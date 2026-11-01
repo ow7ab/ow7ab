@@ -1,0 +1,6 @@
+{
+  "name": "PMP Paints",
+  "description": "نظام إدارة الحسابات والخزن والمصنع والمخازن لشركة PMP Paints بتصميم زجاجي حديث",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

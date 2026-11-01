@@ -1,0 +1,95 @@
+{
+  "entities": {
+    "LinkedAccount": {
+      "title": "LinkedAccount",
+      "description": "Represents an employee or manager account synced to Google Cloud Firestore for cross-device account linking and role-based permission enforcement.",
+      "type": "object",
+      "properties": {
+        "userCode": {
+          "type": "string",
+          "description": "Unique account code matching the document ID (e.g., USR-SD-1001)."
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the manager/owner who created and manages this account."
+        },
+        "linkedUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the employee linked to this account."
+        },
+        "clusterCode": {
+          "type": "string",
+          "description": "Enterprise cluster identifier (e.g., PMP-ERP-V16-CLUSTER)."
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full display name of the employee or manager."
+        },
+        "username": {
+          "type": "string",
+          "description": "Login username identifier for the employee."
+        },
+        "role": {
+          "type": "string",
+          "description": "Assigned job role (e.g., مدير النظام, محاسب خزنة ومبيعات)."
+        },
+        "branch": {
+          "type": "string",
+          "description": "Assigned company branch or warehouse."
+        },
+        "permissions": {
+          "type": "string",
+          "description": "Comma-separated list of screen/module permissions assigned by the manager."
+        },
+        "serverSyncToken": {
+          "type": "string",
+          "description": "Unique cloud synchronization token for linking employee devices."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the employee account is currently active."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp populated via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last modification timestamp populated via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userCode",
+        "ownerId",
+        "linkedUid",
+        "clusterCode",
+        "fullName",
+        "username",
+        "role",
+        "branch",
+        "permissions",
+        "serverSyncToken",
+        "active",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/linked_accounts/{accountCode}": {
+      "schema": {
+        "$ref": "#/entities/LinkedAccount"
+      },
+      "description": "Stores cloud-linked user accounts and manager-assigned employee permissions."
+    },
+    "/erp_clusters/{clusterCode}/{collectionName}/{docId}": {
+      "schema": {
+        "type": "object",
+        "description": "Enterprise cloud ERP central documents for phone and Windows clients (invoices, movements, customers, products, cashboxes)."
+      },
+      "description": "Enterprise central database synchronization cluster connecting Android phone and Windows desktop clients."
+    }
+  }
+}

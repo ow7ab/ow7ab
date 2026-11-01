@@ -1,0 +1,6 @@
+customtkinter
+pillow
+requests
+reportlab
+arabic-reshaper
+python-bidi
