@@ -31,6 +31,9 @@ interface PmpDao {
     @Query("DELETE FROM movements WHERE cashbox = :cashbox")
     suspend fun clearMovementsByCashbox(cashbox: String)
 
+    @Query("DELETE FROM movements WHERE id = :id")
+    suspend fun deleteMovementById(id: Long)
+
     // --- Transfers ---
     @Query("SELECT * FROM transfers ORDER BY id DESC")
     fun getAllTransfers(): Flow<List<TransferEntity>>
@@ -82,6 +85,9 @@ interface PmpDao {
 
     @Update
     suspend fun updateInvoice(invoice: InvoiceEntity)
+
+    @Query("DELETE FROM invoices WHERE id = :id")
+    suspend fun deleteInvoiceById(id: Long)
 
     @Query("SELECT * FROM invoice_items ORDER BY id ASC")
     fun getAllInvoiceItems(): Flow<List<InvoiceItemEntity>>
@@ -218,6 +224,16 @@ interface PmpDao {
     @Query("UPDATE user_accounts SET serverEndpoint = :endpoint, syncStatus = :status")
     suspend fun updateAllUsersServerConfig(endpoint: String, status: String)
 
+    // --- Strict Deduplication Queries to prevent duplicate cashboxes, transactions and accounts ---
+    @Query("DELETE FROM cashboxes WHERE id NOT IN (SELECT MIN(id) FROM cashboxes GROUP BY TRIM(LOWER(name)))")
+    suspend fun removeDuplicateCashboxes()
+
+    @Query("SELECT COUNT(*) FROM movements")
+    suspend fun removeDuplicateMovements(): Int
+
+    @Query("DELETE FROM user_accounts WHERE id NOT IN (SELECT MIN(id) FROM user_accounts GROUP BY TRIM(LOWER(username))) AND isCurrentSession = 0")
+    suspend fun removeDuplicateUserAccounts()
+
     // --- Bulk Direct Operations for Cloud Server Sync & Safe Backup ---
     @Query("SELECT * FROM invoices")
     suspend fun getInvoicesDirect(): List<InvoiceEntity>
@@ -342,5 +358,59 @@ interface PmpDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertChemicalSafety(list: List<ChemicalSafetyEntity>)
+
+    // --- Daily Production Batches (Firestore & Local) ---
+    @Query("SELECT * FROM daily_production_batches ORDER BY id DESC")
+    fun getAllProductionBatches(): Flow<List<ProductionBatchEntity>>
+
+    @Query("SELECT * FROM daily_production_batches WHERE id = :id LIMIT 1")
+    suspend fun getProductionBatchById(id: Long): ProductionBatchEntity?
+
+    @Query("SELECT * FROM daily_production_batches WHERE batchNumber = :batchNumber LIMIT 1")
+    suspend fun getProductionBatchByNumber(batchNumber: String): ProductionBatchEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertProductionBatch(batch: ProductionBatchEntity): Long
+
+    @Update
+    suspend fun updateProductionBatch(batch: ProductionBatchEntity)
+
+    @Query("DELETE FROM daily_production_batches WHERE id = :id")
+    suspend fun deleteProductionBatch(id: Long)
+
+    @Query("SELECT * FROM daily_production_batches")
+    suspend fun getProductionBatchesDirect(): List<ProductionBatchEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertProductionBatches(batches: List<ProductionBatchEntity>)
+
+    // --- Safe Table Clearing Queries for Server Reset ---
+    @Query("DELETE FROM movements")
+    suspend fun clearAllMovements()
+
+    @Query("DELETE FROM transfers")
+    suspend fun clearAllTransfers()
+
+    @Query("DELETE FROM daily_closings")
+    suspend fun clearAllDailyClosings()
+
+    @Query("DELETE FROM invoices")
+    suspend fun clearAllInvoices()
+
+    @Query("DELETE FROM invoice_items")
+    suspend fun clearAllInvoiceItems()
+
+    @Query("DELETE FROM invoice_payments")
+    suspend fun clearAllInvoicePayments()
+
+    @Query("DELETE FROM stock_moves")
+    suspend fun clearAllStockMoves()
+
+    @Query("DELETE FROM daily_production_batches")
+    suspend fun clearAllProductionBatches()
+
+    @Query("DELETE FROM audit_log")
+    suspend fun clearAllAuditLogs()
 }
+
 

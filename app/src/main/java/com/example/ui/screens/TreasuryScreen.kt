@@ -18,6 +18,10 @@ import com.example.isSystemManager
 import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.PmpViewModel
+import com.example.util.RoomTransactionLogger
+import com.example.util.RoomTransactionTrace
+import com.example.util.TraceStatus
+import com.example.util.TransactionStage
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -37,6 +41,8 @@ fun TreasuryScreen(
     val halfaInvoices by viewModel.halfaInvoices.collectAsState()
     val cashboxBalances by viewModel.cashboxBalances.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val transactionTraces by viewModel.transactionTraces.collectAsState()
+    var showDiagnosticsDialog by remember { mutableStateOf(false) }
 
     val canAccessTreasury = currentUser.hasModulePermission("الخزن")
     val canAccessTransfers = currentUser.hasModulePermission("التحويلات")
@@ -80,8 +86,11 @@ fun TreasuryScreen(
     var moveCurrency by remember { mutableStateOf("SDG") }
     var moveDirection by remember { mutableStateOf("وارد") }
     var moveAmount by remember { mutableStateOf("") }
-    var moveReference by remember { mutableStateOf("") }
+    var moveReference by remember { mutableStateOf("REC-${System.currentTimeMillis() % 1000000}") }
     var moveDescription by remember { mutableStateOf("") }
+    var txSearchQuery by remember { mutableStateOf("") }
+    var txDirectionFilter by remember { mutableStateOf("الكل") }
+    var txCashboxFilter by remember { mutableStateOf("كل الخزن") }
 
     // Tab 1: Transfer State
     var trfSourceBox by remember { mutableStateOf("خزنة السودان") }
@@ -134,19 +143,32 @@ fun TreasuryScreen(
                 cornerRadius = 24.dp
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
-                    Text(
-                        text = if (canAccessTreasury && canAccessTransfers) {
-                            "الخزن والحسابات والتحويلات"
-                        } else if (canAccessTransfers) {
-                            "قسم التحويلات المالية بين الخزن"
-                        } else {
-                            "الخزن والحركات المالية (بدون صلاحية تحويلات)"
-                        },
-                        style = MaterialTheme.typography.headlineMedium,
-                        color = TextWhite,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (canAccessTreasury && canAccessTransfers) {
+                                "الخزن والحسابات والتحويلات"
+                            } else if (canAccessTransfers) {
+                                "قسم التحويلات المالية بين الخزن"
+                            } else {
+                                "الخزن والحركات المالية (بدون صلاحية تحويلات)"
+                            },
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = TextWhite,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 20.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        GlassButton(
+                            text = "فحص المسار والمزامنة",
+                            icon = Icons.Default.Analytics,
+                            onClick = { showDiagnosticsDialog = true }
+                        )
+                    }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = if (canAccessTransfers) {
@@ -272,23 +294,204 @@ fun TreasuryScreen(
                                 text = "إضافة معاملة",
                                 icon = Icons.Default.Save,
                                 onClick = {
-                                    val amt = moveAmount.toDoubleOrNull() ?: 0.0
+                                    val cleanAmtStr = moveAmount.replace("٬", "").replace(",", "").trim()
+                                    val amt = cleanAmtStr.toDoubleOrNull() ?: 0.0
+                                    val ref = moveReference.trim().ifBlank { "REC-${System.currentTimeMillis() % 1000000}" }
+                                    val desc = moveDescription.trim().ifBlank { "حركة $moveDirection نقدية في $moveCashbox" }
                                     viewModel.addMovement(
                                         cashbox = moveCashbox,
                                         currency = moveCurrency,
                                         direction = moveDirection,
                                         amount = amt,
-                                        description = moveDescription,
-                                        reference = moveReference
+                                        description = desc,
+                                        reference = ref
                                     )
-                                    if (amt > 0 && moveReference.isNotBlank()) {
+                                    if (amt > 0) {
                                         moveAmount = ""
-                                        moveReference = ""
+                                        moveReference = "REC-${System.currentTimeMillis() % 1000000}"
                                         moveDescription = ""
                                     }
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             )
+                        }
+                    }
+                }
+
+                // Recent Transactions List Header & Filters
+                val filteredMovements = movements.filter { m ->
+                    val matchQuery = txSearchQuery.isBlank() ||
+                        m.reference.contains(txSearchQuery, ignoreCase = true) ||
+                        m.description.contains(txSearchQuery, ignoreCase = true) ||
+                        m.cashbox.contains(txSearchQuery, ignoreCase = true) ||
+                        m.createdBy.contains(txSearchQuery, ignoreCase = true)
+                    val matchDirection = txDirectionFilter == "الكل" || m.direction == txDirectionFilter
+                    val matchCashbox = txCashboxFilter == "كل الخزن" || m.cashbox.trim().equals(txCashboxFilter.trim(), ignoreCase = true)
+                    matchQuery && matchDirection && matchCashbox
+                }
+
+                item {
+                    GlassCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.ReceiptLong,
+                                        contentDescription = null,
+                                        tint = PmpCyan,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "سجل المعاملات والحركات المالية",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = TextWhite,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp
+                                    )
+                                }
+                                GlassBadge(
+                                    text = "${filteredMovements.size} حركة مسجلة",
+                                    color = PmpCyan
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Search bar
+                            GlassTextField(
+                                value = txSearchQuery,
+                                onValueChange = { txSearchQuery = it },
+                                label = "بحث في المعاملات",
+                                placeholder = "رقم المستند، البيان، الخزنة...",
+                                leadingIcon = Icons.Default.Search,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Direction Filter and Cashbox Filter
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                GlassDropdown(
+                                    label = "نوع الحركة",
+                                    options = listOf("الكل", "وارد", "منصرف"),
+                                    selectedOption = txDirectionFilter,
+                                    onOptionSelected = { txDirectionFilter = it },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                GlassDropdown(
+                                    label = "فلترة الخزنة",
+                                    options = listOf("كل الخزن") + boxNames,
+                                    selectedOption = txCashboxFilter,
+                                    onOptionSelected = { txCashboxFilter = it },
+                                    modifier = Modifier.weight(1.2f)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (filteredMovements.isEmpty()) {
+                    item {
+                        GlassCard(modifier = Modifier.fillMaxWidth()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(
+                                        imageVector = Icons.Default.AccountBalanceWallet,
+                                        contentDescription = null,
+                                        tint = TextSubtle,
+                                        modifier = Modifier.size(36.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = if (txSearchQuery.isNotBlank() || txDirectionFilter != "الكل" || txCashboxFilter != "كل الخزن") {
+                                            "لا توجد معاملات مطابقة لخيارات البحث المحددة"
+                                        } else {
+                                            "لا توجد معاملات مالية مسجلة بعد. استخدم النموذج أعلاه لتسجيل أول حركة."
+                                        },
+                                        color = TextMuted,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    items(filteredMovements, key = { "tx_mov_${it.id}" }) { m ->
+                        GlassCard(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 10.dp)
+                                ) {
+                                    GlassBadge(
+                                        text = m.direction,
+                                        color = if (m.direction == "وارد") PmpGreen else PmpRed
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = m.description.ifBlank { "معاملة نقدية (${m.direction})" },
+                                            color = TextWhite,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 13.5.sp,
+                                            maxLines = 1
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = "${m.cashbox} • ${m.txDate} • مستند: ${m.reference} • ${m.createdBy}",
+                                            color = TextMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = (if (m.direction == "وارد") "+" else "-") + "${format.format(m.amount)} ${m.currency}",
+                                        color = if (m.direction == "وارد") PmpGreen else PmpRed,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.5.sp,
+                                        maxLines = 1
+                                    )
+
+                                    if (isManager || currentUser.hasModulePermission("صلاحية الحذف والتصفير")) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        IconButton(
+                                            onClick = { viewModel.deleteMovement(m.id) },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.DeleteOutline,
+                                                contentDescription = "حذف الحركة",
+                                                tint = PmpRedLight.copy(alpha = 0.7f),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -743,19 +946,32 @@ fun TreasuryScreen(
 
             "كشف الحساب" -> {
                 // Statement of Account (كشف حساب)
-                val boxMovements = movements.filter { it.cashbox == stBox && it.currency == stCur }
-                val currentTotal = cashboxBalances[Pair(stBox, stCur)] ?: 0.0
+                val boxMovements = movements.filter {
+                    it.cashbox.trim().equals(stBox.trim(), ignoreCase = true) &&
+                    it.currency.trim().equals(stCur.trim(), ignoreCase = true)
+                }
+                val currentTotal = cashboxBalances[Pair(stBox.trim(), stCur.trim())] ?: 0.0
 
                 item {
                     GlassCard(modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(18.dp)) {
-                            Text(
-                                text = "كشف حساب مفصل للخزنة",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = PmpCyan,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "كشف حساب مفصل للخزنة",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = PmpCyan,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp
+                                )
+                                GlassBadge(
+                                    text = "${boxMovements.size} حركة",
+                                    color = PmpCyan
+                                )
+                            }
                             Spacer(modifier = Modifier.height(12.dp))
 
                             Row(
@@ -797,60 +1013,106 @@ fun TreasuryScreen(
                     }
                 }
 
-                val displayedBoxMovements = if (showAllBoxMovements) boxMovements else boxMovements.take(5)
-                items(displayedBoxMovements, key = { "stmt_m_${it.id}" }) { m ->
-                    GlassCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
+                if (boxMovements.isEmpty()) {
+                    item {
+                        GlassCard(modifier = Modifier.fillMaxWidth()) {
+                            Box(
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .padding(end = 10.dp)
+                                    .fillMaxWidth()
+                                    .padding(24.dp),
+                                contentAlignment = Alignment.Center
                             ) {
-                                GlassBadge(
-                                    text = m.direction,
-                                    color = if (m.direction == "وارد") PmpGreen else PmpRed
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(text = m.description, color = TextWhite, fontSize = 13.sp, maxLines = 1)
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(
+                                        imageVector = Icons.Default.ReceiptLong,
+                                        contentDescription = null,
+                                        tint = TextSubtle,
+                                        modifier = Modifier.size(36.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
                                     Text(
-                                        text = "${m.txDate} • مرجع: ${m.reference}",
-                                        color = TextSubtle,
-                                        fontSize = 11.sp,
-                                        maxLines = 1
+                                        text = "لا توجد معاملات مسجلة لخزنة ($stBox) بالعملة ($stCur) حتى الآن",
+                                        color = TextMuted,
+                                        fontSize = 13.sp
                                     )
                                 }
                             }
-                            Text(
-                                text = (if (m.direction == "وارد") "+" else "-") + format.format(m.amount),
-                                color = if (m.direction == "وارد") PmpGreen else PmpRed,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                maxLines = 1,
-                                softWrap = false
-                            )
                         }
                     }
-                }
+                } else {
+                    val displayedBoxMovements = if (showAllBoxMovements) boxMovements else boxMovements.take(30)
+                    items(displayedBoxMovements, key = { "stmt_m_${it.id}" }) { m ->
+                        GlassCard(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 10.dp)
+                                ) {
+                                    GlassBadge(
+                                        text = m.direction,
+                                        color = if (m.direction == "وارد") PmpGreen else PmpRed
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(text = m.description.ifBlank { "حركة نقدية ${m.direction}" }, color = TextWhite, fontSize = 13.sp, maxLines = 1)
+                                        Text(
+                                            text = "${m.txDate} • مستند: ${m.reference} • ${m.createdBy}",
+                                            color = TextSubtle,
+                                            fontSize = 11.sp,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
 
-                if (boxMovements.size > 5) {
-                    item {
-                        OutlinedButton(
-                            onClick = { showAllBoxMovements = !showAllBoxMovements },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = PmpCyan)
-                        ) {
-                            Text(
-                                text = if (showAllBoxMovements) "عرض أقل (العودة لـ 5)" else "عرض المزيد (${boxMovements.size - 5} حركات إضافية)",
-                                fontWeight = FontWeight.Bold
-                            )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = (if (m.direction == "وارد") "+" else "-") + format.format(m.amount),
+                                        color = if (m.direction == "وارد") PmpGreen else PmpRed,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+
+                                    if (isManager || currentUser.hasModulePermission("صلاحية الحذف والتصفير")) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        IconButton(
+                                            onClick = { viewModel.deleteMovement(m.id) },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.DeleteOutline,
+                                                contentDescription = "حذف الحركة",
+                                                tint = PmpRedLight.copy(alpha = 0.7f),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (boxMovements.size > 30) {
+                        item {
+                            OutlinedButton(
+                                onClick = { showAllBoxMovements = !showAllBoxMovements },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = PmpCyan)
+                            ) {
+                                Text(
+                                    text = if (showAllBoxMovements) "عرض أقل (العودة لـ 30)" else "عرض كامل السجل (${boxMovements.size - 30} حركات إضافية)",
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
@@ -1094,5 +1356,329 @@ fun TreasuryScreen(
             },
             containerColor = PmpNavySurface
         )
+    }
+
+    var showWipeConfirmDialog by remember { mutableStateOf(false) }
+
+    if (showDiagnosticsDialog) {
+        TransactionDiagnosticsDialog(
+            traces = transactionTraces,
+            onClear = { viewModel.clearTransactionTraces() },
+            onWipeServer = { showWipeConfirmDialog = true },
+            onDismiss = { showDiagnosticsDialog = false }
+        )
+    }
+
+    if (showWipeConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showWipeConfirmDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = PmpRed)
+                    Text("تأكيد حذف جميع سجلات السيرفر", color = PmpRed, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Text(
+                    text = "هل أنت متأكد تماماً من رغبتك في حذف جميع السجلات والمعاملات من السيرفر السحابي والبدء من جديد؟\n\nسيتم مسح كافة الحركات، الفواتير، التحويلات، والإقفالات وتصفيرها على السيرفر ومحلياً مع الاحتفاظ بالخزن الأساسية وبدء السيرفر بحالة نظيفة وسريعة.",
+                    color = TextWhite,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "نعم، حذف السجلات والبدء من جديد",
+                    gradient = PmpBrandRedGradient,
+                    onClick = {
+                        viewModel.wipeAllServerDataAndStartFresh { _, _ -> }
+                        showWipeConfirmDialog = false
+                    }
+                )
+            },
+            dismissButton = {
+                GlassButton(text = "إلغاء", onClick = { showWipeConfirmDialog = false })
+            },
+            containerColor = PmpNavySurface
+        )
+    }
+}
+
+@Composable
+fun TransactionDiagnosticsDialog(
+    traces: List<RoomTransactionTrace>,
+    onClear: () -> Unit,
+    onWipeServer: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedFilter by remember { mutableStateOf("الكل") }
+    val filteredTraces = remember(traces, selectedFilter) {
+        when (selectedFilter) {
+            "أخطاء فقط" -> traces.filter { it.status == TraceStatus.FAILURE || it.stage == TransactionStage.SYNC_BROKEN }
+            "معاملات Room" -> traces.filter {
+                it.stage in listOf(
+                    TransactionStage.TX_BEGIN,
+                    TransactionStage.ROOM_INSERT,
+                    TransactionStage.ROOM_UPDATE,
+                    TransactionStage.ROOM_DELETE,
+                    TransactionStage.ROOM_TX_COMMIT,
+                    TransactionStage.ROOM_TX_ROLLBACK
+                )
+            }
+            "مزامنة السحابة" -> traces.filter {
+                it.stage in listOf(
+                    TransactionStage.SYNC_DISPATCH,
+                    TransactionStage.SYNC_ACKNOWLEDGED,
+                    TransactionStage.SYNC_BROKEN
+                )
+            }
+            "استعلامات" -> traces.filter { it.stage == TransactionStage.FETCH_QUERY }
+            else -> traces
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier
+            .fillMaxWidth(0.96f)
+            .heightIn(max = 680.dp),
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.Analytics, contentDescription = null, tint = PmpCyan)
+                    Column {
+                        Text(
+                            text = "تشخيص مسار المعاملات والمزامنة (Room & Cloud)",
+                            color = TextDark,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                        Text(
+                            text = "${traces.size} حركة متتبعة • فحص فوري لانقطاع البيانات المالية",
+                            color = TextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Filter chips
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    listOf("الكل", "أخطاء فقط", "معاملات Room", "مزامنة السحابة", "استعلامات").forEach { filter ->
+                        val isSelected = selectedFilter == filter
+                        Surface(
+                            onClick = { selectedFilter = filter },
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+                            color = if (isSelected) PmpCyan.copy(alpha = 0.15f) else PmpNavyCard,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (isSelected) PmpCyan else PmpNavyBorder
+                            )
+                        ) {
+                            Text(
+                                text = filter,
+                                color = if (isSelected) PmpCyan else TextMuted,
+                                fontSize = 10.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (filteredTraces.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "لا توجد سجلات تتبع مسجلة في هذا التصنيف حالياً.\nقم بإضافة حركة مالية أو تصفح كشف الحساب لرؤية التتبع اللحظي.",
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filteredTraces, key = { it.id + it.timestamp }) { trace ->
+                            TraceItemCard(trace)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                GlassButton(
+                    text = "حذف جميع السجلات من السيرفر والبدء من جديد",
+                    onClick = onWipeServer,
+                    icon = Icons.Default.DeleteSweep,
+                    gradient = PmpBrandRedGradient,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    GlassButton(
+                        text = "مسح سجل التتبع",
+                        onClick = onClear,
+                        icon = Icons.Default.DeleteOutline,
+                        modifier = Modifier.weight(1f)
+                    )
+                    GlassButton(
+                        text = "إغلاق",
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        },
+        containerColor = PmpNavySurface
+    )
+}
+
+@Composable
+fun TraceItemCard(trace: RoomTransactionTrace) {
+    val stageColor = when (trace.stage) {
+        TransactionStage.ROOM_TX_COMMIT -> PmpGreen
+        TransactionStage.ROOM_TX_ROLLBACK -> PmpRed
+        TransactionStage.TX_BEGIN -> PmpCyan
+        TransactionStage.ROOM_INSERT, TransactionStage.ROOM_UPDATE, TransactionStage.ROOM_DELETE -> PmpBlueLight
+        TransactionStage.SYNC_DISPATCH -> PmpGold
+        TransactionStage.SYNC_ACKNOWLEDGED -> PmpGreen
+        TransactionStage.SYNC_BROKEN -> PmpRed
+        TransactionStage.FETCH_QUERY -> PmpPurple
+    }
+
+    val stageLabel = when (trace.stage) {
+        TransactionStage.TX_BEGIN -> "بدء معاملة Room"
+        TransactionStage.ROOM_INSERT -> "إدراج سجل Room"
+        TransactionStage.ROOM_UPDATE -> "تعديل سجل Room"
+        TransactionStage.ROOM_DELETE -> "حذف سجل Room"
+        TransactionStage.ROOM_TX_COMMIT -> "تثبيت Room بنجاح"
+        TransactionStage.ROOM_TX_ROLLBACK -> "تراجع وفشل Room"
+        TransactionStage.FETCH_QUERY -> "استعلام قراءة Room"
+        TransactionStage.SYNC_DISPATCH -> "إرسال إلى السحابة"
+        TransactionStage.SYNC_ACKNOWLEDGED -> "تأكيد السيرفر بنجاح"
+        TransactionStage.SYNC_BROKEN -> "انقطاع المزامنة"
+    }
+
+    val statusIcon = when (trace.status) {
+        TraceStatus.SUCCESS -> Icons.Default.CheckCircle
+        TraceStatus.FAILURE -> Icons.Default.Error
+        TraceStatus.WARNING -> Icons.Default.Warning
+        TraceStatus.IN_PROGRESS -> Icons.Default.HourglassTop
+    }
+
+    GlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 12.dp,
+        borderColor = if (trace.status == TraceStatus.FAILURE) PmpRed else null
+    ) {
+        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(statusIcon, contentDescription = null, tint = stageColor, modifier = Modifier.size(16.dp))
+                    Text(
+                        text = stageLabel,
+                        color = stageColor,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        text = "[${trace.operation}]",
+                        color = TextMuted,
+                        fontSize = 10.sp
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (trace.durationMs > 0) {
+                        Text(
+                            text = "${trace.durationMs}ms",
+                            color = PmpCyan,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        text = trace.formattedTime,
+                        color = TextSubtle,
+                        fontSize = 10.sp
+                    )
+                }
+            }
+
+            Text(
+                text = trace.details,
+                color = TextDark,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
+
+            if (!trace.diagnosticsHint.isNullOrBlank()) {
+                Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(6.dp),
+                    color = (if (trace.status == TraceStatus.FAILURE) PmpRed else PmpGold).copy(alpha = 0.1f),
+                    border = androidx.compose.foundation.BorderStroke(0.5.dp, if (trace.status == TraceStatus.FAILURE) PmpRed else PmpGold),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = if (trace.status == TraceStatus.FAILURE) PmpRed else PmpGold,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = trace.diagnosticsHint,
+                            color = if (trace.status == TraceStatus.FAILURE) PmpRed else TextDark,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp
+                        )
+                    }
+                }
+            }
+
+            if (!trace.errorMessage.isNullOrBlank()) {
+                Text(
+                    text = "سبب الخطأ: ${trace.errorMessage}",
+                    color = PmpRed,
+                    fontSize = 10.sp,
+                    maxLines = 2,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
+            }
+        }
     }
 }

@@ -98,6 +98,7 @@ fun SyncDiagnosticDashboardView(
     val userAccounts by viewModel.userAccounts.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) }
+    var showWipeConfirmDialog by remember { mutableStateOf(false) }
     val tabs = listOf("نظرة عامة والوحدات", "الأخطاء المعلقة (${pendingErrors.size})", "سجل العمليات (${syncDiagnostics.size})")
 
     val isOnline = serverHealthReport?.isOnline != false
@@ -775,8 +776,53 @@ fun SyncDiagnosticDashboardView(
                             onClick = { viewModel.restoreAllErpDataFromServer() }
                         )
                     }
+
+                    GlassButton(
+                        text = "حذف جميع السجلات من السيرفر والبدء من جديد",
+                        icon = Icons.Default.DeleteSweep,
+                        gradient = PmpBrandRedGradient,
+                        enabled = !isSyncing,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("wipe_server_button"),
+                        onClick = { showWipeConfirmDialog = true }
+                    )
                 }
             }
+        }
+
+        if (showWipeConfirmDialog) {
+            AlertDialog(
+                onDismissRequest = { showWipeConfirmDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = PmpRed)
+                        Text("تأكيد حذف جميع سجلات السيرفر", color = PmpRed, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    }
+                },
+                text = {
+                    Text(
+                        text = "تحذير: هل أنت متأكد تماماً من رغبتك في حذف جميع السجلات والمعاملات من السيرفر السحابي والبدء من جديد؟\n\nسيتم حذف كافة الحركات المالية، الفواتير، التحويلات، والإقفالات وتصفيرها على السيرفر ومحلياً مع الاحتفاظ بحسابات الخزن والمخازن الأساسية وبدء السيرفر بحالة نظيفة وسريعة.",
+                        color = TextWhite,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+                },
+                confirmButton = {
+                    GlassButton(
+                        text = "نعم، حذف السجلات والبدء من جديد",
+                        gradient = PmpBrandRedGradient,
+                        onClick = {
+                            viewModel.wipeAllServerDataAndStartFresh { _, _ -> }
+                            showWipeConfirmDialog = false
+                        }
+                    )
+                },
+                dismissButton = {
+                    GlassButton(text = "إلغاء", onClick = { showWipeConfirmDialog = false })
+                },
+                containerColor = PmpNavySurface
+            )
         }
     }
 }

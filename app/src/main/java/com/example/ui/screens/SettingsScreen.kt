@@ -479,7 +479,7 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(text = "نوع التخزين والتشغيل:", color = TextMuted)
-                        Text(text = "محلي آمن (Offline-First) قابل للربط السحابي", color = PmpGreen, fontWeight = FontWeight.SemiBold)
+                        Text(text = "سحابي متصل مباشر (Google Cloud) • متسلسل عبر الإنترنت", color = PmpGreen, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }

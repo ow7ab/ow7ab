@@ -90,6 +90,7 @@ fun UsersScreen(
         "التحويلات",
         "المخازن",
         "المصنع",
+        "المختبر الكيميائي",
         "مواد الإنتاج",
         "التعبئة والتغليف",
         "المستخدمين",
@@ -467,6 +468,9 @@ fun UsersScreen(
                             },
                             onDeletePermanently = {
                                 userToDeletePermanently = account
+                            },
+                            onApproveDirectly = {
+                                viewModel.approveUserAccount(account)
                             }
                         )
                     }
@@ -1617,7 +1621,8 @@ private fun UserAccountCard(
     onEditPermissionsRequest: () -> Unit,
     onToggleActive: () -> Unit,
     onRegenerateToken: () -> Unit,
-    onDeletePermanently: (() -> Unit)? = null
+    onDeletePermanently: (() -> Unit)? = null,
+    onApproveDirectly: (() -> Unit)? = null
 ) {
     val isPendingApproval = account.syncStatus == "PENDING_MANAGER_APPROVAL"
 
@@ -1768,6 +1773,27 @@ private fun UserAccountCard(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
+
+                if (isPendingApproval && canManagePermissions && onApproveDirectly != null) {
+                    Button(
+                        onClick = onApproveDirectly,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp)
+                            .testTag("approve_account_btn_${account.id}"),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "موافقة المدير على طلب إنشاء الحساب",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.5.sp
+                        )
+                    }
+                }
 
                 // Manager Action Buttons Row
                 Row(

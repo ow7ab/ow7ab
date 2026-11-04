@@ -160,88 +160,92 @@ object PubChemService {
 
         // Try live HTTP lookup to PubChem NCBI
         runCatching {
-            val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
-            val url = URL("https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/$encoded/JSON")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 6000
-                readTimeout = 6000
-                requestMethod = "GET"
-                setRequestProperty("Accept", "application/json")
-                setRequestProperty("User-Agent", "PMP-Paints-Android-Lab/1.0")
-            }
-
-            if (conn.responseCode == 200) {
-                val reader = BufferedReader(InputStreamReader(conn.inputStream))
-                val sb = StringBuilder()
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    sb.append(line)
+            var conn: HttpURLConnection? = null
+            try {
+                val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+                val url = URL("https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/$encoded/JSON")
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 6000
+                    readTimeout = 6000
+                    requestMethod = "GET"
+                    setRequestProperty("Accept", "application/json")
+                    setRequestProperty("User-Agent", "PMP-Paints-Android-Lab/1.0")
                 }
-                reader.close()
 
-                val root = JSONObject(sb.toString())
-                val pcCompounds = root.optJSONObject("PC_Compounds")
-                    ?: root.optJSONArray("PC_Compounds")?.optJSONObject(0)
+                if (conn.responseCode == 200) {
+                    val reader = BufferedReader(InputStreamReader(conn.inputStream))
+                    val sb = StringBuilder()
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        sb.append(line)
+                    }
+                    reader.close()
 
-                val parsedList = mutableListOf<PubChemCompound>()
-                if (pcCompounds != null) {
-                    val cidObj = pcCompounds.optJSONObject("id")?.optJSONObject("id")
-                    val cid = cidObj?.optLong("cid") ?: 0L
+                    val root = JSONObject(sb.toString())
+                    val pcCompounds = root.optJSONObject("PC_Compounds")
+                        ?: root.optJSONArray("PC_Compounds")?.optJSONObject(0)
 
-                    var formula = ""
-                    var mw = 0.0
-                    var iupac = ""
-                    var smiles = ""
+                    val parsedList = mutableListOf<PubChemCompound>()
+                    if (pcCompounds != null) {
+                        val cidObj = pcCompounds.optJSONObject("id")?.optJSONObject("id")
+                        val cid = cidObj?.optLong("cid") ?: 0L
 
-                    val props = pcCompounds.optJSONArray("props")
-                    if (props != null) {
-                        for (i in 0 until props.length()) {
-                            val p = props.getJSONObject(i)
-                            val urn = p.optJSONObject("urn")
-                            val label = urn?.optString("label") ?: ""
-                            val name = urn?.optString("name") ?: ""
-                            val valueObj = p.optJSONObject("value")
+                        var formula = ""
+                        var mw = 0.0
+                        var iupac = ""
+                        var smiles = ""
 
-                            when {
-                                label == "Molecular Formula" -> {
-                                    formula = valueObj?.optString("sval") ?: ""
-                                }
-                                label == "Molecular Weight" -> {
-                                    mw = valueObj?.optDouble("fval") ?: valueObj?.optDouble("sval") ?: 0.0
-                                }
-                                label == "IUPAC Name" && (name == "Preferred" || iupac.isEmpty()) -> {
-                                    iupac = valueObj?.optString("sval") ?: ""
-                                }
-                                label == "SMILES" && (name == "Canonical" || smiles.isEmpty()) -> {
-                                    smiles = valueObj?.optString("sval") ?: ""
+                        val props = pcCompounds.optJSONArray("props")
+                        if (props != null) {
+                            for (i in 0 until props.length()) {
+                                val p = props.getJSONObject(i)
+                                val urn = p.optJSONObject("urn")
+                                val label = urn?.optString("label") ?: ""
+                                val name = urn?.optString("name") ?: ""
+                                val valueObj = p.optJSONObject("value")
+
+                                when {
+                                    label == "Molecular Formula" -> {
+                                        formula = valueObj?.optString("sval") ?: ""
+                                    }
+                                    label == "Molecular Weight" -> {
+                                        mw = valueObj?.optDouble("fval") ?: valueObj?.optDouble("sval") ?: 0.0
+                                    }
+                                    label == "IUPAC Name" && (name == "Preferred" || iupac.isEmpty()) -> {
+                                        iupac = valueObj?.optString("sval") ?: ""
+                                    }
+                                    label == "SMILES" && (name == "Canonical" || smiles.isEmpty()) -> {
+                                        smiles = valueObj?.optString("sval") ?: ""
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if (cid > 0) {
-                        parsedList.add(
-                            PubChemCompound(
-                                cid = cid,
-                                name = cleanQuery,
-                                iupacName = iupac.ifEmpty { cleanQuery },
-                                molecularFormula = formula,
-                                molecularWeight = mw,
-                                casNumber = if (cleanQuery.matches(Regex("\\d+-\\d+-\\d+"))) cleanQuery else "",
-                                canonicalSmiles = smiles,
-                                estimatedDensity = if (formula.contains("Ti")) 4.2 else if (formula.contains("Ca")) 2.7 else 1.05,
-                                description = "مركب كيميائي مسجل في NCBI PubChem برقم CID $cid وصيغة $formula.",
-                                pubChemUrl = "https://pubchem.ncbi.nlm.nih.gov/compound/$cid"
+                        if (cid > 0) {
+                            parsedList.add(
+                                PubChemCompound(
+                                    cid = cid,
+                                    name = cleanQuery,
+                                    iupacName = iupac.ifEmpty { cleanQuery },
+                                    molecularFormula = formula,
+                                    molecularWeight = mw,
+                                    casNumber = if (cleanQuery.matches(Regex("\\d+-\\d+-\\d+"))) cleanQuery else "",
+                                    canonicalSmiles = smiles,
+                                    estimatedDensity = if (formula.contains("Ti")) 4.2 else if (formula.contains("Ca")) 2.7 else 1.05,
+                                    description = "مركب كيميائي مسجل في NCBI PubChem برقم CID $cid وصيغة $formula.",
+                                    pubChemUrl = "https://pubchem.ncbi.nlm.nih.gov/compound/$cid"
+                                )
                             )
-                        )
+                        }
+                    }
+
+                    if (parsedList.isNotEmpty()) {
+                        return@withContext Result.success(parsedList)
                     }
                 }
-
-                if (parsedList.isNotEmpty()) {
-                    return@withContext Result.success(parsedList)
-                }
+            } finally {
+                conn?.disconnect()
             }
-            conn.disconnect()
             // If HTTP had no results or error, return local matches or empty
             Result.success(localMatches)
         }.getOrElse {

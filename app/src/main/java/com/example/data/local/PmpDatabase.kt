@@ -31,9 +31,10 @@ import kotlinx.coroutines.launch
         AuditLogEntity::class,
         UserAccountEntity::class,
         FormulationEntity::class,
-        ChemicalSafetyEntity::class
+        ChemicalSafetyEntity::class,
+        ProductionBatchEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
@@ -128,13 +129,30 @@ abstract class PmpDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `poster_prices` ADD COLUMN `currency` TEXT NOT NULL DEFAULT 'SDG'")
             }
 
-            // Update legacy warehouses and ensure proper distinct sales warehouses for each cashbox
+            // Deduplicate cashboxes, movements, and user accounts
             try {
-                // Ensure Cashboxes exist
-                db.execSQL("INSERT OR IGNORE INTO `cashboxes` (`name`) VALUES ('خزنة السودان')")
-                db.execSQL("INSERT OR IGNORE INTO `cashboxes` (`name`) VALUES ('خزنة مصر')")
-                db.execSQL("INSERT OR IGNORE INTO `cashboxes` (`name`) VALUES ('خزنة حلفا')")
-                db.execSQL("INSERT OR IGNORE INTO `cashboxes` (`name`) VALUES ('خزنة عطبرة')")
+                // Purge duplicate cashboxes (keep lowest id for each distinct trimmed name)
+                db.execSQL("DELETE FROM `cashboxes` WHERE `id` NOT IN (SELECT MIN(`id`) FROM `cashboxes` GROUP BY TRIM(LOWER(`name`)))")
+
+                // Purge duplicate financial movements with the same non-empty reference
+                db.execSQL("DELETE FROM `movements` WHERE `reference` != '' AND `id` NOT IN (SELECT MIN(`id`) FROM `movements` WHERE `reference` != '' GROUP BY TRIM(`reference`))")
+
+                // Purge duplicate user accounts (preserve current active session)
+                db.execSQL("DELETE FROM `user_accounts` WHERE `isCurrentSession` = 0 AND `id` NOT IN (SELECT MIN(`id`) FROM `user_accounts` GROUP BY TRIM(LOWER(`username`)))")
+
+                // Ensure default Cashboxes exist without creating duplicates
+                val existingBoxes = mutableSetOf<String>()
+                db.query("SELECT TRIM(LOWER(`name`)) FROM `cashboxes`").use { cursor ->
+                    while (cursor.moveToNext()) {
+                        existingBoxes.add(cursor.getString(0))
+                    }
+                }
+                listOf("خزنة السودان", "خزنة مصر", "خزنة حلفا", "خزنة عطبرة").forEach { boxName ->
+                    if (boxName.trim().lowercase() !in existingBoxes) {
+                        db.execSQL("INSERT INTO `cashboxes` (`name`) VALUES ('$boxName')")
+                        existingBoxes.add(boxName.trim().lowercase())
+                    }
+                }
 
                 // Update existing warehouse assignments
                 db.execSQL("UPDATE `warehouses` SET `currency` = 'SDG', `linkedCashbox` = 'خزنة حلفا', `warehouseType` = 'مبيعات' WHERE `name` LIKE '%حلفا%'")
@@ -205,6 +223,38 @@ abstract class PmpDatabase : RoomDatabase() {
                 """.trimIndent()
             )
 
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `daily_production_batches` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `batchNumber` TEXT NOT NULL,
+                    `productionDate` TEXT NOT NULL,
+                    `formulaId` INTEGER,
+                    `formulaNo` TEXT NOT NULL,
+                    `productName` TEXT NOT NULL,
+                    `paintType` TEXT NOT NULL,
+                    `baseKind` TEXT NOT NULL,
+                    `targetPvc` REAL NOT NULL,
+                    `targetWeightKg` REAL NOT NULL,
+                    `actualWeightKg` REAL NOT NULL,
+                    `targetVolumeLiters` REAL NOT NULL,
+                    `cartonsCount` INTEGER NOT NULL,
+                    `packageUnit` TEXT NOT NULL,
+                    `machineId` INTEGER,
+                    `machineName` TEXT NOT NULL,
+                    `qualityStatus` TEXT NOT NULL,
+                    `measuredDensity` REAL NOT NULL,
+                    `measuredViscosity` TEXT NOT NULL,
+                    `scaledIngredientsJson` TEXT NOT NULL,
+                    `supervisorOrEngineer` TEXT NOT NULL,
+                    `shift` TEXT NOT NULL,
+                    `notes` TEXT NOT NULL,
+                    `syncStatus` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+
             // Drop any indices not declared in @Entity annotations so Room schema validation never throws IllegalStateException
             db.execSQL("DROP INDEX IF EXISTS `index_user_accounts_username`")
             db.execSQL("DROP INDEX IF EXISTS `index_user_accounts_userCode`")
@@ -256,6 +306,12 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+            }
+        }
+
         fun getDatabase(context: Context): PmpDatabase {
             return INSTANCE ?: synchronized(this) {
                 val appContext = context.applicationContext
@@ -264,7 +320,7 @@ abstract class PmpDatabase : RoomDatabase() {
                     PmpDatabase::class.java,
                     "pmp_paints_v16.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                     .fallbackToDestructiveMigration()
                     .addCallback(DatabaseCallback(appContext))
                     .build()

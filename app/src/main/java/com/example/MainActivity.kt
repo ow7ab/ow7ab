@@ -234,6 +234,7 @@ fun PmpAppContent(viewModel: PmpViewModel) {
     }
 
     val activeUserId by viewModel.activeSessionUserId.collectAsState()
+    val isNetworkOnline by viewModel.isNetworkOnline.collectAsState()
 
     // Only de-authenticate if the currently active employee was explicitly deactivated/suspended by the manager
     LaunchedEffect(currentUser, isSessionAuthenticated, activeUserId) {
@@ -366,62 +367,108 @@ fun PmpAppContent(viewModel: PmpViewModel) {
         containerColor = Color.Transparent,
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
-            Surface(
-                color = Color.White.copy(alpha = 0.95f),
-                shadowElevation = 2.dp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.statusBars)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+            Column(modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars)) {
+                Surface(
+                    color = Color.White.copy(alpha = 0.95f),
+                    shadowElevation = 2.dp,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.clickable {
-                            currentScreen = PmpScreen.DASHBOARD
-                        }
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Image(
-                            painter = painterResource(id = R.drawable.ic_pmp_emblem),
-                            contentDescription = "PMP Emblem",
-                            modifier = Modifier
-                                .size(30.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                        )
-                        Column {
-                            Text(
-                                text = "PMP PAINTS",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = PmpBrandNavy
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.clickable {
+                                currentScreen = PmpScreen.DASHBOARD
+                            }
+                        ) {
+                            Image(
+                                painter = painterResource(id = R.drawable.ic_pmp_emblem),
+                                contentDescription = "PMP Emblem",
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .clip(RoundedCornerShape(8.dp))
                             )
-                            Text(
-                                text = if (currentScreen == PmpScreen.DASHBOARD) "لوحة التحكم الرئيسية" else currentScreen.title,
-                                fontSize = 11.sp,
-                                color = PmpBrandRed,
-                                fontWeight = FontWeight.SemiBold
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "PMP PAINTS",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        color = PmpBrandNavy
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(if (isNetworkOnline) Color(0xFF10B981).copy(alpha = 0.15f) else Color(0xFFEF4444).copy(alpha = 0.15f))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = if (isNetworkOnline) "سحابي متصل" else "غير متصل",
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isNetworkOnline) Color(0xFF047857) else Color(0xFFB91C1C)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = if (currentScreen == PmpScreen.DASHBOARD) "لوحة التحكم الرئيسية" else currentScreen.title,
+                                    fontSize = 11.sp,
+                                    color = PmpBrandRed,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                        // Clean Logout Icon Button (no text "تسجيل الخروج" as requested)
+                        IconButton(
+                            onClick = { handleSignOut() },
+                            modifier = Modifier
+                                .size(38.dp)
+                                .testTag("top_bar_logout_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Logout,
+                                contentDescription = "خروج",
+                                tint = PmpBrandNavy,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                     }
-                    // Clean Logout Icon Button (no text "تسجيل الخروج" as requested)
-                    IconButton(
-                        onClick = { handleSignOut() },
-                        modifier = Modifier
-                            .size(38.dp)
-                            .testTag("top_bar_logout_button")
+                }
+
+                if (!isNetworkOnline) {
+                    Surface(
+                        color = Color(0xFFDC2626),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Logout,
-                            contentDescription = "خروج",
-                            tint = PmpBrandNavy,
-                            modifier = Modifier.size(22.dp)
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.WifiOff,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "لا يوجد اتصال بالإنترنت • تم إيقاف المعاملات مؤقتاً لضمان تسجيل الترتيب المتسلسل على السيرفر السحابي",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center
+                            )
+                        }
                     }
                 }
             }

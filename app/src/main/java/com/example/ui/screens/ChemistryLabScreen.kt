@@ -41,6 +41,8 @@ import androidx.compose.ui.unit.sp
 import com.example.data.local.ChemicalSafetyEntity
 import com.example.data.local.FormulationEntity
 import com.example.data.local.FormulationIngredient
+import com.example.data.local.ProductionBatchEntity
+import com.example.ui.components.DailyProductionBatchModal
 import com.example.ui.components.GlassButton
 import com.example.ui.components.GlassCard
 import com.example.ui.theme.*
@@ -225,6 +227,8 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
     var showLoadDialog by remember { mutableStateOf(false) }
     var showAddIngredientDialog by remember { mutableStateOf(false) }
     var showProductionOrderDialog by remember { mutableStateOf(false) }
+    var showBatchModalFromLab by remember { mutableStateOf(false) }
+    val factoryMachines by viewModel.factoryMachines.collectAsState()
     var batchOrderMultiplierInput by remember { mutableStateOf("5.0") } // e.g. 5x = 500 kg batch
 
     var selectedBatchScaleKg by remember { mutableDoubleStateOf(100.0) }
@@ -741,13 +745,13 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     .padding(top = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Main Factory Dispatch Button (Confirmed Decision 3)
+                // Primary Firestore Daily Batch Logging Button
                 Button(
-                    onClick = { showProductionOrderDialog = true },
+                    onClick = { showBatchModalFromLab = true },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp)
-                        .testTag("lab_create_factory_order_button"),
+                        .height(48.dp)
+                        .testTag("lab_log_daily_batch_btn"),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFF1E40AF),
                         contentColor = Color.White
@@ -755,12 +759,31 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Icon(Icons.Default.PrecisionManufacturing, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "أمر تشغيل للمصنع",
-                        fontSize = 14.sp,
+                        text = "تسجيل تشغيلة يومية في السحابة (Firestore)",
+                        fontSize = 13.5.sp,
                         fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // Secondary Factory Dispatch / Move Order Button
+                OutlinedButton(
+                    onClick = { showProductionOrderDialog = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .testTag("lab_create_factory_order_button"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.PrecisionManufacturing, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color(0xFF1E40AF))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "أمر تشغيل وتوريد خامات للمصنع",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF1E40AF)
                     )
                 }
 
@@ -1033,6 +1056,46 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                 TextButton(onClick = { showProductionOrderDialog = false }) {
                     Text("إلغاء")
                 }
+            }
+        )
+    }
+
+    // Modal: Log Daily Production Batch linked to active chemical formula
+    if (showBatchModalFromLab) {
+        val currentActiveFormula = remember(
+            currentFormulaId, formulaNo, productName, paintType, baseKind,
+            targetPvcInput, calcResult, ingredientsList, notesInput
+        ) {
+            FormulationEntity(
+                id = currentFormulaId,
+                formulaNo = formulaNo,
+                productName = productName,
+                paintType = paintType,
+                baseKind = baseKind,
+                targetPvc = targetPvcInput.toDoubleOrNull() ?: calcResult.calculatedPvc,
+                calculatedPvc = calcResult.calculatedPvc,
+                cpvcEstimated = calcResult.cpvcEstimated,
+                totalSolidsWeight = calcResult.totalSolidsWeight,
+                totalSolidsVolume = calcResult.totalSolidsVolume,
+                totalBatchWeight = calcResult.totalBatchWeight,
+                totalBatchVolume = calcResult.totalBatchVolume,
+                calculatedDensity = calcResult.calculatedDensity,
+                totalCost = calcResult.totalCost,
+                costPerKg = calcResult.costPerKg,
+                ingredientsJson = PvcEngine.ingredientsToJson(ingredientsList),
+                technicalAnalysis = calcResult.technicalAnalysisText,
+                notes = notesInput
+            )
+        }
+
+        DailyProductionBatchModal(
+            availableFormulations = listOf(currentActiveFormula) + formulations.filter { it.id != currentFormulaId },
+            factoryMachines = factoryMachines,
+            preSelectedFormula = currentActiveFormula,
+            onDismiss = { showBatchModalFromLab = false },
+            onSaveBatch = { batch ->
+                viewModel.logProductionBatch(batch)
+                showBatchModalFromLab = false
             }
         )
     }

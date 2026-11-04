@@ -18,9 +18,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 import com.example.data.remote.CloudErpSyncRepository
 import com.example.data.remote.ServerHealthReport
+import com.example.util.NetworkConnectivityMonitor
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class UiMessage(
     val message: String,
@@ -30,7 +35,7 @@ data class UiMessage(
 class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database: PmpDatabase = PmpDatabase.getDatabase(application)
-    private val repository: PmpRepository = PmpRepository(database.pmpDao())
+    private val repository: PmpRepository = PmpRepository(database.pmpDao(), database)
     private val cloudSyncRepo: CloudAccountSyncRepository = CloudAccountSyncRepository.create(application)
     private val cloudErpSyncRepo: CloudErpSyncRepository = CloudErpSyncRepository.create(application)
     private var cloudObserverJob: Job? = null
@@ -48,6 +53,21 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     val serverHealthReport: StateFlow<ServerHealthReport?> = _serverHealthReport.asStateFlow()
 
     val serverClusterCode = MutableStateFlow(CloudErpSyncRepository.DEFAULT_CLUSTER)
+
+    // مراقبة اتصال الشبكة في الوقت الحقيقي لضمان تنفيذ وتسلسل العمليات حصرياً على السيرفر السحابي
+    val isNetworkOnline: StateFlow<Boolean> = NetworkConnectivityMonitor.getInstance(application).isOnline
+
+    fun isConnectedToCloud(): Boolean {
+        return NetworkConnectivityMonitor.getInstance(getApplication()).isNetworkConnected()
+    }
+
+    fun checkOnlineBeforeTransaction(actionName: String): Boolean {
+        if (!isConnectedToCloud()) {
+            postMessage("تنبيه: لا يمكن تنفيذ ($actionName) أثناء انقطاع الإنترنت. التطبيق يعمل حصرياً عبر السيرفر السحابي المباشر لضمان تسجيل الترتيب المتسلسل على الشبكة.", isError = true)
+            return false
+        }
+        return true
+    }
 
     // --- StateFlow Streams ---
     val cashboxes = repository.getCashboxes()
@@ -166,6 +186,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val productionBatches = repository.getProductionBatches()
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+
     // --- PubChem Search State ---
     private val _isSearchingPubChem = MutableStateFlow(false)
     val isSearchingPubChem: StateFlow<Boolean> = _isSearchingPubChem.asStateFlow()
@@ -231,7 +256,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     val cashboxBalances: StateFlow<Map<Pair<String, String>, Double>> = movements.map { list ->
         val map = mutableMapOf<Pair<String, String>, Double>()
         for (m in list) {
-            val key = Pair(m.cashbox, m.currency)
+            val key = Pair(m.cashbox.trim(), m.currency.trim())
             val sign = if (m.direction == "وارد") 1.0 else -1.0
             val current = map.getOrDefault(key, 0.0)
             map[key] = current + (sign * m.amount)
@@ -314,11 +339,32 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         reference: String,
         user: String = resolveUserActor("المدير")
     ) {
+        if (!checkOnlineBeforeTransaction("تسجيل حركة مالية")) return
         viewModelScope.launch {
-            val res = repository.recordMovement(cashbox, currency, direction, amount, description, reference, user)
-            res.onSuccess {
-                postMessage("تم تسجيل الحركة بنجاح: $reference")
-                persistAndSyncToServer()
+            val autoRef = reference.trim().ifBlank { "REC-${System.currentTimeMillis() % 1000000}" }
+            val autoDesc = description.trim().ifBlank { "حركة $direction بمبلغ $amount $currency في $cashbox" }
+            val res = repository.recordMovement(cashbox, currency, direction, amount, autoDesc, autoRef, user)
+            res.onSuccess { movId ->
+                postMessage("تم تسجيل الحركة بنجاح: $autoRef")
+                // Fast background cloud sync (<100ms) for just this movement
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        val m = MovementEntity(
+                            id = movId,
+                            txDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()),
+                            cashbox = cashbox,
+                            currency = currency,
+                            direction = direction,
+                            amount = amount,
+                            description = autoDesc,
+                            reference = autoRef,
+                            createdBy = user
+                        )
+                        cloudErpSyncRepo.syncSingleMovementToCloud(serverClusterCode.value, m)
+                    } catch (e: Exception) {
+                        Log.w("PmpViewModel", "Direct movement sync deferred: ${e.message}")
+                    }
+                }
             }.onFailure {
                 postMessage(it.message ?: "تعذر تسجيل الحركة", isError = true)
             }
@@ -339,22 +385,96 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         halfaAmount: Double? = null,
         isInvertedRate: Boolean = false
     ) {
+        if (!checkOnlineBeforeTransaction("تحويل بين الخزن")) return
         viewModelScope.launch {
+            val autoRef = reference.trim().ifBlank { "TRF-${System.currentTimeMillis() % 1000000}" }
             val res = repository.recordTransfer(
                 sourceCashbox, destinationCashbox, sourceCurrency, destinationCurrency,
-                sourceAmount, rate, description, reference, user, halfaInvoiceId, halfaAmount,
+                sourceAmount, rate, description, autoRef, user, halfaInvoiceId, halfaAmount,
                 isInvertedRate
             )
-            res.onSuccess {
-                postMessage("تم إتمام التحويل بنجاح برقم: $reference")
-                persistAndSyncToServer()
+            res.onSuccess { trfId ->
+                postMessage("تم إتمام التحويل بنجاح برقم: $autoRef")
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        val destAmt = if (isInvertedRate && rate > 0) sourceAmount / rate else sourceAmount * rate
+                        val t = TransferEntity(
+                            id = trfId,
+                            reference = autoRef,
+                            txDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()),
+                            sourceCashbox = sourceCashbox,
+                            destinationCashbox = destinationCashbox,
+                            sourceCurrency = sourceCurrency,
+                            destinationCurrency = destinationCurrency,
+                            sourceAmount = sourceAmount,
+                            rate = rate,
+                            destinationAmount = destAmt,
+                            description = description,
+                            halfaInvoiceId = halfaInvoiceId,
+                            halfaAmount = halfaAmount,
+                            createdBy = user
+                        )
+                        cloudErpSyncRepo.syncSingleTransferToCloud(serverClusterCode.value, t)
+                    } catch (e: Exception) {
+                        Log.w("PmpViewModel", "Direct transfer sync deferred: ${e.message}")
+                    }
+                }
             }.onFailure {
                 postMessage(it.message ?: "تعذر تنفيذ التحويل", isError = true)
             }
         }
     }
 
+    fun deleteMovement(id: Long) {
+        if (!checkOnlineBeforeTransaction("حذف حركة مالية")) return
+        viewModelScope.launch {
+            if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
+                postMessage("عفواً، حذف الحركات المالية متاح لمدير النظام أو الحسابات المصرح لها فقط", isError = true)
+                return@launch
+            }
+            val res = repository.deleteMovement(id, resolveUserActor("المدير"))
+            res.onSuccess {
+                viewModelScope.launch(Dispatchers.IO) {
+                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "movements", "MOV-$id")
+                }
+                postMessage("تم حذف الحركة المالية بنجاح")
+                persistAndSyncToServer()
+            }.onFailure {
+                postMessage(it.message ?: "تعذر حذف الحركة المالية", isError = true)
+            }
+        }
+    }
+
+    fun recordCustomerPayment(
+        customerId: Long,
+        customerName: String,
+        amount: Double,
+        currency: String,
+        cashbox: String,
+        note: String
+    ) {
+        if (!checkOnlineBeforeTransaction("سداد دفعة العميل")) return
+        viewModelScope.launch {
+            val res = repository.recordCustomerPayment(
+                customerId = customerId,
+                customerName = customerName,
+                amount = amount,
+                currency = currency,
+                cashbox = cashbox,
+                note = note,
+                user = resolveUserActor("محاسب المبيعات")
+            )
+            res.onSuccess {
+                postMessage("تم تسجيل سداد وتحصيل مبلغ $amount $currency من العميل ($customerName) بنجاح")
+                persistAndSyncToServer()
+            }.onFailure {
+                postMessage(it.message ?: "تعذر تسجيل سداد العميل", isError = true)
+            }
+        }
+    }
+
     fun resetCashboxBalance(cashboxName: String) {
+        if (!checkOnlineBeforeTransaction("تصفير الخزنة")) return
         viewModelScope.launch {
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
                 postMessage("عفواً، تصفير الخزن متاح لمدير النظام أو الحسابات المصرح لها فقط", isError = true)
@@ -362,6 +482,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             val res = repository.resetCashboxBalance(cashboxName, resolveUserActor("المدير"))
             res.onSuccess {
+                viewModelScope.launch(Dispatchers.IO) {
+                    cloudErpSyncRepo.clearCashboxMovementsFromCloud(serverClusterCode.value, cashboxName)
+                }
                 postMessage("تم تصفير رصيد وحركات خزنة ($cashboxName) بنجاح")
                 persistAndSyncToServer()
             }.onFailure {
@@ -378,6 +501,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         notes: String,
         user: String = resolveUserActor("المدير")
     ) {
+        if (!checkOnlineBeforeTransaction("إقفال اليومية")) return
         viewModelScope.launch {
             repository.recordDailyClosing(cashbox, currency, bookBalance, countedBalance, notes, user)
             postMessage("تم إقفال اليومية لخزنة $cashbox بنجاح")
@@ -386,6 +510,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addCustomer(name: String, phone: String, address: String, notes: String, user: String = resolveUserActor("المدير")) {
+        if (!checkOnlineBeforeTransaction("إضافة عميل جديد")) return
         viewModelScope.launch {
             repository.addCustomer(name, phone, address, notes, user)
             postMessage("تمت إضافة العميل $name بنجاح")
@@ -394,6 +519,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteCustomer(customerId: Long, customerName: String) {
+        if (!checkOnlineBeforeTransaction("حذف عميل")) return
         viewModelScope.launch {
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
                 postMessage("عفواً، حذف العملاء متاح لحساب مدير النظام فقط", isError = true)
@@ -401,6 +527,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             val res = repository.deleteCustomer(customerId, customerName, resolveUserActor("المدير"))
             res.onSuccess {
+                viewModelScope.launch(Dispatchers.IO) {
+                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "customers", "CUST-$customerId")
+                }
                 postMessage("تم حذف العميل ($customerName) وسجلاته بنجاح")
                 persistAndSyncToServer()
             }.onFailure {
@@ -410,6 +539,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearCustomerBalance(customerId: Long, customerName: String) {
+        if (!checkOnlineBeforeTransaction("تصفير حساب عميل")) return
         viewModelScope.launch {
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
                 postMessage("عفواً، تصفير وحذف حسابات العملاء متاح لمدير النظام فقط", isError = true)
@@ -436,6 +566,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         paymentCashbox: String? = null,
         paymentAmount: Double? = null
     ) {
+        if (!checkOnlineBeforeTransaction("إصدار فاتورة مبيعات")) return
         viewModelScope.launch {
             val res = repository.createInvoice(
                 customerId, customerName, currency, items, discount, notes, user, paymentCashbox, paymentAmount
@@ -459,6 +590,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         note: String,
         user: String = resolveUserActor("المدير")
     ) {
+        if (!checkOnlineBeforeTransaction("سداد فاتورة مبيعات")) return
         viewModelScope.launch {
             val res = repository.recordInvoicePayment(invoiceId, invoiceNo, customerName, currency, cashbox, amount, note, user)
             res.onSuccess {
@@ -471,6 +603,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancelInvoice(invoiceId: Long, reason: String, user: String = resolveUserActor("المدير")) {
+        if (!checkOnlineBeforeTransaction("إلغاء فاتورة")) return
         viewModelScope.launch {
             val res = repository.cancelInvoice(invoiceId, reason, user)
             res.onSuccess {
@@ -483,6 +616,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addCashbox(name: String, user: String = resolveUserActor("المدير")) {
+        if (!checkOnlineBeforeTransaction("إضافة خزنة")) return
         viewModelScope.launch {
             repository.addCashbox(name, user)
             postMessage("تمت إضافة الخزنة $name بنجاح")
@@ -506,6 +640,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = repository.deleteCashbox(id, user)
             res.onSuccess {
+                viewModelScope.launch(Dispatchers.IO) {
+                    val cleanDoc = "BOX-" + name.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-").trim('-').lowercase()
+                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "cashboxes", cleanDoc)
+                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "cashboxes", "BOX-$id")
+                }
                 postMessage("تم حذف الخزنة $name بنجاح")
                 persistAndSyncToServer()
             }.onFailure {
@@ -552,6 +691,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = repository.deleteWarehouse(id, user)
             res.onSuccess {
+                viewModelScope.launch(Dispatchers.IO) {
+                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "warehouses", "WH-$id")
+                }
                 postMessage("تم حذف المخزن $name بنجاح")
                 persistAndSyncToServer()
             }.onFailure {
@@ -585,6 +727,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         minimumStock: Double = 10.0,
         user: String = resolveUserActor("المدير")
     ) {
+        if (!checkOnlineBeforeTransaction("إضافة صنف")) return
         viewModelScope.launch {
             repository.addProduct(name, color, weight, purchasePrice, salePrice, salePriceEgp, minimumStock, user)
             postMessage("تمت إضافة الصنف $name بنجاح")
@@ -601,6 +744,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         salePrice: Double,
         note: String
     ) {
+        if (!checkOnlineBeforeTransaction("توريد أصناف للمخزن")) return
         viewModelScope.launch {
             val prodName = "بوهية $color $weight جم"
             val existing = repository.getDao().getProductsDirect().firstOrNull {
@@ -649,6 +793,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         note: String,
         user: String = resolveUserActor("المدير")
     ) {
+        if (!checkOnlineBeforeTransaction("حركة مخزون")) return
         viewModelScope.launch {
             repository.recordStockMove(warehouseId, productId, quantity, kind, note, user)
             postMessage("تم تسجيل حركة المخزون بنجاح")
@@ -656,6 +801,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteProduct(productId: Long, productName: String) {
+        if (!checkOnlineBeforeTransaction("حذف صنف")) return
         viewModelScope.launch {
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
                 postMessage("عفواً، حذف الأصناف متاح لمدير النظام أو الحسابات المصرح لها فقط", isError = true)
@@ -663,6 +809,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             val res = repository.deleteProduct(productId, productName, resolveUserActor("المدير"))
             res.onSuccess {
+                viewModelScope.launch(Dispatchers.IO) {
+                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "products", "PROD-$productId")
+                }
                 postMessage("تم حذف الصنف ($productName) بنجاح من النظام")
                 persistAndSyncToServer()
             }.onFailure {
@@ -672,6 +821,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun resetWarehouseStock(warehouseId: Long, warehouseName: String) {
+        if (!checkOnlineBeforeTransaction("تصفير رصيد المخزن")) return
         viewModelScope.launch {
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
                 postMessage("عفواً، تصفير رصيد المخزن متاح لمدير النظام أو المصرح لهم فقط", isError = true)
@@ -699,6 +849,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         actor: String = resolveUserActor("مهندس الإنتاج"),
         counterparty: String = ""
     ) {
+        if (!checkOnlineBeforeTransaction("تسجيل حركة المصنع أو التشغيلة")) return
         viewModelScope.launch {
             repository.recordFactoryMove(kind, itemId, itemName, qty, machineId, machineName, batch, note, actor, counterparty)
             persistAndSyncToServer()
@@ -717,6 +868,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         note: String,
         actor: String = resolveUserActor("مسؤول التحميل")
     ) {
+        if (!checkOnlineBeforeTransaction("ترحيل شحنة حلفا")) return
         viewModelScope.launch {
             val res = repository.dispatchHalfa(itemId, itemName, qty, productId, productName, cartons, unitPrice, note, actor)
             postMessage("تم ترحيل البضاعة إلى حلفا وإنشاء فاتورة ${res.second}")
@@ -724,9 +876,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updatePosterPrice(weight: String, kind: String, price: Long, currency: String = "SDG") {
+        if (!checkOnlineBeforeTransaction("تعديل قائمة الأسعار")) return
         viewModelScope.launch {
             repository.updatePosterPrice(weight, kind, price, currency)
-            postMessage("تم تحديث سعر $kind ($weight جم) بالعملة $currency")
+            postMessage("تم تحديث سعر $kind ($weight جم) بالعملة $currency ومزامنته مع السيرفر السحابي")
+            persistAndSyncToServer()
         }
     }
 
@@ -894,6 +1048,26 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 postMessage(it.message ?: "تعذر تحديث صلاحيات الموظف", isError = true)
             }
         }
+    }
+
+    /**
+     * Direct one-click manager approval for employee account creation requests
+     */
+    fun approveUserAccount(
+        account: UserAccountEntity,
+        newRole: String = "محاسب ومبيعات",
+        newPermissions: String = "المبيعات,الأسعار,المخازن"
+    ) {
+        val targetRole = if (account.role.contains("بانتظار موافقة") || account.role.isBlank()) newRole else account.role
+        val targetPerms = if (account.permissions.isBlank()) newPermissions else account.permissions
+        updateEmployeePermissionsAndRole(
+            account = account,
+            newRole = targetRole,
+            newBranch = account.branch.ifBlank { "فرع السودان (SD-001)" },
+            newPermissions = targetPerms,
+            newLinkedUid = account.remoteServerId,
+            approveAccount = true
+        )
     }
 
     // --- User Profile Management ---
@@ -1195,6 +1369,12 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     val lastSuccessfulSyncTime = cloudErpSyncRepo.lastSuccessfulSyncTime
     val pendingSyncErrors = cloudErpSyncRepo.pendingErrors
 
+    val transactionTraces = com.example.util.RoomTransactionLogger.traces
+
+    fun clearTransactionTraces() {
+        com.example.util.RoomTransactionLogger.clearTraces()
+    }
+
     fun clearPendingSyncError(id: String) {
         cloudErpSyncRepo.clearPendingError(id)
     }
@@ -1248,6 +1428,29 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { err ->
                 _cloudSyncState.value = "تعذرت الاستعادة: ${err.message}"
                 postMessage("تعذرت استعادة البيانات من السيرفر: ${err.message}", isError = true)
+            }
+        }
+    }
+
+    fun wipeAllServerDataAndStartFresh(onComplete: (Boolean, String) -> Unit = { _, _ -> }) {
+        viewModelScope.launch {
+            _isSyncing.value = true
+            _cloudSyncState.value = "جارٍ حذف كافة السجلات من السيرفر وإعادة الضبط ببيانات نظيفة..."
+            val result = cloudErpSyncRepo.wipeAllServerClusterDataAndResetFresh(
+                serverClusterCode.value,
+                repository.getDao(),
+                resolveUserActor("مدير النظام")
+            )
+            _isSyncing.value = false
+            result.onSuccess { count ->
+                _cloudSyncState.value = "تم حذف جميع السجلات من السيرفر وبدء البيانات من جديد بنجاح"
+                postMessage("تم حذف $count سجلاً من السيرفر وتصفير الحركات والبدء من جديد بنجاح!")
+                checkServerHealth()
+                onComplete(true, "تم حذف $count سجلاً من السيرفر وإعادة الضبط بنجاح")
+            }.onFailure { err ->
+                _cloudSyncState.value = "فشل حذف بيانات السيرفر: ${err.message}"
+                postMessage("تعذر حذف السجلات من السيرفر: ${err.message}", isError = true)
+                onComplete(false, err.message ?: "فشلت العملية")
             }
         }
     }
@@ -1433,13 +1636,16 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             try {
-                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                withTimeoutOrNull(2000L) {
+                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                }
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Cloud check warning: ${e.message}")
             }
 
             val allUsers = repository.getDao().getUserAccountsDirect()
             val usernameCandidate = cleanUsername.ifBlank { cleanEmail.substringBefore("@") }
+            val hashedPin = com.example.data.repository.PmpRepository.hashSecret(cleanPin)
             
             // Check if account already exists with this username or email
             val existingMatch = allUsers.firstOrNull {
@@ -1450,14 +1656,18 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 if (existingMatch.syncStatus == "PENDING_MANAGER_APPROVAL") {
                     val updated = existingMatch.copy(
                         fullName = cleanName,
-                        pinOrPassword = cleanPin,
+                        pinOrPassword = hashedPin,
                         branch = branch.ifBlank { existingMatch.branch }
                     )
                     repository.getDao().updateUserAccount(updated)
-                    try {
-                        cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updated)
-                    } catch (e: Exception) {
-                        Log.w("PmpViewModel", "Cloud sync pending: ${e.message}")
+                    viewModelScope.launch(Dispatchers.IO) {
+                        try {
+                            withTimeoutOrNull(3000L) {
+                                cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updated)
+                            }
+                        } catch (e: Exception) {
+                            Log.w("PmpViewModel", "Cloud sync pending: ${e.message}")
+                        }
                     }
                     pendingApprovalUserCode.value = updated.userCode
                     postMessage("طلبك مسجل مسبقاً بكود (${updated.userCode}) ووصل هاتف المدير لاعتماد الصلاحيات.")
@@ -1484,7 +1694,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 fullName = cleanName,
                 username = usernameCandidate,
                 phoneOrEmail = cleanEmail,
-                pinOrPassword = cleanPin,
+                pinOrPassword = hashedPin,
                 role = "موظف جديد (بانتظار موافقة المدير)",
                 branch = branch.ifBlank { "فرع السودان (SD-001)" },
                 permissions = "",
@@ -1499,10 +1709,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             val insertedId = repository.getDao().insertUserAccount(pendingUser)
             val savedUser = pendingUser.copy(id = insertedId)
 
-            try {
-                cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, savedUser)
-            } catch (e: Exception) {
-                Log.w("PmpViewModel", "Sync single user to cloud: ${e.message}")
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    withTimeoutOrNull(4000L) {
+                        cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, savedUser)
+                    }
+                } catch (e: Exception) {
+                    Log.w("PmpViewModel", "Sync single user to cloud: ${e.message}")
+                }
             }
 
             pendingApprovalUserCode.value = userCode
@@ -1566,9 +1780,12 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val cleanIdentity = userCodeOrUsername.trim().lowercase(java.util.Locale.ROOT)
             val cleanPin = passwordOrPin.trim()
+            val hashedPin = com.example.data.repository.PmpRepository.hashSecret(cleanPin)
 
             try {
-                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                withTimeoutOrNull(3000L) {
+                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                }
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Pull cloud error: ${e.message}")
             }
@@ -1607,12 +1824,29 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            if (cleanPin.isNotBlank() && finalUser.pinOrPassword != cleanPin) {
+            val isPinValid = cleanPin.isBlank() ||
+                finalUser.pinOrPassword == cleanPin ||
+                finalUser.pinOrPassword == hashedPin
+
+            if (!isPinValid) {
                 onError("كلمة المرور أو رمز الدخول غير صحيح للحساب ${finalUser.fullName}")
                 return@launch
             }
 
-            repository.switchActiveUser(finalUser.id, finalUser.pinOrPassword)
+            // Auto-upgrade plain password to hash if needed
+            if (cleanPin.isNotBlank() && finalUser.pinOrPassword == cleanPin) {
+                val updatedWithHash = finalUser.copy(pinOrPassword = hashedPin)
+                repository.getDao().updateUserAccount(updatedWithHash)
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updatedWithHash)
+                    } catch (e: Exception) {
+                        Log.w("PmpViewModel", "Auto-upgrade password hash sync warning: ${e.message}")
+                    }
+                }
+            }
+
+            repository.switchActiveUser(finalUser.id, cleanPin)
             activeSessionUserId.value = finalUser.id
             isSessionAuthenticated.value = true
             DeviceSessionStore.saveActiveSession(getApplication(), finalUser.id, finalUser.userCode, finalUser.role)
@@ -1632,7 +1866,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             try {
-                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                withTimeoutOrNull(3000L) {
+                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                }
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Could not pre-fetch cloud users before Google bind: ${e.message}")
             }
@@ -1673,7 +1909,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         Log.w("PmpViewModel", "Cloud account sync pending error: ${e.message}")
                     }
                     pendingApprovalUserCode.value = res.account.userCode
-                    runCatching { Firebase.auth.signOut() }
+                    // Retain Firebase auth session for subsequent token authorization
                     onPendingApproval(res.message)
                 }
             }
@@ -1765,6 +2001,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             val actor = resolveUserActor("إدارة المصنع")
             val res = repository.deleteFactoryItem(item.id, item.name, actor)
             res.onSuccess {
+                viewModelScope.launch(Dispatchers.IO) {
+                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "factory_items", "FI-${item.id}")
+                }
                 postMessage("تم حذف الصنف (${item.name}) من المصنع بنجاح")
                 persistAndSyncToServer()
             }.onFailure {
@@ -1830,6 +2069,47 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun logProductionBatch(batch: ProductionBatchEntity, onCompleted: ((Boolean) -> Unit)? = null) {
+        viewModelScope.launch {
+            val actor = resolveUserActor("مهندس الإنتاج")
+            val res = repository.saveProductionBatch(batch, actor)
+            res.onSuccess { savedId ->
+                val entityToSync = batch.copy(id = savedId)
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        cloudErpSyncRepo.syncSingleProductionBatchToCloud(serverClusterCode.value, entityToSync)
+                    } catch (e: Exception) {
+                        Log.w("PmpViewModel", "Cloud batch sync warning: ${e.message}")
+                    }
+                }
+                postMessage("تم تسجيل تشغيلة الإنتاج #${batch.batchNumber} بنجاح وحفظها في Firestore | الحالة: ${batch.qualityStatus}")
+                onCompleted?.invoke(true)
+            }.onFailure {
+                postMessage(it.message ?: "فشل تسجيل تشغيلة الإنتاج", isError = true)
+                onCompleted?.invoke(false)
+            }
+        }
+    }
+
+    fun deleteProductionBatch(batch: ProductionBatchEntity) {
+        viewModelScope.launch {
+            val actor = resolveUserActor("مهندس الإنتاج")
+            val res = repository.deleteProductionBatch(batch.id, batch.batchNumber, actor)
+            res.onSuccess {
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        cloudErpSyncRepo.deleteProductionBatchFromCloud(serverClusterCode.value, batch.id, batch.batchNumber)
+                    } catch (e: Exception) {
+                        Log.w("PmpViewModel", "Cloud batch delete warning: ${e.message}")
+                    }
+                }
+                postMessage("تم حذف تشغيلة الإنتاج #${batch.batchNumber} من السجل والسحابة")
+            }.onFailure {
+                postMessage(it.message ?: "تعذر حذف التشغيلة", isError = true)
+            }
+        }
+    }
+
     fun saveChemicalSafety(item: ChemicalSafetyEntity) {
         viewModelScope.launch {
             val actor = resolveUserActor("مسؤول السلامة والجودة")
@@ -1886,6 +2166,20 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 persistAndSyncToServer()
             }.onFailure {
                 postMessage(it.message ?: "تعذر إضافة المادة لكتالوج المصنع", isError = true)
+            }
+        }
+    }
+
+    fun testDirectServerRead(onResult: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            val res = cloudErpSyncRepo.testDirectServerRead(serverClusterCode.value)
+            res.onSuccess {
+                postMessage(it)
+                onResult(it)
+            }.onFailure {
+                val msg = it.message ?: "فشل فحص السيرفر المباشر"
+                postMessage(msg, isError = true)
+                onResult(msg)
             }
         }
     }

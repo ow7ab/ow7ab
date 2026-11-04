@@ -95,6 +95,9 @@ fun onGoogleSignInClicked(
             } else {
                 onAuthError("نوع بيانات الاعتماد غير مدعوم")
             }
+        } catch (e: androidx.credentials.exceptions.NoCredentialException) {
+            Log.w("Auth", "No Google account credentials found on device", e)
+            onAuthError("لا يوجد حساب Google متاح على هذا الهاتف. يرجى تسجيل الدخول باسم المستخدم وكلمة المرور أو إضافة حسابك في إعدادات الهاتف.")
         } catch (e: GetCredentialCancellationException) {
             Log.w("Auth", "Google Sign-In cancelled or dismissed: ${e.message}", e)
             onAuthCancelled()

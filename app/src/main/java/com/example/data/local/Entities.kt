@@ -324,3 +324,33 @@ data class ChemicalSafetyEntity(
     val createdAt: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "daily_production_batches")
+data class ProductionBatchEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val batchNumber: String, // e.g. "PB-20261101-01"
+    val productionDate: String, // e.g. "2026-11-01"
+    val formulaId: Long? = null,
+    val formulaNo: String = "",
+    val productName: String,
+    val paintType: String = "مطفي معماري (Matt)",
+    val baseKind: String = "أبيض",
+    val targetPvc: Double = 0.0,
+    val targetWeightKg: Double = 0.0,
+    val actualWeightKg: Double = 0.0,
+    val targetVolumeLiters: Double = 0.0,
+    val cartonsCount: Int = 0,
+    val packageUnit: String = "كرتونة 900 مل",
+    val machineId: Long? = null,
+    val machineName: String = "",
+    val qualityStatus: String = "معتمد ومطابق", // "معتمد ومطابق", "تحت الفحص المخبري", "مرفوض/معالجة"
+    val measuredDensity: Double = 0.0,
+    val measuredViscosity: String = "",
+    val scaledIngredientsJson: String = "[]",
+    val supervisorOrEngineer: String = "مهندس الإنتاج",
+    val shift: String = "الوردية الصباحية",
+    val notes: String = "",
+    val syncStatus: String = "SYNCED",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+

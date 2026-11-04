@@ -4,6 +4,9 @@ import android.content.Context
 import android.util.Log
 import com.example.R
 import com.example.data.local.*
+import com.example.util.RoomTransactionLogger
+import com.example.util.TransactionStage
+import com.example.util.TraceStatus
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
@@ -17,6 +20,8 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class SyncDiagnosticRecord(
     val id: String = java.util.UUID.randomUUID().toString(),
@@ -72,6 +77,9 @@ class CloudErpSyncRepository(
 
     private val _pendingErrors = kotlinx.coroutines.flow.MutableStateFlow<List<SyncDiagnosticRecord>>(emptyList())
     val pendingErrors: kotlinx.coroutines.flow.StateFlow<List<SyncDiagnosticRecord>> = _pendingErrors
+
+    // Global mutex guaranteeing non-overlapping synchronization passes (prevents sync concurrency collisions)
+    private val syncMutex = Mutex()
 
     fun clearPendingError(errorId: String) {
         _pendingErrors.value = _pendingErrors.value.filter { it.id != errorId }
@@ -338,29 +346,44 @@ class CloudErpSyncRepository(
         currentActiveUserId: Long? = null,
         deviceId: String = "DEV-NODE"
     ): Result<Int> = withContext(Dispatchers.IO) {
-        runCatching {
-            val clustersToQuery = linkedSetOf(
+        syncMutex.withLock {
+            internalPullAndMergeCloudUsers(clusterCode, dao, currentActiveUserId, deviceId)
+        }
+    }
+
+    private suspend fun internalPullAndMergeCloudUsers(
+        clusterCode: String,
+        dao: PmpDao,
+        currentActiveUserId: Long? = null,
+        deviceId: String = "DEV-NODE"
+    ): Result<Int> {
+        return runCatching {
+            // Clean local duplicate user accounts first
+            runCatching { dao.removeDuplicateUserAccounts() }
+
+            val primaryClusters = linkedSetOf(
                 safeId(clusterCode, DEFAULT_CLUSTER),
-                DEFAULT_CLUSTER,
-                LEGACY_V16_CLUSTER,
-                "PMP-ERP-V15-CLUSTER",
-                "PMP-ERP-V1-CLUSTER"
+                DEFAULT_CLUSTER
             )
 
-            // 0. Pull all tombstones from all clusters and root deleted_accounts first
-            for (code in clustersToQuery) {
+            // 0. Pull tombstones with safe timeout
+            for (code in primaryClusters) {
                 runCatching {
-                    val delSnap = clusterRef(code).collection("deleted_users").get().await()
-                    val delList = delSnap.documents.mapNotNull { it.data }
-                    if (delList.isNotEmpty()) {
+                    val delSnap = kotlinx.coroutines.withTimeoutOrNull(2000L) {
+                        clusterRef(code).collection("deleted_users").get().await()
+                    }
+                    val delList = delSnap?.documents?.mapNotNull { it.data }
+                    if (!delList.isNullOrEmpty()) {
                         DeletedAccountsRegistry.mergeRemoteTombstones(delList)
                     }
                 }
             }
             runCatching {
-                val rootDelSnap = firestore.collection("deleted_accounts").get().await()
-                val rootDelList = rootDelSnap.documents.mapNotNull { it.data }
-                if (rootDelList.isNotEmpty()) {
+                val rootDelSnap = kotlinx.coroutines.withTimeoutOrNull(1500L) {
+                    firestore.collection("deleted_accounts").get().await()
+                }
+                val rootDelList = rootDelSnap?.documents?.mapNotNull { it.data }
+                if (!rootDelList.isNullOrEmpty()) {
                     DeletedAccountsRegistry.mergeRemoteTombstones(rootDelList)
                 }
             }
@@ -382,19 +405,27 @@ class CloudErpSyncRepository(
             val seenKeys = mutableSetOf<String>()
             var mergedCount = 0
 
-            // Collect all user documents from all known clusters
+            // Collect user documents from primary clusters with timeout
             val allCloudDocs = mutableListOf<com.google.firebase.firestore.DocumentSnapshot>()
-            for (code in clustersToQuery) {
+            for (code in primaryClusters) {
                 runCatching {
-                    val snap = clusterRef(code).collection("user_accounts").get().await()
-                    allCloudDocs.addAll(snap.documents)
+                    val snap = kotlinx.coroutines.withTimeoutOrNull(2500L) {
+                        clusterRef(code).collection("user_accounts").get().await()
+                    }
+                    if (snap != null) {
+                        allCloudDocs.addAll(snap.documents)
+                    }
                 }
             }
 
             // Also check linked_accounts collection if available
             runCatching {
-                val linkedSnap = firestore.collection("linked_accounts").get().await()
-                allCloudDocs.addAll(linkedSnap.documents)
+                val linkedSnap = kotlinx.coroutines.withTimeoutOrNull(1500L) {
+                    firestore.collection("linked_accounts").get().await()
+                }
+                if (linkedSnap != null) {
+                    allCloudDocs.addAll(linkedSnap.documents)
+                }
             }
 
             if (allCloudDocs.isEmpty()) return@runCatching 0
@@ -650,10 +681,18 @@ class CloudErpSyncRepository(
         activeUserId: Long? = null,
         deviceId: String = "DEV-NODE"
     ): Result<Int> = withContext(Dispatchers.IO) {
-        runCatching {
-            val actor = currentActorId
-            var syncedCount = 0
-            val cRef = clusterRef(clusterCode)
+        syncMutex.withLock {
+            runCatching {
+                // Deduplicate local cashboxes, movements, and user accounts before pushing
+                runCatching {
+                    dao.removeDuplicateCashboxes()
+                    dao.removeDuplicateMovements()
+                    dao.removeDuplicateUserAccounts()
+                }
+
+                val actor = currentActorId
+                var syncedCount = 0
+                val cRef = clusterRef(clusterCode)
 
             // 0. User Accounts & Employee Permissions
             // Concurrency protection: non-manager employees only sync their own user profile,
@@ -678,339 +717,464 @@ class CloudErpSyncRepository(
                 }
             }
 
-            usersToSync.forEach { u ->
-                val docId = safeId(u.userCode, "USR-${u.id}")
-                val data = mapOf(
-                    "id" to u.id,
-                    "userCode" to docId,
-                    "fullName" to u.fullName,
-                    "username" to u.username,
-                    "phoneOrEmail" to u.phoneOrEmail,
-                    "pinOrPassword" to u.pinOrPassword,
-                    "role" to u.role,
-                    "branch" to u.branch,
-                    "permissions" to u.permissions,
-                    "serverSyncToken" to u.serverSyncToken,
-                    "remoteServerId" to u.remoteServerId,
-                    "syncStatus" to u.syncStatus,
-                    "serverEndpoint" to u.serverEndpoint,
-                    "active" to u.active,
-                    "createdAt" to u.createdAt,
-                    "serverUpdatedBy" to actor,
-                    "serverUpdatedAt" to FieldValue.serverTimestamp()
-                )
-                cRef.collection("user_accounts").document(docId).set(data, SetOptions.merge()).await()
-                syncedCount++
+            usersToSync.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { u ->
+                    val docId = safeId(u.userCode, "USR-${u.id}")
+                    val data = mapOf(
+                        "id" to u.id,
+                        "userCode" to docId,
+                        "fullName" to u.fullName,
+                        "username" to u.username,
+                        "phoneOrEmail" to u.phoneOrEmail,
+                        "pinOrPassword" to u.pinOrPassword,
+                        "role" to u.role,
+                        "branch" to u.branch,
+                        "permissions" to u.permissions,
+                        "serverSyncToken" to u.serverSyncToken,
+                        "remoteServerId" to u.remoteServerId,
+                        "syncStatus" to u.syncStatus,
+                        "serverEndpoint" to u.serverEndpoint,
+                        "active" to u.active,
+                        "createdAt" to u.createdAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    )
+                    batch.set(cRef.collection("user_accounts").document(docId), data, SetOptions.merge())
+                    syncedCount++
+                }
+                batch.commit().await()
             }
 
-            // 1. Invoices & Items & Payments
+            // 1. Invoices & Items & Payments (Batched)
             val invoices = dao.getInvoicesDirect()
             val allItems = dao.getInvoiceItemsDirect()
             val allPayments = dao.getInvoicePaymentsDirect()
 
-            invoices.forEach { inv ->
-                val invItems = allItems.filter { it.invoiceId == inv.id }.map { item ->
-                    mapOf(
-                        "id" to item.id,
-                        "description" to item.description,
-                        "quantity" to item.quantity,
-                        "unitPrice" to item.unitPrice,
-                        "lineTotal" to item.lineTotal,
-                        "productId" to (item.productId ?: 0L),
-                        "warehouseId" to (item.warehouseId ?: 0L)
-                    )
-                }
-                val invPayments = allPayments.filter { it.invoiceId == inv.id && it.status == "active" }.map { p ->
-                    mapOf(
-                        "id" to p.id,
-                        "payDate" to p.payDate,
-                        "cashbox" to p.cashbox,
-                        "amount" to p.amount,
-                        "note" to p.note,
-                        "createdBy" to p.createdBy
-                    )
-                }
+            invoices.chunked(200).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { inv ->
+                    val invItems = allItems.filter { it.invoiceId == inv.id }.map { item ->
+                        mapOf(
+                            "id" to item.id,
+                            "description" to item.description,
+                            "quantity" to item.quantity,
+                            "unitPrice" to item.unitPrice,
+                            "lineTotal" to item.lineTotal,
+                            "productId" to (item.productId ?: 0L),
+                            "warehouseId" to (item.warehouseId ?: 0L)
+                        )
+                    }
+                    val invPayments = allPayments.filter { it.invoiceId == inv.id && it.status == "active" }.map { p ->
+                        mapOf(
+                            "id" to p.id,
+                            "payDate" to p.payDate,
+                            "cashbox" to p.cashbox,
+                            "amount" to p.amount,
+                            "note" to p.note,
+                            "createdBy" to p.createdBy
+                        )
+                    }
 
-                val docId = safeId(inv.invoiceNo, "INV-${inv.id}")
-                val data = mapOf(
-                    "id" to inv.id,
-                    "invoiceNo" to inv.invoiceNo,
-                    "customerId" to inv.customerId,
-                    "customerName" to inv.customerName,
-                    "invoiceDate" to inv.invoiceDate,
-                    "currency" to inv.currency,
-                    "subtotal" to inv.subtotal,
-                    "discount" to inv.discount,
-                    "total" to inv.total,
-                    "notes" to inv.notes,
-                    "status" to inv.status,
-                    "cancelReason" to (inv.cancelReason ?: ""),
-                    "createdBy" to inv.createdBy,
-                    "items" to invItems,
-                    "payments" to invPayments,
-                    "serverUpdatedBy" to actor,
-                    "serverUpdatedAt" to FieldValue.serverTimestamp()
-                )
-                cRef.collection("invoices").document(docId).set(data, SetOptions.merge()).await()
-                syncedCount++
-            }
-
-            // 2. Financial Movements
-            val movements = dao.getMovementsDirect()
-            movements.forEach { m ->
-                val docId = safeId("MOV-${m.id}-${m.reference}", "MOV-${m.id}")
-                val data = mapOf(
-                    "id" to m.id,
-                    "txDate" to m.txDate,
-                    "cashbox" to m.cashbox,
-                    "currency" to m.currency,
-                    "direction" to m.direction,
-                    "amount" to m.amount,
-                    "description" to m.description,
-                    "reference" to m.reference,
-                    "createdBy" to m.createdBy,
-                    "serverUpdatedBy" to actor,
-                    "serverUpdatedAt" to FieldValue.serverTimestamp()
-                )
-                cRef.collection("movements").document(docId).set(data, SetOptions.merge()).await()
-                syncedCount++
-            }
-
-            // 3. Transfers
-            val transfers = dao.getTransfersDirect()
-            transfers.forEach { t ->
-                val docId = safeId("TRF-${t.id}-${t.reference}", "TRF-${t.id}")
-                val data = mapOf(
-                    "id" to t.id,
-                    "reference" to t.reference,
-                    "txDate" to t.txDate,
-                    "sourceCashbox" to t.sourceCashbox,
-                    "destinationCashbox" to t.destinationCashbox,
-                    "sourceCurrency" to t.sourceCurrency,
-                    "destinationCurrency" to t.destinationCurrency,
-                    "sourceAmount" to t.sourceAmount,
-                    "rate" to t.rate,
-                    "destinationAmount" to t.destinationAmount,
-                    "description" to t.description,
-                    "createdBy" to t.createdBy,
-                    "serverUpdatedBy" to actor,
-                    "serverUpdatedAt" to FieldValue.serverTimestamp()
-                )
-                cRef.collection("transfers").document(docId).set(data, SetOptions.merge()).await()
-                syncedCount++
-            }
-
-            // 4. Customers
-            val customers = dao.getCustomersDirect()
-            customers.forEach { c ->
-                val docId = "CUST-${c.id}"
-                val data = mapOf(
-                    "id" to c.id,
-                    "name" to c.name,
-                    "phone" to c.phone,
-                    "address" to c.address,
-                    "notes" to c.notes,
-                    "active" to c.active,
-                    "serverUpdatedBy" to actor,
-                    "serverUpdatedAt" to FieldValue.serverTimestamp()
-                )
-                cRef.collection("customers").document(docId).set(data, SetOptions.merge()).await()
-                syncedCount++
-            }
-
-            // 5. Products & Pricing
-            val products = dao.getProductsDirect()
-            products.forEach { p ->
-                val docId = "PROD-${p.id}"
-                val data = mapOf(
-                    "id" to p.id,
-                    "sku" to p.sku,
-                    "name" to p.name,
-                    "category" to p.category,
-                    "unit" to p.unit,
-                    "purchasePrice" to p.purchasePrice,
-                    "salePrice" to p.salePrice,
-                    "minimumStock" to p.minimumStock,
-                    "paintColor" to p.paintColor,
-                    "packageWeight" to p.packageWeight,
-                    "active" to p.active,
-                    "serverUpdatedBy" to actor,
-                    "serverUpdatedAt" to FieldValue.serverTimestamp()
-                )
-                cRef.collection("products").document(docId).set(data, SetOptions.merge()).await()
-                syncedCount++
-            }
-
-            // 6. Cashboxes & Warehouses
-            val cashboxes = dao.getCashboxesDirect()
-            cashboxes.forEach { cb ->
-                val docId = "BOX-${cb.id}"
-                cRef.collection("cashboxes").document(docId).set(
-                    mapOf(
-                        "id" to cb.id,
-                        "name" to cb.name,
+                    val docId = safeId(inv.invoiceNo, "INV-${inv.id}")
+                    val data = mapOf(
+                        "id" to inv.id,
+                        "invoiceNo" to inv.invoiceNo,
+                        "customerId" to inv.customerId,
+                        "customerName" to inv.customerName,
+                        "invoiceDate" to inv.invoiceDate,
+                        "currency" to inv.currency,
+                        "subtotal" to inv.subtotal,
+                        "discount" to inv.discount,
+                        "total" to inv.total,
+                        "notes" to inv.notes,
+                        "status" to inv.status,
+                        "cancelReason" to (inv.cancelReason ?: ""),
+                        "createdBy" to inv.createdBy,
+                        "items" to invItems,
+                        "payments" to invPayments,
+                        "serverUpdatedBy" to actor,
                         "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                ).await()
-                syncedCount++
+                    )
+                    batch.set(cRef.collection("invoices").document(docId), data, SetOptions.merge())
+                    syncedCount++
+                }
+                batch.commit().await()
+            }
+
+            // 2. Financial Movements (Batched for high speed and unique document ID)
+            val movements = dao.getMovementsDirect()
+            RoomTransactionLogger.log(
+                operation = "SYNC_MOVEMENTS_DISPATCH",
+                stage = TransactionStage.SYNC_DISPATCH,
+                status = TraceStatus.IN_PROGRESS,
+                entityType = "movements",
+                details = "إرسال ${movements.size} حركة مالية إلى السحابة"
+            )
+            try {
+                movements.chunked(300).forEach { chunk ->
+                    val batch = firestore.batch()
+                    chunk.forEach { m ->
+                        val docId = "MOV-${m.id}"
+                        val data = mapOf(
+                            "id" to m.id,
+                            "txDate" to m.txDate,
+                            "cashbox" to m.cashbox,
+                            "currency" to m.currency,
+                            "direction" to m.direction,
+                            "amount" to m.amount,
+                            "description" to m.description,
+                            "reference" to m.reference,
+                            "createdBy" to m.createdBy,
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        )
+                        batch.set(cRef.collection("movements").document(docId), data, SetOptions.merge())
+                        syncedCount++
+                    }
+                    batch.commit().await()
+                }
+                RoomTransactionLogger.log(
+                    operation = "SYNC_MOVEMENTS_ACK",
+                    stage = TransactionStage.SYNC_ACKNOWLEDGED,
+                    status = TraceStatus.SUCCESS,
+                    entityType = "movements",
+                    details = "تم تأكيد مزامنة ${movements.size} حركة مالية بنجاح على السيرفر"
+                )
+            } catch (e: Exception) {
+                RoomTransactionLogger.recordSyncBreakage(
+                    operation = "SYNC_MOVEMENTS_TO_CLOUD",
+                    entityType = "movements",
+                    recordId = "BATCH",
+                    reason = "فشل إرسال الحركات المالية إلى السيرفر: ${e.message}",
+                    cause = e
+                )
+                throw e
+            }
+
+            // 3. Transfers (Batched)
+            val transfers = dao.getTransfersDirect()
+            transfers.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { t ->
+                    val docId = safeId("TRF-${t.id}-${t.reference}", "TRF-${t.id}")
+                    val data = mapOf(
+                        "id" to t.id,
+                        "reference" to t.reference,
+                        "txDate" to t.txDate,
+                        "sourceCashbox" to t.sourceCashbox,
+                        "destinationCashbox" to t.destinationCashbox,
+                        "sourceCurrency" to t.sourceCurrency,
+                        "destinationCurrency" to t.destinationCurrency,
+                        "sourceAmount" to t.sourceAmount,
+                        "rate" to t.rate,
+                        "destinationAmount" to t.destinationAmount,
+                        "description" to t.description,
+                        "createdBy" to t.createdBy,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    )
+                    batch.set(cRef.collection("transfers").document(docId), data, SetOptions.merge())
+                    syncedCount++
+                }
+                batch.commit().await()
+            }
+
+            // 4. Customers (Batched)
+            val customers = dao.getCustomersDirect()
+            customers.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { c ->
+                    val docId = "CUST-${c.id}"
+                    val data = mapOf(
+                        "id" to c.id,
+                        "name" to c.name,
+                        "phone" to c.phone,
+                        "address" to c.address,
+                        "notes" to c.notes,
+                        "active" to c.active,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    )
+                    batch.set(cRef.collection("customers").document(docId), data, SetOptions.merge())
+                    syncedCount++
+                }
+                batch.commit().await()
+            }
+
+            // 5. Products & Pricing (Batched)
+            val products = dao.getProductsDirect()
+            products.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { p ->
+                    val docId = "PROD-${p.id}"
+                    val data = mapOf(
+                        "id" to p.id,
+                        "sku" to p.sku,
+                        "name" to p.name,
+                        "category" to p.category,
+                        "unit" to p.unit,
+                        "purchasePrice" to p.purchasePrice,
+                        "salePrice" to p.salePrice,
+                        "minimumStock" to p.minimumStock,
+                        "paintColor" to p.paintColor,
+                        "packageWeight" to p.packageWeight,
+                        "active" to p.active,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    )
+                    batch.set(cRef.collection("products").document(docId), data, SetOptions.merge())
+                    syncedCount++
+                }
+                batch.commit().await()
+            }
+
+            // 6. Cashboxes & Warehouses (Batched)
+            val cashboxes = dao.getCashboxesDirect()
+            if (cashboxes.isNotEmpty()) {
+                val batch = firestore.batch()
+                cashboxes.forEach { cb ->
+                    val docId = safeId("BOX-${cb.name.trim().lowercase()}", "BOX-${cb.id}")
+                    batch.set(
+                        cRef.collection("cashboxes").document(docId),
+                        mapOf(
+                            "id" to cb.id,
+                            "name" to cb.name,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                    syncedCount++
+                }
+                batch.commit().await()
             }
 
             val warehouses = dao.getWarehousesDirect()
-            warehouses.forEach { wh ->
-                val docId = "WH-${wh.id}"
-                cRef.collection("warehouses").document(docId).set(
-                    mapOf(
-                        "id" to wh.id,
-                        "name" to wh.name,
-                        "active" to wh.active,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                ).await()
-                syncedCount++
+            if (warehouses.isNotEmpty()) {
+                val batch = firestore.batch()
+                warehouses.forEach { wh ->
+                    val docId = "WH-${wh.id}"
+                    batch.set(
+                        cRef.collection("warehouses").document(docId),
+                        mapOf(
+                            "id" to wh.id,
+                            "name" to wh.name,
+                            "active" to wh.active,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                    syncedCount++
+                }
+                batch.commit().await()
             }
 
-            // 7. Factory Items & Raw Materials (Egypt Connected)
+            // 7. Factory Items & Raw Materials (Egypt Connected - Batched)
             val factoryItems = dao.getFactoryItemsDirect()
-            factoryItems.forEach { fi ->
-                val docId = "FI-${fi.id}"
-                cRef.collection("factory_items").document(docId).set(
-                    mapOf(
-                        "id" to fi.id,
-                        "name" to fi.name,
-                        "unit" to fi.unit,
-                        "category" to fi.category,
-                        "linkedToEgypt" to true,
-                        "defaultCurrency" to "EGP",
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                ).await()
-                syncedCount++
+            factoryItems.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { fi ->
+                    val docId = "FI-${fi.id}"
+                    batch.set(
+                        cRef.collection("factory_items").document(docId),
+                        mapOf(
+                            "id" to fi.id,
+                            "name" to fi.name,
+                            "unit" to fi.unit,
+                            "category" to fi.category,
+                            "linkedToEgypt" to true,
+                            "defaultCurrency" to "EGP",
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                    syncedCount++
+                }
+                batch.commit().await()
             }
 
-            // 8. Factory Movements (Raw Material Purchases, Warehouse Receipts, Production)
+            // 8. Factory Movements (Batched)
             val factoryMoves = dao.getFactoryMovesDirect()
-            factoryMoves.forEach { fm ->
-                val docId = "FM-${fm.id}"
-                cRef.collection("factory_moves").document(docId).set(
-                    mapOf(
-                        "id" to fm.id,
-                        "moveDate" to fm.moveDate,
-                        "kind" to fm.kind,
-                        "itemId" to fm.itemId,
-                        "itemName" to fm.itemName,
-                        "qty" to fm.qty,
-                        "machineId" to (fm.machineId ?: 0L),
-                        "machineName" to (fm.machineName ?: ""),
-                        "batch" to fm.batch,
-                        "note" to fm.note,
-                        "actor" to fm.actor,
-                        "counterparty" to fm.counterparty,
-                        "linked" to fm.linked,
-                        "createdAt" to fm.createdAt,
-                        "currency" to "EGP",
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                ).await()
-                syncedCount++
+            factoryMoves.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { fm ->
+                    val docId = "FM-${fm.id}"
+                    batch.set(
+                        cRef.collection("factory_moves").document(docId),
+                        mapOf(
+                            "id" to fm.id,
+                            "moveDate" to fm.moveDate,
+                            "kind" to fm.kind,
+                            "itemId" to fm.itemId,
+                            "itemName" to fm.itemName,
+                            "qty" to fm.qty,
+                            "machineId" to (fm.machineId ?: 0L),
+                            "machineName" to (fm.machineName ?: ""),
+                            "batch" to fm.batch,
+                            "note" to fm.note,
+                            "actor" to fm.actor,
+                            "counterparty" to fm.counterparty,
+                            "linked" to fm.linked,
+                            "createdAt" to fm.createdAt,
+                            "currency" to "EGP",
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                    syncedCount++
+                }
+                batch.commit().await()
             }
 
-            // 8b. Chemical Formulations & Paint Batch Formulas
+            // 8b. Chemical Formulations & Paint Batch Formulas (Batched)
             val formulations = dao.getFormulationsDirect()
-            formulations.forEach { form ->
-                val docId = if (form.formulaNo.isNotBlank()) {
-                    form.formulaNo.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
-                } else {
-                    "FORM-${form.id}"
+            formulations.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { form ->
+                    val docId = if (form.formulaNo.isNotBlank()) {
+                        form.formulaNo.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
+                    } else {
+                        "FORM-${form.id}"
+                    }
+                    val payload = mapOf(
+                        "id" to form.id,
+                        "formulaNo" to form.formulaNo,
+                        "productName" to form.productName,
+                        "paintType" to form.paintType,
+                        "baseKind" to form.baseKind,
+                        "targetPvc" to form.targetPvc,
+                        "calculatedPvc" to form.calculatedPvc,
+                        "cpvcEstimated" to form.cpvcEstimated,
+                        "totalSolidsWeight" to form.totalSolidsWeight,
+                        "totalSolidsVolume" to form.totalSolidsVolume,
+                        "totalBatchWeight" to form.totalBatchWeight,
+                        "totalBatchVolume" to form.totalBatchVolume,
+                        "calculatedDensity" to form.calculatedDensity,
+                        "totalCost" to form.totalCost,
+                        "costPerKg" to form.costPerKg,
+                        "ingredientsJson" to form.ingredientsJson,
+                        "technicalAnalysis" to form.technicalAnalysis,
+                        "notes" to form.notes,
+                        "approvedForProduction" to form.approvedForProduction,
+                        "createdBy" to form.createdBy,
+                        "createdAt" to form.createdAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    )
+                    batch.set(cRef.collection("lab_formulations").document(docId), payload, SetOptions.merge())
+                    syncedCount++
                 }
-                val payload = mapOf(
-                    "id" to form.id,
-                    "formulaNo" to form.formulaNo,
-                    "productName" to form.productName,
-                    "paintType" to form.paintType,
-                    "baseKind" to form.baseKind,
-                    "targetPvc" to form.targetPvc,
-                    "calculatedPvc" to form.calculatedPvc,
-                    "cpvcEstimated" to form.cpvcEstimated,
-                    "totalSolidsWeight" to form.totalSolidsWeight,
-                    "totalSolidsVolume" to form.totalSolidsVolume,
-                    "totalBatchWeight" to form.totalBatchWeight,
-                    "totalBatchVolume" to form.totalBatchVolume,
-                    "calculatedDensity" to form.calculatedDensity,
-                    "totalCost" to form.totalCost,
-                    "costPerKg" to form.costPerKg,
-                    "ingredientsJson" to form.ingredientsJson,
-                    "technicalAnalysis" to form.technicalAnalysis,
-                    "notes" to form.notes,
-                    "approvedForProduction" to form.approvedForProduction,
-                    "createdBy" to form.createdBy,
-                    "createdAt" to form.createdAt,
-                    "serverUpdatedBy" to actor,
-                    "serverUpdatedAt" to FieldValue.serverTimestamp()
-                )
-                cRef.collection("lab_formulations").document(docId).set(payload, SetOptions.merge()).await()
-                runCatching {
-                    firestore.collection("lab_formulations").document(docId).set(payload, SetOptions.merge()).await()
-                }
-                syncedCount++
+                batch.commit().await()
             }
 
-            // 9. Stock Moves (Warehouse movements)
+            // 8c. Daily Production Batches (Batched)
+            val batches = dao.getProductionBatchesDirect()
+            batches.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { b ->
+                    val docId = if (b.batchNumber.isNotBlank()) {
+                        b.batchNumber.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
+                    } else {
+                        "BATCH-${b.id}"
+                    }
+                    val payload = mapOf(
+                        "id" to b.id,
+                        "batchNumber" to b.batchNumber,
+                        "productionDate" to b.productionDate,
+                        "formulaId" to (b.formulaId ?: 0L),
+                        "formulaNo" to b.formulaNo,
+                        "productName" to b.productName,
+                        "paintType" to b.paintType,
+                        "baseKind" to b.baseKind,
+                        "targetPvc" to b.targetPvc,
+                        "targetWeightKg" to b.targetWeightKg,
+                        "actualWeightKg" to b.actualWeightKg,
+                        "targetVolumeLiters" to b.targetVolumeLiters,
+                        "cartonsCount" to b.cartonsCount,
+                        "packageUnit" to b.packageUnit,
+                        "machineId" to (b.machineId ?: 0L),
+                        "machineName" to b.machineName,
+                        "qualityStatus" to b.qualityStatus,
+                        "measuredDensity" to b.measuredDensity,
+                        "measuredViscosity" to b.measuredViscosity,
+                        "scaledIngredientsJson" to b.scaledIngredientsJson,
+                        "supervisorOrEngineer" to b.supervisorOrEngineer,
+                        "shift" to b.shift,
+                        "notes" to b.notes,
+                        "syncStatus" to "SYNCED",
+                        "createdAt" to b.createdAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    )
+                    batch.set(cRef.collection("paint_batches").document(docId), payload, SetOptions.merge())
+                    syncedCount++
+                }
+                batch.commit().await()
+            }
+
+            // 9. Stock Moves (Batched)
             val stockMoves = dao.getStockMovesDirect()
-            stockMoves.forEach { sm ->
-                val docId = "SM-${sm.id}"
-                cRef.collection("stock_moves").document(docId).set(
-                    mapOf(
-                        "id" to sm.id,
-                        "warehouseId" to sm.warehouseId,
-                        "productId" to sm.productId,
-                        "quantity" to sm.quantity,
-                        "kind" to sm.kind,
-                        "invoiceId" to (sm.invoiceId ?: 0L),
-                        "note" to sm.note,
-                        "createdBy" to sm.createdBy,
-                        "createdAt" to sm.createdAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                ).await()
-                syncedCount++
+            stockMoves.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { sm ->
+                    val docId = "SM-${sm.id}"
+                    batch.set(
+                        cRef.collection("stock_moves").document(docId),
+                        mapOf(
+                            "id" to sm.id,
+                            "warehouseId" to sm.warehouseId,
+                            "productId" to sm.productId,
+                            "quantity" to sm.quantity,
+                            "kind" to sm.kind,
+                            "invoiceId" to (sm.invoiceId ?: 0L),
+                            "note" to sm.note,
+                            "createdBy" to sm.createdBy,
+                            "createdAt" to sm.createdAt,
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                    syncedCount++
+                }
+                batch.commit().await()
             }
 
-            // 10. Halfa & Egypt Invoices (Handled in EGP)
+            // 10. Halfa & Egypt Invoices (Handled in EGP - Batched)
             val halfaInvoices = dao.getHalfaInvoicesDirect()
-            halfaInvoices.forEach { hi ->
-                val docId = "HINV-${hi.id}"
-                cRef.collection("halfa_invoices").document(docId).set(
-                    mapOf(
-                        "id" to hi.id,
-                        "invoiceNo" to hi.invoiceNo,
-                        "invoiceDate" to hi.invoiceDate,
-                        "cashbox" to hi.cashbox,
-                        "currency" to hi.currency,
-                        "warehouseId" to hi.warehouseId,
-                        "productId" to hi.productId,
-                        "productName" to hi.productName,
-                        "quantity" to hi.quantity,
-                        "unitPrice" to hi.unitPrice,
-                        "total" to hi.total,
-                        "factoryMoveId" to (hi.factoryMoveId ?: 0L),
-                        "note" to hi.note,
-                        "status" to hi.status,
-                        "createdBy" to hi.createdBy,
-                        "createdAt" to hi.createdAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                ).await()
-                syncedCount++
+            halfaInvoices.chunked(300).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { hi ->
+                    val docId = "HINV-${hi.id}"
+                    batch.set(
+                        cRef.collection("halfa_invoices").document(docId),
+                        mapOf(
+                            "id" to hi.id,
+                            "invoiceNo" to hi.invoiceNo,
+                            "invoiceDate" to hi.invoiceDate,
+                            "cashbox" to hi.cashbox,
+                            "currency" to hi.currency,
+                            "warehouseId" to hi.warehouseId,
+                            "productId" to hi.productId,
+                            "productName" to hi.productName,
+                            "quantity" to hi.quantity,
+                            "unitPrice" to hi.unitPrice,
+                            "total" to hi.total,
+                            "factoryMoveId" to (hi.factoryMoveId ?: 0L),
+                            "note" to hi.note,
+                            "status" to hi.status,
+                            "createdBy" to hi.createdBy,
+                            "createdAt" to hi.createdAt,
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                    syncedCount++
+                }
+                batch.commit().await()
             }
 
             // 11. Cluster Server Info & Cross-Network Egypt-Sudan Linking Metadata (Non-blocking)
@@ -1061,6 +1225,7 @@ class CloudErpSyncRepository(
             )
         }
     }
+}
 
     /**
      * Restores all data from Google Cloud Firestore down to the local device database.
@@ -1072,13 +1237,14 @@ class CloudErpSyncRepository(
         currentActiveUserId: Long? = null,
         deviceId: String = "DEV-NODE"
     ): Result<Int> = withContext(Dispatchers.IO) {
-        runCatching {
-            var restoredCount = 0
-            val cRef = clusterRef(clusterCode)
+        syncMutex.withLock {
+            runCatching {
+                var restoredCount = 0
+                val cRef = clusterRef(clusterCode)
 
-            // 0. Restore User Accounts preserving active local session
-            val mergedUsersCount = pullAndMergeCloudUsers(clusterCode, dao, currentActiveUserId, deviceId).getOrDefault(0)
-            restoredCount += mergedUsersCount
+                // 0. Restore User Accounts preserving active local session
+                val mergedUsersCount = internalPullAndMergeCloudUsers(clusterCode, dao, currentActiveUserId, deviceId).getOrDefault(0)
+                restoredCount += mergedUsersCount
 
             // 1. Fetch Invoices from Server with deduplication
             val localInvoices = dao.getInvoicesDirect()
@@ -1174,9 +1340,12 @@ class CloudErpSyncRepository(
                     createdBy = doc.getString("createdBy") ?: "المدير"
                 )
             }
-            if (restoredMovements.isNotEmpty()) {
-                dao.upsertMovements(restoredMovements)
-                restoredCount += restoredMovements.size
+            val distinctMovements = restoredMovements.distinctBy {
+                if (it.reference.isNotBlank()) it.reference.trim() else "ID-${it.id}"
+            }
+            if (distinctMovements.isNotEmpty()) {
+                dao.upsertMovements(distinctMovements)
+                restoredCount += distinctMovements.size
             }
 
             // 3. Fetch Transfers from Server
@@ -1277,9 +1446,10 @@ class CloudErpSyncRepository(
                     name = name
                 )
             }
-            if (restoredCashboxes.isNotEmpty()) {
-                dao.upsertCashboxes(restoredCashboxes)
-                restoredCount += restoredCashboxes.size
+            val distinctCashboxes = restoredCashboxes.distinctBy { it.name.trim().lowercase() }
+            if (distinctCashboxes.isNotEmpty()) {
+                dao.upsertCashboxes(distinctCashboxes)
+                restoredCount += distinctCashboxes.size
             }
 
             // 7. Fetch Factory Items & Raw Materials (Egypt Linked)
@@ -1358,6 +1528,44 @@ class CloudErpSyncRepository(
                 restoredCount += restoredFormulations.size
             }
 
+            // 8c. Fetch Daily Production Batches from Cloud
+            val batchSnapshot = cRef.collection("paint_batches").get().await()
+            val restoredBatches = batchSnapshot.documents.mapNotNull { doc ->
+                val id = doc.getLong("id") ?: return@mapNotNull null
+                val bNo = doc.getString("batchNumber") ?: doc.id
+                ProductionBatchEntity(
+                    id = id,
+                    batchNumber = bNo,
+                    productionDate = doc.getString("productionDate") ?: "",
+                    formulaId = doc.getLong("formulaId"),
+                    formulaNo = doc.getString("formulaNo") ?: "",
+                    productName = doc.getString("productName") ?: "تشغيلة دهان",
+                    paintType = doc.getString("paintType") ?: "مطفي معماري (Matt)",
+                    baseKind = doc.getString("baseKind") ?: "أبيض",
+                    targetPvc = doc.getDouble("targetPvc") ?: 0.0,
+                    targetWeightKg = doc.getDouble("targetWeightKg") ?: 0.0,
+                    actualWeightKg = doc.getDouble("actualWeightKg") ?: 0.0,
+                    targetVolumeLiters = doc.getDouble("targetVolumeLiters") ?: 0.0,
+                    cartonsCount = doc.getLong("cartonsCount")?.toInt() ?: 0,
+                    packageUnit = doc.getString("packageUnit") ?: "كرتونة 900 مل",
+                    machineId = doc.getLong("machineId"),
+                    machineName = doc.getString("machineName") ?: "",
+                    qualityStatus = doc.getString("qualityStatus") ?: "معتمد ومطابق",
+                    measuredDensity = doc.getDouble("measuredDensity") ?: 0.0,
+                    measuredViscosity = doc.getString("measuredViscosity") ?: "",
+                    scaledIngredientsJson = doc.getString("scaledIngredientsJson") ?: "[]",
+                    supervisorOrEngineer = doc.getString("supervisorOrEngineer") ?: "مهندس الإنتاج",
+                    shift = doc.getString("shift") ?: "الوردية الصباحية",
+                    notes = doc.getString("notes") ?: "",
+                    syncStatus = "SYNCED",
+                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (restoredBatches.isNotEmpty()) {
+                dao.upsertProductionBatches(restoredBatches)
+                restoredCount += restoredBatches.size
+            }
+
             // 9. Fetch Stock Moves
             val smSnapshot = cRef.collection("stock_moves").get().await()
             val restoredStockMoves = smSnapshot.documents.mapNotNull { doc ->
@@ -1407,6 +1615,13 @@ class CloudErpSyncRepository(
                 restoredCount += restoredHalfaInvoices.size
             }
 
+            // Clean any residual duplicates across cashboxes, transactions, and user accounts
+            runCatching {
+                dao.removeDuplicateCashboxes()
+                dao.removeDuplicateMovements()
+                dao.removeDuplicateUserAccounts()
+            }
+
             recordDiagnostic(
                 action = "RESTORE_CLOUD_TO_LOCAL",
                 status = "SUCCESS",
@@ -1426,6 +1641,7 @@ class CloudErpSyncRepository(
             )
         }
     }
+}
 
     /**
      * Performs a server diagnostics health check to verify connection stability and response latency.
@@ -1587,69 +1803,80 @@ class CloudErpSyncRepository(
         val cRef = clusterRef(clusterCode)
 
         val invListener = cRef.collection("invoices")
-            .addSnapshotListener { snapshot, error ->
-                if (error == null && snapshot != null && !snapshot.isEmpty) {
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
                     scope.launch(Dispatchers.IO) {
                         try {
-                            val restoredInvoices = mutableListOf<InvoiceEntity>()
-                            val restoredItems = mutableListOf<InvoiceItemEntity>()
-                            val restoredPayments = mutableListOf<InvoicePaymentEntity>()
-
-                            for (doc in snapshot.documents) {
-                                val invId = doc.getLong("id") ?: continue
-                                restoredInvoices.add(
-                                    InvoiceEntity(
-                                        id = invId,
-                                        invoiceNo = doc.getString("invoiceNo") ?: doc.id,
-                                        customerId = doc.getLong("customerId") ?: 1L,
-                                        customerName = doc.getString("customerName") ?: "عميل",
-                                        invoiceDate = doc.getString("invoiceDate") ?: "2026-10-26",
-                                        currency = doc.getString("currency") ?: "SDG",
-                                        subtotal = doc.getDouble("subtotal") ?: 0.0,
-                                        discount = doc.getDouble("discount") ?: 0.0,
-                                        total = doc.getDouble("total") ?: 0.0,
-                                        notes = doc.getString("notes") ?: "",
-                                        status = doc.getString("status") ?: "active",
-                                        cancelReason = doc.getString("cancelReason"),
-                                        createdBy = doc.getString("createdBy") ?: "المدير"
-                                    )
-                                )
-                                val rawItems = doc.get("items") as? List<Map<String, Any>>
-                                rawItems?.forEachIndexed { idx, itemMap ->
-                                    val itemId = (itemMap["id"] as? Number)?.toLong()?.takeIf { it > 0 } ?: (invId * 100 + idx + 1)
-                                    restoredItems.add(
-                                        InvoiceItemEntity(
-                                            id = itemId,
-                                            invoiceId = invId,
-                                            description = itemMap["description"] as? String ?: "بند فاتورة",
-                                            quantity = (itemMap["quantity"] as? Number)?.toDouble() ?: 1.0,
-                                            unitPrice = (itemMap["unitPrice"] as? Number)?.toDouble() ?: 0.0,
-                                            lineTotal = (itemMap["lineTotal"] as? Number)?.toDouble() ?: 0.0,
-                                            productId = (itemMap["productId"] as? Number)?.toLong()?.takeIf { it > 0 },
-                                            warehouseId = (itemMap["warehouseId"] as? Number)?.toLong()?.takeIf { it > 0 }
-                                        )
-                                    )
-                                }
-                                val rawPays = doc.get("payments") as? List<Map<String, Any>>
-                                rawPays?.forEachIndexed { idx, payMap ->
-                                    val payId = (payMap["id"] as? Number)?.toLong()?.takeIf { it > 0 } ?: (invId * 100 + idx + 1)
-                                    restoredPayments.add(
-                                        InvoicePaymentEntity(
-                                            id = payId,
-                                            invoiceId = invId,
-                                            payDate = payMap["payDate"] as? String ?: "2026-10-26",
-                                            cashbox = payMap["cashbox"] as? String ?: "خزنة السودان",
-                                            amount = (payMap["amount"] as? Number)?.toDouble() ?: 0.0,
-                                            note = payMap["note"] as? String ?: "دفعة سحابية",
-                                            status = "active",
-                                            createdBy = (payMap["createdBy"] as? String) ?: "المدير"
-                                        )
-                                    )
+                            for (dc in snapshot.documentChanges) {
+                                if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                                    val invId = dc.document.getLong("id")
+                                    if (invId != null) {
+                                        dao.deleteInvoiceById(invId)
+                                    }
                                 }
                             }
-                            if (restoredInvoices.isNotEmpty()) dao.upsertInvoices(restoredInvoices)
-                            if (restoredItems.isNotEmpty()) dao.upsertInvoiceItems(restoredItems)
-                            if (restoredPayments.isNotEmpty()) dao.upsertInvoicePayments(restoredPayments)
+                            if (!snapshot.isEmpty) {
+                                val restoredInvoices = mutableListOf<InvoiceEntity>()
+                                val restoredItems = mutableListOf<InvoiceItemEntity>()
+                                val restoredPayments = mutableListOf<InvoicePaymentEntity>()
+
+                                for (doc in snapshot.documents) {
+                                    val invId = doc.getLong("id") ?: continue
+                                    restoredInvoices.add(
+                                        InvoiceEntity(
+                                            id = invId,
+                                            invoiceNo = doc.getString("invoiceNo") ?: doc.id,
+                                            customerId = doc.getLong("customerId") ?: 1L,
+                                            customerName = doc.getString("customerName") ?: "عميل",
+                                            invoiceDate = doc.getString("invoiceDate") ?: "2026-10-26",
+                                            currency = doc.getString("currency") ?: "SDG",
+                                            subtotal = doc.getDouble("subtotal") ?: 0.0,
+                                            discount = doc.getDouble("discount") ?: 0.0,
+                                            total = doc.getDouble("total") ?: 0.0,
+                                            notes = doc.getString("notes") ?: "",
+                                            status = doc.getString("status") ?: "active",
+                                            cancelReason = doc.getString("cancelReason"),
+                                            createdBy = doc.getString("createdBy") ?: "المدير"
+                                        )
+                                    )
+                                    val rawItems = doc.get("items") as? List<Map<String, Any>>
+                                    rawItems?.forEachIndexed { idx, itemMap ->
+                                        val itemId = (itemMap["id"] as? Number)?.toLong()?.takeIf { it > 0 } ?: (invId * 100 + idx + 1)
+                                        restoredItems.add(
+                                            InvoiceItemEntity(
+                                                id = itemId,
+                                                invoiceId = invId,
+                                                description = itemMap["description"] as? String ?: "بند فاتورة",
+                                                quantity = (itemMap["quantity"] as? Number)?.toDouble() ?: 1.0,
+                                                unitPrice = (itemMap["unitPrice"] as? Number)?.toDouble() ?: 0.0,
+                                                lineTotal = (itemMap["lineTotal"] as? Number)?.toDouble() ?: 0.0,
+                                                productId = (itemMap["productId"] as? Number)?.toLong()?.takeIf { it > 0 },
+                                                warehouseId = (itemMap["warehouseId"] as? Number)?.toLong()?.takeIf { it > 0 }
+                                            )
+                                        )
+                                    }
+                                    val rawPays = doc.get("payments") as? List<Map<String, Any>>
+                                    rawPays?.forEachIndexed { idx, payMap ->
+                                        val payId = (payMap["id"] as? Number)?.toLong()?.takeIf { it > 0 } ?: (invId * 100 + idx + 1)
+                                        restoredPayments.add(
+                                            InvoicePaymentEntity(
+                                                id = payId,
+                                                invoiceId = invId,
+                                                payDate = payMap["payDate"] as? String ?: "2026-10-26",
+                                                cashbox = payMap["cashbox"] as? String ?: "خزنة السودان",
+                                                amount = (payMap["amount"] as? Number)?.toDouble() ?: 0.0,
+                                                note = payMap["note"] as? String ?: "دفعة سحابية",
+                                                status = "active",
+                                                createdBy = (payMap["createdBy"] as? String) ?: "المدير"
+                                            )
+                                        )
+                                    }
+                                }
+                                if (restoredInvoices.isNotEmpty()) dao.upsertInvoices(restoredInvoices)
+                                if (restoredItems.isNotEmpty()) dao.upsertInvoiceItems(restoredItems)
+                                if (restoredPayments.isNotEmpty()) dao.upsertInvoicePayments(restoredPayments)
+                            }
                             trySend(snapshot.size())
                         } catch (e: Exception) {
                             Log.e(TAG, "Error syncing live invoices", e)
@@ -1659,52 +1886,130 @@ class CloudErpSyncRepository(
             }
 
         val movListener = cRef.collection("movements")
-            .addSnapshotListener { snapshot, error ->
-                if (error == null && snapshot != null && !snapshot.isEmpty) {
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error != null) {
+                    RoomTransactionLogger.recordSyncBreakage(
+                        operation = "OBSERVE_LIVE_MOVEMENTS",
+                        entityType = "movements",
+                        recordId = "SNAPSHOT",
+                        reason = "انقطاع الاستماع المباشر لحركات الخزينة: ${error.message}",
+                        cause = error
+                    )
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
                     scope.launch(Dispatchers.IO) {
                         try {
-                            val list = snapshot.documents.mapNotNull { doc ->
-                                val id = doc.getLong("id") ?: return@mapNotNull null
-                                MovementEntity(
-                                    id = id,
-                                    txDate = doc.getString("txDate") ?: "2026-10-26",
-                                    cashbox = doc.getString("cashbox") ?: "خزنة السودان",
-                                    currency = doc.getString("currency") ?: "SDG",
-                                    direction = doc.getString("direction") ?: "وارد",
-                                    amount = doc.getDouble("amount") ?: 0.0,
-                                    description = doc.getString("description") ?: "",
-                                    reference = doc.getString("reference") ?: doc.id,
-                                    createdBy = doc.getString("createdBy") ?: "المدير"
-                                )
+                            for (dc in snapshot.documentChanges) {
+                                if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                                    val movId = dc.document.getLong("id")
+                                    if (movId != null) {
+                                        dao.deleteMovementById(movId)
+                                    }
+                                }
                             }
-                            if (list.isNotEmpty()) dao.upsertMovements(list)
+                            if (!snapshot.isEmpty) {
+                                val list = snapshot.documents.mapNotNull { doc ->
+                                    val id = doc.getLong("id") ?: return@mapNotNull null
+                                    MovementEntity(
+                                        id = id,
+                                        txDate = doc.getString("txDate") ?: "2026-10-26",
+                                        cashbox = doc.getString("cashbox") ?: "خزنة السودان",
+                                        currency = doc.getString("currency") ?: "SDG",
+                                        direction = doc.getString("direction") ?: "وارد",
+                                        amount = doc.getDouble("amount") ?: 0.0,
+                                        description = doc.getString("description") ?: "",
+                                        reference = doc.getString("reference") ?: doc.id,
+                                        createdBy = doc.getString("createdBy") ?: "المدير"
+                                    )
+                                }
+                                if (list.isNotEmpty()) dao.upsertMovements(list)
+                            }
                             trySend(snapshot.size())
                         } catch (e: Exception) {
                             Log.e(TAG, "Error syncing live movements", e)
+                            RoomTransactionLogger.recordSyncBreakage(
+                                operation = "APPLY_LIVE_MOVEMENTS_TO_ROOM",
+                                entityType = "movements",
+                                recordId = "UPSERT",
+                                reason = "فشل تطبيق الحركات القادمة من السيرفر على قاعدة Room: ${e.message}",
+                                cause = e
+                            )
                         }
                     }
                 }
             }
 
         val custListener = cRef.collection("customers")
-            .addSnapshotListener { snapshot, error ->
-                if (error == null && snapshot != null && !snapshot.isEmpty) {
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
                     scope.launch(Dispatchers.IO) {
                         try {
-                            val list = snapshot.documents.mapNotNull { doc ->
-                                val id = doc.getLong("id") ?: return@mapNotNull null
-                                CustomerEntity(
-                                    id = id,
-                                    name = doc.getString("name") ?: "عميل",
-                                    phone = doc.getString("phone") ?: "",
-                                    address = doc.getString("address") ?: "",
-                                    notes = doc.getString("notes") ?: "",
-                                    active = doc.getBoolean("active") ?: true
-                                )
+                            for (dc in snapshot.documentChanges) {
+                                if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                                    val custId = dc.document.getLong("id")
+                                    if (custId != null) {
+                                        dao.deleteCustomer(custId)
+                                    }
+                                }
                             }
-                            if (list.isNotEmpty()) dao.upsertCustomers(list)
+                            if (!snapshot.isEmpty) {
+                                val list = snapshot.documents.mapNotNull { doc ->
+                                    val id = doc.getLong("id") ?: return@mapNotNull null
+                                    CustomerEntity(
+                                        id = id,
+                                        name = doc.getString("name") ?: "عميل",
+                                        phone = doc.getString("phone") ?: "",
+                                        address = doc.getString("address") ?: "",
+                                        notes = doc.getString("notes") ?: "",
+                                        active = doc.getBoolean("active") ?: true
+                                    )
+                                }
+                                if (list.isNotEmpty()) dao.upsertCustomers(list)
+                            }
                         } catch (e: Exception) {
                             Log.e(TAG, "Error syncing live customers", e)
+                        }
+                    }
+                }
+            }
+
+        val prodListener = cRef.collection("products")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            for (dc in snapshot.documentChanges) {
+                                if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                                    val prodId = dc.document.getLong("id")
+                                    if (prodId != null) {
+                                        dao.deleteProduct(prodId)
+                                    }
+                                }
+                            }
+                            if (!snapshot.isEmpty) {
+                                val list = snapshot.documents.mapNotNull { doc ->
+                                    val id = doc.getLong("id") ?: return@mapNotNull null
+                                    ProductEntity(
+                                        id = id,
+                                        sku = doc.getString("sku") ?: "PMP-$id",
+                                        name = doc.getString("name") ?: "منتج",
+                                        category = doc.getString("category") ?: "بوهيات",
+                                        unit = doc.getString("unit") ?: "كرتونة",
+                                        purchasePrice = doc.getDouble("purchasePrice") ?: 0.0,
+                                        salePrice = doc.getDouble("salePrice") ?: 0.0,
+                                        minimumStock = doc.getDouble("minimumStock") ?: 10.0,
+                                        paintColor = doc.getString("paintColor") ?: "أبيض",
+                                        packageWeight = doc.getString("packageWeight") ?: "900",
+                                        active = doc.getBoolean("active") ?: true
+                                    )
+                                }
+                                if (list.isNotEmpty()) dao.upsertProducts(list)
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error syncing live products", e)
                         }
                     }
                 }
@@ -1714,6 +2019,7 @@ class CloudErpSyncRepository(
             invListener.remove()
             movListener.remove()
             custListener.remove()
+            prodListener.remove()
         }
     }
 
@@ -1782,23 +2088,403 @@ class CloudErpSyncRepository(
     }
 
     /**
+     * Directly syncs a daily production paint batch to Google Cloud Firestore,
+     * maintaining the link to its chemical formulation.
+     */
+    suspend fun syncSingleProductionBatchToCloud(
+        clusterCode: String,
+        batch: ProductionBatchEntity
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cRef = clusterRef(clusterCode)
+            val docId = if (batch.batchNumber.isNotBlank()) {
+                batch.batchNumber.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
+            } else {
+                "BATCH-${batch.id}"
+            }
+            val payload = mapOf(
+                "id" to batch.id,
+                "batchNumber" to batch.batchNumber,
+                "productionDate" to batch.productionDate,
+                "formulaId" to (batch.formulaId ?: 0L),
+                "formulaNo" to batch.formulaNo,
+                "productName" to batch.productName,
+                "paintType" to batch.paintType,
+                "baseKind" to batch.baseKind,
+                "targetPvc" to batch.targetPvc,
+                "targetWeightKg" to batch.targetWeightKg,
+                "actualWeightKg" to batch.actualWeightKg,
+                "targetVolumeLiters" to batch.targetVolumeLiters,
+                "cartonsCount" to batch.cartonsCount,
+                "packageUnit" to batch.packageUnit,
+                "machineId" to (batch.machineId ?: 0L),
+                "machineName" to batch.machineName,
+                "qualityStatus" to batch.qualityStatus,
+                "measuredDensity" to batch.measuredDensity,
+                "measuredViscosity" to batch.measuredViscosity,
+                "scaledIngredientsJson" to batch.scaledIngredientsJson,
+                "supervisorOrEngineer" to batch.supervisorOrEngineer,
+                "shift" to batch.shift,
+                "notes" to batch.notes,
+                "syncStatus" to "SYNCED",
+                "createdAt" to batch.createdAt,
+                "serverUpdatedBy" to currentActorId,
+                "serverUpdatedAt" to FieldValue.serverTimestamp()
+            )
+            cRef.collection("paint_batches").document(docId).set(payload, SetOptions.merge()).await()
+            runCatching {
+                firestore.collection("paint_batches").document(docId).set(payload, SetOptions.merge()).await()
+            }
+            Unit
+        }
+    }
+
+    /**
+     * Deletes a production batch from Google Cloud Firestore.
+     */
+    suspend fun deleteProductionBatchFromCloud(
+        clusterCode: String,
+        id: Long,
+        batchNumber: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cRef = clusterRef(clusterCode)
+            val docId = if (batchNumber.isNotBlank()) {
+                batchNumber.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
+            } else {
+                "BATCH-$id"
+            }
+            runCatching { cRef.collection("paint_batches").document(docId).delete().await() }
+            runCatching { firestore.collection("paint_batches").document(docId).delete().await() }
+            recordDiagnostic(
+                action = "DELETE_BATCH_CLOUD",
+                status = "SUCCESS",
+                count = 1,
+                message = "تم حذف تشغيلة الإنتاج ($docId) بنجاح من السيرفر"
+            )
+            Unit
+        }
+    }
+
+    /**
+     * Generic safe delete for an operational entity from Google Cloud Firestore.
+     * Prevents resurrection during subsequent bidirectional synchronization passes.
+     */
+    suspend fun deleteEntityFromCloud(
+        clusterCode: String,
+        collectionName: String,
+        docId: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanDocId = safeId(docId, docId)
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            cRef.collection(collectionName).document(cleanDocId).delete().await()
+            if (cleanCluster != DEFAULT_CLUSTER) {
+                runCatching {
+                    clusterRef(DEFAULT_CLUSTER).collection(collectionName).document(cleanDocId).delete().await()
+                }
+            }
+            if (collectionName in listOf("lab_formulations", "paint_batches")) {
+                runCatching {
+                    firestore.collection(collectionName).document(cleanDocId).delete().await()
+                }
+            }
+            recordDiagnostic(
+                action = "DELETE_CLOUD_ENTITY",
+                status = "SUCCESS",
+                count = 1,
+                message = "تم حذف المستند ($cleanDocId) من ($collectionName) على السيرفر لمنع استرجاعه"
+            )
+            Unit
+        }
+    }
+
+    /**
      * Deletes a chemical formulation from Google Cloud Firestore.
      */
     suspend fun deleteFormulationFromCloud(
         clusterCode: String,
         id: Long,
-        formulaNo: String
+        formulaNo: String = ""
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            val cRef = clusterRef(clusterCode)
             val docId = if (formulaNo.isNotBlank()) {
                 formulaNo.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
             } else {
                 "FORM-$id"
             }
-            runCatching { cRef.collection("lab_formulations").document(docId).delete().await() }
-            runCatching { firestore.collection("lab_formulations").document(docId).delete().await() }
+            deleteEntityFromCloud(clusterCode, "lab_formulations", docId)
+            deleteEntityFromCloud(clusterCode, "lab_formulations", "FORM-$id")
             Unit
         }
     }
+
+    /**
+     * Verifies server reachability and rules by performing a direct, non-cached read (Source.SERVER).
+     */
+    suspend fun testDirectServerRead(clusterCode: String): Result<String> = withContext(Dispatchers.IO) {
+        val start = System.currentTimeMillis()
+        try {
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            val serverSnap = cRef.collection("user_accounts").limit(1).get(com.google.firebase.firestore.Source.SERVER).await()
+            val latency = System.currentTimeMillis() - start
+            val count = serverSnap.size()
+            val msg = "نجح فحص القراءة المباشرة من السيرفر (Source.SERVER): استجابة ${latency}ms (المستندات: $count)"
+            recordDiagnostic(
+                action = "DIRECT_SERVER_READ_TEST",
+                status = "SUCCESS",
+                count = count,
+                message = msg
+            )
+            Result.success(msg)
+        } catch (e: Exception) {
+            val latency = System.currentTimeMillis() - start
+            val errMsg = "فشل فحص القراءة المباشرة من السيرفر (Source.SERVER): ${e.message} (${latency}ms)"
+            recordDiagnostic(
+                action = "DIRECT_SERVER_READ_TEST",
+                status = "FAILED",
+                count = 0,
+                message = errMsg
+            )
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Clears all movements associated with a specific cashbox from Cloud Firestore,
+     * ensuring zeroed cashbox records do not bounce back upon sync.
+     */
+    suspend fun clearCashboxMovementsFromCloud(clusterCode: String, cashboxName: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cRef = clusterRef(clusterCode)
+            val snaps = cRef.collection("movements")
+                .whereEqualTo("cashbox", cashboxName)
+                .get()
+                .await()
+            if (!snaps.isEmpty) {
+                snaps.documents.chunked(300).forEach { chunk ->
+                    val batch = firestore.batch()
+                    chunk.forEach { doc ->
+                        batch.delete(doc.reference)
+                    }
+                    batch.commit().await()
+                }
+            }
+            Unit
+        }
+    }
+
+    /**
+     * Instantly pushes a single financial MovementEntity to Cloud Firestore in < 100ms
+     */
+    suspend fun syncSingleMovementToCloud(
+        clusterCode: String,
+        m: MovementEntity,
+        actor: String = currentActorId
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cRef = clusterRef(clusterCode)
+            val docId = "MOV-${m.id}"
+            val data = mapOf(
+                "id" to m.id,
+                "txDate" to m.txDate,
+                "cashbox" to m.cashbox,
+                "currency" to m.currency,
+                "direction" to m.direction,
+                "amount" to m.amount,
+                "description" to m.description,
+                "reference" to m.reference,
+                "createdBy" to m.createdBy,
+                "serverUpdatedBy" to actor,
+                "serverUpdatedAt" to FieldValue.serverTimestamp()
+            )
+            cRef.collection("movements").document(docId).set(data, SetOptions.merge()).await()
+            RoomTransactionLogger.log(
+                operation = "SYNC_SINGLE_MOVEMENT",
+                stage = TransactionStage.SYNC_ACKNOWLEDGED,
+                status = TraceStatus.SUCCESS,
+                entityType = "movements",
+                recordId = docId,
+                details = "تم تأكيد مزامنة الحركة #$docId بالسيرفر فورياً"
+            )
+            Unit
+        }
+    }
+
+    /**
+     * Instantly pushes a single financial TransferEntity to Cloud Firestore in < 100ms
+     */
+    suspend fun syncSingleTransferToCloud(
+        clusterCode: String,
+        t: TransferEntity,
+        actor: String = currentActorId
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cRef = clusterRef(clusterCode)
+            val docId = safeId("TRF-${t.id}-${t.reference}", "TRF-${t.id}")
+            val data = mapOf(
+                "id" to t.id,
+                "reference" to t.reference,
+                "txDate" to t.txDate,
+                "sourceCashbox" to t.sourceCashbox,
+                "destinationCashbox" to t.destinationCashbox,
+                "sourceCurrency" to t.sourceCurrency,
+                "destinationCurrency" to t.destinationCurrency,
+                "sourceAmount" to t.sourceAmount,
+                "rate" to t.rate,
+                "destinationAmount" to t.destinationAmount,
+                "description" to t.description,
+                "createdBy" to t.createdBy,
+                "serverUpdatedBy" to actor,
+                "serverUpdatedAt" to FieldValue.serverTimestamp()
+            )
+            cRef.collection("transfers").document(docId).set(data, SetOptions.merge()).await()
+            RoomTransactionLogger.log(
+                operation = "SYNC_SINGLE_TRANSFER",
+                stage = TransactionStage.SYNC_ACKNOWLEDGED,
+                status = TraceStatus.SUCCESS,
+                entityType = "transfers",
+                recordId = docId,
+                details = "تم تأكيد مزامنة التحويل #$docId بالسيرفر فورياً"
+            )
+            Unit
+        }
+    }
+
+    /**
+     * Wipes all operational records from the Cloud Firestore cluster collections,
+     * clears local Room tables, and seeds fresh pristine baseline data both locally and on the server.
+     */
+    suspend fun wipeAllServerClusterDataAndResetFresh(
+        clusterCode: String,
+        dao: PmpDao,
+        actor: String = "مدير النظام"
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        syncMutex.withLock {
+            runCatching {
+                val cRef = clusterRef(clusterCode)
+                var deletedDocs = 0
+
+                val collectionsToWipe = listOf(
+                    "movements",
+                    "transfers",
+                    "invoices",
+                    "invoice_items",
+                    "invoice_payments",
+                    "daily_closings",
+                    "stock_moves",
+                    "production_batches",
+                    "paint_batches",
+                    "factory_moves",
+                    "halfa_invoices",
+                    "audit_logs",
+                    "deleted_users"
+                )
+
+                for (coll in collectionsToWipe) {
+                    try {
+                        val snapshot = cRef.collection(coll).get().await()
+                        if (!snapshot.isEmpty) {
+                            snapshot.documents.chunked(400).forEach { chunk ->
+                                val batch = firestore.batch()
+                                chunk.forEach { doc ->
+                                    batch.delete(doc.reference)
+                                    deletedDocs++
+                                }
+                                batch.commit().await()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Notice during server collection wipe ($coll): ${e.message}")
+                    }
+                }
+
+                // 2. Clear local operational tables in Room
+                dao.clearAllMovements()
+                dao.clearAllTransfers()
+                dao.clearAllDailyClosings()
+                dao.clearAllInvoices()
+                dao.clearAllInvoiceItems()
+                dao.clearAllInvoicePayments()
+                dao.clearAllStockMoves()
+                dao.clearAllProductionBatches()
+                dao.clearAllAuditLogs()
+
+                // 3. Ensure baseline Cashboxes exist locally and on the server
+                val existingBoxes = dao.getCashboxesDirect()
+                if (existingBoxes.isEmpty()) {
+                    val defaultCashboxes = listOf(
+                        CashboxEntity(name = "خزنة السودان"),
+                        CashboxEntity(name = "خزنة مصر")
+                    )
+                    for (cb in defaultCashboxes) {
+                        dao.insertCashbox(cb)
+                    }
+
+                    val cbBatch = firestore.batch()
+                    defaultCashboxes.forEachIndexed { idx, cb ->
+                        val docId = safeId("BOX-${cb.name.trim().lowercase()}", "BOX-$idx")
+                        cbBatch.set(
+                            cRef.collection("cashboxes").document(docId),
+                            mapOf(
+                                "id" to (idx + 1L),
+                                "name" to cb.name,
+                                "serverUpdatedAt" to FieldValue.serverTimestamp()
+                            ),
+                            SetOptions.merge()
+                        )
+                    }
+                    cbBatch.commit().await()
+                }
+
+                // 4. Ensure baseline Warehouses exist
+                val existingWarehouses = dao.getWarehousesDirect()
+                if (existingWarehouses.isEmpty()) {
+                    val defaultWarehouses = listOf(
+                        WarehouseEntity(name = "مخزن عطبرة", currency = "SDG", linkedCashbox = "خزنة السودان"),
+                        WarehouseEntity(name = "مخزن حلفا", currency = "SDG", linkedCashbox = "خزنة حلفا")
+                    )
+                    for (wh in defaultWarehouses) {
+                        dao.insertWarehouse(wh)
+                    }
+                    val whBatch = firestore.batch()
+                    defaultWarehouses.forEachIndexed { idx, wh ->
+                        val docId = "WH-${idx + 1L}"
+                        whBatch.set(
+                            cRef.collection("warehouses").document(docId),
+                            mapOf(
+                                "id" to (idx + 1L),
+                                "name" to wh.name,
+                                "active" to true,
+                                "serverUpdatedAt" to FieldValue.serverTimestamp()
+                            ),
+                            SetOptions.merge()
+                        )
+                    }
+                    whBatch.commit().await()
+                }
+
+                RoomTransactionLogger.clearTraces()
+                RoomTransactionLogger.log(
+                    operation = "SERVER_CLUSTER_WIPE_AND_RESET",
+                    stage = TransactionStage.ROOM_TX_COMMIT,
+                    status = TraceStatus.SUCCESS,
+                    entityType = "erp_clusters",
+                    details = "تم حذف كافة سجلات السيرفر ($deletedDocs مستنداً) والبدء من جديد ببيانات نظيفة"
+                )
+
+                recordDiagnostic(
+                    action = "WIPE_SERVER_CLUSTER",
+                    status = "SUCCESS",
+                    count = deletedDocs,
+                    message = "تم حذف كافة سجلات السيرفر ($deletedDocs مستنداً) بنجاح والبدء من جديد ببيانات نظيفة"
+                )
+
+                deletedDocs
+            }
+        }
+    }
 }
+

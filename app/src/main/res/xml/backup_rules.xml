@@ -6,8 +6,8 @@
    See https://developer.android.com/about/versions/12/backup-restore
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <include domain="sharedpref" path="."/>
+    <!-- Exclude device session and biometric preferences so transferring app to another device requires login -->
+    <exclude domain="sharedpref" path="pmp_device_session_prefs.xml"/>
+    <exclude domain="sharedpref" path="pmp_biometric_prefs.xml"/>
 </full-backup-content>

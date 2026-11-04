@@ -16,6 +16,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.testTag
 import com.example.data.local.FactoryItemEntity
+import com.example.data.local.FormulationEntity
+import com.example.data.local.ProductionBatchEntity
+import com.example.util.PvcEngine
 import com.example.hasModulePermission
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,6 +29,9 @@ import com.example.isSystemManager
 import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.PmpViewModel
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.text.style.TextAlign
+import java.text.DecimalFormat
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -55,6 +61,15 @@ fun FactoryScreen(
     val halfaInvoices by viewModel.halfaInvoices.collectAsState()
     val products by viewModel.products.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val productionBatches by viewModel.productionBatches.collectAsState()
+    val formulations by viewModel.formulations.collectAsState()
+
+    var showBatchModal by remember { mutableStateOf(false) }
+    var selectedFormulaForBatch by remember { mutableStateOf<FormulationEntity?>(null) }
+    var batchSearchQuery by remember { mutableStateOf("") }
+    var batchQualityFilter by remember { mutableStateOf("الكل") }
+    var expandedBatchId by remember { mutableStateOf<Long?>(null) }
+    var batchToDelete by remember { mutableStateOf<ProductionBatchEntity?>(null) }
 
     val isManager = currentUser.isSystemManager()
     val hasFactoryFull = isManager || currentUser.hasModulePermission("المصنع")
@@ -65,17 +80,18 @@ fun FactoryScreen(
     val tabs = remember(hasFactoryFull, hasRawMaterials, hasPackaging) {
         val list = mutableListOf<String>()
         if (hasRawMaterials) {
-            list.add("المواد الخام")
-            list.add("مخزن المواد الخام")
+            list.add("المشتريات")
+            list.add("المخزن")
         }
         if (hasPackaging) {
+            list.add("تشغيلات الإنتاج")
             list.add("أوامر الإنتاج")
         }
         if (hasFactoryFull) {
             list.add("خروج المنتج للعملاء")
             list.add("سجل دورة المصنع")
         }
-        list.ifEmpty { listOf("المواد الخام") }
+        list.ifEmpty { listOf("المشتريات") }
     }
 
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -176,11 +192,11 @@ fun FactoryScreen(
             }
         }
 
-        val activeTabTitle = tabs.getOrElse(selectedTab.coerceIn(0, (tabs.size - 1).coerceAtLeast(0))) { tabs.firstOrNull() ?: "المواد الخام" }
+        val activeTabTitle = tabs.getOrElse(selectedTab.coerceIn(0, (tabs.size - 1).coerceAtLeast(0))) { tabs.firstOrNull() ?: "المشتريات" }
 
         when (activeTabTitle) {
-            "المواد الخام" -> {
-                // Tab 0: Raw Materials Procurement (المواد الخام)
+            "المشتريات", "المواد الخام" -> {
+                // Tab 0: Raw Materials Procurement (المشتريات)
                 item {
                     val rawItemNames = factoryItems.map { it.name }.ifEmpty { listOf("صبغات تيتانيوم أبيض", "راتنجات ألكيد", "مذيبات ومخففات", "كربونات كالسيوم") }
                     val currentSelectedRaw = if (rawItemName.isNotBlank()) rawItemName else rawItemNames.first()
@@ -370,8 +386,8 @@ fun FactoryScreen(
                 }
             }
 
-            "مخزن المواد الخام" -> {
-                // Tab 1: Raw Materials Warehouse (مخزن المواد الخام)
+            "المخزن", "مخزن المواد الخام" -> {
+                // Tab 1: Raw Materials Warehouse (المخزن)
                 val rawItemNames = factoryItems.map { it.name }.ifEmpty { listOf("صبغات تيتانيوم أبيض", "راتنجات ألكيد", "مذيبات ومخففات") }
                 val currentRcvItem = if (rcvItemName.isNotBlank()) rcvItemName else rawItemNames.first()
                 val currentIssueItem = if (issueItemName.isNotBlank()) issueItemName else rawItemNames.first()
@@ -571,6 +587,569 @@ fun FactoryScreen(
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             )
+                        }
+                    }
+                }
+            }
+
+            "تشغيلات الإنتاج", "تشغيلات الإنتاج (Batches)" -> {
+                // Tab: Daily Production Batches linked to Chemical Formulations & Firestore
+                item {
+                    val totalWeight = productionBatches.sumOf { if (it.actualWeightKg > 0) it.actualWeightKg else it.targetWeightKg }
+                    val totalCartons = productionBatches.sumOf { it.cartonsCount }
+                    val passedCount = productionBatches.count { it.qualityStatus == "معتمد ومطابق" }
+
+                    GlassCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        backgroundColor = Color.White,
+                        borderColor = Color(0xFFCBD5E1),
+                        cornerRadius = 20.dp
+                    ) {
+                        Column(modifier = Modifier.padding(18.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "سجل تشغيلات الإنتاج اليومية (Firestore Sync)",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = Color(0xFF1E40AF),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 16.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "توثيق الطبخات المصنعية وربطها بالتركيبات المعملية الكيميائية وفحوصات الجودة",
+                                        color = Color(0xFF64748B),
+                                        fontSize = 12.sp
+                                    )
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFFEFF6FF),
+                                    border = BorderStroke(1.dp, Color(0xFF3B82F6).copy(alpha = 0.5f))
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(Icons.Default.CloudDone, contentDescription = null, tint = Color(0xFF1D4ED8), modifier = Modifier.size(14.dp))
+                                        Text(
+                                            text = "Firestore السحابي",
+                                            color = Color(0xFF1D4ED8),
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            // Key Statistics - 2x2 Grid with ample spacing to prevent text clipping
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Surface(
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFF1F5F9)
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text("إجمالي التشغيلات", fontSize = 11.sp, color = Color(0xFF64748B))
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Text("${productionBatches.size}", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = Color(0xFF1E293B))
+                                        }
+                                    }
+
+                                    Surface(
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFF1F5F9)
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text("الوزن الإجمالي", fontSize = 11.sp, color = Color(0xFF64748B))
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Text("${format.format(totalWeight)} كجم", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color(0xFF1E40AF))
+                                        }
+                                    }
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Surface(
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFF1F5F9)
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text("العبوات المعبأة", fontSize = 11.sp, color = Color(0xFF64748B))
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Text("${format.format(totalCartons)}", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color(0xFF059669))
+                                        }
+                                    }
+
+                                    Surface(
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFF1F5F9)
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text("فحص الجودة مطابق QC", fontSize = 11.sp, color = Color(0xFF64748B))
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Text("$passedCount", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = Color(0xFF16A34A))
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            // New Batch Action Button
+                            Button(
+                                onClick = {
+                                    selectedFormulaForBatch = formulations.firstOrNull()
+                                    showBatchModal = true
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("open_create_batch_modal_btn"),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E40AF)),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Default.AddCircle, contentDescription = null, modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "تسجيل تشغيلة إنتاج جديدة وربطها بالتركيبة المعملية",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Filter & Search Row
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = batchSearchQuery,
+                            onValueChange = { batchSearchQuery = it },
+                            placeholder = { Text("بحث برقم التشغيلة، اسم الصنف، أو كود التركيبة...", fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFF64748B)) },
+                            trailingIcon = {
+                                if (batchSearchQuery.isNotBlank()) {
+                                    IconButton(onClick = { batchSearchQuery = "" }) {
+                                        Icon(Icons.Default.Clear, contentDescription = "مسح", tint = Color(0xFF64748B))
+                                    }
+                                }
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf("الكل", "معتمد ومطابق", "تحت الفحص المخبري", "مرفوض/معالجة").forEach { status ->
+                                val isSelected = batchQualityFilter == status
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { batchQualityFilter = status },
+                                    label = { Text(status, fontSize = 11.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal) }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Filtered Batches List
+                val filteredBatches = productionBatches.filter { b ->
+                    val matchesQuery = batchSearchQuery.isBlank() ||
+                        b.batchNumber.contains(batchSearchQuery, ignoreCase = true) ||
+                        b.productName.contains(batchSearchQuery, ignoreCase = true) ||
+                        b.formulaNo.contains(batchSearchQuery, ignoreCase = true) ||
+                        b.machineName.contains(batchSearchQuery, ignoreCase = true)
+
+                    val matchesFilter = batchQualityFilter == "الكل" || b.qualityStatus == batchQualityFilter
+                    matchesQuery && matchesFilter
+                }
+
+                if (filteredBatches.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color.White)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(32.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PrecisionManufacturing,
+                                    contentDescription = null,
+                                    tint = Color(0xFF94A3B8),
+                                    modifier = Modifier.size(48.dp)
+                                )
+                                Text(
+                                    text = if (batchSearchQuery.isNotBlank() || batchQualityFilter != "الكل") {
+                                        "لا توجد تشغيلات مطابقة لمعايير البحث الحالية."
+                                    } else {
+                                        "لم يتم تسجيل أي تشغيلات إنتاجية حتى الآن."
+                                    },
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF64748B),
+                                    textAlign = TextAlign.Center
+                                )
+                                Button(
+                                    onClick = {
+                                        selectedFormulaForBatch = formulations.firstOrNull()
+                                        showBatchModal = true
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E40AF))
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("تسجيل أول تشغيلة إنتاج", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    items(filteredBatches, key = { it.id }) { batch ->
+                        val isExpanded = expandedBatchId == batch.id
+                        val statusColor = when (batch.qualityStatus) {
+                            "معتمد ومطابق" -> Color(0xFF059669)
+                            "تحت الفحص المخبري" -> Color(0xFFD97706)
+                            else -> Color(0xFFDC2626)
+                        }
+                        val statusBg = when (batch.qualityStatus) {
+                            "معتمد ومطابق" -> Color(0xFFECFDF5)
+                            "تحت الفحص المخبري" -> Color(0xFFFEF3C7)
+                            else -> Color(0xFFFEF2F2)
+                        }
+
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("batch_card_${batch.id}"),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color.White),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                // Top row: Batch Number & Status & Date
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = Color(0xFF1E40AF)
+                                        ) {
+                                            Text(
+                                                text = batch.batchNumber,
+                                                color = Color.White,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
+
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = statusBg,
+                                            border = BorderStroke(1.dp, statusColor.copy(alpha = 0.5f))
+                                        ) {
+                                            Text(
+                                                text = batch.qualityStatus,
+                                                color = statusColor,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(Icons.Default.CalendarToday, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(13.dp))
+                                        Text(batch.productionDate, fontSize = 11.sp, color = Color(0xFF64748B))
+                                    }
+                                }
+
+                                // Product & Formula Link
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(
+                                        text = batch.productName,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp,
+                                        color = Color(0xFF0F172A)
+                                    )
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = Color(0xFFF1F5F9)
+                                        ) {
+                                            Text(
+                                                text = "التركيبة: ${batch.formulaNo}",
+                                                fontSize = 10.5.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color(0xFF2563EB),
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+
+                                        if (batch.targetPvc > 0) {
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = Color(0xFFEFF6FF)
+                                            ) {
+                                                Text(
+                                                    text = "PVC: ${batch.targetPvc}%",
+                                                    fontSize = 10.5.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = Color(0xFF1D4ED8),
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
+
+                                        Text(
+                                            text = "نوع الدهان: ${batch.paintType}",
+                                            fontSize = 10.5.sp,
+                                            color = Color(0xFF64748B)
+                                        )
+                                    }
+                                }
+
+                                HorizontalDivider(color = Color(0xFFF1F5F9))
+
+                                // Batch Operational Numbers - 2x2 Grid preventing overlapping text
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Color(0xFFF8FAFC), RoundedCornerShape(10.dp))
+                                        .border(0.8.dp, Color(0xFFE2E8F0), RoundedCornerShape(10.dp))
+                                        .padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("الوزن الإجمالي", fontSize = 10.5.sp, color = Color(0xFF64748B))
+                                            val w = if (batch.actualWeightKg > 0) batch.actualWeightKg else batch.targetWeightKg
+                                            Text("${format.format(w)} كجم", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                                        }
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("التعبئة والتغليف", fontSize = 10.5.sp, color = Color(0xFF64748B))
+                                            Text("${batch.cartonsCount} ${batch.packageUnit}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                                        }
+                                    }
+
+                                    HorizontalDivider(color = Color(0xFFE2E8F0), thickness = 0.6.dp)
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("الحجم التقريبي", fontSize = 10.5.sp, color = Color(0xFF64748B))
+                                            Text("${format.format(batch.targetVolumeLiters)} لتر", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                                        }
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("الماكينة / الخلاط", fontSize = 10.5.sp, color = Color(0xFF64748B))
+                                            Text(batch.machineName.ifBlank { "الديزولفر الرئيسي" }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF1E40AF), maxLines = 1)
+                                        }
+                                    }
+                                }
+
+                                // Lab QC measurements row
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        if (batch.measuredDensity > 0) {
+                                            Text(
+                                                text = "الكثافة: ${batch.measuredDensity} g/cm³",
+                                                fontSize = 11.sp,
+                                                color = Color(0xFF334155),
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                        if (batch.measuredViscosity.isNotBlank()) {
+                                            Text(
+                                                text = "اللزوجة: ${batch.measuredViscosity}",
+                                                fontSize = 11.sp,
+                                                color = Color(0xFF334155),
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(Icons.Default.CloudDone, contentDescription = null, tint = Color(0xFF2563EB), modifier = Modifier.size(14.dp))
+                                        Text("Firestore", fontSize = 10.sp, color = Color(0xFF2563EB), fontWeight = FontWeight.Bold)
+                                    }
+                                }
+
+                                // Expandable Ingredients Breakdown
+                                val scaledIngs = remember(batch.scaledIngredientsJson) {
+                                    PvcEngine.jsonToIngredients(batch.scaledIngredientsJson)
+                                }
+
+                                if (scaledIngs.isNotEmpty()) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { expandedBatchId = if (isExpanded) null else batch.id }
+                                            .padding(vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                                contentDescription = null,
+                                                tint = Color(0xFF1E40AF),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Text(
+                                                text = if (isExpanded) "إخفاء بيان المواد الخام المستهلكة" else "عرض بيان استهلاك المواد الخام (${scaledIngs.size} مادة)",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color(0xFF1E40AF)
+                                            )
+                                        }
+
+                                        IconButton(
+                                            onClick = { batchToDelete = batch },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.DeleteOutline,
+                                                contentDescription = "حذف التشغيلة",
+                                                tint = Color(0xFFEF4444),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+
+                                    if (isExpanded) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(Color(0xFFF1F5F9), RoundedCornerShape(8.dp))
+                                                .padding(10.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(
+                                                text = "المشرف: ${batch.supervisorOrEngineer} | الوردية: ${batch.shift}",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF334155)
+                                            )
+
+                                            if (batch.notes.isNotBlank()) {
+                                                Text(
+                                                    text = "ملاحظات: ${batch.notes}",
+                                                    fontSize = 11.sp,
+                                                    color = Color(0xFF64748B)
+                                                )
+                                            }
+
+                                            HorizontalDivider(color = Color(0xFFE2E8F0))
+
+                                            scaledIngs.forEachIndexed { i, ing ->
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text("${i + 1}. ${ing.name} (${ing.type})", fontSize = 11.sp, color = Color(0xFF1E293B))
+                                                    Text("${DecimalFormat("#,##0.00").format(ing.weight)} كجم", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1E40AF))
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End
+                                    ) {
+                                        IconButton(
+                                            onClick = { batchToDelete = batch },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.DeleteOutline,
+                                                contentDescription = "حذف التشغيلة",
+                                                tint = Color(0xFFEF4444),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1195,6 +1774,63 @@ fun FactoryScreen(
                 GlassButton(
                     text = "إلغاء",
                     onClick = { itemToDelete = null }
+                )
+            },
+            containerColor = PmpNavySurface
+        )
+    }
+
+    // Modal: Daily Production Batch (Firestore Sync)
+    if (showBatchModal) {
+        DailyProductionBatchModal(
+            availableFormulations = formulations,
+            factoryMachines = factoryMachines,
+            preSelectedFormula = selectedFormulaForBatch,
+            onDismiss = {
+                showBatchModal = false
+                selectedFormulaForBatch = null
+            },
+            onSaveBatch = { batch ->
+                viewModel.logProductionBatch(batch)
+                showBatchModal = false
+                selectedFormulaForBatch = null
+            }
+        )
+    }
+
+    // Modal: Confirm Delete Production Batch
+    batchToDelete?.let { batch ->
+        AlertDialog(
+            onDismissRequest = { batchToDelete = null },
+            title = {
+                Text(
+                    text = "تأكيد حذف تشغيلة الإنتاج",
+                    color = PmpRed,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp
+                )
+            },
+            text = {
+                Text(
+                    text = "هل أنت متأكد من حذف تشغيلة الإنتاج رقم (${batch.batchNumber}) للمنتج [${batch.productName}] من السجل وقاعدة بيانات Firestore السحابية نهائياً؟",
+                    fontSize = 13.sp,
+                    color = Color(0xFF0F172A)
+                )
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "تأكيد الحذف",
+                    gradient = PmpBrandRedGradient,
+                    onClick = {
+                        viewModel.deleteProductionBatch(batch)
+                        batchToDelete = null
+                    }
+                )
+            },
+            dismissButton = {
+                GlassButton(
+                    text = "إلغاء",
+                    onClick = { batchToDelete = null }
                 )
             },
             containerColor = PmpNavySurface

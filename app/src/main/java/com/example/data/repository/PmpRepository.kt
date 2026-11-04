@@ -1,15 +1,49 @@
 package com.example.data.repository
 
+import androidx.room.withTransaction
 import com.example.data.local.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class PmpRepository(private val dao: PmpDao) {
+class PmpRepository(
+    private val dao: PmpDao,
+    private val database: PmpDatabase? = null
+) {
 
     fun getDao(): PmpDao = dao
+
+    suspend fun <T> runInTransaction(
+        operationName: String = "ROOM_TRANSACTION",
+        entityType: String = "general",
+        details: String = "",
+        block: suspend () -> T
+    ): T {
+        return com.example.util.RoomTransactionLogger.traceTransaction(
+            operation = operationName,
+            entityType = entityType,
+            details = details,
+            dao = dao
+        ) {
+            val db = database
+            if (db != null) {
+                db.withTransaction { block() }
+            } else {
+                block()
+            }
+        }
+    }
+
+    companion object {
+        fun hashSecret(secret: String): String {
+            val salted = "PMP_SECURE_V2:$secret:PMP_HASH_SALT"
+            val digest = MessageDigest.getInstance("SHA-256").digest(salted.toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }
+        }
+    }
 
     private fun currentDateString(): String {
         return SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
@@ -43,6 +77,13 @@ class PmpRepository(private val dao: PmpDao) {
         return Result.success(Unit)
     }
 
+    suspend fun getMovementsDirect(): List<MovementEntity> = com.example.util.RoomTransactionLogger.traceFetch(
+        queryName = "FETCH_ALL_MOVEMENTS",
+        entityType = "movements"
+    ) {
+        dao.getMovementsDirect()
+    }
+
     suspend fun recordMovement(
         cashbox: String,
         currency: String,
@@ -52,9 +93,14 @@ class PmpRepository(private val dao: PmpDao) {
         reference: String,
         user: String,
         date: String = currentDateString()
-    ): Result<Long> {
-        if (amount <= 0) return Result.failure(Exception("المبلغ يجب أن يكون أكبر من صفر"))
-        if (reference.isBlank()) return Result.failure(Exception("رقم المستند مطلوب"))
+    ): Result<Long> = runInTransaction(
+        operationName = "RECORD_MOVEMENT",
+        entityType = "movements",
+        details = "$direction $amount $currency في $cashbox | مرجع: $reference"
+    ) {
+        if (amount <= 0) return@runInTransaction Result.failure(Exception("المبلغ يجب أن يكون أكبر من صفر"))
+        val safeRef = reference.trim().ifBlank { "REC-${System.currentTimeMillis() % 1000000}" }
+        val safeDesc = description.trim().ifBlank { "حركة $direction نقدية في $cashbox" }
 
         val id = dao.insertMovement(
             MovementEntity(
@@ -63,8 +109,8 @@ class PmpRepository(private val dao: PmpDao) {
                 currency = currency,
                 direction = direction,
                 amount = amount,
-                description = description.trim(),
-                reference = reference.trim(),
+                description = safeDesc,
+                reference = safeRef,
                 createdBy = user
             )
         )
@@ -72,10 +118,106 @@ class PmpRepository(private val dao: PmpDao) {
             AuditLogEntity(
                 username = user,
                 action = "CREATE_MOVEMENT",
-                detail = "حركة #$id | $direction $amount $currency في $cashbox | مرجع: $reference"
+                detail = "حركة #$id | $direction $amount $currency في $cashbox | مرجع: $safeRef"
             )
         )
-        return Result.success(id)
+        Result.success(id)
+    }
+
+    suspend fun deleteMovement(id: Long, user: String): Result<Unit> = runInTransaction(
+        operationName = "DELETE_MOVEMENT",
+        entityType = "movements",
+        details = "حذف الحركة المالية #$id"
+    ) {
+        dao.deleteMovementById(id)
+        dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_MOVEMENT", detail = "حذف الحركة المالية #$id"))
+        Result.success(Unit)
+    }
+
+    suspend fun recordCustomerPayment(
+        customerId: Long,
+        customerName: String,
+        amount: Double,
+        currency: String,
+        cashbox: String,
+        note: String,
+        user: String,
+        date: String = currentDateString()
+    ): Result<Long> = runInTransaction(
+        operationName = "RECORD_CUSTOMER_PAYMENT",
+        entityType = "invoice_payments",
+        details = "تحصيل $amount $currency من $customerName في $cashbox"
+    ) {
+        if (amount <= 0) return@runInTransaction Result.failure(Exception("المبلغ يجب أن يكون أكبر من صفر"))
+
+        val activeInvoices = dao.getInvoicesDirect()
+            .filter { it.customerId == customerId && it.status == "active" }
+            .sortedBy { it.id }
+
+        val allPayments = dao.getInvoicePaymentsDirect()
+
+        var remainingToApply = amount
+        var lastPaymentId = 0L
+
+        for (inv in activeInvoices) {
+            if (remainingToApply <= 0) break
+            val paidOnInv = allPayments.filter { it.invoiceId == inv.id && it.status == "active" }.sumOf { it.amount }
+            val invRemaining = (inv.total - paidOnInv).coerceAtLeast(0.0)
+            if (invRemaining > 0) {
+                val payForThisInv = remainingToApply.coerceAtMost(invRemaining)
+                val payId = dao.insertInvoicePayment(
+                    InvoicePaymentEntity(
+                        invoiceId = inv.id,
+                        payDate = date,
+                        cashbox = cashbox,
+                        amount = payForThisInv,
+                        note = if (note.isNotBlank()) "$note (فاتورة ${inv.invoiceNo})" else "سداد دفعة لفاتورة ${inv.invoiceNo}",
+                        createdBy = user
+                    )
+                )
+                lastPaymentId = payId
+                remainingToApply -= payForThisInv
+            }
+        }
+
+        if (remainingToApply > 0 && activeInvoices.isNotEmpty()) {
+            val primaryInv = activeInvoices.first()
+            val payId = dao.insertInvoicePayment(
+                InvoicePaymentEntity(
+                    invoiceId = primaryInv.id,
+                    payDate = date,
+                    cashbox = cashbox,
+                    amount = remainingToApply,
+                    note = if (note.isNotBlank()) "$note (دفعة بحساب العميل)" else "دفعة إضافية بحساب العميل",
+                    createdBy = user
+                )
+            )
+            lastPaymentId = payId
+        }
+
+        val ref = "PAY-CUST-$customerId-${System.currentTimeMillis() % 100000}"
+        val movId = dao.insertMovement(
+            MovementEntity(
+                txDate = date,
+                cashbox = cashbox,
+                currency = currency,
+                direction = "وارد",
+                amount = amount,
+                description = "تحصيل وسداد دفعة من العميل: $customerName ${if (note.isNotBlank()) "• $note" else ""}",
+                reference = ref,
+                createdBy = user
+            )
+        )
+
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = user,
+                action = "CUSTOMER_PAYMENT",
+                detail = "تحصيل دفعة $amount $currency من $customerName في $cashbox"
+            )
+        )
+
+        Result.success(movId)
     }
 
     suspend fun recordTransfer(
@@ -92,11 +234,15 @@ class PmpRepository(private val dao: PmpDao) {
         halfaAmount: Double? = null,
         isInvertedRate: Boolean = false,
         date: String = currentDateString()
-    ): Result<Long> {
-        if (sourceAmount <= 0) return Result.failure(Exception("مبلغ التحويل يجب أن يكون أكبر من صفر"))
-        if (rate <= 0) return Result.failure(Exception("سعر الصرف يجب أن يكون أكبر من صفر"))
+    ): Result<Long> = runInTransaction(
+        operationName = "RECORD_TRANSFER",
+        entityType = "transfers",
+        details = "تحويل $sourceAmount $sourceCurrency من $sourceCashbox إلى $destinationCashbox | مرجع: $reference"
+    ) {
+        if (sourceAmount <= 0) return@runInTransaction Result.failure(Exception("مبلغ التحويل يجب أن يكون أكبر من صفر"))
+        if (rate <= 0) return@runInTransaction Result.failure(Exception("سعر الصرف يجب أن يكون أكبر من صفر"))
         if (sourceCashbox == destinationCashbox && sourceCurrency == destinationCurrency) {
-            return Result.failure(Exception("لا يمكن التحويل لنفس الخزنة وبنفس العملة"))
+            return@runInTransaction Result.failure(Exception("لا يمكن التحويل لنفس الخزنة وبنفس العملة"))
         }
 
         val destinationAmount = if (isInvertedRate) {
@@ -161,7 +307,7 @@ class PmpRepository(private val dao: PmpDao) {
                 detail = "$reference: $sourceCashbox $sourceAmount $sourceCurrency -> $destinationCashbox $destinationAmount $destinationCurrency"
             )
         )
-        return Result.success(transferId)
+        Result.success(transferId)
     }
 
     suspend fun recordDailyClosing(
@@ -246,8 +392,8 @@ class PmpRepository(private val dao: PmpDao) {
         paymentCashbox: String? = null,
         paymentAmount: Double? = null,
         date: String = currentDateString()
-    ): Result<Long> {
-        if (items.isEmpty()) return Result.failure(Exception("يجب إضافة بند واحد على الأقل"))
+    ): Result<Long> = runInTransaction {
+        if (items.isEmpty()) return@runInTransaction Result.failure(Exception("يجب إضافة بند واحد على الأقل"))
 
         val subtotal = items.sumOf { it.lineTotal }
         val finalDiscount = discount.coerceIn(0.0, subtotal)
@@ -293,7 +439,7 @@ class PmpRepository(private val dao: PmpDao) {
         // Handle instant payment if specified
         if (!paymentCashbox.isNullOrBlank() && paymentAmount != null && paymentAmount > 0) {
             val actualPay = paymentAmount.coerceAtMost(total)
-            dao.insertInvoicePayment(
+            val payId = dao.insertInvoicePayment(
                 InvoicePaymentEntity(
                     invoiceId = invoiceId,
                     payDate = date,
@@ -311,7 +457,7 @@ class PmpRepository(private val dao: PmpDao) {
                     direction = "وارد",
                     amount = actualPay,
                     description = "دفعة فاتورة $invoiceNumber - $customerName",
-                    reference = "INV:$invoiceNumber:P1",
+                    reference = "INV:$invoiceNumber:P$payId",
                     createdBy = user
                 )
             )
@@ -325,7 +471,7 @@ class PmpRepository(private val dao: PmpDao) {
             )
         )
 
-        return Result.success(invoiceId)
+        Result.success(invoiceId)
     }
 
     suspend fun recordInvoicePayment(
@@ -338,8 +484,12 @@ class PmpRepository(private val dao: PmpDao) {
         note: String,
         user: String,
         date: String = currentDateString()
-    ): Result<Long> {
-        if (amount <= 0) return Result.failure(Exception("المبلغ غير صالح"))
+    ): Result<Long> = runInTransaction(
+        operationName = "RECORD_INVOICE_PAYMENT",
+        entityType = "invoice_payments",
+        details = "دفعة $amount $currency لفاتورة $invoiceNo ($customerName) في $cashbox"
+    ) {
+        if (amount <= 0) return@runInTransaction Result.failure(Exception("المبلغ غير صالح"))
 
         val payId = dao.insertInvoicePayment(
             InvoicePaymentEntity(
@@ -373,12 +523,12 @@ class PmpRepository(private val dao: PmpDao) {
             )
         )
 
-        return Result.success(payId)
+        Result.success(payId)
     }
 
-    suspend fun cancelInvoice(invoiceId: Long, reason: String, user: String): Result<Unit> {
-        val invoice = dao.getInvoiceById(invoiceId) ?: return Result.failure(Exception("الفاتورة غير موجودة"))
-        if (invoice.status == "cancelled") return Result.failure(Exception("الفاتورة ملغاة مسبقاً"))
+    suspend fun cancelInvoice(invoiceId: Long, reason: String, user: String): Result<Unit> = runInTransaction {
+        val invoice = dao.getInvoiceById(invoiceId) ?: return@runInTransaction Result.failure(Exception("الفاتورة غير موجودة"))
+        if (invoice.status == "cancelled") return@runInTransaction Result.failure(Exception("الفاتورة ملغاة مسبقاً"))
 
         dao.updateInvoice(
             invoice.copy(
@@ -394,7 +544,7 @@ class PmpRepository(private val dao: PmpDao) {
                 detail = "إلغاء الفاتورة ${invoice.invoiceNo}: $reason"
             )
         )
-        return Result.success(Unit)
+        Result.success(Unit)
     }
 
     // --- Warehouses & Products ---
@@ -616,9 +766,10 @@ class PmpRepository(private val dao: PmpDao) {
         unitPrice: Double,
         note: String,
         actor: String
-    ): Pair<Long, String> {
+    ): Pair<Long, String> = runInTransaction {
         val total = cartons * unitPrice
         val invoiceNo = "HLF-" + SimpleDateFormat("yyMMdd-HHmmss", Locale.getDefault()).format(Date())
+        val targetWarehouseId = dao.getWarehousesDirect().firstOrNull { it.name.contains("حلفا") }?.id ?: 2L
 
         val moveId = recordFactoryMove(
             kind = "DISPATCH_HALFA",
@@ -636,7 +787,7 @@ class PmpRepository(private val dao: PmpDao) {
                 invoiceDate = currentDateString(),
                 cashbox = "خزنة مصر",
                 currency = "EGP",
-                warehouseId = 2L, // مخزن حلفا
+                warehouseId = targetWarehouseId,
                 productId = productId,
                 productName = productName,
                 quantity = cartons,
@@ -651,7 +802,7 @@ class PmpRepository(private val dao: PmpDao) {
         // Insert stock move into Halfa warehouse
         dao.insertStockMove(
             StockMoveEntity(
-                warehouseId = 2L,
+                warehouseId = targetWarehouseId,
                 productId = productId,
                 quantity = cartons,
                 kind = "IN",
@@ -660,7 +811,7 @@ class PmpRepository(private val dao: PmpDao) {
             )
         )
 
-        return Pair(moveId, invoiceNo)
+        Pair(moveId, invoiceNo)
     }
 
     // --- Poster Prices ---
@@ -729,7 +880,7 @@ class PmpRepository(private val dao: PmpDao) {
                 fullName = cleanName,
                 username = cleanUsername,
                 phoneOrEmail = phoneOrEmail.trim(),
-                pinOrPassword = pinOrPassword.trim(),
+                pinOrPassword = hashSecret(pinOrPassword.trim()),
                 role = role,
                 branch = branch,
                 permissions = permissions.ifBlank { "الخزن,المبيعات,المخازن" },
@@ -758,8 +909,15 @@ class PmpRepository(private val dao: PmpDao) {
         if (!target.active) {
             return Result.failure(Exception("هذا الحساب موقوف حالياً، يرجى تفعيله أولاً"))
         }
-        if (pinInput != null && pinInput.trim() != target.pinOrPassword) {
-            return Result.failure(Exception("رمز الدخول (PIN) غير صحيح للحساب ${target.fullName}"))
+        if (pinInput != null) {
+            val cleanPin = pinInput.trim()
+            val matches = cleanPin == target.pinOrPassword || hashSecret(cleanPin) == target.pinOrPassword
+            if (!matches) {
+                return Result.failure(Exception("رمز الدخول (PIN) غير صحيح للحساب ${target.fullName}"))
+            }
+            if (cleanPin == target.pinOrPassword && cleanPin != hashSecret(cleanPin)) {
+                dao.updateUserAccount(target.copy(pinOrPassword = hashSecret(cleanPin)))
+            }
         }
 
         dao.setActiveSessionUser(targetUserId)
@@ -854,8 +1012,13 @@ class PmpRepository(private val dao: PmpDao) {
             if (!matchedUser.active) {
                 return Result.failure(Exception("هذا الحساب موقوف أو غير مفعل حالياً، يرجى مراجعة مدير النظام"))
             }
-            if (matchedUser.pinOrPassword != cleanSecret) {
+            val hashedInput = hashSecret(cleanSecret)
+            val isValidPassword = matchedUser.pinOrPassword == cleanSecret || matchedUser.pinOrPassword == hashedInput
+            if (!isValidPassword) {
                 return Result.failure(Exception("كلمة المرور أو رمز الدخول غير صحيح للحساب ${matchedUser.fullName}"))
+            }
+            if (matchedUser.pinOrPassword == cleanSecret && matchedUser.pinOrPassword != hashedInput) {
+                dao.updateUserAccount(matchedUser.copy(pinOrPassword = hashedInput))
             }
             dao.setActiveSessionUser(matchedUser.id)
             dao.insertAuditLog(
@@ -887,7 +1050,7 @@ class PmpRepository(private val dao: PmpDao) {
             return Result.failure(Exception("كلمة المرور الجديدة يجب أن تكون 4 خانات على الأقل"))
         }
 
-        val updatedPin = if (!newPassword.isNullOrBlank()) newPassword.trim() else user.pinOrPassword
+        val updatedPin = if (!newPassword.isNullOrBlank()) hashSecret(newPassword.trim()) else user.pinOrPassword
         val updatedUser = user.copy(
             fullName = fullName.trim(),
             phoneOrEmail = phoneOrEmail.trim(),
@@ -1086,7 +1249,7 @@ class PmpRepository(private val dao: PmpDao) {
         if (cleanPass.length < 4) {
             return Result.failure(Exception("كلمة المرور الجديدة يجب أن تتكون من 4 خانات على الأقل"))
         }
-        val updated = user.copy(pinOrPassword = cleanPass)
+        val updated = user.copy(pinOrPassword = hashSecret(cleanPass))
         dao.updateUserAccount(updated)
         dao.insertAuditLog(
             AuditLogEntity(
@@ -1422,6 +1585,76 @@ class PmpRepository(private val dao: PmpDao) {
         )
 
         return Result.success(moveId)
+    }
+
+    // --- Daily Production Batches (Firestore linked to Formulations) ---
+    fun getProductionBatches(): Flow<List<ProductionBatchEntity>> = dao.getAllProductionBatches()
+
+    suspend fun saveProductionBatch(
+        batch: ProductionBatchEntity,
+        actor: String
+    ): Result<Long> {
+        val id = if (batch.id == 0L) {
+            dao.insertProductionBatch(batch)
+        } else {
+            dao.updateProductionBatch(batch)
+            batch.id
+        }
+
+        val savedBatch = batch.copy(id = id)
+
+        // Record finished item factory move
+        val finishedProdItem = dao.getFactoryItemsDirect().find { it.name.trim().equals(savedBatch.productName.trim(), ignoreCase = true) }
+        val finishedId = finishedProdItem?.id ?: dao.insertFactoryItem(
+            FactoryItemEntity(
+                name = savedBatch.productName.trim(),
+                unit = "كجم",
+                category = "finished"
+            )
+        )
+
+        dao.insertFactoryMove(
+            FactoryMoveEntity(
+                moveDate = savedBatch.productionDate,
+                kind = "إنتاج تام معتمد",
+                itemId = finishedId,
+                itemName = savedBatch.productName.trim(),
+                qty = if (savedBatch.actualWeightKg > 0) savedBatch.actualWeightKg else savedBatch.targetWeightKg,
+                machineId = savedBatch.machineId,
+                machineName = savedBatch.machineName,
+                batch = savedBatch.batchNumber,
+                note = "تشغيلة إنتاج يومية مرتبطة بالتركيبة المعملية [${savedBatch.formulaNo}] - ${savedBatch.cartonsCount} ${savedBatch.packageUnit}",
+                actor = actor,
+                counterparty = "مستودع الإنتاج التام",
+                linked = true
+            )
+        )
+
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = actor,
+                action = "PRODUCTION_BATCH_LOGGED",
+                detail = "تسجيل تشغيلة إنتاج رقم ${savedBatch.batchNumber} بالتركيبة ${savedBatch.formulaNo} - حالة الجودة: ${savedBatch.qualityStatus}"
+            )
+        )
+
+        return Result.success(id)
+    }
+
+    suspend fun deleteProductionBatch(
+        id: Long,
+        batchNumber: String,
+        actor: String
+    ): Result<Unit> {
+        dao.deleteProductionBatch(id)
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = actor,
+                action = "PRODUCTION_BATCH_DELETED",
+                detail = "حذف تشغيلة الإنتاج رقم $batchNumber"
+            )
+        )
+        return Result.success(Unit)
     }
 }
 

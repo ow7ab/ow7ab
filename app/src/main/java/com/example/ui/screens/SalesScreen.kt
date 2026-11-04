@@ -77,6 +77,11 @@ fun SalesScreen(
     var payAmountText by remember { mutableStateOf("") }
     var payCashbox by remember { mutableStateOf(cashboxes.firstOrNull()?.name ?: "خزنة السودان") }
     var payNote by remember { mutableStateOf("") }
+    var showCustomerPaymentDialog by remember { mutableStateOf(false) }
+    var custPayAmountText by remember { mutableStateOf("") }
+    var custPayCashbox by remember { mutableStateOf(cashboxes.firstOrNull()?.name ?: "خزنة السودان") }
+    var custPayCurrency by remember { mutableStateOf("SDG") }
+    var custPayNote by remember { mutableStateOf("") }
 
     // Launcher for exporting PDF to custom user-selected location
     val createPdfDocumentLauncher = rememberLauncherForActivityResult(
@@ -852,6 +857,23 @@ fun SalesScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
+                                GlassButton(
+                                    text = "تسجيل دفعة / سند تحصيل للعميل",
+                                    icon = Icons.Default.Payments,
+                                    gradient = GlassAccentGreenGradient,
+                                    onClick = {
+                                        custPayAmountText = if (netBalance > 0) netBalance.toString() else ""
+                                        custPayCashbox = cashboxes.firstOrNull()?.name ?: "خزنة السودان"
+                                        custPayCurrency = "SDG"
+                                        custPayNote = "تحصيل دفعة نقدية بحساب العميل"
+                                        showCustomerPaymentDialog = true
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(46.dp)
+                                        .testTag("record_customer_payment_btn")
+                                )
+
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1873,5 +1895,92 @@ fun SalesScreen(
             },
             containerColor = PmpNavySurface
         )
+    }
+
+    // Modal: Record Direct Customer Payment / Collection
+    if (showCustomerPaymentDialog) {
+        val targetCust = customers.find { it.id == statementCustomerId } ?: customers.firstOrNull()
+        if (targetCust != null) {
+            AlertDialog(
+                onDismissRequest = { showCustomerPaymentDialog = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Default.Payments, contentDescription = null, tint = PmpGreen)
+                        Text(text = "تسجيل تحصيل / دفعة للعميل (${targetCust.name})", color = TextWhite, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            GlassTextField(
+                                value = custPayAmountText,
+                                onValueChange = { custPayAmountText = it },
+                                label = "المبلغ ($custPayCurrency) *",
+                                placeholder = "0.00",
+                                isNumber = true,
+                                modifier = Modifier.weight(1.3f)
+                            )
+                            GlassDropdown(
+                                label = "العملة",
+                                options = listOf("SDG", "EGP", "USD"),
+                                selectedOption = custPayCurrency,
+                                onOptionSelected = { custPayCurrency = it },
+                                modifier = Modifier.weight(0.7f)
+                            )
+                        }
+
+                        GlassDropdown(
+                            label = "الخزنة المستلمة *",
+                            options = cashboxes.map { it.name }.ifEmpty { listOf("خزنة السودان", "خزنة مصر") },
+                            selectedOption = custPayCashbox,
+                            onOptionSelected = { box ->
+                                custPayCashbox = box
+                                if (box.contains("مصر") || box.contains("القاهرة") || box.contains("EGP")) {
+                                    custPayCurrency = "EGP"
+                                } else if (box.contains("سودان") || box.contains("خرطوم") || box.contains("حلفا") || box.contains("عطبرة") || box.contains("SDG")) {
+                                    custPayCurrency = "SDG"
+                                }
+                            }
+                        )
+
+                        GlassTextField(
+                            value = custPayNote,
+                            onValueChange = { custPayNote = it },
+                            label = "البيان / ملاحظات السند",
+                            placeholder = "دفعة نقدية، تحويل بنكي..."
+                        )
+                    }
+                },
+                confirmButton = {
+                    GlassButton(
+                        text = "تأكيد واستلام المبلغ",
+                        gradient = GlassAccentGreenGradient,
+                        onClick = {
+                            val amt = custPayAmountText.toDoubleOrNull() ?: 0.0
+                            if (amt > 0) {
+                                viewModel.recordCustomerPayment(
+                                    customerId = targetCust.id,
+                                    customerName = targetCust.name,
+                                    amount = amt,
+                                    currency = custPayCurrency,
+                                    cashbox = custPayCashbox,
+                                    note = custPayNote
+                                )
+                                custPayAmountText = ""
+                                custPayNote = ""
+                                showCustomerPaymentDialog = false
+                            }
+                        }
+                    )
+                },
+                dismissButton = {
+                    GlassButton(text = "إلغاء", onClick = { showCustomerPaymentDialog = false })
+                },
+                containerColor = PmpNavySurface
+            )
+        }
     }
 }
