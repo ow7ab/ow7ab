@@ -1,0 +1,101 @@
+name: PMP Paints - Build & Release Signed APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Version Name (e.g. 2.2.0)'
+        required: true
+        default: '2.2.0'
+      version_code:
+        description: 'Version Code (must be > previous)'
+        required: true
+        default: '4'
+      release_notes:
+        description: 'Release Notes (Arabic or English)'
+        required: false
+        default: 'تحديث أمان واستقرار جديد لمنظومة PMP Paints مع الحفاظ التام على البيانات'
+
+jobs:
+  build:
+    name: Build Signed APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Restore Keystore from base64
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+
+      - name: Build APK
+        run: |
+          gradle :app:assembleDebug
+
+      - name: Prepare APK Asset
+        id: prepare_apk
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          TAG_NAME="${{ github.ref_name }}"
+          if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "main" ]; then
+            TAG_NAME="v${{ github.event.inputs.version_name || '2.2.0' }}"
+          fi
+          ASSET_NAME="pmp-paints-${TAG_NAME}.apk"
+          cp "$APK_PATH" "./$ASSET_NAME"
+          echo "apk_asset=./$ASSET_NAME" >> $GITHUB_OUTPUT
+          FILE_SIZE=$(du -m "./$ASSET_NAME" | cut -f1)
+          echo "file_size=$FILE_SIZE" >> $GITHUB_OUTPUT
+          SHA256=$(sha256sum "./$ASSET_NAME" | cut -d ' ' -f1)
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Generate version.json
+        run: |
+          V_NAME="${{ github.event.inputs.version_name || github.ref_name || '2.2.0' }}"
+          V_CODE="${{ github.event.inputs.version_code || '4' }}"
+          NOTES="${{ github.event.inputs.release_notes || 'تحديث رسمي معتمد لنظام PMP Paints' }}"
+          TAG="${{ steps.prepare_apk.outputs.tag_name }}"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/pmp-paints-${TAG}.apk"
+
+          cat <<EOF > version.json
+          {
+            "versionCode": ${V_CODE},
+            "versionName": "${V_NAME}",
+            "downloadUrl": "${DOWNLOAD_URL}",
+            "releaseNotes": "${NOTES}",
+            "fileSizeMb": ${{ steps.prepare_apk.outputs.file_size }},
+            "sha256": "${{ steps.prepare_apk.outputs.sha256 }}",
+            "minSupportedVersion": 1
+          }
+          EOF
+          cat version.json
+
+      - name: Publish Release to GitHub
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          files: |
+            ${{ steps.prepare_apk.outputs.apk_asset }}
+            version.json
+          name: PMP Paints ${{ steps.prepare_apk.outputs.tag_name }}
+          body: ${{ github.event.inputs.release_notes || 'تحديث رسمي جديد لتطبيق PMP Paints' }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

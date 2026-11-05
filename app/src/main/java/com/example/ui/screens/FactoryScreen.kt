@@ -80,7 +80,6 @@ fun FactoryScreen(
     val tabs = remember(hasFactoryFull, hasRawMaterials, hasPackaging) {
         val list = mutableListOf<String>()
         if (hasRawMaterials) {
-            list.add("المشتريات")
             list.add("المخزن")
         }
         if (hasPackaging) {
@@ -91,7 +90,7 @@ fun FactoryScreen(
             list.add("خروج المنتج للعملاء")
             list.add("سجل دورة المصنع")
         }
-        list.ifEmpty { listOf("المشتريات") }
+        list.ifEmpty { listOf("المخزن") }
     }
 
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -192,200 +191,9 @@ fun FactoryScreen(
             }
         }
 
-        val activeTabTitle = tabs.getOrElse(selectedTab.coerceIn(0, (tabs.size - 1).coerceAtLeast(0))) { tabs.firstOrNull() ?: "المشتريات" }
+        val activeTabTitle = tabs.getOrElse(selectedTab.coerceIn(0, (tabs.size - 1).coerceAtLeast(0))) { tabs.firstOrNull() ?: "المخزن" }
 
         when (activeTabTitle) {
-            "المشتريات", "المواد الخام" -> {
-                // Tab 0: Raw Materials Procurement (المشتريات)
-                item {
-                    val rawItemNames = factoryItems.map { it.name }.ifEmpty { listOf("صبغات تيتانيوم أبيض", "راتنجات ألكيد", "مذيبات ومخففات", "كربونات كالسيوم") }
-                    val currentSelectedRaw = if (rawItemName.isNotBlank()) rawItemName else rawItemNames.first()
-
-                    GlassCard(
-                        modifier = Modifier.fillMaxWidth(),
-                        backgroundColor = Color.White,
-                        borderColor = Color(0xFFCBD5E1),
-                        cornerRadius = 20.dp
-                    ) {
-                        Column(modifier = Modifier.padding(18.dp)) {
-                            // Clear top row: Title and Add button separated with clean wrapping
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "إضافة وتوريد مادة خام (المشتريات)",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = PmpCyan,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.5.sp,
-                                    modifier = Modifier.weight(1f)
-                                )
-
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = Color(0xFFFEF3C7),
-                                    border = BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.5f))
-                                ) {
-                                    Text(
-                                        text = "مصر ⇄ EGP",
-                                        color = Color(0xFFB45309),
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "تسجيل المواد الخام المشتراة من مصر بالجنيه المصري لمخزن الخام.",
-                                    color = TextMuted,
-                                    fontSize = 11.5.sp,
-                                    modifier = Modifier.weight(1f)
-                                )
-
-                                TextButton(
-                                    onClick = { showAddItemDialog = true },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                                ) {
-                                    Icon(Icons.Default.AddCircleOutline, contentDescription = null, tint = PmpCyan, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("＋ خامة جديدة", color = PmpCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            GlassDropdown(
-                                label = "اسم المادة الخام *",
-                                options = rawItemNames,
-                                selectedOption = currentSelectedRaw,
-                                onOptionSelected = { rawItemName = it }
-                            )
-
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                GlassTextField(
-                                    value = rawQty,
-                                    onValueChange = { rawQty = it },
-                                    label = "الكمية المشتراة (كجم/برميل) *",
-                                    isNumber = true,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                GlassTextField(
-                                    value = rawPurchaseAmount,
-                                    onValueChange = { rawPurchaseAmount = it },
-                                    label = "مبلغ الشراء ($rawCurrency) *",
-                                    placeholder = "0.00 EGP",
-                                    isNumber = true,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            GlassTextField(
-                                value = rawSupplier,
-                                onValueChange = { rawSupplier = it },
-                                label = "اسم المورد في مصر (افتراضي: مورد مصر المعتمد)",
-                                placeholder = "اكتب اسم شركة التوريد أو المصنع في مصر..."
-                            )
-
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            GlassTextField(
-                                value = rawNote,
-                                onValueChange = { rawNote = it },
-                                label = "ملاحظات إضافية والتوريد من مصر",
-                                placeholder = "مثال: استيراد وتوريد من مخازن القاهرة..."
-                            )
-
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            GlassButton(
-                                text = "شراء وتوريد خامة",
-                                icon = Icons.Default.AddShoppingCart,
-                                onClick = {
-                                    val qty = rawQty.toDoubleOrNull() ?: 1.0
-                                    val targetItem = factoryItems.find { it.name == currentSelectedRaw } ?: factoryItems.firstOrNull()
-                                    val itemId = targetItem?.id ?: 1L
-                                    val amountStr = if (rawPurchaseAmount.isNotBlank()) " • بمبلغ $rawPurchaseAmount $rawCurrency" else ""
-
-                                    viewModel.addFactoryMove(
-                                        kind = "RAW_PURCHASE",
-                                        itemId = itemId,
-                                        itemName = currentSelectedRaw,
-                                        qty = qty,
-                                        note = if (rawNote.isBlank()) "شراء مادة خام من مصر$amountStr" else "${rawNote}$amountStr",
-                                        counterparty = rawSupplier.ifBlank { "مورد مصر المعتمد (EGP)" },
-                                        actor = "مسؤول المواد الخام (ربط مصر)"
-                                    )
-                                    successRecord = FactorySuccessRecord(
-                                        title = "تم تسجيل وإرسال المادة الخام بنجاح",
-                                        subtitle = "تم توجيه المادة الخام لمخزن المواد الخام؛ بانتظار استلامها وإدخالها يدوياً بواسطة أمين المخزن المختص.",
-                                        itemName = currentSelectedRaw,
-                                        quantity = "$qty ${targetItem?.unit ?: "كجم/برميل"}",
-                                        destinationWarehouse = "مخزن المواد الخام (مرتبط بمستودع مصر)",
-                                        responsibleDepartment = "قسم المشتريات والمواد الخام (EGP)",
-                                        counterparty = rawSupplier.ifBlank { "مورد مصر المعتمد (EGP)" },
-                                        financialAmount = if (rawPurchaseAmount.isNotBlank()) "$rawPurchaseAmount $rawCurrency" else null,
-                                        note = rawNote.ifBlank { null }
-                                    )
-                                    rawQty = "100"
-                                    rawPurchaseAmount = ""
-                                    rawSupplier = ""
-                                    rawNote = ""
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    }
-                }
-
-                // Raw Materials Catalog List
-                item {
-                    Text(
-                        text = "قائمة المواد الخام وعناصر المصنع (${factoryItems.size})",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextWhite,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
-                    )
-                }
-
-                items(factoryItems, key = { "fi_${it.id}" }) { item ->
-                    GlassCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(text = item.name, color = TextWhite, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(text = "الفئة: ${item.category} • الوحدة: ${item.unit}", color = TextMuted, fontSize = 11.sp)
-                            }
-                            IconButton(onClick = { itemToDelete = item }) {
-                                Icon(Icons.Default.Delete, contentDescription = "حذف الخامة", tint = PmpRedLight)
-                            }
-                        }
-                    }
-                }
-            }
-
             "المخزن", "مخزن المواد الخام" -> {
                 // Tab 1: Raw Materials Warehouse (المخزن)
                 val rawItemNames = factoryItems.map { it.name }.ifEmpty { listOf("صبغات تيتانيوم أبيض", "راتنجات ألكيد", "مذيبات ومخففات") }

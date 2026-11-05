@@ -96,6 +96,7 @@ class MainActivity : FragmentActivity() {
 enum class PmpScreen(val route: String, val title: String, val icon: ImageVector) {
     DASHBOARD("dashboard", "الرئيسية", Icons.Default.Dashboard),
     TREASURY("treasury", "الخزن", Icons.Default.AccountBalanceWallet),
+    PURCHASES("purchases", "المشتريات", Icons.Default.ShoppingCart),
     SALES("sales", "المبيعات", Icons.Default.ReceiptLong),
     INVENTORY("inventory", "المخازن", Icons.Default.Inventory2),
     FACTORY("factory", "المصنع", Icons.Default.PrecisionManufacturing),
@@ -127,6 +128,7 @@ fun UserAccountEntity?.parsedPermissionsSet(): Set<String> {
             "التعبئة والتغليف",
             "المخازن",
             "الخزن",
+            "المشتريات",
             "التحويلات",
             "المبيعات",
             "تصدير PDF",
@@ -251,6 +253,7 @@ fun PmpAppContent(viewModel: PmpViewModel) {
             when (screen) {
                 PmpScreen.DASHBOARD -> true
                 PmpScreen.TREASURY -> currentUser.hasModulePermission("الخزن") || currentUser.hasModulePermission("التحويلات")
+                PmpScreen.PURCHASES -> currentUser.hasModulePermission("المشتريات") || currentUser.hasModulePermission("مواد الإنتاج") || currentUser.hasModulePermission("المصنع") || currentUser.isSystemManager()
                 PmpScreen.FACTORY -> currentUser.hasModulePermission("المصنع") || currentUser.hasModulePermission("مواد الإنتاج") || currentUser.hasModulePermission("التعبئة والتغليف")
                 PmpScreen.CHEMISTRY_LAB -> currentUser.hasModulePermission("المختبر الكيميائي") || currentUser.hasModulePermission("المصنع") || currentUser.isSystemManager()
                 else -> currentUser.hasModulePermission(screen.title)
@@ -269,7 +272,7 @@ fun PmpAppContent(viewModel: PmpViewModel) {
 
     // Biometric authentication gate for sensitive financial and inventory screens
     val navigateWithBiometrics: (PmpScreen, () -> Unit) -> Unit = { targetScreen, onProceed ->
-        val sensitiveScreens = setOf(PmpScreen.TREASURY, PmpScreen.SALES, PmpScreen.INVENTORY, PmpScreen.REPORTS)
+        val sensitiveScreens = setOf(PmpScreen.TREASURY, PmpScreen.PURCHASES, PmpScreen.SALES, PmpScreen.INVENTORY, PmpScreen.REPORTS)
         if (targetScreen in sensitiveScreens &&
             BiometricAuthManager.isBiometricLockEnabled(context) &&
             !BiometricAuthManager.isRecentlyAuthenticated(context) &&
@@ -519,6 +522,7 @@ fun PmpAppContent(viewModel: PmpViewModel) {
                             initialSection = treasuryInitialSection,
                             onInitialSectionConsumed = { treasuryInitialSection = null }
                         )
+                        PmpScreen.PURCHASES -> PurchasesScreen(viewModel = viewModel)
                         PmpScreen.SALES -> SalesScreen(viewModel = viewModel)
                         PmpScreen.INVENTORY -> InventoryScreen(viewModel = viewModel)
                         PmpScreen.FACTORY -> FactoryScreen(viewModel = viewModel)
@@ -1097,8 +1101,8 @@ fun PmpNavigationMenuModal(
                     )
                 ),
                 NavCategory(
-                    title = "الخزائن والمالية",
-                    subtitle = "السيولة النقدية والخزن المربوطة بكل مخزن مبيعات",
+                    title = "الخزائن والمالية والمشتريات",
+                    subtitle = "السيولة النقدية، الحركات المالية، ومشتريات المواد الخام للمصنع",
                     items = listOf(
                         NavMenuItem(
                             screen = PmpScreen.TREASURY,
@@ -1106,6 +1110,13 @@ fun PmpNavigationMenuModal(
                             desc = "سجل الإيرادات والمصروفات والتحويلات (خزنة حلفا، عطبرة، الخرطوم، مصر)",
                             icon = Icons.Default.AccountBalanceWallet,
                             color = Color(0xFF3B82F6)
+                        ),
+                        NavMenuItem(
+                            screen = PmpScreen.PURCHASES,
+                            label = "المشتريات والموردين",
+                            desc = "فواتير وتوريد خامات ومشتريات المصنع وتتبع حسابات الموردين (EGP / SDG)",
+                            icon = Icons.Default.ShoppingCart,
+                            color = Color(0xFF10B981)
                         )
                     )
                 ),

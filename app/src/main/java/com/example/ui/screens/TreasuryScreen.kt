@@ -162,12 +162,6 @@ fun TreasuryScreen(
                             fontSize = 20.sp,
                             modifier = Modifier.weight(1f)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        GlassButton(
-                            text = "فحص المسار والمزامنة",
-                            icon = Icons.Default.Analytics,
-                            onClick = { showDiagnosticsDialog = true }
-                        )
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(

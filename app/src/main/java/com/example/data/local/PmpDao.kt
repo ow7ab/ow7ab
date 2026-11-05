@@ -41,6 +41,9 @@ interface PmpDao {
     @Insert
     suspend fun insertTransfer(transfer: TransferEntity): Long
 
+    @Query("DELETE FROM transfers WHERE id = :id")
+    suspend fun deleteTransferById(id: Long)
+
     // --- Daily Closings ---
     @Query("SELECT * FROM daily_closings ORDER BY id DESC")
     fun getAllDailyClosings(): Flow<List<DailyClosingEntity>>

@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تطبيق PMP PAINTS — مركز التحديثات الرسمي المباشر</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --pmp-navy: #0F172A;
+            --pmp-navy-card: rgba(30, 41, 59, 0.7);
+            --pmp-red: #DC2626;
+            --pmp-red-hover: #B91C1C;
+            --pmp-cyan: #06B6D4;
+            --pmp-gold: #F59E0B;
+            --pmp-green: #10B981;
+            --glass-border: rgba(255, 255, 255, 0.12);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Cairo', sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #090D16 0%, #0F172A 50%, #1E1B4B 100%);
+            color: #F8FAFC;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 16px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 680px;
+            background: var(--pmp-navy-card);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            border-radius: 28px;
+            padding: 36px 28px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 40px rgba(6, 182, 212, 0.15);
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .container::before {
+            content: '';
+            position: absolute;
+            top: -50px;
+            right: -50px;
+            width: 160px;
+            height: 160px;
+            background: radial-gradient(circle, rgba(220, 38, 38, 0.3) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .badge-live {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(16, 185, 129, 0.15);
+            color: #34D399;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            padding: 6px 14px;
+            border-radius: 9999px;
+            font-size: 13px;
+            font-weight: 700;
+            margin-bottom: 20px;
+        }
+
+        .badge-dot {
+            width: 8px;
+            height: 8px;
+            background-color: #10B981;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #10B981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(0.85); }
+        }
+
+        .logo-title {
+            font-size: 32px;
+            font-weight: 900;
+            letter-spacing: -0.5px;
+            color: #FFFFFF;
+            margin-bottom: 6px;
+        }
+
+        .logo-title span {
+            color: var(--pmp-red);
+        }
+
+        .subtitle {
+            font-size: 14.5px;
+            color: #94A3B8;
+            margin-bottom: 28px;
+            line-height: 1.6;
+        }
+
+        .version-card {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--glass-border);
+            border-radius: 20px;
+            padding: 20px;
+            margin-bottom: 28px;
+            text-align: right;
+        }
+
+        .version-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .version-row:last-child {
+            margin-bottom: 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+
+        .version-label {
+            color: #94A3B8;
+            font-size: 13.5px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .version-value {
+            color: #F8FAFC;
+            font-weight: 700;
+            font-size: 14px;
+        }
+
+        .version-value.gold {
+            color: var(--pmp-gold);
+        }
+
+        .version-value.cyan {
+            color: var(--pmp-cyan);
+        }
+
+        .release-notes {
+            background: rgba(6, 182, 212, 0.08);
+            border: 1px dashed rgba(6, 182, 212, 0.3);
+            border-radius: 14px;
+            padding: 14px;
+            font-size: 13px;
+            color: #E2E8F0;
+            line-height: 1.6;
+            margin-top: 14px;
+        }
+
+        .btn-download {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            width: 100%;
+            background: linear-gradient(135deg, var(--pmp-red) 0%, #991B1B 100%);
+            color: #FFFFFF;
+            text-decoration: none;
+            padding: 18px 24px;
+            border-radius: 16px;
+            font-size: 18px;
+            font-weight: 800;
+            box-shadow: 0 10px 25px -5px rgba(220, 38, 38, 0.5);
+            transition: all 0.25s ease;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            cursor: pointer;
+            margin-bottom: 18px;
+        }
+
+        .btn-download:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 15px 30px -5px rgba(220, 38, 38, 0.7);
+            background: linear-gradient(135deg, #EF4444 0%, var(--pmp-red) 100%);
+        }
+
+        .btn-download:active {
+            transform: translateY(1px);
+        }
+
+        .btn-download svg {
+            width: 24px;
+            height: 24px;
+            fill: currentColor;
+        }
+
+        .instructions-list {
+            text-align: right;
+            font-size: 12.5px;
+            color: #94A3B8;
+            line-height: 1.8;
+            margin-top: 20px;
+            padding: 0 8px;
+        }
+
+        .instructions-list li {
+            margin-bottom: 6px;
+            list-style-type: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .instructions-list li::before {
+            content: "✓";
+            color: var(--pmp-green);
+            font-weight: bold;
+        }
+
+        .footer {
+            margin-top: 24px;
+            font-size: 12px;
+            color: #64748B;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="badge-live">
+            <span class="badge-dot"></span>
+            تحديث مباشر وتلقائي متصل بالسيرفر
+        </div>
+
+        <h1 class="logo-title">PMP <span>PAINTS</span></h1>
+        <p class="subtitle">مركز تنزيل وتثبيت أحدث إصدار لتطبيق نظام إدارة الحسابات، الخزن، المصنع، والمخازن</p>
+
+        <div class="version-card">
+            <div class="version-row">
+                <span class="version-label">📦 رقم الإصدار الحالي:</span>
+                <span class="version-value cyan" id="versionName">v2.1-PRO (Build 3)</span>
+            </div>
+            <div class="version-row">
+                <span class="version-label">⚡ معرّف الحزمة (Package ID):</span>
+                <span class="version-value">com.pmp</span>
+            </div>
+            <div class="version-row">
+                <span class="version-label">🛡️ التوقيع الرقمي:</span>
+                <span class="version-value gold">موقّع رسمي معتمد (In-Place Upgrade)</span>
+            </div>
+            <div class="version-row">
+                <span class="version-label">💾 حجم الحزمة:</span>
+                <span class="version-value" id="fileSize">33.2 ميجابايت</span>
+            </div>
+
+            <div class="release-notes" id="releaseNotes">
+                ✨ <strong>جديد التحديث:</strong> فحص تلقائي للإصدارات، تنزيل متدفق مع مؤشر دائري فوري، تشغيل نظام PackageInstaller الرسمي مع الحفاظ الكامل على كافة البيانات والحسابات والخزن.
+            </div>
+        </div>
+
+        <!-- زر التنزيل المباشر -->
+        <a href="/pmp-paints-latest.apk" class="btn-download" download="pmp-paints-latest.apk" id="downloadBtn">
+            <svg viewBox="0 0 24 24">
+                <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/>
+            </svg>
+            <span>تحميل التحديث المباشر الآن (APK)</span>
+        </a>
+
+        <ul class="instructions-list">
+            <li>التحديث آمن ومباشر: لن يتم حذف أي بيانات أو إعدادات أو أرصدة سابقة.</li>
+            <li>إذا طلب هاتفك الإذن: اسمح لـ "تثبيت التطبيقات غير المعروفة" لمرة واحدة فقط.</li>
+            <li>يقوم التطبيق بالترقية الفورية (In-Place Package Upgrade) تلقائياً.</li>
+        </ul>
+
+        <div class="footer">
+            جميع الحقوق محفوظة &copy; 2026 شركة PMP PAINTS للصناعات الكيماوية والطلاءات
+        </div>
+    </div>
+
+    <script>
+        // جلب بيانات الإصدار الحديث ديناميكياً من ملف version.json إن وُجد
+        fetch('/version.json')
+            .then(res => res.json())
+            .then(data => {
+                if (data.versionName) {
+                    document.getElementById('versionName').textContent = 'v' + data.versionName + ' (Build ' + (data.versionCode || '') + ')';
+                }
+                if (data.fileSizeMb) {
+                    document.getElementById('fileSize').textContent = data.fileSizeMb + ' ميجابايت';
+                }
+                if (data.releaseNotes) {
+                    document.getElementById('releaseNotes').innerHTML = '✨ <strong>جديد التحديث:</strong> ' + data.releaseNotes;
+                }
+                if (data.downloadUrl && data.downloadUrl.startsWith('http')) {
+                    // إذا كان الرابط الخارجي جاهزاً يمكن توجيه التنزيل إليه أو استخدام النسخة المباشرة
+                    // document.getElementById('downloadBtn').href = data.downloadUrl;
+                }
+            })
+            .catch(() => {
+                // استخدام البيانات الافتراضية المكتوبة مسبقاً
+            });
+    </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Secure file sharing paths for system package installer and in-app updates -->
+    <cache-path name="apk_cache" path="." />
+    <cache-path name="apk_updates" path="updates/" />
+    <external-cache-path name="external_apk_cache" path="." />
+    <files-path name="apk_files" path="." />
+    <external-path name="external_download" path="Download/" />
+</paths>

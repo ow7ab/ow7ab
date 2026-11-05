@@ -25,11 +25,27 @@ service cloud.firestore {
         'factory_items', 'factory_machines', 'factory_moves',
         'halfa_invoices', 'poster_prices', 'audit_logs',
         'server_status', 'deleted_users',
-        'lab_formulations', 'formulations', 'paint_batches'
+        'lab_formulations', 'formulations', 'paint_batches',
+        'deleted_records', 'system_metadata', 'system_config'
       ];
     }
 
-    // 3. Collection Rules: /linked_accounts/{accountCode} and /deleted_accounts/{accountCode}
+    // 3. Collection Rules: /linked_accounts, /deleted_accounts, /system_config, /app_updates, /deleted_records
+    match /system_config/{docId} {
+      allow read: if true;
+      allow create, update, delete: if isValidId(docId) || isSignedIn();
+    }
+
+    match /app_updates/{docId} {
+      allow read: if true;
+      allow create, update, delete: if isValidId(docId) || isSignedIn();
+    }
+
+    match /deleted_records/{docId} {
+      allow read: if true;
+      allow create, update, delete: if isValidId(docId) || isSignedIn();
+    }
+
     match /linked_accounts/{accountCode} {
       allow read: if true;
       allow create, update, delete: if isValidId(accountCode) || isSignedIn();
