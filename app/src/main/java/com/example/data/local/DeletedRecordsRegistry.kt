@@ -58,8 +58,24 @@ object DeletedRecordsRegistry {
 
     private fun makeKey(collection: String, idOrDoc: String): String {
         val cleanCol = normalize(collection)
-        val cleanId = normalize(idOrDoc).replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
+        val cleanId = normalize(idOrDoc).replace(Regex("[^\\p{L}\\p{N}_\\-]"), "-").trim('-')
         return "${cleanCol}_$cleanId"
+    }
+
+    /**
+     * Generates a deterministic, ASCII-safe Firestore document ID for a cashbox name
+     * (including Arabic names like "خزنة حلفا") so all devices address the exact same document.
+     */
+    fun cashboxDocId(name: String, fallbackId: Long = 0L): String {
+        val cleanName = normalize(name)
+        if (cleanName.isBlank()) return "BOX-$fallbackId"
+        val asciiPart = cleanName.replace(Regex("[^a-zA-Z0-9_\\-]"), "-").trim('-')
+        val hashHex = cleanName.hashCode().toUInt().toString(16)
+        return if (asciiPart.isNotBlank()) {
+            "BOX-${asciiPart.take(32)}-$hashHex"
+        } else {
+            "BOX-H$hashHex"
+        }
     }
 
     /**
@@ -84,12 +100,17 @@ object DeletedRecordsRegistry {
                 "invoices" -> if (primaryId.startsWith("INV-", true)) primaryId else "INV-$primaryId"
                 "transfers" -> if (primaryId.startsWith("TRF-", true)) primaryId else "TRF-$primaryId"
                 "products" -> if (primaryId.startsWith("PROD-", true)) primaryId else "PROD-$primaryId"
+                "cashboxes" -> if (primaryId.startsWith("BOX-", true)) primaryId else cashboxDocId(primaryId)
                 else -> primaryId
             }
         }
 
         val key2 = makeKey(collection, resolvedDocId)
         deletedKeys.add(key2)
+
+        if (normalize(collection) == "cashboxes" && !primaryId.startsWith("BOX-", true)) {
+            deletedKeys.add(makeKey(collection, cashboxDocId(primaryId)))
+        }
 
         val tombstone = RecordTombstone(
             collection = collection.trim(),
@@ -122,6 +143,12 @@ object DeletedRecordsRegistry {
         val key = makeKey(collection, idOrDoc)
         if (deletedKeys.contains(key)) return true
 
+        if (normalize(collection) == "cashboxes" && !idOrDoc.startsWith("BOX-", true)) {
+            if (deletedKeys.contains(makeKey(collection, cashboxDocId(idOrDoc)))) {
+                return true
+            }
+        }
+
         // Also check prefixed variant if it was stored without prefix
         val altId = when {
             idOrDoc.startsWith("MOV-", true) -> idOrDoc.substring(4)
@@ -129,6 +156,7 @@ object DeletedRecordsRegistry {
             idOrDoc.startsWith("INV-", true) -> idOrDoc.substring(4)
             idOrDoc.startsWith("TRF-", true) -> idOrDoc.substring(4)
             idOrDoc.startsWith("PROD-", true) -> idOrDoc.substring(5)
+            idOrDoc.startsWith("BOX-", true) -> idOrDoc.substring(4)
             else -> null
         }
         if (altId != null && deletedKeys.contains(makeKey(collection, altId))) {
@@ -152,12 +180,19 @@ object DeletedRecordsRegistry {
         deletedKeys.remove(key1)
         allTombstones.remove(key1)
 
+        if (normalize(collection) == "cashboxes" && !idOrDoc.startsWith("BOX-", true)) {
+            val hashDocKey = makeKey(collection, cashboxDocId(idOrDoc))
+            deletedKeys.remove(hashDocKey)
+            allTombstones.remove(hashDocKey)
+        }
+
         val altId = when {
             idOrDoc.startsWith("MOV-", true) -> idOrDoc.substring(4)
             idOrDoc.startsWith("CUST-", true) -> idOrDoc.substring(5)
             idOrDoc.startsWith("INV-", true) -> idOrDoc.substring(4)
             idOrDoc.startsWith("TRF-", true) -> idOrDoc.substring(4)
             idOrDoc.startsWith("PROD-", true) -> idOrDoc.substring(5)
+            idOrDoc.startsWith("BOX-", true) -> idOrDoc.substring(4)
             else -> null
         }
         if (altId != null) {

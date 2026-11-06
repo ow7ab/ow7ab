@@ -156,11 +156,23 @@ data class ProductEntity(
     val active: Boolean = true
 )
 
+fun InvoicePaymentEntity.resolvePaymentCurrency(invoiceCurrency: String = "SDG"): String {
+    return when {
+        note.contains("[EGP]", ignoreCase = true) -> "EGP"
+        note.contains("[USD]", ignoreCase = true) -> "USD"
+        note.contains("[SDG]", ignoreCase = true) -> "SDG"
+        cashbox.contains("مصر") || cashbox.contains("القاهرة") || cashbox.contains("EGP", ignoreCase = true) -> "EGP"
+        cashbox.contains("دولار") || cashbox.contains("USD", ignoreCase = true) -> "USD"
+        cashbox.contains("سودان") || cashbox.contains("خرطوم") || cashbox.contains("حلفا") || cashbox.contains("عطبرة") -> "SDG"
+        else -> invoiceCurrency.ifBlank { "SDG" }
+    }
+}
+
 fun ProductEntity.getEffectiveSalePrice(currency: String): Double {
     return if (currency.equals("EGP", ignoreCase = true)) {
-        if (salePriceEgp > 0) salePriceEgp else (salePrice / 200.0).coerceAtLeast(1.0)
+        if (salePriceEgp > 0.0) salePriceEgp else 0.0
     } else {
-        if (salePrice > 0) salePrice else (salePriceEgp * 200.0).coerceAtLeast(1.0)
+        if (salePrice > 0.0) salePrice else 0.0
     }
 }
 

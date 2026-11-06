@@ -91,6 +91,13 @@ class MainActivity : FragmentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        runCatching {
+            viewModel.verifyPostInstallAndRefreshVersion()
+        }
+    }
 }
 
 enum class PmpScreen(val route: String, val title: String, val icon: ImageVector) {
@@ -116,6 +123,15 @@ fun UserAccountEntity?.isSystemManager(): Boolean {
 }
 
 /**
+ * Checks whether the given user is strictly the primary `admin` account.
+ * Technical and server-level diagnostic details are visible only to `admin`.
+ */
+fun UserAccountEntity?.isSuperAdminAccount(): Boolean {
+    if (this == null) return false
+    return username.equals("admin", ignoreCase = true)
+}
+
+/**
  * Parses the comma-separated permissions assigned to this employee by the manager.
  */
 fun UserAccountEntity?.parsedPermissionsSet(): Set<String> {
@@ -136,12 +152,15 @@ fun UserAccountEntity?.parsedPermissionsSet(): Set<String> {
             "التقارير",
             "التقارير (كاملة)",
             "تقارير المبيعات",
+            "تقارير مبيعات الشهر الحالي",
             "تقارير المواد الخام",
+            "تقارير المنتج التام",
             "تقارير حركة المخزون",
             "تقارير حركات الخزن",
             "تقارير المديونيات",
             "المستخدمين",
             "الإعدادات",
+            "تعديل نوع الصنف",
             "صلاحية الحذف والتصفير"
         )
     }
@@ -177,14 +196,14 @@ fun UserAccountEntity?.hasReportTabPermission(tabName: String): Boolean {
     val perms = parsedPermissionsSet()
     if (perms.contains("التقارير (كاملة)")) return true
     val specificKey = when (tabName) {
-        "المبيعات" -> "تقارير المبيعات"
+        "المبيعات", "مبيعات الشهر الحالي" -> "تقارير المبيعات"
         "المديونيات" -> "تقارير المديونيات"
-        "حركة المخزون" -> "تقارير حركة المخزون"
+        "حركة المخزون", "المنتج التام" -> "تقارير حركة المخزون"
         "حركات الخزن" -> "تقارير حركات الخزن"
-        "تقارير المواد الخام" -> "تقارير المواد الخام"
+        "تقارير المواد الخام", "المواد الخام في المخزن" -> "تقارير المواد الخام"
         else -> "تقارير $tabName"
     }
-    if (perms.contains(specificKey)) return true
+    if (perms.contains(specificKey) || perms.contains("تقارير $tabName")) return true
     val hasGranularReportPerms = perms.any { it.startsWith("تقارير ") }
     if (perms.contains("التقارير") && !hasGranularReportPerms) {
         return true
@@ -204,6 +223,8 @@ fun PmpAppContent(viewModel: PmpViewModel) {
     val uiMessage by viewModel.uiMessage.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
     val isSessionAuthenticated by viewModel.isSessionAuthenticated.collectAsState()
+    val isInitializingSession by viewModel.isInitializingSession.collectAsState()
+    val saveableStateHolder = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
 
     var firebaseUser by remember { mutableStateOf(runCatching { Firebase.auth.currentUser }.getOrNull()) }
     val sessionManager = remember { UserSessionManager.getInstance(context) }
@@ -237,6 +258,9 @@ fun PmpAppContent(viewModel: PmpViewModel) {
 
     val activeUserId by viewModel.activeSessionUserId.collectAsState()
     val isNetworkOnline by viewModel.isNetworkOnline.collectAsState()
+    val updateAvailable by viewModel.updateAvailable.collectAsState()
+    val availableUpdate by viewModel.availableUpdate.collectAsState()
+    val effectiveVersionName by viewModel.effectiveVersionName.collectAsState()
 
     // Only de-authenticate if the currently active employee was explicitly deactivated/suspended by the manager
     LaunchedEffect(currentUser, isSessionAuthenticated, activeUserId) {
@@ -326,16 +350,23 @@ fun PmpAppContent(viewModel: PmpViewModel) {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        if (!isSessionAuthenticated) {
-            LoginScreen(
-                viewModel = viewModel,
-                onLoginSuccess = {
-                    firebaseUser = Firebase.auth.currentUser
-                    currentScreen = PmpScreen.DASHBOARD
-                    treasuryInitialSection = null
-                    viewModel.startCloudRealtimeSyncIfAuthenticated()
-                }
-            )
+        if (isInitializingSession) {
+            PmpSplashScreen()
+        } else if (!isSessionAuthenticated) {
+            com.example.ui.components.OneUiPullDownContainer(
+                pageTitle = "PMP PAINTS",
+                screenKey = "login_screen"
+            ) {
+                LoginScreen(
+                    viewModel = viewModel,
+                    onLoginSuccess = {
+                        firebaseUser = Firebase.auth.currentUser
+                        currentScreen = PmpScreen.DASHBOARD
+                        treasuryInitialSection = null
+                        viewModel.startCloudRealtimeSyncIfAuthenticated()
+                    }
+                )
+            }
         } else {
 
     val handleDashboardNavigate: (String) -> Unit = { route ->
@@ -369,113 +400,6 @@ fun PmpAppContent(viewModel: PmpViewModel) {
             .background(GlassBackgroundBrush),
         containerColor = Color.Transparent,
         contentWindowInsets = WindowInsets.safeDrawing,
-        topBar = {
-            Column(modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars)) {
-                Surface(
-                    color = Color.White.copy(alpha = 0.95f),
-                    shadowElevation = 2.dp,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.clickable {
-                                currentScreen = PmpScreen.DASHBOARD
-                            }
-                        ) {
-                            Image(
-                                painter = painterResource(id = R.drawable.ic_pmp_emblem),
-                                contentDescription = "PMP Emblem",
-                                modifier = Modifier
-                                    .size(30.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                            )
-                            Column {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = "PMP PAINTS",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 14.sp,
-                                        color = PmpBrandNavy
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(if (isNetworkOnline) Color(0xFF10B981).copy(alpha = 0.15f) else Color(0xFFEF4444).copy(alpha = 0.15f))
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    ) {
-                                        Text(
-                                            text = if (isNetworkOnline) "سحابي متصل" else "غير متصل",
-                                            fontSize = 9.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isNetworkOnline) Color(0xFF047857) else Color(0xFFB91C1C)
-                                        )
-                                    }
-                                }
-                                Text(
-                                    text = if (currentScreen == PmpScreen.DASHBOARD) "لوحة التحكم الرئيسية" else currentScreen.title,
-                                    fontSize = 11.sp,
-                                    color = PmpBrandRed,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                        // Clean Logout Icon Button (no text "تسجيل الخروج" as requested)
-                        IconButton(
-                            onClick = { handleSignOut() },
-                            modifier = Modifier
-                                .size(38.dp)
-                                .testTag("top_bar_logout_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Logout,
-                                contentDescription = "خروج",
-                                tint = PmpBrandNavy,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    }
-                }
-
-                if (!isNetworkOnline) {
-                    Surface(
-                        color = Color(0xFFDC2626),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.WifiOff,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "لا يوجد اتصال بالإنترنت • تم إيقاف المعاملات مؤقتاً لضمان تسجيل الترتيب المتسلسل على السيرفر السحابي",
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                    }
-                }
-            }
-        },
         bottomBar = {
             GlassBottomNavigationBar(
                 allowedScreens = orderedNavScreens,
@@ -492,61 +416,199 @@ fun PmpAppContent(viewModel: PmpViewModel) {
             )
         }
     ) { innerPadding ->
-        Box(
+        com.example.ui.components.OneUiPullDownContainer(
             modifier = Modifier
                 .fillMaxSize()
-                .background(GlassBackgroundBrush)
-                .padding(innerPadding)
-        ) {
-            // Fast, lightweight screen transition without heavy layout thrashing
-            Crossfade(
-                targetState = currentScreen,
-                animationSpec = tween(durationMillis = 150),
-                label = "ScreenTransition"
-            ) { screen ->
-                if (screen !in allowedScreens) {
-                    DashboardScreen(
-                        viewModel = viewModel,
-                        onNavigate = handleDashboardNavigate,
-                        onSignOut = handleSignOut
-                    )
-                } else {
-                    when (screen) {
-                        PmpScreen.DASHBOARD -> DashboardScreen(
-                            viewModel = viewModel,
-                            onNavigate = handleDashboardNavigate,
-                            onSignOut = handleSignOut
-                        )
-                        PmpScreen.TREASURY -> TreasuryScreen(
-                            viewModel = viewModel,
-                            initialSection = treasuryInitialSection,
-                            onInitialSectionConsumed = { treasuryInitialSection = null }
-                        )
-                        PmpScreen.PURCHASES -> PurchasesScreen(viewModel = viewModel)
-                        PmpScreen.SALES -> SalesScreen(viewModel = viewModel)
-                        PmpScreen.INVENTORY -> InventoryScreen(viewModel = viewModel)
-                        PmpScreen.FACTORY -> FactoryScreen(viewModel = viewModel)
-                        PmpScreen.CHEMISTRY_LAB -> ChemistryLabScreen(viewModel = viewModel)
-                        PmpScreen.USERS -> UsersScreen(
-                            viewModel = viewModel,
-                            onSignOut = handleSignOut
-                        )
-                        PmpScreen.POSTER -> PosterPriceScreen(viewModel = viewModel)
-                        PmpScreen.REPORTS -> ReportsScreen(viewModel = viewModel)
-                        PmpScreen.SETTINGS -> SettingsScreen(
-                            viewModel = viewModel,
-                            onNavigateToUsers = {
-                                if (PmpScreen.USERS in allowedScreens) {
-                                    currentScreen = PmpScreen.USERS
-                                } else {
-                                    viewModel.postMessage("إدارة المستخدمين متاحة لمدير النظام فقط", isError = true)
-                                }
-                            },
-                            onSignOut = handleSignOut
-                        )
-                    }
+                .padding(bottom = innerPadding.calculateBottomPadding()),
+            pageTitle = if (currentScreen == PmpScreen.DASHBOARD) "لوحة التحكم الرئيسية" else currentScreen.title,
+            screenKey = currentScreen.route,
+            onDeepPullTriggered = {
+                if (currentScreen == PmpScreen.DASHBOARD) {
+                    viewModel.syncAllErpDataToServer()
                 }
             }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(GlassBackgroundBrush)
+            ) {
+                // Top Bar moves together with the page content as a single unified One UI surface
+                Column(modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars)) {
+                    Surface(
+                        color = Color.White.copy(alpha = 0.95f),
+                        shadowElevation = 2.dp,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.clickable {
+                                    currentScreen = PmpScreen.DASHBOARD
+                                }
+                            ) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.ic_pmp_emblem),
+                                    contentDescription = "PMP Emblem",
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                )
+                                Column {
+                                    Text(
+                                        text = "PMP PAINTS",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        color = PmpBrandNavy
+                                    )
+                                    Text(
+                                        text = if (currentScreen == PmpScreen.DASHBOARD) "لوحة التحكم الرئيسية" else currentScreen.title,
+                                        fontSize = 11.sp,
+                                        color = PmpBrandRed,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (updateAvailable && availableUpdate != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(Color(0xFF047857))
+                                            .clickable {
+                                                currentScreen = PmpScreen.SETTINGS
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                                            .testTag("top_bar_update_badge")
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.SystemUpdate,
+                                                contentDescription = "تحديث متاح",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                            Text(
+                                                text = "تحديث متاح",
+                                                color = Color.White,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                                // Clean Logout Icon Button (no text "تسجيل الخروج" as requested)
+                                IconButton(
+                                    onClick = { handleSignOut() },
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .testTag("top_bar_logout_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.Logout,
+                                        contentDescription = "خروج",
+                                        tint = PmpBrandNavy,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (!isNetworkOnline) {
+                        Surface(
+                            color = Color(0xFFDC2626),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.WifiOff,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "لا يوجد اتصال بالإنترنت • يرجى التحقق من الشبكة للمتابعة",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .background(GlassBackgroundBrush)
+                ) {
+                    // Fast, smooth screen transition with SaveableStateProvider so scroll positions and states are preserved across tabs
+                    Crossfade(
+                        targetState = currentScreen,
+                        animationSpec = tween(durationMillis = 120),
+                        label = "ScreenTransition"
+                    ) { screen ->
+                        val effectiveScreen = if (screen in allowedScreens) screen else PmpScreen.DASHBOARD
+                        saveableStateHolder.SaveableStateProvider(effectiveScreen.route) {
+                            when (effectiveScreen) {
+                                PmpScreen.DASHBOARD -> DashboardScreen(
+                                    viewModel = viewModel,
+                                    onNavigate = handleDashboardNavigate,
+                                    onSignOut = handleSignOut
+                                )
+                                PmpScreen.TREASURY -> TreasuryScreen(
+                                    viewModel = viewModel,
+                                    initialSection = treasuryInitialSection,
+                                    onInitialSectionConsumed = { treasuryInitialSection = null }
+                                )
+                                PmpScreen.PURCHASES -> PurchasesScreen(viewModel = viewModel)
+                                PmpScreen.SALES -> SalesScreen(viewModel = viewModel)
+                                PmpScreen.INVENTORY -> InventoryScreen(viewModel = viewModel)
+                                PmpScreen.FACTORY -> FactoryScreen(viewModel = viewModel)
+                                PmpScreen.CHEMISTRY_LAB -> ChemistryLabScreen(viewModel = viewModel)
+                                PmpScreen.USERS -> UsersScreen(
+                                    viewModel = viewModel,
+                                    onSignOut = handleSignOut
+                                )
+                                PmpScreen.POSTER -> PosterPriceScreen(viewModel = viewModel)
+                                PmpScreen.REPORTS -> ReportsScreen(viewModel = viewModel)
+                                PmpScreen.SETTINGS -> SettingsScreen(
+                                    viewModel = viewModel,
+                                    onNavigateToUsers = {
+                                        if (PmpScreen.USERS in allowedScreens) {
+                                            currentScreen = PmpScreen.USERS
+                                        } else {
+                                            viewModel.postMessage("إدارة المستخدمين متاحة لمدير النظام فقط", isError = true)
+                                        }
+                                    },
+                                    onSignOut = handleSignOut
+                                )
+                            }
+                        }
+                    }
 
             // Glass Floating Snackbar/Toast
             uiMessage?.let { msg ->
@@ -600,6 +662,8 @@ fun PmpAppContent(viewModel: PmpViewModel) {
                             }
                         }
                     }
+                }
+            }
                 }
             }
         }
@@ -1319,6 +1383,68 @@ fun PmpNavigationMenuModal(
             }
 
             Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+fun PmpSplashScreen() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(GlassBackgroundBrush)
+            .testTag("pmp_splash_screen"),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.padding(32.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = Color.White,
+                shadowElevation = 10.dp,
+                border = BorderStroke(2.dp, PmpBrandRed.copy(alpha = 0.25f)),
+                modifier = Modifier.size(116.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_pmp_emblem),
+                        contentDescription = "شعار PMP PAINTS",
+                        modifier = Modifier
+                            .size(84.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                    )
+                }
+            }
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "PMP PAINTS",
+                    color = PmpBrandNavy,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+                Text(
+                    text = "شركة PMP للدهانات والطلاءات والصناعات الكيميائية",
+                    color = TextMuted,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            CircularProgressIndicator(
+                color = PmpBrandRed,
+                strokeWidth = 3.dp,
+                modifier = Modifier.size(28.dp)
+            )
         }
     }
 }

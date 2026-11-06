@@ -63,6 +63,8 @@ fun FactoryScreen(
     val currentUser by viewModel.currentUser.collectAsState()
     val productionBatches by viewModel.productionBatches.collectAsState()
     val formulations by viewModel.formulations.collectAsState()
+    val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
+    val dataLoadError by viewModel.dataLoadError.collectAsState()
 
     var showBatchModal by remember { mutableStateOf(false) }
     var selectedFormulaForBatch by remember { mutableStateOf<FormulationEntity?>(null) }
@@ -172,13 +174,6 @@ fun FactoryScreen(
                         fontWeight = FontWeight.Bold,
                         fontSize = 21.sp
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "دورة صناعية متكاملة: شراء الخامات، مخزن المواد الخام، أوامر الإنتاج والتعبئة، وخروج المنتج للعملاء.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextMuted,
-                        fontSize = 12.sp
-                    )
 
                     Spacer(modifier = Modifier.height(14.dp))
 
@@ -193,7 +188,20 @@ fun FactoryScreen(
 
         val activeTabTitle = tabs.getOrElse(selectedTab.coerceIn(0, (tabs.size - 1).coerceAtLeast(0))) { tabs.firstOrNull() ?: "المخزن" }
 
-        when (activeTabTitle) {
+        if (isInitialDataLoading && factoryItems.isEmpty() && productionBatches.isEmpty()) {
+            item(key = "factory_shimmer_skeleton") {
+                ProvideShimmerEffect(enabled = true) {
+                    FactorySkeletonSection()
+                }
+            }
+        } else if (dataLoadError != null && factoryItems.isEmpty() && productionBatches.isEmpty()) {
+            item(key = "factory_error_card") {
+                PmpErrorStateCard(
+                    message = dataLoadError ?: "تعذر تحميل بيانات المصنع",
+                    onRetry = { viewModel.retryDataLoadAndSync() }
+                )
+            }
+        } else when (activeTabTitle) {
             "المخزن", "مخزن المواد الخام" -> {
                 // Tab 1: Raw Materials Warehouse (المخزن)
                 val rawItemNames = factoryItems.map { it.name }.ifEmpty { listOf("صبغات تيتانيوم أبيض", "راتنجات ألكيد", "مذيبات ومخففات") }
@@ -215,12 +223,6 @@ fun FactoryScreen(
                                     fontSize = 15.sp
                                 )
                             }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "تسجيل استلام الخامات بالمخزن: الخامات والمنتجات مرتبطة بمصر وبالجنيه المصري (EGP) وتُضاف للرصيد الفعلي للمخزن.",
-                                color = TextMuted,
-                                fontSize = 12.sp
-                            )
                             Spacer(modifier = Modifier.height(12.dp))
 
                             GlassDropdown(
@@ -315,12 +317,6 @@ fun FactoryScreen(
                                     fontSize = 15.sp
                                 )
                             }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "صرف مواد خام إلى خطوط الإنتاج: تُخصم تلقائياً من رصيد مخزن المواد الخام وتُسلّم لمهندس التشغيل.",
-                                color = TextMuted,
-                                fontSize = 12.sp
-                            )
                             Spacer(modifier = Modifier.height(12.dp))
 
                             GlassDropdown(
@@ -419,41 +415,14 @@ fun FactoryScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "سجل تشغيلات الإنتاج اليومية (Firestore Sync)",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = Color(0xFF1E40AF),
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 16.sp
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = "توثيق الطبخات المصنعية وربطها بالتركيبات المعملية الكيميائية وفحوصات الجودة",
-                                        color = Color(0xFF64748B),
-                                        fontSize = 12.sp
-                                    )
-                                }
-
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = Color(0xFFEFF6FF),
-                                    border = BorderStroke(1.dp, Color(0xFF3B82F6).copy(alpha = 0.5f))
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        Icon(Icons.Default.CloudDone, contentDescription = null, tint = Color(0xFF1D4ED8), modifier = Modifier.size(14.dp))
-                                        Text(
-                                            text = "Firestore السحابي",
-                                            color = Color(0xFF1D4ED8),
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 11.sp
-                                        )
-                                    }
-                                }
+                                Text(
+                                    text = "سجل تشغيلات الإنتاج اليومية",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color(0xFF1E40AF),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                    modifier = Modifier.weight(1f)
+                                )
                             }
 
                             Spacer(modifier = Modifier.height(14.dp))
@@ -852,8 +821,8 @@ fun FactoryScreen(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
-                                        Icon(Icons.Default.CloudDone, contentDescription = null, tint = Color(0xFF2563EB), modifier = Modifier.size(14.dp))
-                                        Text("Firestore", fontSize = 10.sp, color = Color(0xFF2563EB), fontWeight = FontWeight.Bold)
+                                        Icon(Icons.Default.Verified, contentDescription = null, tint = Color(0xFF2563EB), modifier = Modifier.size(14.dp))
+                                        Text("موثق", fontSize = 10.sp, color = Color(0xFF2563EB), fontWeight = FontWeight.Bold)
                                     }
                                 }
 
@@ -977,14 +946,8 @@ fun FactoryScreen(
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 16.sp
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "المواد المنتجة تنقسم لمعايير قياسية: 250 جم (48 علبة/كرتونة) أو 900 جم (12 علبة/كرتونة)، مع إمكانية التعديل والتخصيص.",
-                                color = TextMuted,
-                                fontSize = 12.sp
-                            )
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
 
                             // Presets Row
                             Row(

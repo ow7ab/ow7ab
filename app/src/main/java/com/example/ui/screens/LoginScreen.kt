@@ -364,7 +364,7 @@ fun LoginScreen(
                         // Unified Email or Username Input Field
                         Column {
                             Text(
-                                text = "البريد الإلكتروني أو اسم المستخدم (Email or Username)",
+                                text = "البريد الإلكتروني أو اسم المستخدم",
                                 color = TextDark,
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 12.sp,
@@ -428,7 +428,7 @@ fun LoginScreen(
                         // Password Input Field
                         Column {
                             Text(
-                                text = "كلمة المرور (Password)",
+                                text = "كلمة المرور",
                                 color = TextDark,
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 12.sp,

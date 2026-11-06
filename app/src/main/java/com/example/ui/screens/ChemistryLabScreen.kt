@@ -45,6 +45,8 @@ import com.example.data.local.ProductionBatchEntity
 import com.example.ui.components.DailyProductionBatchModal
 import com.example.ui.components.GlassButton
 import com.example.ui.components.GlassCard
+import com.example.ui.components.ProvideShimmerEffect
+import com.example.ui.components.ShimmerListRowCardSkeleton
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.PmpViewModel
 import com.example.util.FormulationPdfExporter
@@ -63,9 +65,9 @@ fun ChemistryLabScreen(
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf(
-        "محرك PVC والتركيبات" to Icons.Default.Calculate,
-        "مكتبة PubChem العالمية" to Icons.Default.MenuBook,
-        "السلامة الكيميائية GHS/SDS" to Icons.Default.HealthAndSafety
+        "التركيبات والنسب" to Icons.Default.Calculate,
+        "دليل المواد الخام" to Icons.Default.MenuBook,
+        "معايير السلامة" to Icons.Default.HealthAndSafety
     )
 
     Column(
@@ -108,34 +110,27 @@ fun ChemistryLabScreen(
                         )
                     }
 
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "PMP Science & Chemistry Lab",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(Color(0xFF2563EB).copy(alpha = 0.4f))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = "قسم الأبحاث والتطوير",
-                                    color = Color(0xFF93C5FD),
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "مختبر العلوم الكيميائية وهندسة تركيبات الدهانات",
-                            color = Color(0xFF94A3B8),
-                            fontSize = 12.sp
+                            text = "مختبر التركيبات والجودة",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 17.sp
                         )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xFF2563EB).copy(alpha = 0.4f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "قسم الأبحاث والتطوير",
+                                color = Color(0xFF93C5FD),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -1742,17 +1737,29 @@ fun PubChemTab(viewModel: PmpViewModel) {
             )
         }
 
-        items(searchResults) { comp ->
-            PubChemCompoundCard(
-                compound = comp,
-                onAddToCatalog = {
-                    viewModel.addPubChemCompoundToFactoryCatalog(comp)
-                },
-                onOpenWeb = {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(comp.pubChemUrl))
-                    context.startActivity(intent)
+        if (isSearching && searchResults.isEmpty()) {
+            item(key = "pubchem_shimmer_skeleton") {
+                ProvideShimmerEffect(enabled = true) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        repeat(3) {
+                            ShimmerListRowCardSkeleton(showTrailingBadge = true, showBottomMetaRow = true)
+                        }
+                    }
                 }
-            )
+            }
+        } else {
+            items(searchResults) { comp ->
+                PubChemCompoundCard(
+                    compound = comp,
+                    onAddToCatalog = {
+                        viewModel.addPubChemCompoundToFactoryCatalog(comp)
+                    },
+                    onOpenWeb = {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(comp.pubChemUrl))
+                        context.startActivity(intent)
+                    }
+                )
+            }
         }
     }
 }

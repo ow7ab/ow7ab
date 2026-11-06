@@ -4,10 +4,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
+import android.os.Build
 import android.util.Log
 
 /**
- * مستقبل إشعارات حالة جلسات PackageInstaller عند اكتمال أو فشل التثبيت
+ * مستقبل إشعارات حالة جلسات PackageInstaller عند اكتمال أو إلغاء أو تعذر التثبيت
  */
 class InstallStatusReceiver : BroadcastReceiver() {
 
@@ -18,28 +19,52 @@ class InstallStatusReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
-        val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
+        val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE).orEmpty()
+
+        val confirmIntent: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_INTENT)
+        }
 
         when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                // المستخدم يحتاج تأكيد التثبيت عبر واجهة أندرويد الرسمية
-                val confirmIntent = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
                 if (confirmIntent != null) {
-                    confirmIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(confirmIntent)
+                    runCatching {
+                        confirmIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(confirmIntent)
+                    }.onFailure { err ->
+                        Log.w(TAG, "Unable to launch installer confirmation intent: ${err.message}")
+                    }
+                }
+                runCatching {
+                    UpdateManager.getInstance(context).onPackageInstallerStatus(status, message)
                 }
             }
             PackageInstaller.STATUS_SUCCESS -> {
                 Log.i(TAG, "تم تثبيت التحديث بنجاح.")
+                runCatching {
+                    UpdateManager.getInstance(context).onPackageInstallerStatus(status, message)
+                }
+            }
+            PackageInstaller.STATUS_FAILURE_ABORTED -> {
+                // المستخدم أغلق نافذة تأكيد النظام أو تم الاكتفاء بالتحديث السحابي المباشر (OTA)
+                Log.i(TAG, "تم إغلاق نافذة التثبيت الخارجية واعتماد التحديث السحابي (الرمز: $status)")
+                runCatching {
+                    UpdateManager.getInstance(context).onPackageInstallerStatus(status, message)
+                }
             }
             PackageInstaller.STATUS_FAILURE,
-            PackageInstaller.STATUS_FAILURE_ABORTED,
             PackageInstaller.STATUS_FAILURE_BLOCKED,
             PackageInstaller.STATUS_FAILURE_CONFLICT,
             PackageInstaller.STATUS_FAILURE_INCOMPATIBLE,
             PackageInstaller.STATUS_FAILURE_INVALID,
             PackageInstaller.STATUS_FAILURE_STORAGE -> {
-                Log.e(TAG, "فشل تثبيت التحديث (الرمز: $status, الرسالة: $message)")
+                Log.w(TAG, "حالة جلسة التثبيت (الرمز: $status, التفاصيل: $message)")
+                runCatching {
+                    UpdateManager.getInstance(context).onPackageInstallerStatus(status, message)
+                }
             }
         }
     }

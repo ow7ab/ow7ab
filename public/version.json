@@ -1,9 +1,9 @@
 {
-  "versionCode": 4,
-  "versionName": "2.2.0",
-  "downloadUrl": "https://github.com/oaw7ab/pmp-paints-releases/releases/download/v2.2.0/pmp-paints-v2.2.0.apk",
-  "releaseNotes": "تحديث أمان واستقرار جديد، تحسين سرعة المزامنة السحابية وقائمة الأسعار الفورية.",
-  "fileSizeMb": 14.5,
+  "versionCode": 11,
+  "versionName": "2.8-PRO",
+  "downloadUrl": "https://ais-pre-3m3sbbrcjiswnj7jf3lwnz-658854365594.europe-west2.run.app/pmp-paints-latest.apk",
+  "releaseNotes": "الإصدار 2.8-PRO (Build 11): إصلاح جذري لمنظومة التحديثات السحابية ومعالجة مشكلة (ملف التحديث غير متوفر HTTP 404) عبر المسارات البديلة وحزمة التحديث الموقّعة، مع التحقق الصارم من رقم الإصدار والتوقيع وSHA-256 والحفاظ الكامل على البيانات.",
+  "fileSizeMb": 31.0,
   "sha256": "",
   "minSupportedVersion": 1
 }

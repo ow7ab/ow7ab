@@ -73,70 +73,143 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         return true
     }
 
-    // --- StateFlow Streams ---
+    private val currencyPrefs = application.getSharedPreferences("pmp_account_currency_prefs", android.content.Context.MODE_PRIVATE)
+    private val _defaultAccountCurrency = MutableStateFlow(
+        currencyPrefs.getString("default_account_currency", "SDG") ?: "SDG"
+    )
+    val defaultAccountCurrency: StateFlow<String> = _defaultAccountCurrency.asStateFlow()
+
+    fun setDefaultAccountCurrency(currency: String) {
+        val clean = currency.trim().uppercase().takeIf { it in listOf("SDG", "EGP", "USD") } ?: "SDG"
+        _defaultAccountCurrency.value = clean
+        currencyPrefs.edit().putString("default_account_currency", clean).apply()
+        postMessage("تم توحيد عملة معاملات الحساب الافتراضية على ($clean) — ويمكنك تغيير العملة من داخل أي معاملة عند الحاجة")
+    }
+
+    fun resolveCashboxForCurrency(currency: String): String {
+        val clean = currency.trim().uppercase()
+        val boxes = cashboxes.value
+        return when (clean) {
+            "EGP" -> boxes.firstOrNull { it.name.contains("مصر") || it.name.contains("القاهرة") || it.name.contains("EGP", ignoreCase = true) }?.name ?: "خزنة مصر"
+            "USD" -> boxes.firstOrNull { it.name.contains("دولار") || it.name.contains("USD", ignoreCase = true) }?.name ?: "خزنة السودان"
+            else -> boxes.firstOrNull { it.name.contains("سودان") || it.name.contains("خرطوم") }?.name ?: "خزنة السودان"
+        }
+    }
+
+    fun lookupProductSalePrice(product: ProductEntity, currency: String): Double {
+        val cleanCur = currency.trim().uppercase()
+        val posters = posterPrices.value
+        if (cleanCur == "EGP") {
+            val egpPoster = posters.firstOrNull {
+                (it.currency.equals("EGP", ignoreCase = true) || it.id.endsWith("_EGP")) &&
+                    it.kind.equals(product.paintColor, ignoreCase = true) &&
+                    it.weight == product.packageWeight
+            }
+            if (egpPoster != null) {
+                val p = if (egpPoster.priceEgp > 0L && egpPoster.price == egpPoster.priceEgp * 200L) egpPoster.priceEgp else egpPoster.price
+                if (p > 0L) return p.toDouble()
+            }
+            return product.getEffectiveSalePrice("EGP")
+        } else if (cleanCur == "SDG") {
+            val sdgPoster = posters.firstOrNull {
+                !it.id.endsWith("_EGP") &&
+                    it.currency.equals("SDG", ignoreCase = true) &&
+                    it.kind.equals(product.paintColor, ignoreCase = true) &&
+                    it.weight == product.packageWeight
+            }
+            if (sdgPoster != null && sdgPoster.price > 0L) {
+                return sdgPoster.price.toDouble()
+            }
+            return product.getEffectiveSalePrice("SDG")
+        }
+        return 0.0
+    }
+
+    // --- Real Data Loading & Error States (Zero artificial delay, cached in memory across tab switches) ---
+    private val _isInitialDataLoading = MutableStateFlow(true)
+    val isInitialDataLoading: StateFlow<Boolean> = _isInitialDataLoading.asStateFlow()
+
+    private val _dataLoadError = MutableStateFlow<String?>(null)
+    val dataLoadError: StateFlow<String?> = _dataLoadError.asStateFlow()
+
+    // --- StateFlow Streams (SharingStarted.Lazily keeps loaded data hot in memory across tab switches) ---
     val cashboxes = repository.getCashboxes()
+        .map { list ->
+            list.filter { cb ->
+                !DeletedRecordsRegistry.isDeleted("cashboxes", cb.id) &&
+                    !DeletedRecordsRegistry.isDeleted("cashboxes", cb.name)
+            }.distinctBy { it.name.trim().lowercase() }
+        }
+        .onEach { _isInitialDataLoading.value = false }
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val movements = repository.getMovements()
+        .onEach { _isInitialDataLoading.value = false }
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val transfers = repository.getTransfers()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val dailyClosings = repository.getDailyClosings()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val customers = repository.getCustomers()
+        .onEach { _isInitialDataLoading.value = false }
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val invoices = repository.getInvoices()
+        .onEach { _isInitialDataLoading.value = false }
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val invoiceItems = repository.getAllInvoiceItems()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val invoicePayments = repository.getInvoicePayments()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val warehouses = repository.getWarehouses()
+        .onEach { _isInitialDataLoading.value = false }
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val products = repository.getProducts()
+        .onEach { _isInitialDataLoading.value = false }
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val stockMoves = repository.getStockMoves()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val factoryItems = repository.getFactoryItems()
+        .onEach { _isInitialDataLoading.value = false }
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val factoryMachines = repository.getFactoryMachines()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val factoryMoves = repository.getFactoryMoves()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val halfaInvoices = repository.getHalfaInvoices()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val posterPrices = repository.getPosterPrices()
+        .onEach { _isInitialDataLoading.value = false }
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val defaultPaintColors = listOf(
         "أبيض", "كريمي", "كبدي", "بني", "أزرق", "أحمر", 
@@ -151,11 +224,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
         .flowOn(Dispatchers.Default)
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), defaultPaintColors)
+        .stateIn(viewModelScope, SharingStarted.Lazily, defaultPaintColors)
 
     val auditLogs = repository.getAuditLogs()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val userAccounts = repository.getUserAccounts()
         .map { list ->
@@ -179,20 +252,21 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             result.sortedBy { it.id }
         }
+        .onEach { _isInitialDataLoading.value = false }
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val formulations = repository.getFormulations()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val chemicalSafetyList = repository.getChemicalSafety()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val productionBatches = repository.getProductionBatches()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
 
     // --- PubChem Search State ---
@@ -208,6 +282,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     val activeSessionUserId = MutableStateFlow<Long?>(null)
     val isSessionAuthenticated = MutableStateFlow(false)
     val activeSessionOverride = MutableStateFlow<UserAccountEntity?>(null)
+
+    private val _isInitializingSession = MutableStateFlow(true)
+    val isInitializingSession: StateFlow<Boolean> = _isInitializingSession.asStateFlow()
 
     val currentUser: StateFlow<UserAccountEntity?> = combine(userAccounts, activeSessionUserId, activeSessionOverride) { list, activeId, overrideUser ->
         if (overrideUser != null && (activeId == null || overrideUser.id == activeId)) {
@@ -285,26 +362,59 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
     init {
-        // Restore active user session ONLY if this specific physical device previously logged in
-        viewModelScope.launch {
-            userAccounts.firstOrNull { it.isNotEmpty() }?.let { list ->
+        // Restore active user session BEFORE hiding splash screen so LoginScreen never flashes when already logged in
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                DeletedAccountsRegistry.init(application)
+                DeletedRecordsRegistry.init(application)
                 val savedDeviceId = DeviceSessionStore.getActiveUserId(application)
                 if (savedDeviceId > 0L) {
-                    val activeSessionUser = list.firstOrNull { it.id == savedDeviceId && it.active && it.syncStatus != "PENDING_MANAGER_APPROVAL" }
-                    if (activeSessionUser != null && activeSessionUserId.value == null) {
-                        activeSessionUserId.value = activeSessionUser.id
+                    val dao = repository.getDao()
+                    var directUser = dao.getUserById(savedDeviceId)
+                    if (directUser == null) {
+                        DatabaseBackupManager.restoreIfEmpty(application, dao)
+                        directUser = dao.getUserById(savedDeviceId)
+                            ?: dao.getUserAccountsDirect().firstOrNull { it.id == savedDeviceId }
+                    }
+                    if (directUser != null && directUser.active && directUser.syncStatus != "PENDING_MANAGER_APPROVAL") {
+                        activeSessionOverride.value = directUser
+                        activeSessionUserId.value = directUser.id
                         isSessionAuthenticated.value = true
-                    } else {
-                        // User was deleted or suspended -> clear device session
+                        _isInitializingSession.value = false
+                    } else if (directUser != null && (!directUser.active || directUser.syncStatus == "PENDING_MANAGER_APPROVAL")) {
                         DeviceSessionStore.clearActiveSession(application)
+                        activeSessionOverride.value = null
                         activeSessionUserId.value = null
                         isSessionAuthenticated.value = false
+                        _isInitializingSession.value = false
+                    } else {
+                        // Wait briefly for initial seed if DB is still initializing on first launch
+                        val seededList = userAccounts.firstOrNull { it.isNotEmpty() }.orEmpty()
+                        val matched = seededList.firstOrNull {
+                            it.id == savedDeviceId && it.active && it.syncStatus != "PENDING_MANAGER_APPROVAL"
+                        }
+                        if (matched != null) {
+                            activeSessionOverride.value = matched
+                            activeSessionUserId.value = matched.id
+                            isSessionAuthenticated.value = true
+                        } else {
+                            DeviceSessionStore.clearActiveSession(application)
+                            activeSessionOverride.value = null
+                            activeSessionUserId.value = null
+                            isSessionAuthenticated.value = false
+                        }
+                        _isInitializingSession.value = false
                     }
                 } else {
-                    // Fresh installation or shared app on another device -> require explicit login
+                    // Fresh installation or explicitly logged out -> show LoginScreen after splash check
+                    activeSessionOverride.value = null
                     activeSessionUserId.value = null
                     isSessionAuthenticated.value = false
+                    _isInitializingSession.value = false
                 }
+            } catch (e: Exception) {
+                Log.w("PmpViewModel", "Session init check notice: ${e.message}")
+                _isInitializingSession.value = false
             }
         }
 
@@ -315,8 +425,68 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 DeletedRecordsRegistry.init(application)
                 DatabaseBackupManager.restoreIfEmpty(application, repository.getDao())
                 repository.deduplicateDatabaseUsers()
+                _dataLoadError.value = null
+                _isInitialDataLoading.value = false
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Local cache restore note: ${e.message}")
+                _isInitialDataLoading.value = false
+            }
+
+            // التحقق الفعلي من PackageManager بعد أي عملية تثبيت سابقة، والاستماع اللحظي للتحديثات السحابية
+            viewModelScope.launch {
+                try {
+                    verifyPostInstallAndRefreshVersion()
+
+                    updateManager.installStatusMessage.collect { statusPair ->
+                        if (statusPair != null) {
+                            val (msg, isErr) = statusPair
+                            postMessage(msg, isError = isErr)
+                            updateManager.clearInstallStatusMessage()
+                            verifyPostInstallAndRefreshVersion()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("PmpViewModel", "Install status observer notice: ${e.message}")
+                }
+            }
+
+            viewModelScope.launch {
+                try {
+                    updateManager.observeCloudUpdatesRealtime(serverClusterCode.value) { liveUpdate ->
+                        val installedCode = updateManager.getEffectiveVersionCode()
+                        if (liveUpdate != null && liveUpdate.versionCode > installedCode) {
+                            _availableUpdate.value = liveUpdate
+                            _updateAvailable.value = true
+                            _lastUpdateCheckStatus.value = "تحديث جديد متوفر: ${liveUpdate.versionName} (Build ${liveUpdate.versionCode})"
+                        } else {
+                            _availableUpdate.value = null
+                            _updateAvailable.value = false
+                            _lastUpdateCheckStatus.value = "التطبيق محدّث إلى آخر إصدار (v${updateManager.getEffectiveVersionName()} • Build $installedCode)"
+                        }
+                    }
+                    checkForAppUpdates(manual = false)
+                } catch (e: Exception) {
+                    Log.w("PmpViewModel", "Cloud update init notice: ${e.message}")
+                }
+            }
+
+            viewModelScope.launch {
+                currentUser.collect { user ->
+                    val isAdmin = user?.username?.equals("admin", ignoreCase = true) == true
+                    updateManager.setAdminBroadcastGuardEnabled(isAdmin)
+                    if (isAdmin) {
+                        // Automatically publish the latest cloud release metadata (v2.9-PRO Build 12) so all connected devices receive it
+                        launch(Dispatchers.IO) {
+                            runCatching {
+                                updateManager.broadcastToAllClusters(
+                                    info = UpdateManager.LATEST_CLOUD_RELEASE_INFO,
+                                    activeClusterCode = serverClusterCode.value,
+                                    forceNewIncrement = false
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             // Defer network sync slightly so initial screen displays instantly without any freeze
@@ -326,21 +496,28 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao())
                 DatabaseBackupManager.saveLocalSnapshot(application, repository.getDao())
                 checkServerHealth()
-
-                // نشر بيانات الإصدار المعتمد في السحابة لضمان نجاح فحص التحديثات الداخلي بدون أخطاء
-                val currentInfo = UpdateInfo(
-                    versionCode = BuildConfig.VERSION_CODE,
-                    versionName = BuildConfig.VERSION_NAME,
-                    downloadUrl = "https://github.com/oaw7ab/pmp-paints-releases/releases/latest",
-                    releaseNotes = "النسخة الرسمية المعتمدة (${BuildConfig.VERSION_NAME}) مع نظام حماية السجلات وتحديثات Sideload المباشرة",
-                    fileSizeMb = 14.5
-                )
-                updateManager.publishVersionToFirestore(currentInfo, serverClusterCode.value)
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Deferred cloud cluster sync: ${e.message}")
             }
         }
         startCloudRealtimeSyncIfAuthenticated()
+    }
+
+    fun retryDataLoadAndSync() {
+        _dataLoadError.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                DatabaseBackupManager.restoreIfEmpty(getApplication(), repository.getDao())
+                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao())
+                _isInitialDataLoading.value = false
+            } catch (e: Exception) {
+                _isInitialDataLoading.value = false
+                if (!isConnectedToCloud()) {
+                    _dataLoadError.value = "تعذر الاتصال بالشبكة لتحديث البيانات السحابية. يتم عرض البيانات المحفوظة محلياً."
+                }
+            }
+        }
     }
 
     // --- Actions ---
@@ -638,17 +815,38 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun addCashbox(name: String, user: String = resolveUserActor("المدير")) {
         if (!checkOnlineBeforeTransaction("إضافة خزنة")) return
         viewModelScope.launch {
-            repository.addCashbox(name, user)
-            postMessage("تمت إضافة الخزنة $name بنجاح")
+            if (!currentUser.value.isSystemManager()) {
+                postMessage("عفواً، إضافة الخزن الجديدة متاحة لمدير النظام فقط", isError = true)
+                return@launch
+            }
+            val cleanName = name.trim()
+            if (cleanName.isBlank()) {
+                postMessage("يرجى إدخال اسم الخزنة", isError = true)
+                return@launch
+            }
+            val newId = repository.addCashbox(cleanName, user)
+            viewModelScope.launch(Dispatchers.IO) {
+                cloudErpSyncRepo.syncSingleCashboxToCloud(serverClusterCode.value, newId, cleanName)
+            }
+            postMessage("تمت إضافة الخزنة ($cleanName) ومزامنتها بنجاح")
             persistAndSyncToServer()
         }
     }
 
     fun updateCashbox(id: Long, name: String, user: String = resolveUserActor("المدير")) {
+        if (!checkOnlineBeforeTransaction("تعديل اسم الخزنة")) return
         viewModelScope.launch {
-            val res = repository.updateCashbox(id, name, user)
+            if (!currentUser.value.isSystemManager()) {
+                postMessage("عفواً، تعديل الخزن متاح لمدير النظام فقط", isError = true)
+                return@launch
+            }
+            val cleanName = name.trim()
+            val res = repository.updateCashbox(id, cleanName, user)
             res.onSuccess {
-                postMessage("تم تعديل اسم الخزنة $name بنجاح")
+                viewModelScope.launch(Dispatchers.IO) {
+                    cloudErpSyncRepo.syncSingleCashboxToCloud(serverClusterCode.value, id, cleanName)
+                }
+                postMessage("تم تعديل اسم الخزنة إلى ($cleanName) بنجاح")
                 persistAndSyncToServer()
             }.onFailure {
                 postMessage(it.message ?: "تعذر تعديل الخزنة", isError = true)
@@ -657,16 +855,26 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteCashbox(id: Long, name: String, user: String = resolveUserActor("المدير")) {
+        if (!checkOnlineBeforeTransaction("حذف الخزنة")) return
         viewModelScope.launch {
-            val res = repository.deleteCashbox(id, user)
-            res.onSuccess {
+            if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
+                postMessage("عفواً، حذف أو أرشفة الخزن متاح لمدير النظام أو الحسابات المصرح لها فقط", isError = true)
+                return@launch
+            }
+            val cleanName = name.trim()
+            val res = repository.deleteCashbox(id, cleanName, user)
+            res.onSuccess { hadFinancialHistory ->
                 viewModelScope.launch(Dispatchers.IO) {
-                    val cleanDoc = "BOX-" + name.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-").trim('-').lowercase()
-                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "cashboxes", cleanDoc)
-                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "cashboxes", "BOX-$id")
+                    cloudErpSyncRepo.deleteCashboxFromCloud(serverClusterCode.value, id, cleanName)
+                    DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
+                    cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao())
                 }
-                postMessage("تم حذف الخزنة $name بنجاح")
-                persistAndSyncToServer()
+                val msg = if (hadFinancialHistory) {
+                    "تم إلغاء تفعيل وأرشفة الخزنة ($cleanName) عبر جميع الأجهزة مع الاحتفاظ الكامل بكافة الحركات والسجلات المالية التاريخية المرتبطة بها"
+                } else {
+                    "تم حذف الخزنة ($cleanName) نهائياً ومزامنة الحذف عبر جميع الأجهزة"
+                }
+                postMessage(msg)
             }.onFailure {
                 postMessage(it.message ?: "تعذر حذف الخزنة", isError = true)
             }
@@ -749,7 +957,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         if (!checkOnlineBeforeTransaction("إضافة صنف")) return
         viewModelScope.launch {
-            repository.addProduct(name, color, weight, purchasePrice, salePrice, salePriceEgp, minimumStock, user)
+            val prodId = repository.addProduct(name, color, weight, purchasePrice, salePrice, salePriceEgp, minimumStock, user)
+            DeletedRecordsRegistry.unregisterDeleted("products", prodId)
+            DeletedRecordsRegistry.unregisterDeleted("products", "PROD-$prodId")
             postMessage("تمت إضافة الصنف $name بنجاح")
             persistAndSyncToServer()
         }
@@ -816,7 +1026,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         if (!checkOnlineBeforeTransaction("حركة مخزون")) return
         viewModelScope.launch {
             repository.recordStockMove(warehouseId, productId, quantity, kind, note, user)
-            postMessage("تم تسجيل حركة المخزون بنجاح")
+            postMessage("تم تسجيل حركة المخزون بنجاح ومزامنتها")
+            persistAndSyncToServer()
         }
     }
 
@@ -827,12 +1038,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 postMessage("عفواً، حذف الأصناف متاح لمدير النظام أو الحسابات المصرح لها فقط", isError = true)
                 return@launch
             }
-            val res = repository.deleteProduct(productId, productName, resolveUserActor("المدير"))
+            val actor = resolveUserActor("المدير")
+            val res = repository.deleteProduct(productId, productName, actor)
             res.onSuccess {
+                DeletedRecordsRegistry.registerDeleted("products", productId, "PROD-$productId", actor)
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "products", "PROD-$productId")
                 }
-                postMessage("تم حذف الصنف ($productName) بنجاح من النظام")
+                postMessage("تم حذف الصنف ($productName) بنجاح من النظام والسحابة")
                 persistAndSyncToServer()
             }.onFailure {
                 postMessage(it.message ?: "تعذر حذف الصنف", isError = true)
@@ -892,6 +1105,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = repository.dispatchHalfa(itemId, itemName, qty, productId, productName, cartons, unitPrice, note, actor)
             postMessage("تم ترحيل البضاعة إلى حلفا وإنشاء فاتورة ${res.second}")
+            persistAndSyncToServer()
         }
     }
 
@@ -916,6 +1130,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         serverEndpoint: String = "https://api.pmp-paints-erp.com/v1"
     ) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("إنشاء حساب موظف جديد")) return@launch
             if (!currentUser.value.isSystemManager()) {
                 postMessage("عفواً، إنشاء الحسابات وتخصيص الصلاحيات متاح لحساب مدير النظام فقط", isError = true)
                 return@launch
@@ -954,6 +1169,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleUserAccountActive(user: UserAccountEntity) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("تعديل حالة تفعيل الحساب")) return@launch
             if (!currentUser.value.isSystemManager()) {
                 postMessage("عفواً، تفعيل أو إيقاف الحسابات متاح لحساب مدير النظام فقط", isError = true)
                 return@launch
@@ -976,6 +1192,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteUserAccountPermanently(user: UserAccountEntity) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("حذف حساب الموظف نهائياً")) return@launch
             if (!currentUser.value.isSystemManager()) {
                 postMessage("عفواً، الحذف النهائي متاح لحساب مدير النظام فقط", isError = true)
                 return@launch
@@ -1008,6 +1225,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun restoreUserAccount(user: UserAccountEntity) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("استرداد حساب الموظف")) return@launch
             if (!currentUser.value.isSystemManager()) {
                 postMessage("عفواً، استرداد الحسابات متاح لمدير النظام فقط", isError = true)
                 return@launch
@@ -1111,6 +1329,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     // --- In-App Update Management ---
     private val updateManager: UpdateManager = UpdateManager.getInstance(application)
 
+    val effectiveVersionCode: StateFlow<Int> = updateManager.effectiveVersionCode
+    val effectiveVersionName: StateFlow<String> = updateManager.effectiveVersionName
+
     private val _isCheckingUpdate = MutableStateFlow(false)
     val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate.asStateFlow()
 
@@ -1119,6 +1340,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _availableUpdate = MutableStateFlow<UpdateInfo?>(null)
     val availableUpdate: StateFlow<UpdateInfo?> = _availableUpdate.asStateFlow()
+
+    private val _lastUpdateCheckStatus = MutableStateFlow(
+        "الإصدار المثبت فعلياً: v${updateManager.getEffectiveVersionName()} (Build ${updateManager.getEffectiveVersionCode()})"
+    )
+    val lastUpdateCheckStatus: StateFlow<String> = _lastUpdateCheckStatus.asStateFlow()
 
     private val _updateProgress = MutableStateFlow(0)
     val updateProgress: StateFlow<Int> = _updateProgress.asStateFlow()
@@ -1133,29 +1359,83 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     val customUpdateMetadataUrl = MutableStateFlow(UpdateManager.DEFAULT_UPDATE_METADATA_URL)
 
+    /**
+     * التحقق الفعلي من PackageManager عند فتح التطبيق أو العودة من شاشة التثبيت
+     * للتأكد مما إذا كان الإصدار الجديد قد تم تثبيته فعلياً أم فشل/أُلغي.
+     */
+    fun verifyPostInstallAndRefreshVersion() {
+        updateManager.refreshInstalledVersionState()
+        when (val verifyResult = updateManager.verifyPendingInstallation()) {
+            is com.example.util.PostInstallVerificationResult.VerifiedSuccess -> {
+                _availableUpdate.value = null
+                _updateAvailable.value = false
+                _downloadedApkFile.value = null
+                _updateProgress.value = 0
+                updateManager.resetDownloadState()
+                val msg = "تم التحديث بنجاح والتحقق من تثبيت الإصدار الفعلي (v${verifyResult.installedVersionName} • Build ${verifyResult.installedVersionCode}) مع الحفاظ الكامل على البيانات"
+                _lastUpdateCheckStatus.value = msg
+                postMessage(msg, isError = false)
+            }
+            is com.example.util.PostInstallVerificationResult.FailedOrIncomplete -> {
+                val errMsg = "لم يتم تحديث التطبيق إلى ${verifyResult.expectedVersionName} (الإصدار المثبت حالياً: v${verifyResult.installedVersionName} • Build ${verifyResult.installedVersionCode}). السبب: ${verifyResult.reason}"
+                _lastUpdateCheckStatus.value = errMsg
+                postMessage(errMsg, isError = true)
+            }
+            com.example.util.PostInstallVerificationResult.NoPendingInstall -> {
+                val installedCode = updateManager.getEffectiveVersionCode()
+                val pending = _availableUpdate.value
+                if (pending != null && installedCode >= pending.versionCode) {
+                    _availableUpdate.value = null
+                    _updateAvailable.value = false
+                    _downloadedApkFile.value = null
+                    _updateProgress.value = 0
+                    updateManager.resetDownloadState()
+                }
+            }
+        }
+    }
+
     fun checkForAppUpdates(manual: Boolean = true, customUrl: String? = null) {
+        if (_isCheckingUpdate.value) {
+            if (manual) {
+                postMessage("جاري التحقق من التحديثات بالفعل، يرجى الانتظار لحظات...")
+            }
+            return
+        }
         viewModelScope.launch {
             _isCheckingUpdate.value = true
+            verifyPostInstallAndRefreshVersion()
             val url = customUrl ?: customUpdateMetadataUrl.value
             val result = updateManager.checkForUpdates(url, serverClusterCode.value)
             _isCheckingUpdate.value = false
 
+            val installedCode = updateManager.getEffectiveVersionCode()
+            val installedName = updateManager.getEffectiveVersionName()
+
             result.onSuccess { updateInfo ->
-                if (updateInfo != null) {
+                if (updateInfo != null && updateInfo.versionCode > installedCode) {
                     _availableUpdate.value = updateInfo
                     _updateAvailable.value = true
                     val sizeLabel = if (updateInfo.fileSizeMb > 0) " (${updateInfo.fileSizeMb}MB)" else ""
-                    postMessage("يتوفر تحديث جديد: ${updateInfo.versionName}$sizeLabel")
+                    val statusMsg = "تحديث متوفر: ${updateInfo.versionName} (Build ${updateInfo.versionCode})$sizeLabel"
+                    _lastUpdateCheckStatus.value = statusMsg
+                    postMessage("يتوفر تحديث جديد: ${updateInfo.versionName} (Build ${updateInfo.versionCode})$sizeLabel")
                 } else {
                     _availableUpdate.value = null
                     _updateAvailable.value = false
+                    _downloadedApkFile.value = null
+                    val upToDateMsg = "التطبيق محدّث إلى آخر إصدار (v$installedName • Build $installedCode)"
+                    _lastUpdateCheckStatus.value = upToDateMsg
                     if (manual) {
-                        postMessage("أنت تستخدم أحدث إصدار معتمد (${BuildConfig.VERSION_NAME}) • النظام محدث بالكامل")
+                        postMessage(upToDateMsg)
                     }
                 }
             }.onFailure { err ->
+                val reason = err.message ?: "تعذر الاتصال بخادم التحديثات"
+                val failMsg = "تعذر التحقق من التحديثات: $reason"
+                _lastUpdateCheckStatus.value = failMsg
                 if (manual) {
-                    postMessage("أنت تستخدم أحدث إصدار معتمد (${BuildConfig.VERSION_NAME}) • تم التحقق بنجاح من سلامة النظام")
+                    postMessage(failMsg, isError = true)
                 }
             }
         }
@@ -1167,25 +1447,56 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         dlUrl: String,
         releaseNotes: String = "تحديث أمان واستقرار جديد لمنظومة PMP Paints"
     ) {
+        val isAdmin = currentUser.value?.username?.equals("admin", ignoreCase = true) == true
+        if (!isAdmin) {
+            postMessage("عفواً، صلاحية بث ونشر التحديثات السحابية مخصصة لحساب (admin) فقط", isError = true)
+            return
+        }
         viewModelScope.launch {
             val info = UpdateInfo(
                 versionCode = vCode,
                 versionName = vName,
                 downloadUrl = dlUrl,
                 releaseNotes = releaseNotes,
-                fileSizeMb = 14.5
+                fileSizeMb = 31.0
             )
             val res = updateManager.publishVersionToFirestore(info, serverClusterCode.value)
             res.onSuccess {
                 postMessage("تم نشر بيانات الإصدار $vName ($vCode) على السحابة بنجاح")
-                checkForAppUpdates(manual = false)
             }.onFailure {
                 postMessage("تعذر نشر التحديث: ${it.message}", isError = true)
             }
         }
     }
 
+    /**
+     * إرسال وبث التحديث المعتمد إلى كافة النسخ السابقة سحابياً (حصرياً لحساب admin فقط)
+     */
+    fun broadcastUpdateToAllPreviousVersions() {
+        val isAdmin = currentUser.value?.username?.equals("admin", ignoreCase = true) == true
+        if (!isAdmin) {
+            postMessage("عفواً، صلاحية بث التحديثات للنسخ السابقة مخصصة لحساب (admin) فقط", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            _isCheckingUpdate.value = true
+            val release = UpdateManager.LATEST_CLOUD_RELEASE_INFO
+            val res = updateManager.broadcastToAllClusters(
+                info = release,
+                activeClusterCode = serverClusterCode.value,
+                forceNewIncrement = true
+            )
+            _isCheckingUpdate.value = false
+            res.onSuccess {
+                postMessage("تم إرسال وبث التحديث السحابي لكافة النسخ السابقة بنجاح!")
+            }.onFailure { err ->
+                postMessage("تعذر بث التحديث سحابياً: ${err.message}", isError = true)
+            }
+        }
+    }
+
     fun downloadAndInstallUpdate(context: android.content.Context, onReadyToInstall: (File) -> Unit) {
+        if (_isDownloadingUpdate.value) return
         val update = _availableUpdate.value
         if (update == null) {
             postMessage("لا يوجد تحديث متاح حالياً للتنزيل، قم بالضغط على فحص التحديثات أولاً", isError = true)
@@ -1205,9 +1516,12 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             result.onSuccess { apkFile ->
                 _downloadedApkFile.value = apkFile
                 _updateProgress.value = 100
-                postMessage("اكتمل تنزيل التحديث (${update.versionName}) بنجاح والتحقق من سلامة الحزمة!")
+                _lastUpdateCheckStatus.value = "اكتمل تنزيل الحزمة (${update.versionName}) والتحقق من التوقيع وSHA-256 — جاهز للتثبيت"
+                postMessage("اكتمل تنزيل ملف APK الصحيح (${update.versionName}) والتحقق من سلامة الحزمة والتوقيع — اضغط لتأكيد التثبيت")
                 onReadyToInstall(apkFile)
             }.onFailure { err ->
+                _downloadedApkFile.value = null
+                _lastUpdateCheckStatus.value = "فشل تنزيل التحديث: ${err.message}"
                 postMessage("تعذر تنزيل ملف التحديث: ${err.message}", isError = true)
             }
         }
@@ -1219,13 +1533,39 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             postMessage("ملف الـ APK غير متوفر، يرجى إعادة تنزيل التحديث", isError = true)
             return
         }
-        val res = updateManager.installApk(context, target)
-        res.onFailure { err ->
-            postMessage(err.message ?: "تعذر بدء معالج التثبيت", isError = true)
+        val pendingUpdate = _availableUpdate.value
+        val isExternalUpgrade = updateManager.isExternalBinaryApkUpgrade(target)
+        val res = updateManager.installApk(context, target, pendingUpdate)
+        res.onSuccess {
+            if (!isExternalUpgrade) {
+                _availableUpdate.value = null
+                _updateAvailable.value = false
+                _downloadedApkFile.value = null
+                _updateProgress.value = 0
+                updateManager.resetDownloadState()
+                verifyPostInstallAndRefreshVersion()
+                val newName = updateManager.getEffectiveVersionName()
+                val newCode = updateManager.getEffectiveVersionCode()
+                val successMsg = "تم التحديث بنجاح إلى الإصدار الفعلي (v$newName • Build $newCode) مع الحفاظ الكامل على البيانات"
+                _lastUpdateCheckStatus.value = successMsg
+                postMessage(successMsg, isError = false)
+            } else {
+                val targetName = pendingUpdate?.versionName ?: "الجديد"
+                _lastUpdateCheckStatus.value = "في انتظار موافقة المستخدم على تثبيت الإصدار $targetName من نافذة نظام أندرويد..."
+                postMessage("تم فتح مثبت نظام أندرويد لتثبيت الإصدار ($targetName) — يرجى الموافقة على التثبيت لإتمام الترقية")
+            }
+        }.onFailure { err ->
+            val errMsg = err.message ?: "تعذر بدء معالج التثبيت"
+            _lastUpdateCheckStatus.value = "تعذر التثبيت: $errMsg"
+            postMessage(errMsg, isError = true)
         }
     }
 
-    fun canRequestPackageInstalls(): Boolean {
+    fun canRequestPackageInstalls(apkFile: File? = _downloadedApkFile.value): Boolean {
+        val target = apkFile ?: _downloadedApkFile.value
+        if (target != null && !updateManager.isExternalBinaryApkUpgrade(target)) {
+            return true
+        }
         return updateManager.canRequestPackageInstalls()
     }
 
@@ -1534,6 +1874,27 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { err ->
                 _cloudSyncState.value = "تعذرت الاستعادة: ${err.message}"
                 postMessage("تعذرت استعادة البيانات من السيرفر: ${err.message}", isError = true)
+            }
+        }
+    }
+
+    fun verifyAndWipeAllServerData(
+        managerPassword: String,
+        onAuthError: (String) -> Unit = {},
+        onComplete: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("تصفير وحذف جميع سجلات السيرفر")) {
+                onAuthError("لا يمكن تصفير السيرفر بدون اتصال بالإنترنت")
+                return@launch
+            }
+            val authRes = repository.verifySystemManagerPassword(managerPassword)
+            authRes.onSuccess {
+                wipeAllServerDataAndStartFresh(onComplete)
+            }.onFailure { err ->
+                val msg = err.message ?: "كلمة المرور الخاصة بمدير النظام غير صحيحة!"
+                postMessage(msg, isError = true)
+                onAuthError(msg)
             }
         }
     }
@@ -2090,9 +2451,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         onSuccess: () -> Unit = {}
     ) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("إضافة صنف لمخزن المصنع")) return@launch
             val actor = resolveUserActor("إدارة المصنع")
             val res = repository.addFactoryItem(name, category, unit, actor)
-            res.onSuccess {
+            res.onSuccess { itemId ->
+                DeletedRecordsRegistry.unregisterDeleted("factory_items", itemId)
+                DeletedRecordsRegistry.unregisterDeleted("factory_items", "FI-$itemId")
+                DeletedRecordsRegistry.unregisterDeleted("factory_items", name.trim())
                 postMessage("تمت إضافة الصنف ($name) إلى منظومة المصنع بنجاح")
                 persistAndSyncToServer()
                 onSuccess()
@@ -2102,15 +2467,80 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateFactoryItem(
+        item: FactoryItemEntity,
+        newName: String,
+        newCategory: String,
+        newUnit: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("تعديل بيانات المادة الخام")) return@launch
+            val categoryChanged = item.category.trim() != newCategory.trim()
+            if (categoryChanged && !currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("تعديل نوع الصنف")) {
+                postMessage("عفواً، تعديل نوع الصنف يتطلب صلاحية (تعديل نوع الصنف)", isError = true)
+                return@launch
+            }
+            val actor = resolveUserActor("إدارة المشتريات والمصنع")
+            val res = repository.updateFactoryItem(item.id, newName, newCategory, newUnit, actor)
+            res.onSuccess {
+                DeletedRecordsRegistry.unregisterDeleted("factory_items", item.id)
+                DeletedRecordsRegistry.unregisterDeleted("factory_items", "FI-${item.id}")
+                DeletedRecordsRegistry.unregisterDeleted("factory_items", newName.trim())
+                postMessage("تم تعديل بيانات المادة الخام ($newName) بنجاح ومزامنتها")
+                persistAndSyncToServer()
+                onSuccess()
+            }.onFailure {
+                postMessage(it.message ?: "تعذر تعديل المادة الخام", isError = true)
+            }
+        }
+    }
+
+    fun renameFactoryItemCategory(
+        oldCategory: String,
+        newCategory: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("تعديل اسم نوع الصنف")) return@launch
+            if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("تعديل نوع الصنف")) {
+                postMessage("عفواً، هذه العملية تتطلب صلاحية (تعديل نوع الصنف)", isError = true)
+                return@launch
+            }
+            val actor = resolveUserActor("إدارة الأصناف")
+            val res = repository.renameFactoryItemCategory(oldCategory, newCategory, actor)
+            res.onSuccess {
+                postMessage("تم تعديل اسم نوع الصنف من ($oldCategory) إلى ($newCategory) بنجاح")
+                persistAndSyncToServer()
+                onSuccess()
+            }.onFailure {
+                postMessage(it.message ?: "تعذر تعديل اسم نوع الصنف", isError = true)
+            }
+        }
+    }
+
     fun deleteFactoryItem(item: FactoryItemEntity) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("حذف المادة الخام / الصنف")) return@launch
             val actor = resolveUserActor("إدارة المصنع")
             val res = repository.deleteFactoryItem(item.id, item.name, actor)
             res.onSuccess {
+                com.example.data.local.DeletedRecordsRegistry.registerDeleted(
+                    "factory_items",
+                    "FI-${item.id}",
+                    item.name,
+                    actor
+                )
+                com.example.data.local.DeletedRecordsRegistry.registerDeleted(
+                    "factory_items",
+                    item.id.toString(),
+                    item.name,
+                    actor
+                )
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "factory_items", "FI-${item.id}")
                 }
-                postMessage("تم حذف الصنف (${item.name}) من المصنع بنجاح")
+                postMessage("تم حذف المادة الخام (${item.name}) من النظام والسحابة بنجاح")
                 persistAndSyncToServer()
             }.onFailure {
                 postMessage(it.message ?: "تعذر حذف الصنف", isError = true)
@@ -2138,6 +2568,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveFormulation(formulation: FormulationEntity) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("حفظ تركيبة دهانات بالمختبر")) return@launch
             val actor = resolveUserActor("مهندس المختبر")
             val res = repository.saveFormulation(formulation, actor)
             res.onSuccess { savedId ->
@@ -2158,6 +2589,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteFormulation(formulation: FormulationEntity) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("حذف تركيبة من المختبر")) return@launch
             val actor = resolveUserActor("مهندس المختبر")
             val res = repository.deleteFormulation(formulation.id, actor)
             res.onSuccess {
@@ -2177,6 +2609,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun logProductionBatch(batch: ProductionBatchEntity, onCompleted: ((Boolean) -> Unit)? = null) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("تسجيل تشغيلة إنتاج بالمصنع")) {
+                onCompleted?.invoke(false)
+                return@launch
+            }
             val actor = resolveUserActor("مهندس الإنتاج")
             val res = repository.saveProductionBatch(batch, actor)
             res.onSuccess { savedId ->
@@ -2199,6 +2635,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteProductionBatch(batch: ProductionBatchEntity) {
         viewModelScope.launch {
+            if (!checkOnlineBeforeTransaction("حذف تشغيلة إنتاج من المصنع")) return@launch
             val actor = resolveUserActor("مهندس الإنتاج")
             val res = repository.deleteProductionBatch(batch.id, batch.batchNumber, actor)
             res.onSuccess {

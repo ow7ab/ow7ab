@@ -46,7 +46,12 @@ object BottomNavPreferences {
         // 2. Append any allowed screens that weren't in the saved preferences
         for (screen in allowedScreens) {
             if (screen !in result) {
-                result.add(screen)
+                if (screen == PmpScreen.PURCHASES && PmpScreen.TREASURY in result) {
+                    val treasuryIdx = result.indexOf(PmpScreen.TREASURY)
+                    result.add(treasuryIdx + 1, screen)
+                } else {
+                    result.add(screen)
+                }
             }
         }
         return result

@@ -15,6 +15,17 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isReasonablePayload() {
+      return request.resource == null || request.resource.data.keys().size() <= 120;
+    }
+
+    function isNotVersionDowngrade() {
+      return resource == null ||
+        !('versionCode' in resource.data) ||
+        !('versionCode' in request.resource.data) ||
+        request.resource.data.versionCode >= resource.data.versionCode;
+    }
+
     function isAllowedErpCollection(col) {
       return col in [
         'user_accounts', 'pending_requests',
@@ -26,62 +37,72 @@ service cloud.firestore {
         'halfa_invoices', 'poster_prices', 'audit_logs',
         'server_status', 'deleted_users',
         'lab_formulations', 'formulations', 'paint_batches',
-        'deleted_records', 'system_metadata', 'system_config'
+        'deleted_records', 'system_metadata', 'system_config', 'app_updates'
       ];
     }
 
     // 3. Collection Rules: /linked_accounts, /deleted_accounts, /system_config, /app_updates, /deleted_records
     match /system_config/{docId} {
-      allow read: if true;
-      allow create, update, delete: if isValidId(docId) || isSignedIn();
+      allow read: if isValidId(docId) || isSignedIn();
+      allow create, update: if (isValidId(docId) || isSignedIn()) && isReasonablePayload() && isNotVersionDowngrade();
+      allow delete: if isValidId(docId) || isSignedIn();
     }
 
     match /app_updates/{docId} {
-      allow read: if true;
-      allow create, update, delete: if isValidId(docId) || isSignedIn();
+      allow read: if isValidId(docId) || isSignedIn();
+      allow create, update: if (isValidId(docId) || isSignedIn()) && isReasonablePayload() && isNotVersionDowngrade();
+      allow delete: if isValidId(docId) || isSignedIn();
     }
 
     match /deleted_records/{docId} {
-      allow read: if true;
-      allow create, update, delete: if isValidId(docId) || isSignedIn();
+      allow read: if isValidId(docId) || isSignedIn();
+      allow create, update: if (isValidId(docId) || isSignedIn()) && isReasonablePayload();
+      allow delete: if isValidId(docId) || isSignedIn();
     }
 
     match /linked_accounts/{accountCode} {
-      allow read: if true;
-      allow create, update, delete: if isValidId(accountCode) || isSignedIn();
+      allow read: if isValidId(accountCode) || isSignedIn();
+      allow create, update: if (isValidId(accountCode) || isSignedIn()) && isReasonablePayload();
+      allow delete: if isValidId(accountCode) || isSignedIn();
     }
 
     match /deleted_accounts/{accountCode} {
-      allow read: if true;
-      allow create, update, delete: if isValidId(accountCode) || isSignedIn();
+      allow read: if isValidId(accountCode) || isSignedIn();
+      allow create, update: if (isValidId(accountCode) || isSignedIn()) && isReasonablePayload();
+      allow delete: if isValidId(accountCode) || isSignedIn();
     }
 
     // Chemical Formulations and Paint Batch Data
     match /lab_formulations/{formulaId} {
-      allow read: if true;
-      allow create, update, delete: if isValidId(formulaId) || isSignedIn();
+      allow read: if isValidId(formulaId) || isSignedIn();
+      allow create, update: if (isValidId(formulaId) || isSignedIn()) && isReasonablePayload();
+      allow delete: if isValidId(formulaId) || isSignedIn();
     }
 
     match /paint_batches/{batchId} {
-      allow read: if true;
-      allow create, update, delete: if isValidId(batchId) || isSignedIn();
+      allow read: if isValidId(batchId) || isSignedIn();
+      allow create, update: if (isValidId(batchId) || isSignedIn()) && isReasonablePayload();
+      allow delete: if isValidId(batchId) || isSignedIn();
     }
 
     // 4. Hardened ERP Central Clusters Rules
     // Enterprise ERP central cloud storage for phone, multi-user ERP credentials, and Windows clients
     match /erp_clusters/{clusterCode} {
       allow get, list: if isValidId(clusterCode);
-      allow create, update, delete: if isValidId(clusterCode);
+      allow create, update: if isValidId(clusterCode) && isReasonablePayload();
+      allow delete: if isValidId(clusterCode);
     }
 
     match /erp_clusters/{clusterCode}/{collectionName}/{docId} {
       allow get, list: if isValidId(clusterCode) && isAllowedErpCollection(collectionName);
-      allow create, update, delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId);
+      allow create, update: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId) && isReasonablePayload();
+      allow delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId);
     }
 
     match /erp_clusters/{clusterCode}/{collectionName}/{docId}/{subCollection}/{subDocId} {
       allow get, list: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId);
-      allow create, update, delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidId(subDocId);
+      allow create, update: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidId(subDocId) && isReasonablePayload();
+      allow delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidId(subDocId);
     }
   }
 }

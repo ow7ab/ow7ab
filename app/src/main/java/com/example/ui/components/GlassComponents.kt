@@ -1,9 +1,14 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -17,17 +22,31 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.*
+import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 private val TopHighlightBrush = Brush.horizontalGradient(
     colors = listOf(
@@ -357,7 +376,7 @@ private fun GlassTabPill(
     val shape = RoundedCornerShape(12.dp)
     Box(
         modifier = modifier
-            .defaultMinSize(minWidth = 72.dp)
+            .defaultMinSize(minWidth = 76.dp)
             .heightIn(min = 40.dp)
             .clip(shape)
             .background(if (selected) GlassAccentBlueGradient else GlassCardGradient)
@@ -377,10 +396,10 @@ private fun GlassTabPill(
             text = text,
             color = if (selected) TextPureWhite else TextDark,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
-            fontSize = 13.sp,
+            fontSize = 12.5.sp,
             maxLines = 1,
             softWrap = false,
-            overflow = TextOverflow.Clip,
+            overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center
         )
     }
@@ -531,3 +550,284 @@ fun GlassDropdown(
         }
     }
 }
+
+/**
+ * Samsung One UI-style interactive pull-down page container:
+ * - Moves the entire page content downward together as a single unit following the user's finger in real time.
+ * - Applies natural hyperbolic elastic resistance for a smooth, realistic dragging experience.
+ * - Reveals an atmospheric empty One UI background area at the top of the screen while pulled down.
+ * - Smoothly animates the page back to its original position (0f) using a spring animation upon release.
+ * - Uses NestedScrollConnection + non-intrusive pointer tracking so buttons, inputs, horizontal rows,
+ *   and normal vertical scrolling work without any interference.
+ */
+@Composable
+fun OneUiPullDownContainer(
+    modifier: Modifier = Modifier,
+    pageTitle: String = "",
+    screenKey: Any? = null,
+    onDeepPullTriggered: (() -> Unit)? = null,
+    content: @Composable BoxScope.() -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val viewConfiguration = LocalViewConfiguration.current
+
+    // Raw accumulated finger pull distance (in pixels); mapped through hyperbolic elastic damping
+    var rawPullPx by remember { mutableFloatStateOf(0f) }
+    val animatedOffsetPx = remember { Animatable(0f) }
+    var lastNestedScrollFrameTime by remember { mutableLongStateOf(0L) }
+    var deepPullFiredInGesture by remember { mutableStateOf(false) }
+
+    // Reset immediately when switching between screens
+    LaunchedEffect(screenKey) {
+        rawPullPx = 0f
+        deepPullFiredInGesture = false
+        animatedOffsetPx.snapTo(0f)
+    }
+
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFFE2E8F0),
+                        Color(0xFFEDF2F7),
+                        Color(0xFFF8FAFC)
+                    )
+                )
+            )
+            .testTag("one_ui_pull_down_root")
+    ) {
+        val containerHeightPx = with(density) { maxHeight.toPx().coerceAtLeast(600f) }
+        val maxElasticTranslationPx = remember(containerHeightPx) {
+            (containerHeightPx * 0.44f).coerceAtLeast(320f)
+        }
+        val deepPullThresholdPx = remember(maxElasticTranslationPx) {
+            maxElasticTranslationPx * 0.58f
+        }
+
+        fun computeElasticOffset(raw: Float): Float =
+            computeElasticOffset(raw, maxElasticTranslationPx)
+
+
+        fun computeInverseRawFromElastic(elasticPx: Float): Float {
+            val clamped = elasticPx.coerceIn(0f, maxElasticTranslationPx * 0.96f)
+            if (clamped <= 0f) return 0f
+            val frac = clamped / maxElasticTranslationPx
+            return (maxElasticTranslationPx * (frac / (1f - frac))) / 0.65f
+        }
+
+        fun applyRealtimeFingerDelta(deltaY: Float) {
+            if (deltaY == 0f) return
+            // Sync rawPullPx with current visual offset if a spring animation was interrupted mid-flight
+            if (animatedOffsetPx.isRunning) {
+                rawPullPx = computeInverseRawFromElastic(animatedOffsetPx.value)
+            }
+            if (deltaY > 0f) {
+                rawPullPx = (rawPullPx + deltaY).coerceAtMost(maxElasticTranslationPx * 4.5f)
+            } else {
+                // Moving upward while pulled down: reduce elastic offset smoothly 1:1 with upward finger motion
+                val currentElastic = computeElasticOffset(rawPullPx)
+                val nextElastic = (currentElastic + deltaY).coerceAtLeast(0f)
+                rawPullPx = computeInverseRawFromElastic(nextElastic)
+            }
+            val targetElastic = computeElasticOffset(rawPullPx)
+            if (targetElastic >= deepPullThresholdPx && !deepPullFiredInGesture) {
+                deepPullFiredInGesture = true
+                onDeepPullTriggered?.invoke()
+            }
+            scope.launch {
+                animatedOffsetPx.snapTo(targetElastic)
+            }
+        }
+
+        fun springBackToOrigin(initialVelocityPx: Float = 0f) {
+            deepPullFiredInGesture = false
+            if (rawPullPx <= 0.5f && animatedOffsetPx.value <= 0.5f) {
+                rawPullPx = 0f
+                return
+            }
+            rawPullPx = 0f
+            scope.launch {
+                animatedOffsetPx.animateTo(
+                    targetValue = 0f,
+                    initialVelocity = initialVelocityPx.coerceIn(-2400f, 1200f),
+                    animationSpec = spring(
+                        dampingRatio = 0.84f,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                )
+            }
+        }
+
+        val nestedScrollConnection = remember(maxElasticTranslationPx) {
+            object : NestedScrollConnection {
+                override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                    if (source == NestedScrollSource.UserInput && available.y < 0f && animatedOffsetPx.value > 0.5f) {
+                        lastNestedScrollFrameTime = System.nanoTime()
+                        val beforeElastic = animatedOffsetPx.value
+                        applyRealtimeFingerDelta(available.y)
+                        val afterElastic = computeElasticOffset(rawPullPx)
+                        val consumedY = (afterElastic - beforeElastic).coerceIn(available.y, 0f)
+                        return Offset(0f, consumedY)
+                    }
+                    return Offset.Zero
+                }
+
+                override fun onPostScroll(
+                    consumed: Offset,
+                    available: Offset,
+                    source: NestedScrollSource
+                ): Offset {
+                    if (source == NestedScrollSource.UserInput && available.y > 0f) {
+                        lastNestedScrollFrameTime = System.nanoTime()
+                        applyRealtimeFingerDelta(available.y)
+                        return Offset(0f, available.y)
+                    }
+                    return Offset.Zero
+                }
+
+                override suspend fun onPreFling(available: Velocity): Velocity {
+                    if (animatedOffsetPx.value > 0.5f) {
+                        springBackToOrigin(available.y)
+                        return Velocity(0f, available.y)
+                    }
+                    return Velocity.Zero
+                }
+
+                override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                    if (animatedOffsetPx.value > 0.5f) {
+                        springBackToOrigin(available.y)
+                    }
+                    return Velocity.Zero
+                }
+            }
+        }
+
+        val currentOffsetPx = animatedOffsetPx.value
+        val pullProgress = (currentOffsetPx / (maxElasticTranslationPx * 0.55f)).coerceIn(0f, 1f)
+
+        // Revealed Empty One UI Background Area at the Top of the Screen
+        if (currentOffsetPx > 1f) {
+            val revealedHeightDp = with(density) { currentOffsetPx.toDp() }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(revealedHeightDp)
+                    .align(Alignment.TopCenter),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier
+                        .graphicsLayer {
+                            alpha = (pullProgress * 1.15f).coerceIn(0f, 1f)
+                            scaleX = 0.92f + (0.08f * pullProgress)
+                            scaleY = 0.92f + (0.08f * pullProgress)
+                        }
+                        .padding(horizontal = 24.dp)
+                ) {
+                    if (pageTitle.isNotBlank() && currentOffsetPx > with(density) { 56.dp.toPx() }) {
+                        Text(
+                            text = pageTitle,
+                            color = PmpBrandNavy.copy(alpha = 0.85f),
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 22.sp,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    // Subtle One UI pull-down pill handle at bottom of revealed area
+                    Box(
+                        modifier = Modifier
+                            .width(42.dp)
+                            .height(4.5.dp)
+                            .clip(CircleShape)
+                            .background(PmpBrandNavy.copy(alpha = 0.22f))
+                    )
+                }
+            }
+        }
+
+        val dynamicTopCornerDp = with(density) {
+            (pullProgress * 26f).dp
+        }
+        val pullShape = RoundedCornerShape(
+            topStart = dynamicTopCornerDp,
+            topEnd = dynamicTopCornerDp,
+            bottomStart = 0.dp,
+            bottomEnd = 0.dp
+        )
+
+        // Unified Page Unit Moving Together in Real Time
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .nestedScroll(nestedScrollConnection)
+                .pointerInput(maxElasticTranslationPx) {
+                    val touchSlop = viewConfiguration.touchSlop
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        var totalDy = 0f
+                        var totalDx = 0f
+                        var isNonScrollablePullActive = false
+                        val pointerId = down.id
+
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Main)
+                            val change = event.changes.firstOrNull { it.id == pointerId } ?: event.changes.firstOrNull()
+                            if (change == null || event.changes.none { it.pressed }) {
+                                break
+                            }
+
+                            val delta = change.positionChange()
+                            totalDy += delta.y
+                            totalDx += delta.x
+
+                            val nestedHandledRecently = (System.nanoTime() - lastNestedScrollFrameTime) < 32_000_000L
+                            if (!nestedHandledRecently && !change.isConsumed) {
+                                if (!isNonScrollablePullActive) {
+                                    // Activate fallback pull on non-scrollable areas (headers, static pages) only after clear vertical downward drag
+                                    if (totalDy > touchSlop && abs(totalDy) > abs(totalDx) * 1.25f) {
+                                        isNonScrollablePullActive = true
+                                    }
+                                }
+                                if (isNonScrollablePullActive && (delta.y > 0f || animatedOffsetPx.value > 0.5f)) {
+                                    applyRealtimeFingerDelta(delta.y)
+                                    change.consume()
+                                }
+                            }
+                        }
+
+                        // Guarantee spring return whenever finger leaves the screen
+                        if (animatedOffsetPx.value > 0.5f || rawPullPx > 0.5f) {
+                            springBackToOrigin(0f)
+                        }
+                    }
+                }
+                .graphicsLayer {
+                    translationY = currentOffsetPx
+                    shape = pullShape
+                    clip = currentOffsetPx > 1f
+                    shadowElevation = if (currentOffsetPx > 2f) (pullProgress * 14f) else 0f
+                }
+                .background(GlassBackgroundBrush)
+        ) {
+            content()
+        }
+    }
+}
+
+internal fun computeElasticOffset(raw: Float, maxElasticTranslationPx: Float): Float {
+    if (raw <= 0f || maxElasticTranslationPx <= 0f) return 0f
+    val normalized = raw / maxElasticTranslationPx
+    // Natural Samsung One UI rubber-band curve: responsive initial tracking with progressive resistance
+    return maxElasticTranslationPx * (1f - (1f / (1f + normalized * 0.65f)))
+}
+
+
+

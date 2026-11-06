@@ -767,6 +767,31 @@ class CloudErpSyncRepository(
                         dao.deleteTransferById(t.id)
                     }
                 }
+                dao.getFactoryItemsDirect().forEach { fi ->
+                    if (DeletedRecordsRegistry.isDeleted("factory_items", fi.id) ||
+                        DeletedRecordsRegistry.isDeleted("factory_items", "FI-${fi.id}") ||
+                        DeletedRecordsRegistry.isDeleted("factory_items", fi.name)
+                    ) {
+                        dao.deleteFactoryItemById(fi.id)
+                    }
+                }
+                dao.getProductsDirect().forEach { p ->
+                    if (DeletedRecordsRegistry.isDeleted("products", p.id) ||
+                        DeletedRecordsRegistry.isDeleted("products", "PROD-${p.id}")
+                    ) {
+                        dao.deleteProduct(p.id)
+                    }
+                }
+                dao.getCashboxesDirect().forEach { cb ->
+                    val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
+                    if (DeletedRecordsRegistry.isDeleted("cashboxes", cb.id) ||
+                        DeletedRecordsRegistry.isDeleted("cashboxes", "BOX-${cb.id}") ||
+                        DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) ||
+                        DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId)
+                    ) {
+                        dao.deleteCashbox(cb.id)
+                    }
+                }
             }
 
             usersToSync.chunked(300).forEach { chunk ->
@@ -968,8 +993,11 @@ class CloudErpSyncRepository(
                 batch.commit().await()
             }
 
-            // 5. Products & Pricing (Batched)
-            val products = dao.getProductsDirect()
+            // 5. Products & Pricing (Batched - excluding deleted)
+            val products = dao.getProductsDirect().filterNot { p ->
+                DeletedRecordsRegistry.isDeleted("products", p.id) ||
+                    DeletedRecordsRegistry.isDeleted("products", "PROD-${p.id}")
+            }
             products.chunked(300).forEach { chunk ->
                 val batch = firestore.batch()
                 chunk.forEach { p ->
@@ -982,6 +1010,7 @@ class CloudErpSyncRepository(
                         "unit" to p.unit,
                         "purchasePrice" to p.purchasePrice,
                         "salePrice" to p.salePrice,
+                        "salePriceEgp" to p.salePriceEgp,
                         "minimumStock" to p.minimumStock,
                         "paintColor" to p.paintColor,
                         "packageWeight" to p.packageWeight,
@@ -995,17 +1024,52 @@ class CloudErpSyncRepository(
                 batch.commit().await()
             }
 
+            // 5b. Poster Price List (Separated SDG & EGP Currencies)
+            val posterPrices = dao.getPosterPricesDirect()
+            if (posterPrices.isNotEmpty()) {
+                posterPrices.chunked(300).forEach { chunk ->
+                    val batch = firestore.batch()
+                    chunk.forEach { pp ->
+                        val isEgp = pp.currency.equals("EGP", ignoreCase = true) || pp.id.endsWith("_EGP")
+                        val cleanPrice = if (isEgp && pp.priceEgp > 0L && pp.price == pp.priceEgp * 200L) pp.priceEgp else pp.price
+                        val docId = safeId(pp.id, "${pp.weight}_${pp.kind}_${pp.currency}")
+                        val data = mapOf(
+                            "id" to pp.id,
+                            "weight" to pp.weight,
+                            "kind" to pp.kind,
+                            "price" to cleanPrice,
+                            "priceEgp" to if (isEgp) cleanPrice else 0L,
+                            "currency" to if (isEgp) "EGP" else "SDG",
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        )
+                        batch.set(cRef.collection("poster_prices").document(docId), data, SetOptions.merge())
+                        syncedCount++
+                    }
+                    batch.commit().await()
+                }
+            }
+
             // 6. Cashboxes & Warehouses (Batched)
             val cashboxes = dao.getCashboxesDirect()
+                .filter { cb ->
+                    val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
+                    !DeletedRecordsRegistry.isDeleted("cashboxes", cb.id) &&
+                        !DeletedRecordsRegistry.isDeleted("cashboxes", "BOX-${cb.id}") &&
+                        !DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) &&
+                        !DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId)
+                }
+                .distinctBy { it.name.trim().lowercase() }
             if (cashboxes.isNotEmpty()) {
                 val batch = firestore.batch()
                 cashboxes.forEach { cb ->
-                    val docId = safeId("BOX-${cb.name.trim().lowercase()}", "BOX-${cb.id}")
+                    val docId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
                     batch.set(
                         cRef.collection("cashboxes").document(docId),
                         mapOf(
                             "id" to cb.id,
-                            "name" to cb.name,
+                            "name" to cb.name.trim(),
+                            "docId" to docId,
                             "serverUpdatedAt" to FieldValue.serverTimestamp()
                         ),
                         SetOptions.merge()
@@ -1036,7 +1100,11 @@ class CloudErpSyncRepository(
             }
 
             // 7. Factory Items & Raw Materials (Egypt Connected - Batched)
-            val factoryItems = dao.getFactoryItemsDirect()
+            val factoryItems = dao.getFactoryItemsDirect().filterNot { fi ->
+                DeletedRecordsRegistry.isDeleted("factory_items", fi.id) ||
+                    DeletedRecordsRegistry.isDeleted("factory_items", "FI-${fi.id}") ||
+                    DeletedRecordsRegistry.isDeleted("factory_items", fi.name)
+            }
             factoryItems.chunked(300).forEach { chunk ->
                 val batch = firestore.batch()
                 chunk.forEach { fi ->
@@ -1505,14 +1573,22 @@ class CloudErpSyncRepository(
                 restoredCount += restoredCustomers.size
             }
 
-            // 5. Fetch Products from Server with deduplication
+            // 5. Fetch Products from Server with deduplication & tombstone shield
             val localProducts = dao.getProductsDirect()
             val prodSnapshot = cRef.collection("products").get().await()
-            val restoredProducts = prodSnapshot.documents.map { doc ->
+            val restoredProducts = prodSnapshot.documents.mapNotNull { doc ->
                 val sku = doc.getString("sku") ?: ""
                 val name = doc.getString("name") ?: "منتج"
                 val existingProd = localProducts.firstOrNull { (sku.isNotBlank() && it.sku == sku) || it.name == name }
                 val prodId = existingProd?.id ?: (doc.getLong("id") ?: 0L)
+                if (DeletedRecordsRegistry.isDeleted("products", prodId) ||
+                    DeletedRecordsRegistry.isDeleted("products", "PROD-$prodId") ||
+                    DeletedRecordsRegistry.isDeleted("products", doc.id)
+                ) {
+                    runCatching { doc.reference.delete() }
+                    dao.deleteProduct(prodId)
+                    return@mapNotNull null
+                }
                 ProductEntity(
                     id = prodId,
                     sku = sku,
@@ -1521,6 +1597,7 @@ class CloudErpSyncRepository(
                     unit = doc.getString("unit") ?: existingProd?.unit ?: "كرتونة",
                     purchasePrice = doc.getDouble("purchasePrice") ?: existingProd?.purchasePrice ?: 0.0,
                     salePrice = doc.getDouble("salePrice") ?: existingProd?.salePrice ?: 0.0,
+                    salePriceEgp = doc.getDouble("salePriceEgp") ?: existingProd?.salePriceEgp ?: 0.0,
                     minimumStock = doc.getDouble("minimumStock") ?: existingProd?.minimumStock ?: 10.0,
                     paintColor = doc.getString("paintColor") ?: existingProd?.paintColor ?: "أبيض",
                     packageWeight = doc.getString("packageWeight") ?: existingProd?.packageWeight ?: "900",
@@ -1530,6 +1607,34 @@ class CloudErpSyncRepository(
             if (restoredProducts.isNotEmpty()) {
                 dao.upsertProducts(restoredProducts)
                 restoredCount += restoredProducts.size
+            }
+
+            // 5b. Fetch Poster Prices from Server with strict SDG & EGP separation
+            runCatching {
+                val ppSnapshot = cRef.collection("poster_prices").get().await()
+                val restoredPosterPrices = ppSnapshot.documents.mapNotNull { doc ->
+                    val rawId = doc.getString("id") ?: doc.id
+                    val weight = doc.getString("weight") ?: return@mapNotNull null
+                    val kind = doc.getString("kind") ?: return@mapNotNull null
+                    val rawCurrency = doc.getString("currency") ?: if (rawId.endsWith("_EGP")) "EGP" else "SDG"
+                    val isEgp = rawCurrency.equals("EGP", ignoreCase = true) || rawId.endsWith("_EGP")
+                    val rawPrice = doc.getLong("price") ?: 0L
+                    val rawPriceEgp = doc.getLong("priceEgp") ?: 0L
+                    val cleanPrice = if (isEgp && rawPriceEgp > 0L && rawPrice == rawPriceEgp * 200L) rawPriceEgp else rawPrice
+                    if (cleanPrice <= 0L) return@mapNotNull null
+                    PosterPriceEntity(
+                        id = if (isEgp) "${weight}_${kind}_EGP" else "${weight}_$kind",
+                        weight = weight,
+                        kind = kind,
+                        price = cleanPrice,
+                        priceEgp = if (isEgp) cleanPrice else 0L,
+                        currency = if (isEgp) "EGP" else "SDG"
+                    )
+                }
+                if (restoredPosterPrices.isNotEmpty()) {
+                    dao.insertPosterPrices(restoredPosterPrices)
+                    restoredCount += restoredPosterPrices.size
+                }
             }
 
             // 6. Fetch Warehouses and Cashboxes
@@ -1549,13 +1654,37 @@ class CloudErpSyncRepository(
                 restoredCount += restoredWarehouses.size
             }
 
+            val initialLocalCb = dao.getCashboxesDirect()
+            initialLocalCb.forEach { cb ->
+                val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
+                if (DeletedRecordsRegistry.isDeleted("cashboxes", cb.id) ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", "BOX-${cb.id}") ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId)
+                ) {
+                    dao.deleteCashbox(cb.id)
+                }
+            }
             val localCb = dao.getCashboxesDirect()
             val cbSnapshot = cRef.collection("cashboxes").get().await()
             val restoredCashboxes = cbSnapshot.documents.mapNotNull { doc ->
-                val name = doc.getString("name") ?: return@mapNotNull null
-                val existing = localCb.firstOrNull { it.name.trim().equals(name.trim(), ignoreCase = true) }
+                val name = doc.getString("name")?.trim() ?: return@mapNotNull null
+                if (name.isBlank()) return@mapNotNull null
+                val remoteId = doc.getLong("id") ?: 0L
+                val cbDocId = DeletedRecordsRegistry.cashboxDocId(name, remoteId)
+                if (DeletedRecordsRegistry.isDeleted("cashboxes", name) ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId) ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", doc.id) ||
+                    (remoteId > 0L && DeletedRecordsRegistry.isDeleted("cashboxes", remoteId))
+                ) {
+                    runCatching { doc.reference.delete() }
+                    localCb.filter { it.name.trim().equals(name, ignoreCase = true) || (remoteId > 0L && it.id == remoteId) }
+                        .forEach { dao.deleteCashbox(it.id) }
+                    return@mapNotNull null
+                }
+                val existing = localCb.firstOrNull { it.name.trim().equals(name, ignoreCase = true) }
                 CashboxEntity(
-                    id = existing?.id ?: (doc.getLong("id") ?: 0L),
+                    id = existing?.id ?: remoteId,
                     name = name
                 )
             }
@@ -1569,9 +1698,16 @@ class CloudErpSyncRepository(
             val fiSnapshot = cRef.collection("factory_items").get().await()
             val restoredFactoryItems = fiSnapshot.documents.mapNotNull { doc ->
                 val id = doc.getLong("id") ?: return@mapNotNull null
+                val name = doc.getString("name") ?: "خامة"
+                if (DeletedRecordsRegistry.isDeleted("factory_items", id) ||
+                    DeletedRecordsRegistry.isDeleted("factory_items", doc.id) ||
+                    DeletedRecordsRegistry.isDeleted("factory_items", name)
+                ) {
+                    return@mapNotNull null
+                }
                 FactoryItemEntity(
                     id = id,
-                    name = doc.getString("name") ?: "خامة",
+                    name = name,
                     unit = doc.getString("unit") ?: "كجم",
                     category = doc.getString("category") ?: "raw"
                 )
@@ -1932,8 +2068,29 @@ class CloudErpSyncRepository(
                                     "customers" -> if (numId != null) dao.deleteCustomer(numId)
                                     "invoices" -> if (numId != null) dao.deleteInvoiceById(numId)
                                     "transfers" -> if (numId != null) dao.deleteTransferById(numId)
+                                    "factory_items" -> if (numId != null) dao.deleteFactoryItemById(numId)
+                                    "products" -> if (numId != null) dao.deleteProduct(numId)
+                                    "warehouses" -> if (numId != null) dao.deleteWarehouse(numId)
+                                    "cashboxes" -> {
+                                        val entityIdStr = doc.getString("entityId")?.trim().orEmpty()
+                                        if (numId != null && numId > 0L) {
+                                            dao.deleteCashbox(numId)
+                                        }
+                                        val currentBoxes = dao.getCashboxesDirect()
+                                        currentBoxes.forEach { cb ->
+                                            val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
+                                            if ((entityIdStr.isNotBlank() && cb.name.trim().equals(entityIdStr, ignoreCase = true)) ||
+                                                cbDocId.equals(docId, ignoreCase = true) ||
+                                                DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) ||
+                                                DeletedRecordsRegistry.isDeleted("cashboxes", cb.id)
+                                            ) {
+                                                dao.deleteCashbox(cb.id)
+                                            }
+                                        }
+                                    }
                                 }
                             }
+                            trySend(snapshot.size())
                         } catch (e: Exception) {
                             Log.w(TAG, "Notice merging realtime tombstones: ${e.message}")
                         }
@@ -2174,6 +2331,14 @@ class CloudErpSyncRepository(
                             if (!snapshot.isEmpty) {
                                 val list = snapshot.documents.mapNotNull { doc ->
                                     val id = doc.getLong("id") ?: return@mapNotNull null
+                                    if (DeletedRecordsRegistry.isDeleted("products", id) ||
+                                        DeletedRecordsRegistry.isDeleted("products", "PROD-$id") ||
+                                        DeletedRecordsRegistry.isDeleted("products", doc.id)
+                                    ) {
+                                        runCatching { doc.reference.delete() }
+                                        dao.deleteProduct(id)
+                                        return@mapNotNull null
+                                    }
                                     ProductEntity(
                                         id = id,
                                         sku = doc.getString("sku") ?: "PMP-$id",
@@ -2197,12 +2362,111 @@ class CloudErpSyncRepository(
                 }
             }
 
+        val fiListener = cRef.collection("factory_items")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            for (dc in snapshot.documentChanges) {
+                                if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                                    val fiId = dc.document.getLong("id")
+                                    if (fiId != null) {
+                                        dao.deleteFactoryItemById(fiId)
+                                    }
+                                }
+                            }
+                            if (!snapshot.isEmpty) {
+                                val list = snapshot.documents.mapNotNull { doc ->
+                                    val id = doc.getLong("id") ?: return@mapNotNull null
+                                    val name = doc.getString("name") ?: "خامة"
+                                    if (DeletedRecordsRegistry.isDeleted("factory_items", id) ||
+                                        DeletedRecordsRegistry.isDeleted("factory_items", "FI-$id") ||
+                                        DeletedRecordsRegistry.isDeleted("factory_items", doc.id) ||
+                                        DeletedRecordsRegistry.isDeleted("factory_items", name)
+                                    ) {
+                                        runCatching { doc.reference.delete() }
+                                        dao.deleteFactoryItemById(id)
+                                        return@mapNotNull null
+                                    }
+                                    FactoryItemEntity(
+                                        id = id,
+                                        name = name,
+                                        unit = doc.getString("unit") ?: "كجم",
+                                        category = doc.getString("category") ?: "خامات إنتاج"
+                                    )
+                                }
+                                if (list.isNotEmpty()) dao.upsertFactoryItems(list)
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error syncing live factory items", e)
+                        }
+                    }
+                }
+            }
+
+        val cbListener = cRef.collection("cashboxes")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            val localBoxes = dao.getCashboxesDirect()
+                            for (dc in snapshot.documentChanges) {
+                                if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                                    val removedName = dc.document.getString("name")?.trim().orEmpty()
+                                    val removedId = dc.document.getLong("id")
+                                    if (removedId != null && removedId > 0L) {
+                                        dao.deleteCashbox(removedId)
+                                    }
+                                    if (removedName.isNotBlank()) {
+                                        localBoxes.filter { it.name.trim().equals(removedName, ignoreCase = true) }
+                                            .forEach { dao.deleteCashbox(it.id) }
+                                    }
+                                }
+                            }
+                            if (!snapshot.isEmpty) {
+                                val currentLocal = dao.getCashboxesDirect()
+                                val validList = snapshot.documents.mapNotNull { doc ->
+                                    val name = doc.getString("name")?.trim() ?: return@mapNotNull null
+                                    if (name.isBlank()) return@mapNotNull null
+                                    val remoteId = doc.getLong("id") ?: 0L
+                                    val cbDocId = DeletedRecordsRegistry.cashboxDocId(name, remoteId)
+                                    if (DeletedRecordsRegistry.isDeleted("cashboxes", name) ||
+                                        DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId) ||
+                                        DeletedRecordsRegistry.isDeleted("cashboxes", doc.id) ||
+                                        (remoteId > 0L && DeletedRecordsRegistry.isDeleted("cashboxes", remoteId))
+                                    ) {
+                                        runCatching { doc.reference.delete() }
+                                        currentLocal.filter { it.name.trim().equals(name, ignoreCase = true) || (remoteId > 0L && it.id == remoteId) }
+                                            .forEach { dao.deleteCashbox(it.id) }
+                                        return@mapNotNull null
+                                    }
+                                    val existing = currentLocal.firstOrNull { it.name.trim().equals(name, ignoreCase = true) }
+                                    CashboxEntity(
+                                        id = existing?.id ?: remoteId,
+                                        name = name
+                                    )
+                                }.distinctBy { it.name.trim().lowercase() }
+                                if (validList.isNotEmpty()) {
+                                    dao.upsertCashboxes(validList)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error syncing live cashboxes", e)
+                        }
+                    }
+                }
+            }
+
         awaitClose {
             tombListener.remove()
             invListener.remove()
             movListener.remove()
             custListener.remove()
             prodListener.remove()
+            fiListener.remove()
+            cbListener.remove()
         }
     }
 
@@ -2482,6 +2746,102 @@ class CloudErpSyncRepository(
     }
 
     /**
+     * Synchronizes a single cashbox (added or renamed) immediately to Cloud Firestore.
+     */
+    suspend fun syncSingleCashboxToCloud(
+        clusterCode: String,
+        id: Long,
+        cashboxName: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanName = cashboxName.trim()
+            if (cleanName.isBlank()) return@runCatching
+            DeletedRecordsRegistry.unregisterDeleted("cashboxes", cleanName)
+            if (id > 0L) DeletedRecordsRegistry.unregisterDeleted("cashboxes", id)
+            val docId = DeletedRecordsRegistry.cashboxDocId(cleanName, id)
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            val data = mapOf(
+                "id" to id,
+                "name" to cleanName,
+                "docId" to docId,
+                "serverUpdatedBy" to currentActorId,
+                "serverUpdatedAt" to FieldValue.serverTimestamp()
+            )
+            cRef.collection("cashboxes").document(docId).set(data, SetOptions.merge()).await()
+            // Remove any stale tombstone for this cashbox if it was re-created by admin
+            val tombDocId = safeId("cashboxes_$docId", docId)
+            runCatching { cRef.collection("deleted_records").document(tombDocId).delete() }
+            runCatching { firestore.collection("deleted_records").document(tombDocId).delete() }
+            Unit
+        }
+    }
+
+    /**
+     * Permanently deletes/archives a cashbox from Cloud Firestore and writes a tombstone
+     * so all connected devices and accounts remove it immediately and never resurrect it,
+     * WITHOUT deleting any historical movements or financial transactions linked to it.
+     */
+    suspend fun deleteCashboxFromCloud(
+        clusterCode: String,
+        id: Long,
+        cashboxName: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanName = cashboxName.trim()
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            val actor = currentActorId
+            val docId = DeletedRecordsRegistry.cashboxDocId(cleanName, id)
+
+            // 1. Register local tombstones for both name and ID
+            if (id > 0L) {
+                DeletedRecordsRegistry.registerDeleted("cashboxes", id, "BOX-$id", actor)
+            }
+            if (cleanName.isNotBlank()) {
+                DeletedRecordsRegistry.registerDeleted("cashboxes", cleanName, docId, actor)
+            }
+
+            // 2. Write cloud tombstone to deleted_records (preserving Arabic name in entityId!)
+            val tombstoneDocId = safeId("cashboxes_$docId", docId)
+            val tombstoneData = mapOf(
+                "collection" to "cashboxes",
+                "entityId" to cleanName.ifBlank { "BOX-$id" },
+                "numericId" to id,
+                "docId" to docId,
+                "deletedAt" to FieldValue.serverTimestamp(),
+                "deletedBy" to actor,
+                "clusterCode" to cleanCluster
+            )
+            runCatching {
+                cRef.collection("deleted_records").document(tombstoneDocId).set(tombstoneData, SetOptions.merge()).await()
+                firestore.collection("deleted_records").document(tombstoneDocId).set(tombstoneData, SetOptions.merge())
+            }
+
+            // 3. Delete all Firestore cashbox documents matching this cashbox (by hash docId, BOX-id, and name query)
+            runCatching { cRef.collection("cashboxes").document(docId).delete().await() }
+            if (id > 0L) {
+                runCatching { cRef.collection("cashboxes").document("BOX-$id").delete().await() }
+            }
+            if (cleanName.isNotBlank()) {
+                runCatching {
+                    val byNameSnap = cRef.collection("cashboxes").whereEqualTo("name", cleanName).get().await()
+                    for (doc in byNameSnap.documents) {
+                        doc.reference.delete().await()
+                    }
+                }
+            }
+            recordDiagnostic(
+                action = "DELETE_CASHBOX_CLOUD",
+                status = "SUCCESS",
+                count = 1,
+                message = "تم حذف/أرشفة الخزنة ($cleanName) سحابياً وتسجيل شاهد الحذف ($docId) مع الحفاظ الكامل على سجل الحركات المالية"
+            )
+            Unit
+        }
+    }
+
+    /**
      * Instantly pushes a single financial MovementEntity to Cloud Firestore in < 100ms
      */
     suspend fun syncSingleMovementToCloud(
@@ -2629,6 +2989,8 @@ class CloudErpSyncRepository(
                 dao.clearAllInvoicePayments()
                 dao.clearAllStockMoves()
                 dao.clearAllProductionBatches()
+                dao.clearAllFactoryMoves()
+                dao.clearAllHalfaInvoices()
                 dao.clearAllAuditLogs()
 
                 // 3. Ensure baseline Cashboxes exist locally and on the server

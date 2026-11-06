@@ -17,8 +17,8 @@ android {
     applicationId = "com.pmp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "2.1-PRO"
+    versionCode = (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 12
+    versionName = (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "2.9-PRO"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

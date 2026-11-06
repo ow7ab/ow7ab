@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.hasModulePermission
+import com.example.isSuperAdminAccount
 import com.example.isSystemManager
 import com.example.parsedPermissionsSet
 import com.example.ui.components.*
@@ -59,6 +60,8 @@ fun DashboardScreen(
     val isSyncing by viewModel.isSyncing.collectAsState()
     val lastSyncTime by viewModel.lastSuccessfulSyncTime.collectAsState()
     val pendingErrors by viewModel.pendingSyncErrors.collectAsState()
+    val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
+    val dataLoadError by viewModel.dataLoadError.collectAsState()
 
     var showDiagnosticDashboard by remember { mutableStateOf(false) }
 
@@ -107,9 +110,7 @@ fun DashboardScreen(
         }
     }
 
-    PullToRefreshBox(
-        isRefreshing = isSyncing,
-        onRefresh = { viewModel.syncAllErpDataToServer() },
+    Box(
         modifier = modifier.fillMaxSize()
     ) {
         LazyColumn(
@@ -152,8 +153,13 @@ fun DashboardScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                val isSuperAdmin = currentUser.isSuperAdminAccount()
                                 Text(
-                                    text = "${currentUser?.role ?: "مدير النظام"} • كود: ${currentUser?.userCode ?: "USR-HQ-1001"}",
+                                    text = if (isSuperAdmin) {
+                                        "${currentUser?.role ?: "مدير النظام"} • ${currentUser?.branch ?: "الإدارة العامة"} • ${currentUser?.userCode ?: ""}"
+                                    } else {
+                                        "${currentUser?.role ?: "موظف"} • ${currentUser?.branch ?: "الفرع الرئيسي"}"
+                                    },
                                     color = TextMuted,
                                     fontSize = 11.sp,
                                     maxLines = 1,
@@ -213,17 +219,25 @@ fun DashboardScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Column(modifier = Modifier.weight(1f)) {
+                                        Column(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .padding(end = 8.dp)
+                                        ) {
                                             Text(
                                                 text = pendingUser.fullName,
                                                 fontWeight = FontWeight.Bold,
                                                 fontSize = 13.sp,
-                                                color = Color(0xFF1E293B)
+                                                color = Color(0xFF1E293B),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                             Text(
-                                                text = "@${pendingUser.username} • ${pendingUser.branch}",
+                                                text = pendingUser.branch,
                                                 fontSize = 11.sp,
-                                                color = Color(0xFF64748B)
+                                                color = Color(0xFF64748B),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                         }
 
@@ -234,9 +248,9 @@ fun DashboardScreen(
                                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                             modifier = Modifier.testTag("dashboard_approve_account_btn_${pendingUser.id}")
                                         ) {
-                                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
                                             Spacer(modifier = Modifier.width(4.dp))
-                                            Text("موافقة المدير على طلب إنشاء الحساب", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            Text("موافقة واعتماد", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                                         }
                                     }
                                 }
@@ -246,8 +260,21 @@ fun DashboardScreen(
                 }
             }
 
-            // Treasury KPI Cards (Only visible if employee has Treasury permission)
-            if (canAccessTreasury) {
+            // Skeleton Loading & Error State Handling (No flash on background sync or tab switches)
+            if (isInitialDataLoading && cashboxes.isEmpty() && movements.isEmpty()) {
+                item(key = "dashboard_shimmer_skeleton") {
+                    ProvideShimmerEffect(enabled = true) {
+                        DashboardSkeletonSection()
+                    }
+                }
+            } else if (dataLoadError != null && cashboxes.isEmpty() && movements.isEmpty()) {
+                item(key = "dashboard_error_card") {
+                    PmpErrorStateCard(
+                        message = dataLoadError ?: "تعذر تحميل البيانات",
+                        onRetry = { viewModel.retryDataLoadAndSync() }
+                    )
+                }
+            } else if (canAccessTreasury) {
             item {
                 Text(
                     text = "الأرصدة والسيولة الحالية (لكل عملة)",
@@ -286,32 +313,18 @@ fun DashboardScreen(
             }
 
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    GlassStatCard(
-                        title = "خزينة الدولار الأمريكي",
-                        value = format.format(totalUsd),
-                        unit = "USD",
-                        subtitle = "سيولة المشتريات الخارجية",
-                        accentColor = PmpGreenLight,
-                        icon = Icons.Default.AttachMoney,
-                        modifier = Modifier.weight(1f)
-                    )
-                    GlassStatCard(
-                        title = if (canAccessInventory) "الخزن النشطة والمخازن" else "الخزن المالية المعتمدة",
-                        value = "${cashboxes.size} خزن",
-                        subtitle = if (canAccessInventory) {
-                            if (lowStockCount > 0) "$lowStockCount أصناف منخفضة" else "المخزون كافٍ"
-                        } else {
-                            "متاحة لتسجيل الحركات"
-                        },
-                        accentColor = if (canAccessInventory && lowStockCount > 0) PmpRedLight else PmpPurple,
-                        icon = if (canAccessInventory) Icons.Default.Warehouse else Icons.Default.AccountBalance,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
+                GlassStatCard(
+                    title = if (canAccessInventory) "الخزن النشطة والمخازن" else "الخزن المالية المعتمدة",
+                    value = "${cashboxes.size} خزن",
+                    subtitle = if (canAccessInventory) {
+                        if (lowStockCount > 0) "$lowStockCount أصناف منخفضة" else "المخزون كافٍ"
+                    } else {
+                        "متاحة لتسجيل الحركات"
+                    },
+                    accentColor = if (canAccessInventory && lowStockCount > 0) PmpRedLight else PmpPurple,
+                    icon = if (canAccessInventory) Icons.Default.Warehouse else Icons.Default.AccountBalance,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
 
             // Recent Movements Title & Search Bar

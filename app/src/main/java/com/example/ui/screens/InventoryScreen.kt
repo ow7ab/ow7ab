@@ -40,6 +40,8 @@ fun InventoryScreen(
     val stockBalances by viewModel.productStockBalances.collectAsState()
     val availablePaintColors by viewModel.availablePaintColors.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
+    val dataLoadError by viewModel.dataLoadError.collectAsState()
     val isManager = currentUser.isSystemManager()
     val canDeleteOrZero = remember(currentUser) {
         currentUser.isSystemManager() || currentUser.hasModulePermission("صلاحية الحذف والتصفير")
@@ -133,13 +135,6 @@ fun InventoryScreen(
                         fontWeight = FontWeight.Bold,
                         fontSize = 22.sp
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "متابعة كراتين البوهيات، الألوان والأوزان، والتوريد والصرف المخزني.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextMuted,
-                        fontSize = 13.sp
-                    )
 
                     Spacer(modifier = Modifier.height(14.dp))
 
@@ -152,7 +147,20 @@ fun InventoryScreen(
             }
         }
 
-        when (selectedTab) {
+        if (isInitialDataLoading && products.isEmpty() && warehouses.isEmpty()) {
+            item(key = "inventory_shimmer_skeleton") {
+                ProvideShimmerEffect(enabled = true) {
+                    InventorySkeletonSection()
+                }
+            }
+        } else if (dataLoadError != null && products.isEmpty() && warehouses.isEmpty()) {
+            item(key = "inventory_error_card") {
+                PmpErrorStateCard(
+                    message = dataLoadError ?: "تعذر تحميل بيانات المخازن",
+                    onRetry = { viewModel.retryDataLoadAndSync() }
+                )
+            }
+        } else when (selectedTab) {
             0 -> {
                 // Warehouse filter & Effective stock calculations
                 val selectedWh = warehouses.find { it.name == selectedWarehouseFilter }
@@ -396,15 +404,8 @@ fun InventoryScreen(
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 16.sp
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "أضف لون بوهية ووزن العبوة (250 أو 900 أو 4000 جم) والكمية بالكراتين والمخزن وأسعار الشراء والبيع.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextMuted,
-                                fontSize = 12.sp
-                            )
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),

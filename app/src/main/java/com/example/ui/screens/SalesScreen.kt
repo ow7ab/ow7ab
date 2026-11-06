@@ -35,9 +35,11 @@ import com.example.R
 import com.example.data.local.CustomerEntity
 import com.example.data.local.InvoiceEntity
 import com.example.data.local.InvoiceItemEntity
+import com.example.data.local.InvoicePaymentEntity
 import com.example.data.local.getEffectiveSalePrice
 import com.example.data.local.resolveCurrency
 import com.example.data.local.resolveLinkedCashbox
+import com.example.data.local.resolvePaymentCurrency
 import com.example.hasModulePermission
 import com.example.isSystemManager
 import com.example.ui.components.*
@@ -63,6 +65,9 @@ fun SalesScreen(
     val cashboxes by viewModel.cashboxes.collectAsState()
     val stockBalances by viewModel.productStockBalances.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val defaultAccountCurrency by viewModel.defaultAccountCurrency.collectAsState()
+    val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
+    val dataLoadError by viewModel.dataLoadError.collectAsState()
 
     val canExportPdf = remember(currentUser) {
         currentUser.hasModulePermission("تصدير PDF")
@@ -71,16 +76,17 @@ fun SalesScreen(
     var selectedTab by remember { mutableIntStateOf(0) }
     val format = remember { NumberFormat.getNumberInstance(Locale.US) }
 
-    // Dialog state for viewing invoice details
+    // Dialog state for viewing invoice and payment details
     var selectedInvoiceForDetail by remember { mutableStateOf<InvoiceEntity?>(null) }
+    var selectedPaymentForDetail by remember { mutableStateOf<InvoicePaymentEntity?>(null) }
     var showPaymentDialog by remember { mutableStateOf(false) }
     var payAmountText by remember { mutableStateOf("") }
-    var payCashbox by remember { mutableStateOf(cashboxes.firstOrNull()?.name ?: "خزنة السودان") }
+    var payCashbox by remember { mutableStateOf(viewModel.resolveCashboxForCurrency(defaultAccountCurrency)) }
     var payNote by remember { mutableStateOf("") }
     var showCustomerPaymentDialog by remember { mutableStateOf(false) }
     var custPayAmountText by remember { mutableStateOf("") }
-    var custPayCashbox by remember { mutableStateOf(cashboxes.firstOrNull()?.name ?: "خزنة السودان") }
-    var custPayCurrency by remember { mutableStateOf("SDG") }
+    var custPayCashbox by remember { mutableStateOf(viewModel.resolveCashboxForCurrency(defaultAccountCurrency)) }
+    var custPayCurrency by remember { mutableStateOf(defaultAccountCurrency) }
     var custPayNote by remember { mutableStateOf("") }
 
     // Launcher for exporting PDF to custom user-selected location
@@ -165,19 +171,28 @@ fun SalesScreen(
     // Tab 1: New Invoice Form State
     var invCustomerId by remember { mutableStateOf<Long?>(null) }
     var invCustomerName by remember { mutableStateOf("") }
-    var invCurrency by remember { mutableStateOf("SDG") }
+    var invCurrency by remember { mutableStateOf(defaultAccountCurrency) }
     var invDiscount by remember { mutableStateOf("") }
     var invNotes by remember { mutableStateOf("") }
     var invPayNow by remember { mutableStateOf(false) }
     var invPayAmount by remember { mutableStateOf("") }
-    var invPayCashbox by remember { mutableStateOf(cashboxes.firstOrNull()?.name ?: "خزنة السودان") }
+    var invPayCashbox by remember { mutableStateOf(viewModel.resolveCashboxForCurrency(defaultAccountCurrency)) }
 
     // Invoice items builder
     val draftItems = remember { mutableStateListOf<InvoiceItemEntity>() }
     var itemProductText by remember { mutableStateOf("") }
     var itemQuantityText by remember { mutableStateOf("1") }
     var itemPriceText by remember { mutableStateOf("") }
-    var itemWarehouseText by remember { mutableStateOf(warehouses.firstOrNull()?.name ?: "مخزن المصنع الرئيسي") }
+    var itemWarehouseText by remember { mutableStateOf(warehouses.firstOrNull()?.name ?: "مخزن مبيعات الخرطوم") }
+
+    LaunchedEffect(defaultAccountCurrency) {
+        if (draftItems.isEmpty()) {
+            invCurrency = defaultAccountCurrency
+            invPayCashbox = viewModel.resolveCashboxForCurrency(defaultAccountCurrency)
+        }
+        custPayCurrency = defaultAccountCurrency
+        custPayCashbox = viewModel.resolveCashboxForCurrency(defaultAccountCurrency)
+    }
 
     // Tab 2: New Customer Form State
     var showAddCustomerDialog by remember { mutableStateOf(false) }
@@ -209,15 +224,65 @@ fun SalesScreen(
                         fontWeight = FontWeight.Bold,
                         fontSize = 22.sp
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "اضغط على أي فاتورة لعرض الفاتورة الكاملة بالتفاصيل وتصديرها بصيغة PDF مع شعار الهوية.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextMuted,
-                        fontSize = 13.sp
-                    )
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Unified Default Account Currency Selector Bar
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFFF8FAFC))
+                            .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "عملة معاملات الحساب الموحدة:",
+                                color = PmpBrandNavy,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            Text(
+                                text = "تتوحد عليها الفواتير والسدادات وتقبل التغيير داخل المعاملة",
+                                color = TextMuted,
+                                fontSize = 10.sp
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("SDG", "EGP", "USD").forEach { cur ->
+                                val selected = defaultAccountCurrency == cur
+                                Surface(
+                                    onClick = {
+                                        viewModel.setDefaultAccountCurrency(cur)
+                                        invCurrency = cur
+                                        invPayCashbox = viewModel.resolveCashboxForCurrency(cur)
+                                        custPayCurrency = cur
+                                        custPayCashbox = viewModel.resolveCashboxForCurrency(cur)
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (selected) PmpBrandRed else Color.White,
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        if (selected) PmpBrandRed else GlassBorder
+                                    ),
+                                    modifier = Modifier.testTag("unified_currency_chip_$cur")
+                                ) {
+                                    Text(
+                                        text = cur,
+                                        color = if (selected) Color.White else PmpBrandNavy,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.5.sp,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
 
                     GlassTabRow(
                         tabs = tabs,
@@ -228,7 +293,20 @@ fun SalesScreen(
             }
         }
 
-        when (selectedTab) {
+        if (isInitialDataLoading && invoices.isEmpty() && customers.isEmpty()) {
+            item(key = "sales_shimmer_skeleton") {
+                ProvideShimmerEffect(enabled = true) {
+                    SalesSkeletonSection()
+                }
+            }
+        } else if (dataLoadError != null && invoices.isEmpty() && customers.isEmpty()) {
+            item(key = "sales_error_card") {
+                PmpErrorStateCard(
+                    message = dataLoadError ?: "تعذر تحميل بيانات المبيعات",
+                    onRetry = { viewModel.retryDataLoadAndSync() }
+                )
+            }
+        } else when (selectedTab) {
             0 -> {
                 // Invoices Directory
                 if (invoices.isEmpty()) {
@@ -313,11 +391,18 @@ fun SalesScreen(
                                         fontSize = 14.sp
                                     )
                                     Text(
-                                        text = "المدفوع: ${format.format(paid)} | المتبقي: ${format.format(remaining)}",
+                                        text = "المدفوع: ${format.format(paid)} ${inv.currency} | المتبقي: ${format.format(remaining)} ${inv.currency}",
                                         color = TextMuted,
                                         fontSize = 12.sp
                                     )
                                 }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "موظف الحساب المنفذ: ${inv.createdBy}",
+                                    color = PmpBrandNavy,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 11.5.sp
+                                )
 
                                 Spacer(modifier = Modifier.height(10.dp))
                                 HorizontalDivider(color = GlassBorder)
@@ -376,28 +461,7 @@ fun SalesScreen(
                             )
                             Spacer(modifier = Modifier.height(14.dp))
 
-                            // Sales Warehouse & Branch Selection (Auto-sets Currency and Cashbox)
-                            GlassDropdown(
-                                label = "مخزن المبيعات الرئيسي للفاتورة (تحديد العملة والخزنة تلقائياً) *",
-                                options = warehouseNames,
-                                selectedOption = itemWarehouseText,
-                                onOptionSelected = { whName ->
-                                    itemWarehouseText = whName
-                                    val wh = warehouses.find { it.name == whName }
-                                    if (wh != null) {
-                                        invCurrency = wh.resolveCurrency()
-                                        invPayCashbox = wh.resolveLinkedCashbox()
-                                        val matched = products.find { itemProductText.startsWith(it.sku) }
-                                        if (matched != null) {
-                                            itemPriceText = matched.getEffectiveSalePrice(invCurrency).toString()
-                                        }
-                                    }
-                                }
-                            )
-
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            // Customer & Currency
+                            // Customer & Currency (Respects Unified Currency & Allows Per-Invoice Override)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -411,20 +475,22 @@ fun SalesScreen(
                                         invCustomerName = name
                                         invCustomerId = customers.find { it.name == name }?.id
                                     },
-                                    modifier = Modifier.weight(1.3f)
+                                    modifier = Modifier.weight(1.2f)
                                 )
                                 GlassDropdown(
-                                    label = "العملة",
+                                    label = "عملة الفاتورة *",
                                     options = listOf("SDG", "EGP", "USD"),
                                     selectedOption = invCurrency,
                                     onOptionSelected = { curr ->
                                         invCurrency = curr
+                                        invPayCashbox = viewModel.resolveCashboxForCurrency(curr)
                                         val matched = products.find { itemProductText.startsWith(it.sku) }
                                         if (matched != null) {
-                                            itemPriceText = matched.getEffectiveSalePrice(curr).toString()
+                                            val p = viewModel.lookupProductSalePrice(matched, curr)
+                                            if (p > 0.0) itemPriceText = p.toLong().toString()
                                         }
                                     },
-                                    modifier = Modifier.weight(0.7f)
+                                    modifier = Modifier.weight(0.8f)
                                 )
                             }
 
@@ -432,7 +498,7 @@ fun SalesScreen(
 
                             // Product Line Item Adder
                             Text(
-                                text = "إضافة بنود الفاتورة من المخزون",
+                                text = "إضافة بنود الفاتورة (${invCurrency})",
                                 color = PmpGold,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp
@@ -449,7 +515,8 @@ fun SalesScreen(
                                     itemProductText = opt
                                     val matched = products.find { opt.startsWith(it.sku) }
                                     if (matched != null) {
-                                        itemPriceText = matched.getEffectiveSalePrice(invCurrency).toString()
+                                        val p = viewModel.lookupProductSalePrice(matched, invCurrency)
+                                        if (p > 0.0) itemPriceText = p.toLong().toString()
                                     }
                                 }
                             )
@@ -470,7 +537,7 @@ fun SalesScreen(
                                 GlassTextField(
                                     value = itemPriceText,
                                     onValueChange = { itemPriceText = it },
-                                    label = "سعر الوحدة ($invCurrency) *",
+                                    label = "سعر الوحدة بالـ ($invCurrency) *",
                                     placeholder = "0.00",
                                     isNumber = true,
                                     modifier = Modifier.weight(1f)
@@ -479,21 +546,13 @@ fun SalesScreen(
 
                             Spacer(modifier = Modifier.height(10.dp))
 
+                            // Warehouse Selection (Never overrides invoice currency or typed price!)
                             GlassDropdown(
-                                label = "مخزن صرف هذا البند",
+                                label = "مخزن صرف البضاعة",
                                 options = warehouseNames,
                                 selectedOption = itemWarehouseText,
                                 onOptionSelected = { whName ->
                                     itemWarehouseText = whName
-                                    val wh = warehouses.find { it.name == whName }
-                                    if (wh != null) {
-                                        invCurrency = wh.resolveCurrency()
-                                        invPayCashbox = wh.resolveLinkedCashbox()
-                                        val matched = products.find { itemProductText.startsWith(it.sku) }
-                                        if (matched != null) {
-                                            itemPriceText = matched.getEffectiveSalePrice(invCurrency).toString()
-                                        }
-                                    }
                                 }
                             )
 
@@ -663,22 +722,20 @@ fun SalesScreen(
                                         label = "عملة الدفع",
                                         options = listOf("SDG", "EGP", "USD"),
                                         selectedOption = invCurrency,
-                                        onOptionSelected = { invCurrency = it },
+                                        onOptionSelected = { cur ->
+                                            invCurrency = cur
+                                            invPayCashbox = viewModel.resolveCashboxForCurrency(cur)
+                                        },
                                         modifier = Modifier.weight(0.8f)
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(8.dp))
                                 GlassDropdown(
-                                    label = "الخزنة المستلمة (تحديد تلقائي للعملة) *",
-                                    options = cashboxes.map { it.name },
+                                    label = "الخزنة المستلمة (${invCurrency}) *",
+                                    options = cashboxes.map { it.name }.ifEmpty { listOf("خزنة السودان", "خزنة مصر") },
                                     selectedOption = invPayCashbox,
                                     onOptionSelected = { box ->
                                         invPayCashbox = box
-                                        if (box.contains("مصر") || box.contains("القاهرة") || box.contains("EGP")) {
-                                            invCurrency = "EGP"
-                                        } else if (box.contains("سودان") || box.contains("خرطوم") || box.contains("حلفا") || box.contains("عطبرة") || box.contains("SDG")) {
-                                            invCurrency = "SDG"
-                                        }
                                     }
                                 )
                             }
@@ -777,6 +834,7 @@ fun SalesScreen(
                     val custInvoiceIds = custInvoices.map { it.id }.toSet()
                     val custPayments = invoicePayments.filter { it.invoiceId in custInvoiceIds && it.status == "active" }
 
+                    val statementPrimaryCur = custInvoices.firstOrNull()?.currency ?: defaultAccountCurrency
                     val totalDebit = custInvoices.sumOf { it.total }
                     val totalCredit = custPayments.sumOf { it.amount }
                     val netBalance = totalDebit - totalCredit
@@ -793,7 +851,7 @@ fun SalesScreen(
                                         Text(text = "إجمالي الفواتير (مدين)", color = TextMuted, fontSize = 11.5.sp)
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
-                                            text = "${format.format(totalDebit)} SDG",
+                                            text = "${format.format(totalDebit)} $statementPrimaryCur",
                                             color = PmpBrandNavy,
                                             fontWeight = FontWeight.ExtraBold,
                                             fontSize = 15.sp
@@ -807,7 +865,7 @@ fun SalesScreen(
                                         Text(text = "إجمالي السداد (دائن)", color = TextMuted, fontSize = 11.5.sp)
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
-                                            text = "${format.format(totalCredit)} SDG",
+                                            text = "${format.format(totalCredit)} $statementPrimaryCur",
                                             color = PmpGreen,
                                             fontWeight = FontWeight.ExtraBold,
                                             fontSize = 15.sp
@@ -838,7 +896,7 @@ fun SalesScreen(
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            text = "${format.format(kotlin.math.abs(netBalance))} SDG",
+                                            text = "${format.format(kotlin.math.abs(netBalance))} $statementPrimaryCur",
                                             color = if (netBalance > 0) PmpBrandRed else PmpGreen,
                                             fontWeight = FontWeight.ExtraBold,
                                             fontSize = 20.sp
@@ -863,8 +921,8 @@ fun SalesScreen(
                                     gradient = GlassAccentGreenGradient,
                                     onClick = {
                                         custPayAmountText = if (netBalance > 0) netBalance.toString() else ""
-                                        custPayCashbox = cashboxes.firstOrNull()?.name ?: "خزنة السودان"
-                                        custPayCurrency = "SDG"
+                                        custPayCurrency = statementPrimaryCur
+                                        custPayCashbox = viewModel.resolveCashboxForCurrency(statementPrimaryCur)
                                         custPayNote = "تحصيل دفعة نقدية بحساب العميل"
                                         showCustomerPaymentDialog = true
                                     },
@@ -872,6 +930,31 @@ fun SalesScreen(
                                         .fillMaxWidth()
                                         .height(46.dp)
                                         .testTag("record_customer_payment_btn")
+                                )
+
+                                // Direct One-Click Export to Excel File + Save As Excel + PDF
+                                GlassButton(
+                                    text = "تصدير كشف الحساب في ملف إكسيل (Excel)",
+                                    icon = Icons.Default.TableChart,
+                                    gradient = GlassAccentGreenGradient,
+                                    onClick = {
+                                        val res = StatementPdfAndExcelExporter.exportStatementToExcel(
+                                            context = context,
+                                            customer = targetCust,
+                                            invoices = custInvoices,
+                                            payments = custPayments,
+                                            customOutputUri = null
+                                        )
+                                        res.onSuccess { savedPath ->
+                                            viewModel.postMessage("تم تصدير كشف الحساب في ملف إكسيل (Excel) بنجاح إلى: $savedPath")
+                                        }.onFailure { err ->
+                                            viewModel.postMessage("تعذر تصدير ملف إكسيل: ${err.message}", isError = true)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(46.dp)
+                                        .testTag("export_statement_excel_direct_btn")
                                 )
 
                                 Row(
@@ -892,9 +975,9 @@ fun SalesScreen(
                                     )
 
                                     GlassButton(
-                                        text = "تصدير Excel (عربي)",
-                                        icon = Icons.Default.TableChart,
-                                        gradient = GlassAccentGreenGradient,
+                                        text = "حفظ Excel باسم...",
+                                        icon = Icons.Default.SaveAlt,
+                                        gradient = GlassAccentBlueGradient,
                                         onClick = {
                                             createStatementExcelLauncher.launch("pmp_statement_${targetCust.name.replace(" ", "_")}.csv")
                                         },
@@ -1042,12 +1125,18 @@ fun SalesScreen(
                                                 color = TextMuted,
                                                 fontSize = 11.5.sp
                                             )
+                                            Text(
+                                                text = "موظف الحساب: ${inv.createdBy}",
+                                                color = PmpBrandNavy,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 11.sp
+                                            )
                                         }
                                     }
 
                                     Column(horizontalAlignment = Alignment.End) {
                                         Text(
-                                            text = "${format.format(inv.total)} SDG",
+                                            text = "${format.format(inv.total)} ${inv.currency}",
                                             color = PmpBrandRed,
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 14.5.sp
@@ -1064,9 +1153,14 @@ fun SalesScreen(
                             }
                         }
 
-                        // Display Payments
+                        // Display Payments (Clickable to show transaction details & employee name)
                         items(custPayments, key = { "pay_${it.id}" }) { pay ->
-                            GlassCard(modifier = Modifier.fillMaxWidth()) {
+                            val parentInv = custInvoices.find { it.id == pay.invoiceId }
+                            val payCur = pay.resolvePaymentCurrency(parentInv?.currency ?: defaultAccountCurrency)
+                            GlassCard(
+                                modifier = Modifier.fillMaxWidth(),
+                                onClick = { selectedPaymentForDetail = pay }
+                            ) {
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -1104,12 +1198,18 @@ fun SalesScreen(
                                                 color = TextMuted,
                                                 fontSize = 11.5.sp
                                             )
+                                            Text(
+                                                text = "موظف الحساب: ${pay.createdBy} (اضغط للتفاصيل)",
+                                                color = PmpBrandNavy,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 11.sp
+                                            )
                                         }
                                     }
 
                                     Column(horizontalAlignment = Alignment.End) {
                                         Text(
-                                            text = "-${format.format(pay.amount)} SDG",
+                                            text = "-${format.format(pay.amount)} $payCur",
                                             color = PmpGreen,
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 14.5.sp
@@ -1452,6 +1552,18 @@ fun SalesScreen(
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 11.5.sp
                         )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(Icons.Default.Person, contentDescription = null, tint = PmpBrandRed, modifier = Modifier.size(15.dp))
+                            Text(
+                                text = "اسم موظف الحساب المنفذ للمعاملة: ${inv.createdBy}",
+                                color = PmpBrandRed,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                        }
                     }
 
                     // Full Line Items Table
@@ -1618,8 +1730,9 @@ fun SalesScreen(
                                 fontSize = 12.sp
                             )
                             payments.forEach { p ->
+                                val pCur = p.resolvePaymentCurrency(inv.currency)
                                 Text(
-                                    text = "• ${p.payDate} | ${p.cashbox}: ${format.format(p.amount)} ${inv.currency} (${p.note})",
+                                    text = "• ${p.payDate} | ${p.cashbox}: ${format.format(p.amount)} $pCur • الموظف: ${p.createdBy} (${p.note})",
                                     color = TextMuted,
                                     fontSize = 11.sp
                                 )
@@ -1737,6 +1850,7 @@ fun SalesScreen(
                                 gradient = GlassAccentGoldGradient,
                                 onClick = {
                                     payAmountText = remaining.toString()
+                                    payCashbox = viewModel.resolveCashboxForCurrency(inv.currency)
                                     showPaymentDialog = true
                                 },
                                 modifier = Modifier.weight(1f)
@@ -1765,6 +1879,68 @@ fun SalesScreen(
         }
     }
 
+    // Modal: Payment Transaction Details Dialog (Displays Employee Name & Full Payment Details)
+    selectedPaymentForDetail?.let { pay ->
+        val parentInv = invoices.find { it.id == pay.invoiceId }
+        val payCur = pay.resolvePaymentCurrency(parentInv?.currency ?: defaultAccountCurrency)
+        val createdTimeStr = remember(pay.createdAt) {
+            java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(java.util.Date(pay.createdAt))
+        }
+        AlertDialog(
+            onDismissRequest = { selectedPaymentForDetail = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.ReceiptLong, contentDescription = null, tint = PmpGreen)
+                    Text(
+                        text = "تفاصيل معاملة السداد #${pay.id}",
+                        color = PmpBrandNavy,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 16.sp
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFFFEF2F2))
+                            .border(1.dp, PmpBrandRed.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Default.Badge, contentDescription = null, tint = PmpBrandRed)
+                        Column {
+                            Text(text = "اسم موظف الحساب الذي قام بالمعاملة:", color = TextMuted, fontSize = 11.sp)
+                            Text(
+                                text = pay.createdBy.ifBlank { "المدير" },
+                                color = PmpBrandRed,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                    Text(text = "المبلغ المسدد: ${format.format(pay.amount)} $payCur", color = PmpGreen, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text(text = "الخزنة المستلمة: ${pay.cashbox}", color = TextDark, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    if (parentInv != null) {
+                        Text(text = "الفاتورة المرتبطة: ${parentInv.invoiceNo} (${parentInv.customerName})", color = TextDark, fontSize = 12.5.sp)
+                    }
+                    Text(text = "تاريخ المعاملة: ${pay.payDate} ($createdTimeStr)", color = TextMuted, fontSize = 12.sp)
+                    Text(text = "البيان والملاحظات: ${pay.note.ifBlank { "سداد نقدي" }}", color = TextDark, fontSize = 12.5.sp)
+                }
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "إغلاق",
+                    onClick = { selectedPaymentForDetail = null }
+                )
+            },
+            containerColor = Color.White
+        )
+    }
+
     // Modal: Record Payment on Invoice
     if (showPaymentDialog && selectedInvoiceForDetail != null) {
         val inv = selectedInvoiceForDetail!!
@@ -1790,22 +1966,20 @@ fun SalesScreen(
                             label = "عملة الدفع",
                             options = listOf("SDG", "EGP", "USD"),
                             selectedOption = payCurrency,
-                            onOptionSelected = { payCurrency = it },
+                            onOptionSelected = { cur ->
+                                payCurrency = cur
+                                payCashbox = viewModel.resolveCashboxForCurrency(cur)
+                            },
                             modifier = Modifier.weight(0.7f)
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     GlassDropdown(
-                        label = "الخزنة المستلمة (تحديد تلقائي للعملة) *",
-                        options = cashboxes.map { it.name },
+                        label = "الخزنة المستلمة ($payCurrency) *",
+                        options = cashboxes.map { it.name }.ifEmpty { listOf("خزنة السودان", "خزنة مصر") },
                         selectedOption = payCashbox,
                         onOptionSelected = { box ->
                             payCashbox = box
-                            if (box.contains("مصر") || box.contains("القاهرة") || box.contains("EGP")) {
-                                payCurrency = "EGP"
-                            } else if (box.contains("سودان") || box.contains("خرطوم") || box.contains("حلفا") || box.contains("عطبرة") || box.contains("SDG")) {
-                                payCurrency = "SDG"
-                            }
                         }
                     )
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1927,22 +2101,20 @@ fun SalesScreen(
                                 label = "العملة",
                                 options = listOf("SDG", "EGP", "USD"),
                                 selectedOption = custPayCurrency,
-                                onOptionSelected = { custPayCurrency = it },
+                                onOptionSelected = { cur ->
+                                    custPayCurrency = cur
+                                    custPayCashbox = viewModel.resolveCashboxForCurrency(cur)
+                                },
                                 modifier = Modifier.weight(0.7f)
                             )
                         }
 
                         GlassDropdown(
-                            label = "الخزنة المستلمة *",
+                            label = "الخزنة المستلمة ($custPayCurrency) *",
                             options = cashboxes.map { it.name }.ifEmpty { listOf("خزنة السودان", "خزنة مصر") },
                             selectedOption = custPayCashbox,
                             onOptionSelected = { box ->
                                 custPayCashbox = box
-                                if (box.contains("مصر") || box.contains("القاهرة") || box.contains("EGP")) {
-                                    custPayCurrency = "EGP"
-                                } else if (box.contains("سودان") || box.contains("خرطوم") || box.contains("حلفا") || box.contains("عطبرة") || box.contains("SDG")) {
-                                    custPayCurrency = "SDG"
-                                }
                             }
                         )
 

@@ -6,8 +6,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -21,10 +23,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import com.example.data.local.UserAccountEntity
+import com.example.isSuperAdminAccount
 import com.example.isSystemManager
 import com.example.ui.components.*
 import com.example.ui.theme.*
@@ -38,11 +43,13 @@ fun UsersScreen(
 ) {
     val userAccounts by viewModel.userAccounts.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
     val isManager = currentUser.isSystemManager()
+    val isSuperAdmin = currentUser.isSuperAdminAccount()
 
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = if (isManager) {
-        listOf("حسابات المستخدمين", "+ إنشاء حساب", "الأرشيف", "سيرفر السحابة والويندوز")
+        listOf("حسابات المستخدمين", "+ إنشاء حساب", "الأرشيف")
     } else {
         listOf("حسابي الحالي")
     }
@@ -84,6 +91,7 @@ fun UsersScreen(
 
     val generalPermissions = listOf(
         "المبيعات",
+        "المشتريات",
         "الأسعار",
         "تصدير PDF",
         "الخزن",
@@ -93,6 +101,7 @@ fun UsersScreen(
         "المختبر الكيميائي",
         "مواد الإنتاج",
         "التعبئة والتغليف",
+        "تعديل نوع الصنف",
         "المستخدمين",
         "الإعدادات",
         "صلاحية الحذف والتصفير"
@@ -146,22 +155,10 @@ fun UsersScreen(
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "إدارة حسابات المستخدمين واعتماد الصلاحيات",
+                    text = "إدارة حسابات المستخدمين",
                     color = TextWhite,
                     fontWeight = FontWeight.Bold,
                     fontSize = 18.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = if (isManager) {
-                        "تعديل الصلاحيات واعتماد حسابات Google الجديدة حصرياً عبر حساب مدير النظام"
-                    } else {
-                        "لا يمكن تعديل الصلاحيات إلا من خلال حساب مدير النظام فقط"
-                    },
-                    color = TextMuted,
-                    fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -188,6 +185,14 @@ fun UsersScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(bottom = 24.dp)
                 ) {
+                    if (isInitialDataLoading && userAccounts.isEmpty()) {
+                        item(key = "users_shimmer_skeleton") {
+                            ProvideShimmerEffect(enabled = true) {
+                                UsersSkeletonSection()
+                            }
+                        }
+                    }
+
                     // Active Session Banner Card
                     item {
                         currentUser?.let { activeUser ->
@@ -267,26 +272,28 @@ fun UsersScreen(
                                         )
                                     }
 
-                                    Spacer(modifier = Modifier.height(10.dp))
+                                    if (isSuperAdmin) {
+                                        Spacer(modifier = Modifier.height(10.dp))
 
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = "كود الربط: ${activeUser.userCode} | ${activeUser.serverSyncToken}",
-                                            color = PmpBrandNavy,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        GlassBadge(
-                                            text = "متصل محلياً وجاهز للسيرفر",
-                                            color = PmpGreen
-                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "معرف الحساب: ${activeUser.userCode}",
+                                                color = PmpBrandNavy,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            GlassBadge(
+                                                text = "حساب رئيسي",
+                                                color = PmpGreen
+                                            )
+                                        }
                                     }
 
                                     Spacer(modifier = Modifier.height(10.dp))
@@ -295,15 +302,17 @@ fun UsersScreen(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        GlassButton(
-                                            text = "مزامنة المستخدمين مع السيرفر",
-                                            icon = Icons.Default.CloudSync,
-                                            gradient = PmpBrandRedGradient,
-                                            onClick = { viewModel.syncAllAccountsToGoogleCloud() },
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .testTag("quick_sync_users_cloud_button")
-                                        )
+                                        if (isSuperAdmin) {
+                                            GlassButton(
+                                                text = "مزامنة المستخدمين",
+                                                icon = Icons.Default.CloudSync,
+                                                gradient = PmpBrandRedGradient,
+                                                onClick = { viewModel.syncAllAccountsToGoogleCloud() },
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("quick_sync_users_cloud_button")
+                                            )
+                                        }
 
                                         GlassButton(
                                             text = "تسجيل الخروج",
@@ -350,18 +359,13 @@ fun UsersScreen(
                                             )
                                             Spacer(modifier = Modifier.width(8.dp))
                                             Text(
-                                                text = "طلبات تسجيل دخول عبر Google بانتظار موافقة المدير (${pendingAccounts.size})",
+                                                text = "طلبات حسابات بانتظار موافقة المدير (${pendingAccounts.size})",
                                                 color = Color(0xFF92400E),
                                                 fontWeight = FontWeight.Bold,
                                                 fontSize = 13.sp
                                             )
                                         }
                                     }
-                                    Text(
-                                        text = "لا يُسمح لهذه الحسابات بالدخول للتطبيق حتى تحدد الصلاحيات المخصصة لها وتعتمد تفعيل الحساب.",
-                                        color = Color(0xFFB45309),
-                                        fontSize = 11.5.sp
-                                    )
                                 }
                             }
                         }
@@ -431,6 +435,7 @@ fun UsersScreen(
                             account = account,
                             isCurrent = currentUser?.id == account.id,
                             canManagePermissions = isManager,
+                            isSuperAdmin = isSuperAdmin,
                             onSwitchRequest = {
                                 userPendingSwitch = account
                                 switchPinInput = account.pinOrPassword
@@ -520,7 +525,7 @@ fun UsersScreen(
                                     GlassTextField(
                                         value = username,
                                         onValueChange = { username = it },
-                                        label = "اسم الدخول (Username)",
+                                        label = "اسم الدخول",
                                         placeholder = "مثال: atbara_acc",
                                         leadingIcon = Icons.Default.AlternateEmail,
                                         modifier = Modifier
@@ -531,7 +536,7 @@ fun UsersScreen(
                                     GlassTextField(
                                         value = pinOrPassword,
                                         onValueChange = { pinOrPassword = it },
-                                        label = "رمز الدخول (PIN/كلمة السر)",
+                                        label = "كلمة المرور أو الرمز السري",
                                         placeholder = "1234",
                                         isNumber = true,
                                         leadingIcon = Icons.Default.Lock,
@@ -544,14 +549,14 @@ fun UsersScreen(
                                 GlassTextField(
                                     value = phoneOrEmail,
                                     onValueChange = { phoneOrEmail = it },
-                                    label = "رقم الهاتف أو البريد الإلكتروني (للتوثيق مع السيرفر)",
+                                    label = "رقم الهاتف أو البريد الإلكتروني",
                                     placeholder = "+249912345678 / user@pmp-paints.com",
                                     leadingIcon = Icons.Default.Phone,
                                     modifier = Modifier.testTag("user_contact_input")
                                 )
 
                                 GlassDropdown(
-                                    label = "الدور الوظيفي (Role)",
+                                    label = "المسمى الوظيفي",
                                     options = roleOptions,
                                     selectedOption = selectedRole,
                                     onOptionSelected = { role ->
@@ -584,26 +589,49 @@ fun UsersScreen(
                                     onOptionSelected = { selectedBranch = it }
                                 )
 
-                                Text(
-                                    text = "تحديد الصلاحيات المخصصة للموظف (بما فيها صلاحية تصدير الفواتير PDF):",
-                                    color = TextMuted,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "تحديد الصلاحيات المخصصة للموظف (${selectedPermissions.size}/${allPermissions.size}):",
+                                        color = TextMuted,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        TextButton(
+                                            onClick = { selectedPermissions = allPermissions.toSet() },
+                                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                            modifier = Modifier.height(28.dp)
+                                        ) {
+                                            Text("تحديد الكل", color = PmpCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                        TextButton(
+                                            onClick = { selectedPermissions = emptySet() },
+                                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                            modifier = Modifier.height(28.dp)
+                                        ) {
+                                            Text("إلغاء الكل", color = PmpRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
 
-                                // Permissions Chips Grid
+                                // Permissions Chips Grid (2 per row so nothing gets truncated)
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    generalPermissions.chunked(3).forEach { rowPerms ->
+                                    generalPermissions.chunked(2).forEach { rowPerms ->
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
                                             rowPerms.forEach { perm ->
                                                 val isSelected = perm in selectedPermissions
                                                 Box(
                                                     modifier = Modifier
                                                         .weight(1f)
-                                                        .height(38.dp)
+                                                        .heightIn(min = 40.dp)
                                                         .clip(RoundedCornerShape(10.dp))
                                                         .background(
                                                             if (isSelected) PmpBrandRed.copy(alpha = 0.14f)
@@ -621,18 +649,32 @@ fun UsersScreen(
                                                                 selectedPermissions + perm
                                                             }
                                                         }
-                                                        .padding(horizontal = 4.dp),
-                                                    contentAlignment = Alignment.Center
+                                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                                    contentAlignment = Alignment.CenterStart
                                                 ) {
-                                                    Text(
-                                                        text = perm,
-                                                        color = if (isSelected) PmpBrandRed else TextMuted,
-                                                        fontSize = 11.sp,
-                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = if (isSelected) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                                            contentDescription = null,
+                                                            tint = if (isSelected) PmpBrandRed else TextMuted,
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                        Text(
+                                                            text = perm,
+                                                            color = if (isSelected) PmpBrandRed else TextDark,
+                                                            fontSize = 11.5.sp,
+                                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                            maxLines = 2,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
                                                 }
+                                            }
+                                            if (rowPerms.size == 1) {
+                                                Spacer(modifier = Modifier.weight(1f))
                                             }
                                         }
                                     }
@@ -692,18 +734,10 @@ fun UsersScreen(
                                     }
                                 }
 
-                                GlassTextField(
-                                    value = serverEndpointInput,
-                                    onValueChange = { serverEndpointInput = it },
-                                    label = "نقطة ربط السيرفر المركزي (Server API Endpoint)",
-                                    placeholder = "https://api.pmp-paints-erp.com/v1",
-                                    leadingIcon = Icons.Default.CloudQueue
-                                )
-
                                 Spacer(modifier = Modifier.height(4.dp))
 
                                 GlassButton(
-                                    text = "إنشاء الحساب وتوليد معرف الربط السحابي",
+                                    text = "إنشاء الحساب",
                                     icon = Icons.Default.PersonAddAlt1,
                                     gradient = PmpBrandRedGradient,
                                     modifier = Modifier
@@ -776,11 +810,6 @@ fun UsersScreen(
                                         fontSize = 15.sp
                                     )
                                 }
-                                Text(
-                                    text = "الحسابات الموقوفة هنا لا يمكنها تسجيل الدخول للنظام. يمكنك استرداد أي حساب لإعادته للعمل فوراً، أو حذفه نهائياً من قاعدة البيانات والسحابة.",
-                                    color = TextMuted,
-                                    fontSize = 12.sp
-                                )
                             }
                         }
                     }
@@ -814,503 +843,10 @@ fun UsersScreen(
                         items(suspendedAccounts, key = { "arch_${it.id}" }) { account ->
                             ArchivedUserAccountCard(
                                 account = account,
+                                isSuperAdmin = isSuperAdmin,
                                 onRestore = { viewModel.restoreUserAccount(account) },
                                 onDeletePermanently = { userToDeletePermanently = account }
                             )
-                        }
-                    }
-                }
-            }
-
-            3 -> {
-                // Cloud Server Hub & Windows Cross-Device Integration
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                    contentPadding = PaddingValues(bottom = 28.dp)
-                ) {
-                    // 1. Data Safety & Migration Protection Card (Anti-Data-Loss Architecture)
-                    item {
-                        GlassCard(modifier = Modifier.fillMaxWidth()) {
-                            Column(
-                                modifier = Modifier.padding(18.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Security,
-                                            contentDescription = null,
-                                            tint = PmpGreen,
-                                            modifier = Modifier.size(24.dp)
-                                        )
-                                        Text(
-                                            text = "حماية البيانات الدائمة من الحذف عند التحديث",
-                                            color = TextWhite,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 15.sp
-                                        )
-                                    }
-                                    GlassBadge(text = "محمي 100%", color = PmpGreen)
-                                }
-
-                                Text(
-                                    text = "تم إصلاح الخلل بشكل جذري: تم إلغاء الحذف التدميري (Destructive Migration) وتفعيل مسار ترقية سلس لقاعدة البيانات (Room Migrations V1-V5)، بالإضافة إلى نظام النسخ الاحتياطي المشفر والمزامنة السحابية المباشرة مع سيرفر Google Cloud.",
-                                    color = TextMuted,
-                                    fontSize = 12.sp,
-                                    lineHeight = 18.sp
-                                )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    GlassBadge(text = "هجرة آمنة V1-V5", color = PmpBrandNavy)
-                                    GlassBadge(text = "نسخة مشفرة محلية", color = PmpBlueLight)
-                                    GlassBadge(text = "مرآة سحابية Cloud", color = PmpGreen)
-                                }
-
-                                if (isSyncing) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.Center,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        CircularProgressIndicator(
-                                            color = PmpBrandRed,
-                                            modifier = Modifier.size(22.dp),
-                                            strokeWidth = 2.5.dp
-                                        )
-                                        Spacer(modifier = Modifier.width(10.dp))
-                                        Text(
-                                            text = "جارٍ المعالجة والمزامنة السحابية...",
-                                            color = PmpBrandNavy,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-
-                                GlassButton(
-                                    text = "حفظ ومزامنة شاملة لسيرفر Google Cloud الآن (حفظ دائم)",
-                                    icon = Icons.Default.CloudUpload,
-                                    gradient = PmpLogoSwooshGradient,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("sync_all_erp_server_button"),
-                                    onClick = {
-                                        viewModel.syncAllErpDataToServer()
-                                    }
-                                )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    GlassButton(
-                                        text = "استعادة من السيرفر",
-                                        icon = Icons.Default.CloudDownload,
-                                        gradient = GlassAccentBlueGradient,
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("restore_erp_server_button"),
-                                        onClick = {
-                                            viewModel.restoreAllErpDataFromServer()
-                                        }
-                                    )
-
-                                    GlassButton(
-                                        text = "نسخة محلية فورية",
-                                        icon = Icons.Default.Save,
-                                        gradient = Brush.horizontalGradient(listOf(Color(0xFF0F172A), Color(0xFF334155))),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("save_local_snapshot_button"),
-                                        onClick = {
-                                            viewModel.saveLocalSnapshotNow()
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // 2. Google Cloud Server Status & Health Diagnostics
-                    item {
-                        GlassCard(modifier = Modifier.fillMaxWidth()) {
-                            Column(
-                                modifier = Modifier.padding(18.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "حالة سيرفر Google Cloud واستقرار الاتصال",
-                                        color = TextWhite,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 15.sp,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    val isOnline = serverHealthReport?.isOnline == true
-                                    GlassBadge(
-                                        text = if (isOnline) "سيرفر مستقر أونلاين" else "السيرفر قيد الاتصال",
-                                        color = if (isOnline) PmpGreen else Color(0xFFF59E0B)
-                                    )
-                                }
-
-                                Text(
-                                    text = serverHealthReport?.message ?: cloudSyncState,
-                                    color = PmpBrandNavy,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-
-                                serverHealthReport?.let { report ->
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(Color(0xFFF8FAFC))
-                                                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                                .padding(8.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                                Text("سرعة الاستجابة", fontSize = 10.sp, color = TextMuted)
-                                                Text("${report.responseTimeMs} ms", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = PmpGreen)
-                                            }
-                                        }
-
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(Color(0xFFF8FAFC))
-                                                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                                .padding(8.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                                Text("فواتير السيرفر", fontSize = 10.sp, color = TextMuted)
-                                                Text("${report.cloudInvoicesCount}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = PmpBrandNavy)
-                                            }
-                                        }
-
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(Color(0xFFF8FAFC))
-                                                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                                .padding(8.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                                Text("حركات وخزن", fontSize = 10.sp, color = TextMuted)
-                                                Text("${report.cloudMovementsCount}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = PmpBrandNavy)
-                                            }
-                                        }
-
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(Color(0xFFF8FAFC))
-                                                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                                .padding(8.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                                Text("المستخدمين", fontSize = 10.sp, color = TextMuted)
-                                                Text("${report.cloudUsersCount}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = PmpBlueLight)
-                                            }
-                                        }
-                                    }
-                                }
-
-                                GlassTextField(
-                                    value = clusterCodeInput,
-                                    onValueChange = {
-                                        clusterCodeInput = it
-                                        viewModel.setServerClusterCode(it)
-                                    },
-                                    label = "معرف السيرفر وعنقود البيانات (Cluster Code)",
-                                    placeholder = "PMP-MAIN-CLOUD-SERVER",
-                                    leadingIcon = Icons.Default.Hub,
-                                    modifier = Modifier.testTag("server_cluster_code_input")
-                                )
-
-                                GlassButton(
-                                    text = "فحص استقرار السيرفر وسرعة الاستجابة",
-                                    icon = Icons.Default.Speed,
-                                    gradient = GlassAccentBlueGradient,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("check_server_health_button"),
-                                    onClick = {
-                                        viewModel.checkServerHealth()
-                                    }
-                                )
-                            }
-                        }
-                    }
-
-                    // 2.5. Google Cloud Server Sync Diagnostics Log
-                    item {
-                        GlassCard(modifier = Modifier.fillMaxWidth()) {
-                            Column(
-                                modifier = Modifier.padding(18.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Analytics,
-                                            contentDescription = null,
-                                            tint = PmpCyan,
-                                            modifier = Modifier.size(22.dp)
-                                        )
-                                        Text(
-                                            text = "سجل تشخيص وأمان المزامنة (Sync Diagnostics Log)",
-                                            color = TextWhite,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 15.sp
-                                        )
-                                    }
-                                    GlassBadge(
-                                        text = "${syncDiagnostics.size} عمليات مسجلة",
-                                        color = PmpCyan
-                                    )
-                                }
-
-                                Text(
-                                    text = "تسجيل شفاف لكافة عمليات المزامنة مع Google Cloud مع التوقيت، معرف الجهاز، ونوع العملية لضمان عدم حدوث أي تعارض أو تسجيل خروج قسري.",
-                                    color = TextMuted,
-                                    fontSize = 11.5.sp,
-                                    lineHeight = 17.sp
-                                )
-
-                                GlassButton(
-                                    text = "فتح لوحة تشخيص ومراقبة المزامنة المتقدمة",
-                                    icon = Icons.Default.Dns,
-                                    gradient = PmpLogoSwooshGradient,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("users_open_diagnostic_dashboard_button"),
-                                    onClick = { showFullDiagnosticDialog = true }
-                                )
-
-                                if (syncDiagnostics.isEmpty()) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0xFFF8FAFC))
-                                            .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                            .padding(12.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "لا توجد عمليات مزامنة مسجلة بعد في هذه الجلسة. اضغط على «حفظ ومزامنة شاملة» للبدء.",
-                                            color = TextMuted,
-                                            fontSize = 11.sp
-                                        )
-                                    }
-                                } else {
-                                    val timeFormat = remember { java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US) }
-                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        syncDiagnostics.take(6).forEach { diag ->
-                                            val actionTitle = when (diag.action) {
-                                                "SYNC_PUSH" -> "رفع ومزامنة البيانات"
-                                                "PULL_USERS" -> "مزامنة الحسابات المشتركة"
-                                                "RESTORE_PULL" -> "استعادة شاملة من السيرفر"
-                                                else -> diag.action
-                                            }
-                                            val isSuccess = diag.status == "STATUS_SUCCESS"
-                                            val isInProgress = diag.status == "IN_PROGRESS"
-
-                                            Box(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .background(Color(0xFFF8FAFC))
-                                                    .border(
-                                                        1.dp,
-                                                        if (isSuccess) PmpGreen.copy(alpha = 0.5f) else if (isInProgress) PmpCyan.copy(alpha = 0.5f) else PmpRed.copy(alpha = 0.5f),
-                                                        RoundedCornerShape(8.dp)
-                                                    )
-                                                    .padding(10.dp)
-                                            ) {
-                                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                    Row(
-                                                        modifier = Modifier.fillMaxWidth(),
-                                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                                        verticalAlignment = Alignment.CenterVertically
-                                                    ) {
-                                                        Text(
-                                                            text = actionTitle,
-                                                            fontWeight = FontWeight.Bold,
-                                                            fontSize = 12.5.sp,
-                                                            color = PmpBrandNavy
-                                                        )
-                                                        GlassBadge(
-                                                            text = if (isSuccess) "ناجحة" else if (isInProgress) "جارية" else "فشلت",
-                                                            color = if (isSuccess) PmpGreen else if (isInProgress) PmpCyan else PmpRed
-                                                        )
-                                                    }
-                                                    Row(
-                                                        modifier = Modifier.fillMaxWidth(),
-                                                        horizontalArrangement = Arrangement.SpaceBetween
-                                                    ) {
-                                                        Text(
-                                                            text = "الجهاز: ${diag.deviceId.take(12)}... • السجلات: ${diag.entitiesCount}",
-                                                            fontSize = 10.5.sp,
-                                                            color = TextMuted
-                                                        )
-                                                        Text(
-                                                            text = timeFormat.format(java.util.Date(diag.timestamp)),
-                                                            fontSize = 10.sp,
-                                                            color = TextMuted
-                                                        )
-                                                    }
-                                                    if (diag.message.isNotBlank()) {
-                                                        Text(
-                                                            text = "البيان: ${diag.message}",
-                                                            fontSize = 10.sp,
-                                                            color = if (isSuccess) PmpBrandNavy else PmpRed,
-                                                            fontWeight = FontWeight.SemiBold
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 3. Windows Desktop & Multi-Device Integration Hub
-                    item {
-                        GlassCard(modifier = Modifier.fillMaxWidth()) {
-                            Column(
-                                modifier = Modifier.padding(18.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Computer,
-                                            contentDescription = null,
-                                            tint = PmpBlueLight,
-                                            modifier = Modifier.size(24.dp)
-                                        )
-                                        Text(
-                                            text = "ربط برنامج الويندوز مع الهاتف (Windows & Phone Sync)",
-                                            color = TextWhite,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 15.sp
-                                        )
-                                    }
-                                    GlassBadge(text = "Windows & Android", color = PmpBlueLight)
-                                }
-
-                                Text(
-                                    text = "يتصل تطبيق الهاتف وبرنامج الكمبيوتر (Windows Desktop) بنفس قاعدة بيانات Google Cloud المركزية لحظياً. أي حركة بيع، صرف، أو فاتورة تسجل من أي جهاز تنعكس تلقائياً على باقي الأجهزة دون تعارض وبنفس الصلاحيات المحددة للمستخدم.",
-                                    color = TextMuted,
-                                    fontSize = 12.sp,
-                                    lineHeight = 18.sp
-                                )
-
-                                Text(
-                                    text = "بيانات الربط مع برنامج الويندوز (Windows Endpoint Configuration):",
-                                    color = PmpBrandNavy,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-
-                                val windowsApiSnippet = """
-// رابط وخادم الربط مع برنامج الويندوز (REST & Firestore SDK)
-Server Endpoint: ${serverHealthReport?.endpoint ?: "https://firestore.googleapis.com/v1/projects/erp-pmp-cloud"}
-Cluster ID: $clusterCodeInput
-Supported Clients: Windows Desktop (C#/WPF/Electron), Android Mobile
-Auth Protocol: Google Cloud IAM & Token Verification
-Realtime Sync: Enabled (Bi-directional)
-                                """.trimIndent()
-
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(Color(0xFF0F172A))
-                                        .padding(12.dp)
-                                ) {
-                                    Text(
-                                        text = windowsApiSnippet,
-                                        color = Color(0xFF38BDF8),
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        lineHeight = 16.sp
-                                    )
-                                }
-
-                                HorizontalDivider(color = GlassBorder)
-
-                                GlassTextField(
-                                    value = cloudLinkCodeInput,
-                                    onValueChange = { cloudLinkCodeInput = it },
-                                    label = "ربط ومزامنة حساب موظف من السيرفر بواسطة الكود (User Code)",
-                                    placeholder = "مثال: USR-SD-002 أو USR-HF-004",
-                                    leadingIcon = Icons.Default.Link,
-                                    modifier = Modifier.testTag("cloud_link_code_input")
-                                )
-
-                                GlassButton(
-                                    text = "استيراد ومزامنة حساب وصلاحيات الموظف من السيرفر",
-                                    icon = Icons.Default.CloudDownload,
-                                    gradient = GlassAccentBlueGradient,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("link_account_by_code_button"),
-                                    onClick = {
-                                        viewModel.linkAccountFromGoogleCloudByCode(
-                                            userCode = cloudLinkCodeInput,
-                                            activateSession = false
-                                        )
-                                    }
-                                )
-                            }
                         }
                     }
                 }
@@ -1370,38 +906,62 @@ Realtime Sync: Enabled (Bi-directional)
     // Dialog for Manager to set permissions before approving login OR modify permissions in the future
     userPendingPermEdit?.let { targetUser ->
         val isPendingApproval = targetUser.syncStatus == "PENDING_MANAGER_APPROVAL"
+        val displayGeneralPermissions = remember(generalPermissions, editPermsState) {
+            val extraPerms = editPermsState.filter { it.isNotBlank() && it !in generalPermissions && it !in reportSectionPermissions }
+            (generalPermissions + extraPerms).distinct()
+        }
+        val totalAvailablePerms = displayGeneralPermissions.size + reportSectionPermissions.size
+
         AlertDialog(
             onDismissRequest = { userPendingPermEdit = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+            modifier = Modifier
+                .fillMaxWidth(0.95f)
+                .heightIn(max = 680.dp),
             containerColor = Color.White,
             title = {
-                Text(
-                    text = if (isPendingApproval) {
-                        "تحديد الصلاحيات والموافقة على إنشاء الحساب (${targetUser.fullName})"
-                    } else {
-                        "تعديل صلاحيات الموظف (${targetUser.fullName})"
-                    },
-                    color = TextDark,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.5.sp
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isPendingApproval) {
+                                "تحديد الصلاحيات والموافقة (${targetUser.fullName})"
+                            } else {
+                                "تعديل صلاحيات الموظف (${targetUser.fullName})"
+                            },
+                            color = TextDark,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                        Text(
+                            text = "تم تحديد ${editPermsState.size} من $totalAvailablePerms صلاحية متاحة",
+                            color = PmpBrandRed,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = if (isPendingApproval) {
-                            "هذا الحساب سجل عبر Google وهو معلّق حالياً. حدد الصلاحيات المسموح له بها قبل الموافقة على تسجيل الدخول (ويمكنك تغييرها مستقبلاً في أي وقت):"
-                        } else {
-                            "حدد الصلاحيات المسموح بها لهذا الحساب فقط. ستختفي جميع الصلاحيات غير المحددة فوراً من حساب الموظف:"
-                        },
-                        color = TextMuted,
-                        fontSize = 12.sp
-                    )
-
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     GlassDropdown(
                         label = "الدور الوظيفي",
                         options = roleOptions,
                         selectedOption = editRoleState,
-                        onOptionSelected = { editRoleState = it }
+                        onOptionSelected = { newRole ->
+                            editRoleState = newRole
+                            if (newRole.contains("مدير النظام")) {
+                                editPermsState = (displayGeneralPermissions + reportSectionPermissions).toSet()
+                            }
+                        }
                     )
 
                     if (editRoleState == "مسمى وظيفي آخر (كتابة يدوية)...") {
@@ -1421,15 +981,40 @@ Realtime Sync: Enabled (Bi-directional)
                         onOptionSelected = { editBranchState = it }
                     )
 
-                    Text(
-                        text = "صلاحيات الأقسام العامة:",
-                        color = TextMuted,
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    // Select All / Deselect All quick bar
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "صلاحيات الأقسام والعمليات (${displayGeneralPermissions.size}):",
+                            color = TextDark,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            TextButton(
+                                onClick = {
+                                    editPermsState = (displayGeneralPermissions + reportSectionPermissions).toSet()
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(30.dp)
+                            ) {
+                                Text("تحديد الكل", color = PmpGreen, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                            }
+                            TextButton(
+                                onClick = { editPermsState = emptySet() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(30.dp)
+                            ) {
+                                Text("إلغاء الكل", color = PmpRed, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
 
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        generalPermissions.chunked(3).forEach { rowPerms ->
+                        displayGeneralPermissions.chunked(2).forEach { rowPerms ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1439,8 +1024,8 @@ Realtime Sync: Enabled (Bi-directional)
                                     Box(
                                         modifier = Modifier
                                             .weight(1f)
-                                            .height(36.dp)
-                                            .clip(RoundedCornerShape(9.dp))
+                                            .heightIn(min = 40.dp)
+                                            .clip(RoundedCornerShape(10.dp))
                                             .background(
                                                 if (isSelected) PmpBrandRed.copy(alpha = 0.14f)
                                                 else Color(0xFFF1F5F9)
@@ -1448,7 +1033,7 @@ Realtime Sync: Enabled (Bi-directional)
                                             .border(
                                                 1.dp,
                                                 if (isSelected) PmpBrandRed else GlassBorder,
-                                                RoundedCornerShape(9.dp)
+                                                RoundedCornerShape(10.dp)
                                             )
                                             .clickable {
                                                 editPermsState = if (isSelected) {
@@ -1457,28 +1042,44 @@ Realtime Sync: Enabled (Bi-directional)
                                                     editPermsState + perm
                                                 }
                                             }
-                                            .padding(horizontal = 4.dp),
-                                        contentAlignment = Alignment.Center
+                                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                                        contentAlignment = Alignment.CenterStart
                                     ) {
-                                        Text(
-                                            text = if (isSelected) "✓ $perm" else perm,
-                                            color = if (isSelected) PmpBrandRed else TextMuted,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isSelected) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                                contentDescription = null,
+                                                tint = if (isSelected) PmpBrandRed else TextMuted,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Text(
+                                                text = perm,
+                                                color = if (isSelected) PmpBrandRed else TextDark,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                     }
+                                }
+                                if (rowPerms.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
                                 }
                             }
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(4.dp))
+
                     Text(
-                        text = "صلاحيات أقسام التقارير التفصيلية (تحديد ما يراه الموظف كالمبيعات وحجب المواد الخام):",
-                        color = TextMuted,
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.SemiBold
+                        text = "صلاحيات أقسام التقارير التفصيلية (${reportSectionPermissions.size}):",
+                        color = TextDark,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
                     )
 
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1492,8 +1093,8 @@ Realtime Sync: Enabled (Bi-directional)
                                     Box(
                                         modifier = Modifier
                                             .weight(1f)
-                                            .height(36.dp)
-                                            .clip(RoundedCornerShape(9.dp))
+                                            .heightIn(min = 40.dp)
+                                            .clip(RoundedCornerShape(10.dp))
                                             .background(
                                                 if (isSelected) PmpBrandNavy.copy(alpha = 0.14f)
                                                 else Color(0xFFF1F5F9)
@@ -1501,7 +1102,7 @@ Realtime Sync: Enabled (Bi-directional)
                                             .border(
                                                 1.dp,
                                                 if (isSelected) PmpBrandNavy else GlassBorder,
-                                                RoundedCornerShape(9.dp)
+                                                RoundedCornerShape(10.dp)
                                             )
                                             .clickable {
                                                 editPermsState = if (isSelected) {
@@ -1510,18 +1111,32 @@ Realtime Sync: Enabled (Bi-directional)
                                                     editPermsState + perm
                                                 }
                                             }
-                                            .padding(horizontal = 4.dp),
-                                        contentAlignment = Alignment.Center
+                                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                                        contentAlignment = Alignment.CenterStart
                                     ) {
-                                        Text(
-                                            text = if (isSelected) "✓ $perm" else perm,
-                                            color = if (isSelected) PmpBrandNavy else TextMuted,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isSelected) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                                contentDescription = null,
+                                                tint = if (isSelected) PmpBrandNavy else TextMuted,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Text(
+                                                text = perm,
+                                                color = if (isSelected) PmpBrandNavy else TextDark,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                     }
+                                }
+                                if (rowPerms.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
                                 }
                             }
                         }
@@ -1530,8 +1145,8 @@ Realtime Sync: Enabled (Bi-directional)
             },
             confirmButton = {
                 GlassButton(
-                    text = if (isPendingApproval) "اعتماد الحساب وتفعيل الدخول" else "حفظ الصلاحيات ومزامنة السحابة",
-                    icon = if (isPendingApproval) Icons.Default.Verified else Icons.Default.CloudUpload,
+                    text = if (isPendingApproval) "اعتماد الحساب وتفعيل الدخول" else "حفظ الصلاحيات",
+                    icon = if (isPendingApproval) Icons.Default.Verified else Icons.Default.Save,
                     gradient = PmpBrandRedGradient,
                     onClick = {
                         val resolvedRole = if (editRoleState == "مسمى وظيفي آخر (كتابة يدوية)..." && editCustomRoleText.isNotBlank()) {
@@ -1574,13 +1189,13 @@ Realtime Sync: Enabled (Bi-directional)
             text = {
                 Column {
                     Text(
-                        text = "هل أنت متأكد من رغبتك في حذف حساب (${target.fullName} - @${target.username}) نهائياً من قاعدة البيانات وسيرفر السحابة؟",
+                        text = "هل أنت متأكد من رغبتك في حذف حساب (${target.fullName} - @${target.username}) نهائياً؟",
                         color = TextWhite,
                         fontSize = 13.5.sp
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "تحذير: هذا الإجراء لا يمكن التراجع عنه وسيتم إزالة كافة صلاحيات ومعرف ربط السيرفر لهذا الحساب فوراً.",
+                        text = "تحذير: هذا الإجراء لا يمكن التراجع عنه وسيتم إزالة كافة صلاحيات هذا الحساب فوراً.",
                         color = Color(0xFFFCA5A5),
                         fontSize = 12.sp
                     )
@@ -1604,7 +1219,7 @@ Realtime Sync: Enabled (Bi-directional)
         )
     }
 
-    if (showFullDiagnosticDialog) {
+    if (showFullDiagnosticDialog && isSuperAdmin) {
         SyncDiagnosticDashboardDialog(
             viewModel = viewModel,
             onDismiss = { showFullDiagnosticDialog = false }
@@ -1617,6 +1232,7 @@ private fun UserAccountCard(
     account: UserAccountEntity,
     isCurrent: Boolean,
     canManagePermissions: Boolean,
+    isSuperAdmin: Boolean = false,
     onSwitchRequest: () -> Unit,
     onEditPermissionsRequest: () -> Unit,
     onToggleActive: () -> Unit,
@@ -1704,7 +1320,7 @@ private fun UserAccountCard(
 
                 GlassBadge(
                     text = when {
-                        isPendingApproval -> "بانتظار موافقة المدير"
+                        isPendingApproval -> "بانتظار الموافقة"
                         isCurrent -> "النشط حالياً"
                         else -> account.role
                     },
@@ -1716,7 +1332,7 @@ private fun UserAccountCard(
                 )
             }
 
-            // Server Linkage Info Row
+            // Account Status & Contact Row (Technical codes visible only to SuperAdmin)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1727,28 +1343,34 @@ private fun UserAccountCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
                     Text(
-                        text = "معرف السيرفر: ${account.userCode} • ${account.phoneOrEmail.ifBlank { account.remoteServerId }}",
+                        text = if (isSuperAdmin) {
+                            "كود الحساب: ${account.userCode} • ${account.phoneOrEmail.ifBlank { account.branch }}"
+                        } else {
+                            account.phoneOrEmail.ifBlank { "الفرع: ${account.branch}" }
+                        },
                         color = PmpBrandNavy,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Text(
-                        text = "Sync Token: ${account.serverSyncToken}",
-                        color = TextMuted,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (isSuperAdmin) {
+                        Text(
+                            text = "رمز الربط: ${account.serverSyncToken}",
+                            color = TextMuted,
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
                 GlassBadge(
                     text = when {
-                        isPendingApproval -> "معلّق (غير مصرح بالدخول)"
-                        account.active -> "معتمد ومفعل"
+                        isPendingApproval -> "معلّق"
+                        account.active -> "مفعل"
                         else -> "موقوف"
                     },
                     color = when {
@@ -1763,9 +1385,9 @@ private fun UserAccountCard(
             if (canManagePermissions) {
                 Text(
                     text = if (account.permissions.isBlank()) {
-                        "الصلاحيات المخصصة: لم يتم تحديد صلاحيات بعد (حدد الصلاحيات قبل الموافقة على الدخول)"
+                        "الصلاحيات: لم يتم تحديد صلاحيات بعد"
                     } else {
-                        "الصلاحيات المخصصة: ${account.permissions.replace(",", " • ")}"
+                        "الصلاحيات: ${account.permissions.replace(",", " • ")}"
                     },
                     color = if (account.permissions.isBlank()) Color(0xFFB45309) else PmpBrandNavy,
                     fontSize = 11.sp,
@@ -1787,10 +1409,12 @@ private fun UserAccountCard(
                         Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "موافقة المدير على طلب إنشاء الحساب",
+                            text = "موافقة واعتماد الحساب",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 12.5.sp
+                            fontSize = 12.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -1809,7 +1433,8 @@ private fun UserAccountCard(
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(PmpBrandRed.copy(alpha = 0.12f))
                                 .border(1.dp, PmpBrandRed.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
-                                .clickable { onSwitchRequest() },
+                                .clickable { onSwitchRequest() }
+                                .padding(horizontal = 6.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1821,11 +1446,12 @@ private fun UserAccountCard(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "تبديل للحساب",
+                                    text = "تبديل",
                                     color = PmpBrandRed,
-                                    fontSize = 10.5.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    maxLines = 1
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -1833,7 +1459,7 @@ private fun UserAccountCard(
 
                     Box(
                         modifier = Modifier
-                            .weight(1.3f)
+                            .weight(1.4f)
                             .height(36.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(
@@ -1846,6 +1472,7 @@ private fun UserAccountCard(
                                 RoundedCornerShape(10.dp)
                             )
                             .clickable { onEditPermissionsRequest() }
+                            .padding(horizontal = 6.dp)
                             .testTag("edit_permissions_${account.username}"),
                         contentAlignment = Alignment.Center
                     ) {
@@ -1858,31 +1485,34 @@ private fun UserAccountCard(
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = if (isPendingApproval) "تحديد الصلاحيات والموافقة" else "تعديل الصلاحيات",
+                                text = if (isPendingApproval) "الصلاحيات والموافقة" else "تعديل الصلاحيات",
                                 color = if (isPendingApproval) PmpGreen else PmpBrandNavy,
                                 fontSize = 10.5.sp,
                                 fontWeight = FontWeight.Bold,
-                                maxLines = 1
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
 
-                    Box(
-                        modifier = Modifier
-                            .height(36.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFFF1F5F9))
-                            .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
-                            .clickable { onRegenerateToken() }
-                            .padding(horizontal = 8.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.SyncLock,
-                            contentDescription = "تحديث رمز الربط",
-                            tint = PmpBrandNavy,
-                            modifier = Modifier.size(16.dp)
-                        )
+                    if (isSuperAdmin) {
+                        Box(
+                            modifier = Modifier
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFFF1F5F9))
+                                .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
+                                .clickable { onRegenerateToken() }
+                                .padding(horizontal = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SyncLock,
+                                contentDescription = "تحديث رمز الربط",
+                                tint = PmpBrandNavy,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
 
                     if (!isCurrent && !isPendingApproval) {
@@ -1936,6 +1566,7 @@ private fun UserAccountCard(
 @Composable
 private fun ArchivedUserAccountCard(
     account: UserAccountEntity,
+    isSuperAdmin: Boolean = false,
     onRestore: () -> Unit,
     onDeletePermanently: () -> Unit
 ) {
@@ -1997,28 +1628,31 @@ private fun ArchivedUserAccountCard(
                 GlassBadge(text = "موقوف بالأرشيف", color = PmpRed)
             }
 
-            // Server ID row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFFF8FAFC))
-                    .border(0.5.dp, GlassBorder, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "كود الحساب: ${account.userCode}",
-                    color = PmpBrandNavy,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = account.phoneOrEmail.ifBlank { "بدون بريد مسجل" },
-                    color = TextMuted,
-                    fontSize = 11.sp
-                )
+            if (isSuperAdmin || account.phoneOrEmail.isNotBlank()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFFF8FAFC))
+                        .border(0.5.dp, GlassBorder, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isSuperAdmin) {
+                        Text(
+                            text = "كود الحساب: ${account.userCode}",
+                            color = PmpBrandNavy,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Text(
+                        text = account.phoneOrEmail.ifBlank { "بدون بريد مسجل" },
+                        color = TextMuted,
+                        fontSize = 11.sp
+                    )
+                }
             }
 
             // Action buttons: Restore vs Permanent Delete
@@ -2028,7 +1662,7 @@ private fun ArchivedUserAccountCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 GlassButton(
-                    text = "استرداد الحساب للعمل",
+                    text = "استرداد الحساب",
                     icon = Icons.Default.Restore,
                     gradient = Brush.horizontalGradient(listOf(Color(0xFF0D9488), Color(0xFF059669))),
                     onClick = onRestore,

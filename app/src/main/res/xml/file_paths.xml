@@ -4,4 +4,5 @@
     <cache-path name="apk_updates" path="updates" />
     <external-cache-path name="external_shared_images" path="." />
     <files-path name="internal_files" path="." />
+    <external-files-path name="external_files" path="." />
 </paths>

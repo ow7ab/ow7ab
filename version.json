@@ -1,9 +1,9 @@
 {
-  "versionCode": 4,
-  "versionName": "2.2.0",
-  "downloadUrl": "https://github.com/oaw7ab/pmp-paints-releases/releases/download/v2.2.0/pmp-paints-v2.2.0.apk",
-  "releaseNotes": "تحديث أمان واستقرار جديد، تحسين سرعة المزامنة السحابية وقائمة الأسعار الفورية.",
-  "fileSizeMb": 14.5,
+  "versionCode": 12,
+  "versionName": "2.9-PRO",
+  "downloadUrl": "https://ais-pre-3m3sbbrcjiswnj7jf3lwnz-658854365594.europe-west2.run.app/pmp-paints-latest.apk",
+  "releaseNotes": "الإصدار 2.9-PRO (Build 12): إضافة نظام التحميل البصري الاحترافي (Skeleton Loading + Shimmer Animation) في كافة شاشات التطبيق، وتطوير التقارير المالية والمخزنية الأربعة الجديدة، وتصدير ومشاركة Excel، وعرض تفاصيل الفاتورة الكاملة، ومزامنة أرشفة الخزن السحابية.",
+  "fileSizeMb": 31.5,
   "sha256": "",
   "minSupportedVersion": 1
 }

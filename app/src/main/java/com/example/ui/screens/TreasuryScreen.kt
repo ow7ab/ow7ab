@@ -1,18 +1,30 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.local.CashboxEntity
+import com.example.data.local.DailyClosingEntity
+import com.example.data.local.MovementEntity
+import com.example.data.local.TransferEntity
 import com.example.hasModulePermission
 import com.example.isSystemManager
 import com.example.ui.components.*
@@ -20,6 +32,7 @@ import com.example.ui.theme.*
 import com.example.ui.viewmodel.PmpViewModel
 import com.example.util.RoomTransactionLogger
 import com.example.util.RoomTransactionTrace
+import com.example.util.StatementPdfAndExcelExporter
 import com.example.util.TraceStatus
 import com.example.util.TransactionStage
 import java.text.NumberFormat
@@ -34,6 +47,7 @@ fun TreasuryScreen(
     onInitialSectionConsumed: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val cashboxes by viewModel.cashboxes.collectAsState()
     val movements by viewModel.movements.collectAsState()
     val transfers by viewModel.transfers.collectAsState()
@@ -41,8 +55,13 @@ fun TreasuryScreen(
     val halfaInvoices by viewModel.halfaInvoices.collectAsState()
     val cashboxBalances by viewModel.cashboxBalances.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
-    val transactionTraces by viewModel.transactionTraces.collectAsState()
-    var showDiagnosticsDialog by remember { mutableStateOf(false) }
+    val defaultAccountCurrency by viewModel.defaultAccountCurrency.collectAsState()
+    val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
+    val dataLoadError by viewModel.dataLoadError.collectAsState()
+
+    var selectedMovementForDetail by remember { mutableStateOf<MovementEntity?>(null) }
+    var selectedTransferForDetail by remember { mutableStateOf<TransferEntity?>(null) }
+    var selectedClosingForDetail by remember { mutableStateOf<DailyClosingEntity?>(null) }
 
     val canAccessTreasury = currentUser.hasModulePermission("الخزن")
     val canAccessTransfers = currentUser.hasModulePermission("التحويلات")
@@ -82,8 +101,8 @@ fun TreasuryScreen(
     val today = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()) }
 
     // Tab 0: New Movement State
-    var moveCashbox by remember { mutableStateOf("خزنة السودان") }
-    var moveCurrency by remember { mutableStateOf("SDG") }
+    var moveCashbox by remember { mutableStateOf(viewModel.resolveCashboxForCurrency(defaultAccountCurrency)) }
+    var moveCurrency by remember { mutableStateOf(defaultAccountCurrency) }
     var moveDirection by remember { mutableStateOf("وارد") }
     var moveAmount by remember { mutableStateOf("") }
     var moveReference by remember { mutableStateOf("REC-${System.currentTimeMillis() % 1000000}") }
@@ -106,15 +125,50 @@ fun TreasuryScreen(
     var boxToZeroOut by remember { mutableStateOf<String?>(null) }
 
     // Tab 2: Daily Closing State
-    var closeBox by remember { mutableStateOf("خزنة السودان") }
-    var closeCur by remember { mutableStateOf("SDG") }
+    var closeBox by remember { mutableStateOf(viewModel.resolveCashboxForCurrency(defaultAccountCurrency)) }
+    var closeCur by remember { mutableStateOf(defaultAccountCurrency) }
     var closeActualAmount by remember { mutableStateOf("") }
     var closeNotes by remember { mutableStateOf("") }
 
     // Tab 3: Statement State
-    var stBox by remember { mutableStateOf("خزنة السودان") }
-    var stCur by remember { mutableStateOf("SDG") }
+    var stBox by remember { mutableStateOf(viewModel.resolveCashboxForCurrency(defaultAccountCurrency)) }
+    var stCur by remember { mutableStateOf(defaultAccountCurrency) }
     var showAllBoxMovements by remember { mutableStateOf(false) }
+
+    LaunchedEffect(defaultAccountCurrency) {
+        val targetBox = viewModel.resolveCashboxForCurrency(defaultAccountCurrency)
+        moveCurrency = defaultAccountCurrency
+        moveCashbox = targetBox
+        closeCur = defaultAccountCurrency
+        closeBox = targetBox
+        stCur = defaultAccountCurrency
+        stBox = targetBox
+    }
+
+    val createTreasuryExcelLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        if (uri != null) {
+            val boxMovements = movements.filter {
+                it.cashbox.trim().equals(stBox.trim(), ignoreCase = true) &&
+                    it.currency.trim().equals(stCur.trim(), ignoreCase = true)
+            }
+            val currentTotal = cashboxBalances[Pair(stBox.trim(), stCur.trim())] ?: 0.0
+            val res = StatementPdfAndExcelExporter.exportTreasuryStatementToExcel(
+                context = context,
+                cashboxName = stBox,
+                currency = stCur,
+                movements = boxMovements,
+                closingBalance = currentTotal,
+                customOutputUri = uri
+            )
+            res.onSuccess {
+                viewModel.postMessage("تم تصدير كشف حساب الخزنة ($stBox) في ملف إكسيل (Excel) بنجاح")
+            }.onFailure { err ->
+                viewModel.postMessage("تعذر تصدير ملف إكسيل: ${err.message}", isError = true)
+            }
+        }
+    }
 
     // Tab 4: Manage Cashboxes State
     var showAddCashboxDialog by remember { mutableStateOf(false) }
@@ -152,9 +206,9 @@ fun TreasuryScreen(
                             text = if (canAccessTreasury && canAccessTransfers) {
                                 "الخزن والحسابات والتحويلات"
                             } else if (canAccessTransfers) {
-                                "قسم التحويلات المالية بين الخزن"
+                                "التحويلات المالية بين الخزن"
                             } else {
-                                "الخزن والحركات المالية (بدون صلاحية تحويلات)"
+                                "الخزن والحركات المالية"
                             },
                             style = MaterialTheme.typography.headlineMedium,
                             color = TextWhite,
@@ -163,17 +217,59 @@ fun TreasuryScreen(
                             modifier = Modifier.weight(1f)
                         )
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = if (canAccessTransfers) {
-                            "إدارة السيولة النقدية، التحويلات بين الفروع، وسجل الإقفالات الدورية."
-                        } else {
-                            "تسجيل الحركات النقدية، إقفال اليومية، وكشف الحساب حسب الصلاحيات المخصصة لك."
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextMuted,
-                        fontSize = 12.sp
-                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Unified Default Account Currency Selector Bar
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFFF8FAFC))
+                            .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "عملة معاملات الحساب الموحدة:",
+                                color = PmpBrandNavy,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            Text(
+                                text = "تتوحد عليها الحركات وكشف الحساب وتقبل التغيير داخل المعاملة",
+                                color = TextMuted,
+                                fontSize = 10.sp
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            currencies.forEach { cur ->
+                                val selected = defaultAccountCurrency == cur
+                                Surface(
+                                    onClick = {
+                                        viewModel.setDefaultAccountCurrency(cur)
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (selected) PmpBrandRed else Color.White,
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        if (selected) PmpBrandRed else GlassBorder
+                                    ),
+                                    modifier = Modifier.testTag("treasury_unified_currency_$cur")
+                                ) {
+                                    Text(
+                                        text = cur,
+                                        color = if (selected) Color.White else PmpBrandNavy,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.5.sp,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
 
                     if (tabs.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(14.dp))
@@ -188,7 +284,20 @@ fun TreasuryScreen(
             }
         }
 
-        when (activeTabTitle) {
+        if (isInitialDataLoading && cashboxes.isEmpty() && movements.isEmpty()) {
+            item(key = "treasury_shimmer_skeleton") {
+                ProvideShimmerEffect(enabled = true) {
+                    TreasurySkeletonSection()
+                }
+            }
+        } else if (dataLoadError != null && cashboxes.isEmpty() && movements.isEmpty()) {
+            item(key = "treasury_error_card") {
+                PmpErrorStateCard(
+                    message = dataLoadError ?: "تعذر تحميل بيانات الخزينة",
+                    onRetry = { viewModel.retryDataLoadAndSync() }
+                )
+            }
+        } else when (activeTabTitle) {
             "حركة مالية" -> {
                 // New Movement Form
                 item {
@@ -234,7 +343,10 @@ fun TreasuryScreen(
                                     label = "العملة *",
                                     options = currencies,
                                     selectedOption = moveCurrency,
-                                    onOptionSelected = { moveCurrency = it },
+                                    onOptionSelected = { cur ->
+                                        moveCurrency = cur
+                                        moveCashbox = viewModel.resolveCashboxForCurrency(cur)
+                                    },
                                     modifier = Modifier.weight(0.7f)
                                 )
                             }
@@ -424,7 +536,12 @@ fun TreasuryScreen(
                     }
                 } else {
                     items(filteredMovements, key = { "tx_mov_${it.id}" }) { m ->
-                        GlassCard(modifier = Modifier.fillMaxWidth()) {
+                        GlassCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("movement_card_${m.id}"),
+                            onClick = { selectedMovementForDetail = m }
+                        ) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -453,8 +570,15 @@ fun TreasuryScreen(
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            text = "${m.cashbox} • ${m.txDate} • مستند: ${m.reference} • ${m.createdBy}",
+                                            text = "${m.cashbox} • ${m.txDate} • مستند: ${m.reference}",
                                             color = TextMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 1
+                                        )
+                                        Text(
+                                            text = "موظف الحساب: ${m.createdBy.ifBlank { "المدير" }} (اضغط لعرض التفاصيل)",
+                                            color = PmpBrandNavy,
+                                            fontWeight = FontWeight.SemiBold,
                                             fontSize = 11.sp,
                                             maxLines = 1
                                         )
@@ -748,7 +872,10 @@ fun TreasuryScreen(
                 }
 
                 items(transfers, key = { it.id }) { t ->
-                    GlassCard(modifier = Modifier.fillMaxWidth()) {
+                    GlassCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { selectedTransferForDetail = t }
+                    ) {
                         Column(modifier = Modifier.padding(14.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -767,6 +894,13 @@ fun TreasuryScreen(
                                 text = "من: ${t.sourceCashbox} (${format.format(t.sourceAmount)} ${t.sourceCurrency}) ➔ إلى: ${t.destinationCashbox} (${format.format(t.destinationAmount)} ${t.destinationCurrency})",
                                 color = TextWhite,
                                 fontSize = 13.sp
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "موظف الحساب المنفذ: ${t.createdBy.ifBlank { "المدير" }} (اضغط للتفاصيل)",
+                                color = PmpBrandNavy,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 11.sp
                             )
                             if (t.description.isNotBlank()) {
                                 Spacer(modifier = Modifier.height(2.dp))
@@ -903,7 +1037,10 @@ fun TreasuryScreen(
                 }
 
                 items(dailyClosings, key = { it.id }) { c ->
-                    GlassCard(modifier = Modifier.fillMaxWidth()) {
+                    GlassCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { selectedClosingForDetail = c }
+                    ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -927,6 +1064,12 @@ fun TreasuryScreen(
                                     text = "دفتري: ${format.format(c.bookBalance)} | فعلي: ${format.format(c.countedBalance)} ${c.currency}",
                                     color = TextMuted,
                                     fontSize = 12.sp
+                                )
+                                Text(
+                                    text = "موظف الحساب: ${c.preparedBy.ifBlank { "المدير" }} (اضغط للتفاصيل)",
+                                    color = PmpBrandNavy,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 11.sp
                                 )
                             }
                             GlassBadge(
@@ -983,7 +1126,10 @@ fun TreasuryScreen(
                                     label = "العملة",
                                     options = currencies,
                                     selectedOption = stCur,
-                                    onOptionSelected = { stCur = it },
+                                    onOptionSelected = { cur ->
+                                        stCur = cur
+                                        stBox = viewModel.resolveCashboxForCurrency(cur)
+                                    },
                                     modifier = Modifier.weight(0.8f)
                                 )
                             }
@@ -1001,6 +1147,53 @@ fun TreasuryScreen(
                                     color = if (currentTotal >= 0) PmpGreenLight else PmpRedLight,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 18.sp
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            // Direct Excel Export Buttons for Treasury Statement
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                GlassButton(
+                                    text = "تصدير كشف الحساب إكسيل (Excel)",
+                                    icon = Icons.Default.TableChart,
+                                    gradient = GlassAccentGreenGradient,
+                                    onClick = {
+                                        val res = StatementPdfAndExcelExporter.exportTreasuryStatementToExcel(
+                                            context = context,
+                                            cashboxName = stBox,
+                                            currency = stCur,
+                                            movements = boxMovements,
+                                            closingBalance = currentTotal,
+                                            customOutputUri = null
+                                        )
+                                        res.onSuccess { savedPath ->
+                                            viewModel.postMessage("تم تصدير كشف حساب ($stBox - $stCur) في ملف إكسيل بنجاح إلى: $savedPath")
+                                        }.onFailure { err ->
+                                            viewModel.postMessage("تعذر تصدير ملف إكسيل: ${err.message}", isError = true)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .weight(1.25f)
+                                        .height(44.dp)
+                                        .testTag("export_treasury_excel_direct_btn")
+                                )
+
+                                GlassButton(
+                                    text = "حفظ Excel باسم...",
+                                    icon = Icons.Default.SaveAlt,
+                                    gradient = GlassAccentBlueGradient,
+                                    onClick = {
+                                        val safeName = stBox.replace(" ", "_")
+                                        createTreasuryExcelLauncher.launch("pmp_treasury_${safeName}_${stCur}.csv")
+                                    },
+                                    modifier = Modifier
+                                        .weight(0.75f)
+                                        .height(44.dp)
+                                        .testTag("export_treasury_excel_save_as_btn")
                                 )
                             }
                         }
@@ -1036,7 +1229,10 @@ fun TreasuryScreen(
                 } else {
                     val displayedBoxMovements = if (showAllBoxMovements) boxMovements else boxMovements.take(30)
                     items(displayedBoxMovements, key = { "stmt_m_${it.id}" }) { m ->
-                        GlassCard(modifier = Modifier.fillMaxWidth()) {
+                        GlassCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { selectedMovementForDetail = m }
+                        ) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1058,8 +1254,15 @@ fun TreasuryScreen(
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(text = m.description.ifBlank { "حركة نقدية ${m.direction}" }, color = TextWhite, fontSize = 13.sp, maxLines = 1)
                                         Text(
-                                            text = "${m.txDate} • مستند: ${m.reference} • ${m.createdBy}",
+                                            text = "${m.txDate} • مستند: ${m.reference}",
                                             color = TextSubtle,
+                                            fontSize = 11.sp,
+                                            maxLines = 1
+                                        )
+                                        Text(
+                                            text = "موظف الحساب: ${m.createdBy.ifBlank { "المدير" }} (اضغط للتفاصيل)",
+                                            color = PmpBrandNavy,
+                                            fontWeight = FontWeight.SemiBold,
                                             fontSize = 11.sp,
                                             maxLines = 1
                                         )
@@ -1287,27 +1490,43 @@ fun TreasuryScreen(
         )
     }
 
-    // Modal: Delete Cashbox Confirmation
+    // Modal: Delete / Archive Cashbox Confirmation
     deletingCashbox?.let { box ->
+        val linkedMovesCount = remember(box.name, movements) {
+            movements.count { it.cashbox.trim().equals(box.name.trim(), ignoreCase = true) }
+        }
         AlertDialog(
             onDismissRequest = { deletingCashbox = null },
-            title = { Text(text = "حذف الخزنة نهائياً", color = PmpRedLight, fontWeight = FontWeight.Bold) },
-            text = {
+            title = {
                 Text(
-                    text = "هل أنت متأكد من حذف الخزنة (${box.name}) نهائياً من النظام؟ تأكد من ترحيل أي أرصدة معلقة قبل إتمام الحذف.",
-                    color = TextWhite,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp
+                    text = if (linkedMovesCount > 0) "أرشفة وإلغاء تفعيل الخزنة" else "حذف الخزنة نهائياً",
+                    color = PmpRedLight,
+                    fontWeight = FontWeight.Bold
                 )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = if (linkedMovesCount > 0) {
+                            "الخزنة (${box.name}) مرتبطة بـ ($linkedMovesCount) حركة مالية مسجلة. سيتم إزالتها وأرشفتها من قائمة الخزن النشطة في جميع الأجهزة والحسابات فوراً، مع الاحتفاظ الكامل (100%) بجميع السجلات والحركات المالية التاريخية وأرصدتها في التقارير وكشف الحساب."
+                        } else {
+                            "هل أنت متأكد من حذف الخزنة (${box.name}) نهائياً من النظام ومزامنة الحذف عبر جميع الأجهزة؟"
+                        },
+                        color = TextWhite,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
+                    )
+                }
             },
             confirmButton = {
                 GlassButton(
-                    text = "نعم، حذف نهائي",
+                    text = if (linkedMovesCount > 0) "تأكيد الأرشفة ومزامنة الحذف" else "نعم، حذف نهائي",
                     gradient = PmpBrandRedGradient,
                     onClick = {
                         viewModel.deleteCashbox(box.id, box.name)
                         deletingCashbox = null
-                    }
+                    },
+                    modifier = Modifier.testTag("confirm_delete_cashbox_button")
                 )
             },
             dismissButton = {
@@ -1352,327 +1571,227 @@ fun TreasuryScreen(
         )
     }
 
-    var showWipeConfirmDialog by remember { mutableStateOf(false) }
-
-    if (showDiagnosticsDialog) {
-        TransactionDiagnosticsDialog(
-            traces = transactionTraces,
-            onClear = { viewModel.clearTransactionTraces() },
-            onWipeServer = { showWipeConfirmDialog = true },
-            onDismiss = { showDiagnosticsDialog = false }
-        )
-    }
-
-    if (showWipeConfirmDialog) {
+    // Modal: Movement Transaction Details Dialog (Displays Full Details & Employee Name)
+    selectedMovementForDetail?.let { m ->
+        val createdTimeStr = remember(m.createdAt) {
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(m.createdAt))
+        }
         AlertDialog(
-            onDismissRequest = { showWipeConfirmDialog = false },
+            onDismissRequest = { selectedMovementForDetail = null },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.DeleteSweep, contentDescription = null, tint = PmpRed)
-                    Text("تأكيد حذف جميع سجلات السيرفر", color = PmpRed, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Icon(
+                        imageVector = if (m.direction == "وارد") Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
+                        contentDescription = null,
+                        tint = if (m.direction == "وارد") PmpGreen else PmpRed
+                    )
+                    Text(
+                        text = "تفاصيل المعاملة المالية (${m.reference})",
+                        color = PmpBrandNavy,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 16.sp
+                    )
                 }
             },
             text = {
-                Text(
-                    text = "هل أنت متأكد تماماً من رغبتك في حذف جميع السجلات والمعاملات من السيرفر السحابي والبدء من جديد؟\n\nسيتم مسح كافة الحركات، الفواتير، التحويلات، والإقفالات وتصفيرها على السيرفر ومحلياً مع الاحتفاظ بالخزن الأساسية وبدء السيرفر بحالة نظيفة وسريعة.",
-                    color = TextWhite,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFFFEF2F2))
+                            .border(1.dp, PmpBrandRed.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Default.Badge, contentDescription = null, tint = PmpBrandRed)
+                        Column {
+                            Text(text = "اسم موظف الحساب الذي قام بعمل المعاملة:", color = TextMuted, fontSize = 11.sp)
+                            Text(
+                                text = m.createdBy.ifBlank { "المدير" },
+                                color = PmpBrandRed,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.5.sp
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(text = "نوع الحركة المالية:", color = TextMuted, fontSize = 12.5.sp)
+                        GlassBadge(
+                            text = m.direction,
+                            color = if (m.direction == "وارد") PmpGreen else PmpRed
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(text = "المبلغ والعملة:", color = TextMuted, fontSize = 12.5.sp)
+                        Text(
+                            text = "${format.format(m.amount)} ${m.currency}",
+                            color = if (m.direction == "وارد") PmpGreen else PmpRed,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 15.sp
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(text = "الخزنة:", color = TextMuted, fontSize = 12.5.sp)
+                        Text(text = m.cashbox, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(text = "رقم المستند / المرجع:", color = TextMuted, fontSize = 12.5.sp)
+                        Text(text = m.reference, color = TextDark, fontWeight = FontWeight.SemiBold, fontSize = 12.5.sp)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(text = "تاريخ وتوقيت التنفيذ:", color = TextMuted, fontSize = 12.5.sp)
+                        Text(text = "${m.txDate} ($createdTimeStr)", color = TextDark, fontSize = 11.5.sp)
+                    }
+                    HorizontalDivider(color = GlassBorder)
+                    Text(text = "البيان والتفاصيل الكاملة للمعاملة:", color = PmpBrandNavy, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                    Text(
+                        text = m.description.ifBlank { "معاملة نقدية (${m.direction})" },
+                        color = TextDark,
+                        fontSize = 13.sp
+                    )
+                }
             },
             confirmButton = {
                 GlassButton(
-                    text = "نعم، حذف السجلات والبدء من جديد",
-                    gradient = PmpBrandRedGradient,
-                    onClick = {
-                        viewModel.wipeAllServerDataAndStartFresh { _, _ -> }
-                        showWipeConfirmDialog = false
-                    }
+                    text = "إغلاق",
+                    onClick = { selectedMovementForDetail = null }
                 )
             },
-            dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { showWipeConfirmDialog = false })
-            },
-            containerColor = PmpNavySurface
+            containerColor = Color.White
         )
     }
-}
 
-@Composable
-fun TransactionDiagnosticsDialog(
-    traces: List<RoomTransactionTrace>,
-    onClear: () -> Unit,
-    onWipeServer: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    var selectedFilter by remember { mutableStateOf("الكل") }
-    val filteredTraces = remember(traces, selectedFilter) {
-        when (selectedFilter) {
-            "أخطاء فقط" -> traces.filter { it.status == TraceStatus.FAILURE || it.stage == TransactionStage.SYNC_BROKEN }
-            "معاملات Room" -> traces.filter {
-                it.stage in listOf(
-                    TransactionStage.TX_BEGIN,
-                    TransactionStage.ROOM_INSERT,
-                    TransactionStage.ROOM_UPDATE,
-                    TransactionStage.ROOM_DELETE,
-                    TransactionStage.ROOM_TX_COMMIT,
-                    TransactionStage.ROOM_TX_ROLLBACK
-                )
-            }
-            "مزامنة السحابة" -> traces.filter {
-                it.stage in listOf(
-                    TransactionStage.SYNC_DISPATCH,
-                    TransactionStage.SYNC_ACKNOWLEDGED,
-                    TransactionStage.SYNC_BROKEN
-                )
-            }
-            "استعلامات" -> traces.filter { it.stage == TransactionStage.FETCH_QUERY }
-            else -> traces
+    // Modal: Transfer Details Dialog (Displays Full Transfer Details & Employee Name)
+    selectedTransferForDetail?.let { t ->
+        val createdTimeStr = remember(t.createdAt) {
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(t.createdAt))
         }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        modifier = Modifier
-            .fillMaxWidth(0.96f)
-            .heightIn(max = 680.dp),
-        title = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+        AlertDialog(
+            onDismissRequest = { selectedTransferForDetail = null },
+            title = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.Analytics, contentDescription = null, tint = PmpCyan)
-                    Column {
-                        Text(
-                            text = "تشخيص مسار المعاملات والمزامنة (Room & Cloud)",
-                            color = TextDark,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
-                        )
-                        Text(
-                            text = "${traces.size} حركة متتبعة • فحص فوري لانقطاع البيانات المالية",
-                            color = TextMuted,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-            }
-        },
-        text = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                // Filter chips
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    listOf("الكل", "أخطاء فقط", "معاملات Room", "مزامنة السحابة", "استعلامات").forEach { filter ->
-                        val isSelected = selectedFilter == filter
-                        Surface(
-                            onClick = { selectedFilter = filter },
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-                            color = if (isSelected) PmpCyan.copy(alpha = 0.15f) else PmpNavyCard,
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp,
-                                if (isSelected) PmpCyan else PmpNavyBorder
-                            )
-                        ) {
-                            Text(
-                                text = filter,
-                                color = if (isSelected) PmpCyan else TextMuted,
-                                fontSize = 10.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                }
-
-                if (filteredTraces.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(180.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "لا توجد سجلات تتبع مسجلة في هذا التصنيف حالياً.\nقم بإضافة حركة مالية أو تصفح كشف الحساب لرؤية التتبع اللحظي.",
-                            color = TextMuted,
-                            fontSize = 12.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f, fill = false),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(filteredTraces, key = { it.id + it.timestamp }) { trace ->
-                            TraceItemCard(trace)
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                GlassButton(
-                    text = "حذف جميع السجلات من السيرفر والبدء من جديد",
-                    onClick = onWipeServer,
-                    icon = Icons.Default.DeleteSweep,
-                    gradient = PmpBrandRedGradient,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    GlassButton(
-                        text = "مسح سجل التتبع",
-                        onClick = onClear,
-                        icon = Icons.Default.DeleteOutline,
-                        modifier = Modifier.weight(1f)
-                    )
-                    GlassButton(
-                        text = "إغلاق",
-                        onClick = onDismiss,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        },
-        containerColor = PmpNavySurface
-    )
-}
-
-@Composable
-fun TraceItemCard(trace: RoomTransactionTrace) {
-    val stageColor = when (trace.stage) {
-        TransactionStage.ROOM_TX_COMMIT -> PmpGreen
-        TransactionStage.ROOM_TX_ROLLBACK -> PmpRed
-        TransactionStage.TX_BEGIN -> PmpCyan
-        TransactionStage.ROOM_INSERT, TransactionStage.ROOM_UPDATE, TransactionStage.ROOM_DELETE -> PmpBlueLight
-        TransactionStage.SYNC_DISPATCH -> PmpGold
-        TransactionStage.SYNC_ACKNOWLEDGED -> PmpGreen
-        TransactionStage.SYNC_BROKEN -> PmpRed
-        TransactionStage.FETCH_QUERY -> PmpPurple
-    }
-
-    val stageLabel = when (trace.stage) {
-        TransactionStage.TX_BEGIN -> "بدء معاملة Room"
-        TransactionStage.ROOM_INSERT -> "إدراج سجل Room"
-        TransactionStage.ROOM_UPDATE -> "تعديل سجل Room"
-        TransactionStage.ROOM_DELETE -> "حذف سجل Room"
-        TransactionStage.ROOM_TX_COMMIT -> "تثبيت Room بنجاح"
-        TransactionStage.ROOM_TX_ROLLBACK -> "تراجع وفشل Room"
-        TransactionStage.FETCH_QUERY -> "استعلام قراءة Room"
-        TransactionStage.SYNC_DISPATCH -> "إرسال إلى السحابة"
-        TransactionStage.SYNC_ACKNOWLEDGED -> "تأكيد السيرفر بنجاح"
-        TransactionStage.SYNC_BROKEN -> "انقطاع المزامنة"
-    }
-
-    val statusIcon = when (trace.status) {
-        TraceStatus.SUCCESS -> Icons.Default.CheckCircle
-        TraceStatus.FAILURE -> Icons.Default.Error
-        TraceStatus.WARNING -> Icons.Default.Warning
-        TraceStatus.IN_PROGRESS -> Icons.Default.HourglassTop
-    }
-
-    GlassCard(
-        modifier = Modifier.fillMaxWidth(),
-        cornerRadius = 12.dp,
-        borderColor = if (trace.status == TraceStatus.FAILURE) PmpRed else null
-    ) {
-        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(statusIcon, contentDescription = null, tint = stageColor, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.SwapHoriz, contentDescription = null, tint = PmpGold)
                     Text(
-                        text = stageLabel,
-                        color = stageColor,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
-                    )
-                    Text(
-                        text = "[${trace.operation}]",
-                        color = TextMuted,
-                        fontSize = 10.sp
+                        text = "تفاصيل عملية التحويل (${t.reference})",
+                        color = PmpBrandNavy,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 16.sp
                     )
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (trace.durationMs > 0) {
-                        Text(
-                            text = "${trace.durationMs}ms",
-                            color = PmpCyan,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Text(
-                        text = trace.formattedTime,
-                        color = TextSubtle,
-                        fontSize = 10.sp
-                    )
-                }
-            }
-
-            Text(
-                text = trace.details,
-                color = TextDark,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
-            )
-
-            if (!trace.diagnosticsHint.isNullOrBlank()) {
-                Surface(
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(6.dp),
-                    color = (if (trace.status == TraceStatus.FAILURE) PmpRed else PmpGold).copy(alpha = 0.1f),
-                    border = androidx.compose.foundation.BorderStroke(0.5.dp, if (trace.status == TraceStatus.FAILURE) PmpRed else PmpGold),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
-                        modifier = Modifier.padding(6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFFFEF2F2))
+                            .border(1.dp, PmpBrandRed.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            Icons.Default.Info,
-                            contentDescription = null,
-                            tint = if (trace.status == TraceStatus.FAILURE) PmpRed else PmpGold,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = trace.diagnosticsHint,
-                            color = if (trace.status == TraceStatus.FAILURE) PmpRed else TextDark,
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp
-                        )
+                        Icon(Icons.Default.Badge, contentDescription = null, tint = PmpBrandRed)
+                        Column {
+                            Text(text = "اسم موظف الحساب الذي قام بعمل التحويل:", color = TextMuted, fontSize = 11.sp)
+                            Text(
+                                text = t.createdBy.ifBlank { "المدير" },
+                                color = PmpBrandRed,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.5.sp
+                            )
+                        }
+                    }
+                    Text(text = "من خزنة: ${t.sourceCashbox} (${format.format(t.sourceAmount)} ${t.sourceCurrency})", color = PmpRed, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                    Text(text = "إلى خزنة: ${t.destinationCashbox} (${format.format(t.destinationAmount)} ${t.destinationCurrency})", color = PmpGreen, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                    Text(text = "معامل الصرف: ${t.rate}", color = TextDark, fontSize = 12.5.sp)
+                    Text(text = "تاريخ العملية: ${t.txDate} ($createdTimeStr)", color = TextMuted, fontSize = 12.sp)
+                    if (t.description.isNotBlank()) {
+                        HorizontalDivider(color = GlassBorder)
+                        Text(text = "البيان والملاحظات: ${t.description}", color = TextDark, fontSize = 12.5.sp)
                     }
                 }
-            }
-
-            if (!trace.errorMessage.isNullOrBlank()) {
-                Text(
-                    text = "سبب الخطأ: ${trace.errorMessage}",
-                    color = PmpRed,
-                    fontSize = 10.sp,
-                    maxLines = 2,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "إغلاق",
+                    onClick = { selectedTransferForDetail = null }
                 )
-            }
-        }
+            },
+            containerColor = Color.White
+        )
+    }
+
+    // Modal: Daily Closing Details Dialog (Displays Closing Details & Employee Name)
+    selectedClosingForDetail?.let { c ->
+        AlertDialog(
+            onDismissRequest = { selectedClosingForDetail = null },
+            title = {
+                Text(
+                    text = "تفاصيل إقفال اليومية (${c.cashbox})",
+                    color = PmpBrandNavy,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 16.sp
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFFFEF2F2))
+                            .border(1.dp, PmpBrandRed.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Default.Badge, contentDescription = null, tint = PmpBrandRed)
+                        Column {
+                            Text(text = "اسم موظف الحساب الذي قام بالإقفال:", color = TextMuted, fontSize = 11.sp)
+                            Text(
+                                text = c.preparedBy.ifBlank { "المدير" },
+                                color = PmpBrandRed,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.5.sp
+                            )
+                        }
+                    }
+                    Text(text = "التاريخ: ${c.closeDate}", color = TextDark, fontSize = 13.sp)
+                    Text(text = "الرصيد الدفتري: ${format.format(c.bookBalance)} ${c.currency}", color = TextDark, fontSize = 13.sp)
+                    Text(text = "الرصيد الفعلي المعدود: ${format.format(c.countedBalance)} ${c.currency}", color = PmpGreen, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
+                    Text(text = "الفارق: ${format.format(c.difference)} ${c.currency}", color = if (c.difference == 0.0) PmpGreen else PmpRed, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    if (c.notes.isNotBlank()) {
+                        Text(text = "ملاحظات الجرد: ${c.notes}", color = TextMuted, fontSize = 12.5.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "إغلاق",
+                    onClick = { selectedClosingForDetail = null }
+                )
+            },
+            containerColor = Color.White
+        )
     }
 }

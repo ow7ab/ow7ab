@@ -128,6 +128,10 @@ abstract class PmpDatabase : RoomDatabase() {
             if ("currency" !in posterColumns) {
                 db.execSQL("ALTER TABLE `poster_prices` ADD COLUMN `currency` TEXT NOT NULL DEFAULT 'SDG'")
             }
+            try {
+                db.execSQL("UPDATE `poster_prices` SET `currency` = 'EGP' WHERE `id` LIKE '%_EGP'")
+                db.execSQL("UPDATE `poster_prices` SET `price` = `priceEgp` WHERE (`currency` = 'EGP' OR `id` LIKE '%_EGP') AND `priceEgp` > 0 AND `price` = `priceEgp` * 200")
+            } catch (_: Exception) {}
 
             // Deduplicate cashboxes, movements, and user accounts
             try {
@@ -148,7 +152,9 @@ abstract class PmpDatabase : RoomDatabase() {
                     }
                 }
                 listOf("خزنة السودان", "خزنة مصر", "خزنة حلفا", "خزنة عطبرة").forEach { boxName ->
-                    if (boxName.trim().lowercase() !in existingBoxes) {
+                    if (boxName.trim().lowercase() !in existingBoxes &&
+                        !DeletedRecordsRegistry.isDeleted("cashboxes", boxName)
+                    ) {
                         db.execSQL("INSERT INTO `cashboxes` (`name`) VALUES ('$boxName')")
                         existingBoxes.add(boxName.trim().lowercase())
                     }
@@ -434,7 +440,11 @@ abstract class PmpDatabase : RoomDatabase() {
             seedDefaultUsersIfEmpty(dao)
             // Seed Cashboxes (Separated for each branch & region)
             val cashboxes = listOf("خزنة السودان", "خزنة مصر", "خزنة حلفا", "خزنة عطبرة")
-            cashboxes.forEach { dao.insertCashbox(CashboxEntity(name = it)) }
+            cashboxes.forEach { boxName ->
+                if (!DeletedRecordsRegistry.isDeleted("cashboxes", boxName)) {
+                    dao.insertCashbox(CashboxEntity(name = boxName))
+                }
+            }
 
             // Seed Warehouses (Separated: Sudan sales vs Factory/Egypt)
             val warehouses = listOf(
@@ -581,31 +591,31 @@ abstract class PmpDatabase : RoomDatabase() {
                 )
             )
 
-            // Seed Poster Prices (Dual Currency: Sudan SDG & Factory/Egypt EGP)
+            // Seed Poster Prices (Strictly Separated Currencies: Sudan SDG & Egypt EGP)
             val posterList = listOf(
                 // SDG Prices (Sudan Sales / Halfa)
-                PosterPriceEntity("250_أبيض", "250", "أبيض", 500000, 2500, "SDG"),
-                PosterPriceEntity("250_ألوان", "250", "ألوان", 490000, 2450, "SDG"),
-                PosterPriceEntity("250_فضي", "250", "فضي", 510000, 2550, "SDG"),
-                PosterPriceEntity("250_ذهبي", "250", "ذهبي", 520000, 2600, "SDG"),
-                PosterPriceEntity("250_ورنيش", "250", "ورنيش", 495000, 2475, "SDG"),
-                PosterPriceEntity("900_أبيض", "900", "أبيض", 385000, 1925, "SDG"),
-                PosterPriceEntity("900_ألوان", "900", "ألوان", 375000, 1875, "SDG"),
-                PosterPriceEntity("900_فضي", "900", "فضي", 390000, 1950, "SDG"),
-                PosterPriceEntity("900_ذهبي", "900", "ذهبي", 400000, 2000, "SDG"),
-                PosterPriceEntity("900_ورنيش", "900", "ورنيش", 375000, 1875, "SDG"),
+                PosterPriceEntity("250_أبيض", "250", "أبيض", 500000, 0, "SDG"),
+                PosterPriceEntity("250_ألوان", "250", "ألوان", 490000, 0, "SDG"),
+                PosterPriceEntity("250_فضي", "250", "فضي", 510000, 0, "SDG"),
+                PosterPriceEntity("250_ذهبي", "250", "ذهبي", 520000, 0, "SDG"),
+                PosterPriceEntity("250_ورنيش", "250", "ورنيش", 495000, 0, "SDG"),
+                PosterPriceEntity("900_أبيض", "900", "أبيض", 385000, 0, "SDG"),
+                PosterPriceEntity("900_ألوان", "900", "ألوان", 375000, 0, "SDG"),
+                PosterPriceEntity("900_فضي", "900", "فضي", 390000, 0, "SDG"),
+                PosterPriceEntity("900_ذهبي", "900", "ذهبي", 400000, 0, "SDG"),
+                PosterPriceEntity("900_ورنيش", "900", "ورنيش", 375000, 0, "SDG"),
 
-                // EGP Prices (Factory & Egypt)
-                PosterPriceEntity("250_أبيض_EGP", "250", "أبيض", 500000, 2500, "EGP"),
-                PosterPriceEntity("250_ألوان_EGP", "250", "ألوان", 490000, 2450, "EGP"),
-                PosterPriceEntity("250_فضي_EGP", "250", "فضي", 510000, 2550, "EGP"),
-                PosterPriceEntity("250_ذهبي_EGP", "250", "ذهبي", 520000, 2600, "EGP"),
-                PosterPriceEntity("250_ورنيش_EGP", "250", "ورنيش", 495000, 2475, "EGP"),
-                PosterPriceEntity("900_أبيض_EGP", "900", "أبيض", 385000, 1925, "EGP"),
-                PosterPriceEntity("900_ألوان_EGP", "900", "ألوان", 375000, 1875, "EGP"),
-                PosterPriceEntity("900_فضي_EGP", "900", "فضي", 390000, 1950, "EGP"),
-                PosterPriceEntity("900_ذهبي_EGP", "900", "ذهبي", 400000, 2000, "EGP"),
-                PosterPriceEntity("900_ورنيش_EGP", "900", "ورنيش", 375000, 1875, "EGP")
+                // EGP Prices (Factory & Egypt - Stored exactly as EGP without SDG mixing)
+                PosterPriceEntity("250_أبيض_EGP", "250", "أبيض", 2500, 2500, "EGP"),
+                PosterPriceEntity("250_ألوان_EGP", "250", "ألوان", 2450, 2450, "EGP"),
+                PosterPriceEntity("250_فضي_EGP", "250", "فضي", 2550, 2550, "EGP"),
+                PosterPriceEntity("250_ذهبي_EGP", "250", "ذهبي", 2600, 2600, "EGP"),
+                PosterPriceEntity("250_ورنيش_EGP", "250", "ورنيش", 2475, 2475, "EGP"),
+                PosterPriceEntity("900_أبيض_EGP", "900", "أبيض", 1925, 1925, "EGP"),
+                PosterPriceEntity("900_ألوان_EGP", "900", "ألوان", 1875, 1875, "EGP"),
+                PosterPriceEntity("900_فضي_EGP", "900", "فضي", 1950, 1950, "EGP"),
+                PosterPriceEntity("900_ذهبي_EGP", "900", "ذهبي", 2000, 2000, "EGP"),
+                PosterPriceEntity("900_ورنيش_EGP", "900", "ورنيش", 1875, 1875, "EGP")
             )
             dao.insertPosterPrices(posterList)
 

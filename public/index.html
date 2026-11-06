@@ -117,6 +117,70 @@
             padding: 20px;
             margin-bottom: 28px;
             text-align: right;
+            position: relative;
+            overflow: hidden;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        /* Shimmer loading state for version-card */
+        @keyframes shimmer-sweep {
+            0% { transform: translateX(100%); }
+            100% { transform: translateX(-100%); }
+        }
+
+        @keyframes shimmer-pulse {
+            0%, 100% { background-position: 200% 0; }
+            50% { background-position: -200% 0; }
+        }
+
+        .version-card.is-loading {
+            border-color: rgba(6, 182, 212, 0.35);
+            box-shadow: 0 0 24px rgba(6, 182, 212, 0.08);
+        }
+
+        .version-card.is-loading::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(
+                90deg,
+                transparent 0%,
+                rgba(255, 255, 255, 0.05) 35%,
+                rgba(6, 182, 212, 0.14) 50%,
+                rgba(255, 255, 255, 0.05) 65%,
+                transparent 100%
+            );
+            animation: shimmer-sweep 1.5s infinite ease-in-out;
+            pointer-events: none;
+        }
+
+        .version-card.is-loading .shimmer-target {
+            color: transparent !important;
+            background: linear-gradient(
+                90deg,
+                rgba(148, 163, 184, 0.16) 25%,
+                rgba(226, 232, 240, 0.34) 50%,
+                rgba(148, 163, 184, 0.16) 75%
+            );
+            background-size: 200% 100%;
+            animation: shimmer-pulse 1.4s infinite linear;
+            border-radius: 8px;
+            user-select: none;
+        }
+
+        .version-card.is-loading .shimmer-target * {
+            opacity: 0;
+        }
+
+        .shimmer-target {
+            transition: color 0.25s ease, background 0.25s ease;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .version-card.is-loading::after,
+            .version-card.is-loading .shimmer-target {
+                animation: none;
+            }
         }
 
         .version-row {
@@ -244,10 +308,10 @@
         <h1 class="logo-title">PMP <span>PAINTS</span></h1>
         <p class="subtitle">مركز تنزيل وتثبيت أحدث إصدار لتطبيق نظام إدارة الحسابات، الخزن، المصنع، والمخازن</p>
 
-        <div class="version-card">
+        <div class="version-card is-loading" id="versionCard" aria-busy="true" aria-live="polite">
             <div class="version-row">
                 <span class="version-label">📦 رقم الإصدار الحالي:</span>
-                <span class="version-value cyan" id="versionName">v2.1-PRO (Build 3)</span>
+                <span class="version-value cyan shimmer-target" id="versionName">v2.5-PRO (Build 8)</span>
             </div>
             <div class="version-row">
                 <span class="version-label">⚡ معرّف الحزمة (Package ID):</span>
@@ -259,11 +323,11 @@
             </div>
             <div class="version-row">
                 <span class="version-label">💾 حجم الحزمة:</span>
-                <span class="version-value" id="fileSize">33.2 ميجابايت</span>
+                <span class="version-value shimmer-target" id="fileSize">31.0 ميجابايت</span>
             </div>
 
-            <div class="release-notes" id="releaseNotes">
-                ✨ <strong>جديد التحديث:</strong> فحص تلقائي للإصدارات، تنزيل متدفق مع مؤشر دائري فوري، تشغيل نظام PackageInstaller الرسمي مع الحفاظ الكامل على كافة البيانات والحسابات والخزن.
+            <div class="release-notes shimmer-target" id="releaseNotes">
+                ✨ <strong>النسخة المحسنة v2.5-PRO:</strong> نظام تحديث ذكي بـ 4 مراحل مع إخفاء تلقائي لرسالة التحديث فور الترقية، حماية تصفير السيرفر بكلمة مرور المدير ونافذة حمراء تحذيرية، تعديل وحذف خامات المشتريات، وصلاحية مخصصة لتعديل نوع الصنف.
             </div>
         </div>
 
@@ -287,12 +351,24 @@
     </div>
 
     <script>
+        const versionCard = document.getElementById('versionCard');
+        if (versionCard) {
+            versionCard.classList.add('is-loading');
+            versionCard.setAttribute('aria-busy', 'true');
+        }
+
         // جلب بيانات الإصدار الحديث ديناميكياً من ملف version.json إن وُجد
-        fetch('/version.json')
-            .then(res => res.json())
+        fetch('/version.json', { cache: 'no-store' })
+            .then(res => {
+                if (!res.ok) throw new Error('Failed to load version.json');
+                return res.json();
+            })
             .then(data => {
                 if (data.versionName) {
-                    document.getElementById('versionName').textContent = 'v' + data.versionName + ' (Build ' + (data.versionCode || '') + ')';
+                    const cleanVer = String(data.versionName).startsWith('v')
+                        ? data.versionName
+                        : 'v' + data.versionName;
+                    document.getElementById('versionName').textContent = cleanVer + ' (Build ' + (data.versionCode || '') + ')';
                 }
                 if (data.fileSizeMb) {
                     document.getElementById('fileSize').textContent = data.fileSizeMb + ' ميجابايت';
@@ -300,13 +376,15 @@
                 if (data.releaseNotes) {
                     document.getElementById('releaseNotes').innerHTML = '✨ <strong>جديد التحديث:</strong> ' + data.releaseNotes;
                 }
-                if (data.downloadUrl && data.downloadUrl.startsWith('http')) {
-                    // إذا كان الرابط الخارجي جاهزاً يمكن توجيه التنزيل إليه أو استخدام النسخة المباشرة
-                    // document.getElementById('downloadBtn').href = data.downloadUrl;
-                }
             })
             .catch(() => {
                 // استخدام البيانات الافتراضية المكتوبة مسبقاً
+            })
+            .finally(() => {
+                if (versionCard) {
+                    versionCard.classList.remove('is-loading');
+                    versionCard.setAttribute('aria-busy', 'false');
+                }
             });
     </script>
 </body>

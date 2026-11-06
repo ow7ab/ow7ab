@@ -55,26 +55,106 @@ class PmpRepository(
     fun getTransfers(): Flow<List<TransferEntity>> = dao.getAllTransfers()
     fun getDailyClosings(): Flow<List<DailyClosingEntity>> = dao.getAllDailyClosings()
 
-    suspend fun addCashbox(name: String, user: String) {
+    suspend fun addCashbox(name: String, user: String): Long {
         val trimmed = name.trim()
-        if (trimmed.isNotEmpty()) {
-            dao.insertCashbox(CashboxEntity(name = trimmed))
-            dao.insertAuditLog(AuditLogEntity(username = user, action = "ADD_CASHBOX", detail = trimmed))
+        if (trimmed.isEmpty()) return 0L
+        DeletedRecordsRegistry.unregisterDeleted("cashboxes", trimmed)
+        val existing = dao.getCashboxesDirect().firstOrNull {
+            it.name.trim().equals(trimmed, ignoreCase = true)
         }
+        if (existing != null) {
+            DeletedRecordsRegistry.unregisterDeleted("cashboxes", existing.id)
+            return existing.id
+        }
+        val newId = dao.insertCashbox(CashboxEntity(name = trimmed))
+        DeletedRecordsRegistry.unregisterDeleted("cashboxes", newId)
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = user,
+                action = "ADD_CASHBOX",
+                detail = "إضافة خزنة معتمدة: $trimmed (#$newId)"
+            )
+        )
+        return newId
     }
 
     suspend fun updateCashbox(id: Long, name: String, user: String): Result<Unit> {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return Result.failure(Exception("اسم الخزنة لا يمكن أن يكون فارغاً"))
+        val existing = dao.getCashboxesDirect().firstOrNull { it.id == id }
+        if (existing != null && !existing.name.trim().equals(trimmed, ignoreCase = true)) {
+            DeletedRecordsRegistry.registerDeleted(
+                collection = "cashboxes",
+                entityId = existing.name.trim(),
+                docId = DeletedRecordsRegistry.cashboxDocId(existing.name, existing.id),
+                actor = user
+            )
+        }
+        DeletedRecordsRegistry.unregisterDeleted("cashboxes", trimmed)
+        DeletedRecordsRegistry.unregisterDeleted("cashboxes", id)
         dao.updateCashbox(CashboxEntity(id = id, name = trimmed))
-        dao.insertAuditLog(AuditLogEntity(username = user, action = "UPDATE_CASHBOX", detail = trimmed))
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = user,
+                action = "UPDATE_CASHBOX",
+                detail = "تعديل اسم الخزنة #$id إلى: $trimmed"
+            )
+        )
         return Result.success(Unit)
     }
 
-    suspend fun deleteCashbox(id: Long, user: String): Result<Unit> {
+    /**
+     * يحذف أو يؤرشف الخزنة من قائمة الخزن النشطة ويسجل شاهد حذف سحابي (Tombstone)
+     * مع الحفاظ الكامل 100% على كافة السجلات والحركات المالية التاريخية المرتبطة بها.
+     * يعيد Boolean يوضح ما إذا كانت الخزنة تحتوي على حركات مالية تاريخية تم الاحتفاظ بها بأمان.
+     */
+    suspend fun deleteCashbox(id: Long, name: String = "", user: String): Result<Boolean> = runInTransaction(
+        operationName = "DELETE_OR_ARCHIVE_CASHBOX",
+        entityType = "cashboxes",
+        details = "حذف/أرشفة الخزنة #$id ($name)"
+    ) {
+        val allBoxes = dao.getCashboxesDirect()
+        val resolvedName = name.trim().ifBlank {
+            allBoxes.firstOrNull { it.id == id }?.name?.trim().orEmpty()
+        }
+
+        // Check financial relationships (NEVER delete financial movements or historical records!)
+        val hasMovements = resolvedName.isNotBlank() && dao.getMovementsDirect().any {
+            it.cashbox.trim().equals(resolvedName, ignoreCase = true)
+        }
+        val hasTransfers = resolvedName.isNotBlank() && dao.getTransfersDirect().any {
+            it.sourceCashbox.trim().equals(resolvedName, ignoreCase = true) ||
+                it.destinationCashbox.trim().equals(resolvedName, ignoreCase = true)
+        }
+        val hasPayments = resolvedName.isNotBlank() && dao.getInvoicePaymentsDirect().any {
+            it.cashbox.trim().equals(resolvedName, ignoreCase = true)
+        }
+        val hasFinancialHistory = hasMovements || hasTransfers || hasPayments
+
+        // Register tombstones by ID, name, and deterministic docId so it never resurrects on sync
+        if (id > 0) {
+            DeletedRecordsRegistry.registerDeleted("cashboxes", id, "BOX-$id", user)
+        }
+        if (resolvedName.isNotBlank()) {
+            val docId = DeletedRecordsRegistry.cashboxDocId(resolvedName, id)
+            DeletedRecordsRegistry.registerDeleted("cashboxes", resolvedName, docId, user)
+        }
+
+        // Delete active cashbox row(s) matching id or name (removing any duplicates as well)
         dao.deleteCashbox(id)
-        dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_CASHBOX", detail = "حذف الخزنة #$id"))
-        return Result.success(Unit)
+        if (resolvedName.isNotBlank()) {
+            allBoxes.filter { it.name.trim().equals(resolvedName, ignoreCase = true) }
+                .forEach { dup -> dao.deleteCashbox(dup.id) }
+        }
+
+        val auditAction = if (hasFinancialHistory) "ARCHIVE_CASHBOX_WITH_HISTORY" else "DELETE_CASHBOX"
+        val auditDetail = if (hasFinancialHistory) {
+            "أرشفة وإلغاء تفعيل الخزنة ($resolvedName #$id) من الخزن النشطة ومزامنة الحذف مع الاحتفاظ الكامل بجميع الحركات المالية التاريخية"
+        } else {
+            "حذف الخزنة ($resolvedName #$id) نهائياً ومزامنة الحذف عبر جميع الأجهزة"
+        }
+        dao.insertAuditLog(AuditLogEntity(username = user, action = auditAction, detail = auditDetail))
+        Result.success(hasFinancialHistory)
     }
 
     suspend fun getMovementsDirect(): List<MovementEntity> = com.example.util.RoomTransactionLogger.traceFetch(
@@ -150,9 +230,13 @@ class PmpRepository(
     ) {
         if (amount <= 0) return@runInTransaction Result.failure(Exception("المبلغ يجب أن يكون أكبر من صفر"))
 
+        val cleanCurrency = currency.trim().uppercase().ifBlank { "SDG" }
         val activeInvoices = dao.getInvoicesDirect()
             .filter { it.customerId == customerId && it.status == "active" }
-            .sortedBy { it.id }
+            .sortedWith(
+                compareByDescending<InvoiceEntity> { it.currency.equals(cleanCurrency, ignoreCase = true) }
+                    .thenBy { it.id }
+            )
 
         val allPayments = dao.getInvoicePaymentsDirect()
 
@@ -165,13 +249,15 @@ class PmpRepository(
             val invRemaining = (inv.total - paidOnInv).coerceAtLeast(0.0)
             if (invRemaining > 0) {
                 val payForThisInv = remainingToApply.coerceAtMost(invRemaining)
+                val baseNote = if (note.isNotBlank()) "$note (فاتورة ${inv.invoiceNo})" else "سداد دفعة لفاتورة ${inv.invoiceNo}"
+                val taggedNote = if (baseNote.contains("[$cleanCurrency]")) baseNote else "$baseNote [$cleanCurrency]"
                 val payId = dao.insertInvoicePayment(
                     InvoicePaymentEntity(
                         invoiceId = inv.id,
                         payDate = date,
                         cashbox = cashbox,
                         amount = payForThisInv,
-                        note = if (note.isNotBlank()) "$note (فاتورة ${inv.invoiceNo})" else "سداد دفعة لفاتورة ${inv.invoiceNo}",
+                        note = taggedNote,
                         createdBy = user
                     )
                 )
@@ -182,13 +268,15 @@ class PmpRepository(
 
         if (remainingToApply > 0 && activeInvoices.isNotEmpty()) {
             val primaryInv = activeInvoices.first()
+            val baseNote = if (note.isNotBlank()) "$note (دفعة بحساب العميل)" else "دفعة إضافية بحساب العميل"
+            val taggedNote = if (baseNote.contains("[$cleanCurrency]")) baseNote else "$baseNote [$cleanCurrency]"
             val payId = dao.insertInvoicePayment(
                 InvoicePaymentEntity(
                     invoiceId = primaryInv.id,
                     payDate = date,
                     cashbox = cashbox,
                     amount = remainingToApply,
-                    note = if (note.isNotBlank()) "$note (دفعة بحساب العميل)" else "دفعة إضافية بحساب العميل",
+                    note = taggedNote,
                     createdBy = user
                 )
             )
@@ -439,13 +527,14 @@ class PmpRepository(
         // Handle instant payment if specified
         if (!paymentCashbox.isNullOrBlank() && paymentAmount != null && paymentAmount > 0) {
             val actualPay = paymentAmount.coerceAtMost(total)
+            val cleanCurrency = currency.trim().uppercase().ifBlank { "SDG" }
             val payId = dao.insertInvoicePayment(
                 InvoicePaymentEntity(
                     invoiceId = invoiceId,
                     payDate = date,
                     cashbox = paymentCashbox,
                     amount = actualPay,
-                    note = "سداد فوري عند إصدار الفاتورة",
+                    note = "سداد فوري عند إصدار الفاتورة [$cleanCurrency]",
                     createdBy = user
                 )
             )
@@ -491,13 +580,15 @@ class PmpRepository(
     ) {
         if (amount <= 0) return@runInTransaction Result.failure(Exception("المبلغ غير صالح"))
 
+        val cleanCurrency = currency.trim().uppercase().ifBlank { "SDG" }
+        val taggedNote = if (note.contains("[$cleanCurrency]")) note else "${note.ifBlank { "سداد دفعة" }} [$cleanCurrency]"
         val payId = dao.insertInvoicePayment(
             InvoicePaymentEntity(
                 invoiceId = invoiceId,
                 payDate = date,
                 cashbox = cashbox,
                 amount = amount,
-                note = note,
+                note = taggedNote,
                 createdBy = user
             )
         )
@@ -706,6 +797,48 @@ class PmpRepository(
         return Result.success(id)
     }
 
+    suspend fun updateFactoryItem(
+        itemId: Long,
+        newName: String,
+        newCategory: String,
+        newUnit: String,
+        actor: String = "إدارة المصنع"
+    ): Result<Unit> {
+        val cleanName = newName.trim()
+        if (cleanName.isBlank()) return Result.failure(Exception("يرجى إدخال اسم المادة الخام/الصنف"))
+        val cleanCategory = newCategory.trim().ifBlank { "خامات إنتاج" }
+        val cleanUnit = newUnit.trim().ifBlank { "كجم" }
+        dao.updateFactoryItem(itemId, cleanName, cleanCategory, cleanUnit)
+        dao.updateFactoryMovesItemName(itemId, cleanName)
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = actor,
+                action = "UPDATE_FACTORY_ITEM",
+                detail = "تعديل بيانات المادة الخام (#$itemId): $cleanName ($cleanCategory - $cleanUnit)"
+            )
+        )
+        return Result.success(Unit)
+    }
+
+    suspend fun renameFactoryItemCategory(
+        oldCategory: String,
+        newCategory: String,
+        actor: String = "إدارة المصنع"
+    ): Result<Unit> {
+        val cleanOld = oldCategory.trim()
+        val cleanNew = newCategory.trim()
+        if (cleanNew.isBlank()) return Result.failure(Exception("يرجى إدخال الاسم الجديد لنوع الصنف"))
+        dao.renameFactoryItemCategory(cleanOld, cleanNew)
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = actor,
+                action = "RENAME_ITEM_CATEGORY",
+                detail = "تعديل اسم نوع الصنف من ($cleanOld) إلى ($cleanNew)"
+            )
+        )
+        return Result.success(Unit)
+    }
+
     suspend fun deleteFactoryItem(itemId: Long, itemName: String, actor: String = "إدارة المصنع"): Result<Unit> {
         dao.deleteFactoryItemById(itemId)
         dao.insertAuditLog(
@@ -818,21 +951,37 @@ class PmpRepository(
     fun getPosterPrices(): Flow<List<PosterPriceEntity>> = dao.getAllPosterPrices()
 
     suspend fun updatePosterPrice(weight: String, kind: String, price: Long, currency: String = "SDG") {
-        val id = if (currency.equals("EGP", ignoreCase = true)) "${weight}_${kind}_EGP" else "${weight}_$kind"
-        val priceEgp = if (currency.equals("EGP", ignoreCase = true)) price else (price / 200L).coerceAtLeast(1L)
-        val priceSdg = if (currency.equals("SDG", ignoreCase = true)) price else (price * 200L)
+        val cleanCurrency = currency.trim().uppercase()
+        val isEgp = cleanCurrency == "EGP"
+        val id = if (isEgp) "${weight}_${kind}_EGP" else "${weight}_$kind"
+        val exactPrice = price.coerceAtLeast(0L)
         dao.insertPosterPrices(
             listOf(
                 PosterPriceEntity(
                     id = id,
                     weight = weight,
                     kind = kind,
-                    price = priceSdg,
-                    priceEgp = priceEgp,
-                    currency = currency
+                    price = exactPrice,
+                    priceEgp = if (isEgp) exactPrice else 0L,
+                    currency = if (isEgp) "EGP" else "SDG"
                 )
             )
         )
+        // Update matching ProductEntity for ONLY this currency without mixing or cross-multiplying
+        runCatching {
+            val matchingProducts = dao.getProductsDirect().filter {
+                (it.paintColor.equals(kind, ignoreCase = true) || it.name.contains(kind)) &&
+                    it.packageWeight == weight
+            }
+            for (prod in matchingProducts) {
+                val updated = if (isEgp) {
+                    prod.copy(salePriceEgp = exactPrice.toDouble())
+                } else {
+                    prod.copy(salePrice = exactPrice.toDouble())
+                }
+                dao.updateProduct(updated)
+            }
+        }
     }
 
     // --- Audit Log ---
@@ -929,6 +1078,26 @@ class PmpRepository(
             )
         )
         return Result.success(target.copy(isCurrentSession = true))
+    }
+
+    suspend fun verifySystemManagerPassword(passwordInput: String): Result<UserAccountEntity> {
+        val cleanInput = passwordInput.trim()
+        if (cleanInput.isBlank()) {
+            return Result.failure(Exception("يرجى إدخال كلمة المرور الخاصة بمدير النظام لتأكيد الحذف"))
+        }
+        val hashed = hashSecret(cleanInput)
+        val allUsers = dao.getAllUserAccounts().first()
+        val managers = allUsers.filter {
+            it.role.contains("مدير النظام") || it.username.equals("admin", ignoreCase = true)
+        }
+        val matchedManager = managers.firstOrNull {
+            it.pinOrPassword == cleanInput || it.pinOrPassword == hashed
+        }
+        return if (matchedManager != null) {
+            Result.success(matchedManager)
+        } else {
+            Result.failure(Exception("كلمة المرور الخاصة بمدير النظام غير صحيحة! تم إيقاف عملية تصفير السيرفر."))
+        }
     }
 
     suspend fun toggleUserAccountActive(user: UserAccountEntity, actor: String): Result<Unit> {

@@ -155,6 +155,15 @@ interface PmpDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFactoryItem(item: FactoryItemEntity): Long
 
+    @Query("UPDATE factory_items SET name = :newName, category = :newCategory, unit = :newUnit WHERE id = :id")
+    suspend fun updateFactoryItem(id: Long, newName: String, newCategory: String, newUnit: String)
+
+    @Query("UPDATE factory_moves SET itemName = :newName WHERE itemId = :itemId")
+    suspend fun updateFactoryMovesItemName(itemId: Long, newName: String)
+
+    @Query("UPDATE factory_items SET category = :newCategory WHERE category = :oldCategory")
+    suspend fun renameFactoryItemCategory(oldCategory: String, newCategory: String)
+
     @Query("DELETE FROM factory_items WHERE id = :id")
     suspend fun deleteFactoryItemById(id: Long)
 
@@ -182,6 +191,9 @@ interface PmpDao {
     // --- Poster Prices ---
     @Query("SELECT * FROM poster_prices")
     fun getAllPosterPrices(): Flow<List<PosterPriceEntity>>
+
+    @Query("SELECT * FROM poster_prices")
+    suspend fun getPosterPricesDirect(): List<PosterPriceEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPosterPrices(prices: List<PosterPriceEntity>)
@@ -231,7 +243,7 @@ interface PmpDao {
     @Query("DELETE FROM cashboxes WHERE id NOT IN (SELECT MIN(id) FROM cashboxes GROUP BY TRIM(LOWER(name)))")
     suspend fun removeDuplicateCashboxes()
 
-    @Query("SELECT COUNT(*) FROM movements")
+    @Query("DELETE FROM movements WHERE TRIM(reference) != '' AND id NOT IN (SELECT MIN(id) FROM movements WHERE TRIM(reference) != '' GROUP BY TRIM(reference))")
     suspend fun removeDuplicateMovements(): Int
 
     @Query("DELETE FROM user_accounts WHERE id NOT IN (SELECT MIN(id) FROM user_accounts GROUP BY TRIM(LOWER(username))) AND isCurrentSession = 0")
@@ -411,6 +423,12 @@ interface PmpDao {
 
     @Query("DELETE FROM daily_production_batches")
     suspend fun clearAllProductionBatches()
+
+    @Query("DELETE FROM factory_moves")
+    suspend fun clearAllFactoryMoves()
+
+    @Query("DELETE FROM halfa_invoices")
+    suspend fun clearAllHalfaInvoices()
 
     @Query("DELETE FROM audit_log")
     suspend fun clearAllAuditLogs()

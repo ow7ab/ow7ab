@@ -42,6 +42,7 @@ fun PosterPriceScreen(
 ) {
     val posterPrices by viewModel.posterPrices.collectAsState()
     val availablePaintColors by viewModel.availablePaintColors.collectAsState()
+    val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
     val format = remember { NumberFormat.getNumberInstance(Locale.US) }
 
     var searchQuery by remember { mutableStateOf("") }
@@ -62,14 +63,22 @@ fun PosterPriceScreen(
     var newKindPrice250 by remember { mutableStateOf("") }
     var newKindPrice900 by remember { mutableStateOf("") }
 
-    // Merge predefined kinds with database records
+    // Merge predefined kinds with database records for the selected currency
     val baseKinds = remember { listOf("أبيض", "ألوان", "فضي", "ذهبي", "ورنيش") }
-    val allUniqueKinds = remember(posterPrices, availablePaintColors) {
-        val fromDb = posterPrices.map { it.kind }
-        (baseKinds + fromDb + availablePaintColors).distinct().filter { it.isNotBlank() }
+    val allUniqueKinds = remember(posterPrices, selectedCurrency) {
+        val fromDbForCurrency = posterPrices
+            .filter {
+                if (selectedCurrency == "EGP") {
+                    it.currency.equals("EGP", ignoreCase = true) || it.id.endsWith("_EGP")
+                } else {
+                    !it.id.endsWith("_EGP") && it.currency.equals("SDG", ignoreCase = true)
+                }
+            }
+            .map { it.kind }
+        (baseKinds + fromDbForCurrency).distinct().filter { it.isNotBlank() }
     }
 
-    // Prepare list of items for the table
+    // Prepare list of items for the table strictly separated by currency
     val priceItems = remember(allUniqueKinds, posterPrices, selectedWeightFilter, searchQuery, selectedCurrency) {
         val weights = when (selectedWeightFilter) {
             "250" -> listOf("250")
@@ -83,26 +92,56 @@ fun PosterPriceScreen(
                 continue
             }
             for (w in weights) {
-                // Find matching price entity
-                val entity = posterPrices.firstOrNull {
-                    it.kind.equals(kind, ignoreCase = true) && it.weight == w
-                }
-                val rawPrice = if (selectedCurrency == "EGP") {
+                if (selectedCurrency == "EGP") {
                     val egpEntity = posterPrices.firstOrNull {
-                        it.id == "${w}_${kind}_EGP" || (it.kind.equals(kind, ignoreCase = true) && it.weight == w && it.currency == "EGP")
+                        (it.id.equals("${w}_${kind}_EGP", ignoreCase = true) ||
+                            (it.kind.equals(kind, ignoreCase = true) && it.weight == w &&
+                                (it.currency.equals("EGP", ignoreCase = true) || it.id.endsWith("_EGP"))))
                     }
-                    egpEntity?.price ?: (entity?.priceEgp ?: 0L).let { if (it > 0L) it else 50L }
+                    val rawEgpPrice = if (egpEntity != null) {
+                        if (egpEntity.priceEgp > 0L && egpEntity.price == egpEntity.priceEgp * 200L) {
+                            egpEntity.priceEgp
+                        } else {
+                            egpEntity.price
+                        }
+                    } else if (kind in baseKinds) {
+                        when (kind) {
+                            "أبيض" -> if (w == "900") 1925L else 2500L
+                            "ألوان" -> if (w == "900") 1875L else 2450L
+                            "فضي" -> if (w == "900") 1950L else 2550L
+                            "ذهبي" -> if (w == "900") 2000L else 2600L
+                            "ورنيش" -> if (w == "900") 1875L else 2475L
+                            else -> 0L
+                        }
+                    } else {
+                        null
+                    }
+                    if (rawEgpPrice != null) {
+                        list.add(PriceRowItem(kind = kind, weight = w, price = rawEgpPrice, currency = "EGP"))
+                    }
                 } else {
-                    entity?.price ?: when (kind) {
-                        "أبيض" -> if (w == "900") 28000L else 9000L
-                        "ألوان" -> if (w == "900") 26000L else 8000L
-                        "فضي" -> if (w == "900") 30000L else 10000L
-                        "ذهبي" -> if (w == "900") 32000L else 11000L
-                        "ورنيش" -> if (w == "900") 25000L else 7500L
-                        else -> if (w == "900") 27000L else 8500L
+                    val sdgEntity = posterPrices.firstOrNull {
+                        !it.id.endsWith("_EGP") &&
+                            it.currency.equals("SDG", ignoreCase = true) &&
+                            it.kind.equals(kind, ignoreCase = true) &&
+                            it.weight == w
+                    }
+                    val rawSdgPrice = sdgEntity?.price ?: if (kind in baseKinds) {
+                        when (kind) {
+                            "أبيض" -> if (w == "900") 385000L else 500000L
+                            "ألوان" -> if (w == "900") 375000L else 490000L
+                            "فضي" -> if (w == "900") 390000L else 510000L
+                            "ذهبي" -> if (w == "900") 400000L else 520000L
+                            "ورنيش" -> if (w == "900") 375000L else 495000L
+                            else -> 0L
+                        }
+                    } else {
+                        null
+                    }
+                    if (rawSdgPrice != null) {
+                        list.add(PriceRowItem(kind = kind, weight = w, price = rawSdgPrice, currency = "SDG"))
                     }
                 }
-                list.add(PriceRowItem(kind = kind, weight = w, price = rawPrice, currency = selectedCurrency))
             }
         }
         list
@@ -148,21 +187,13 @@ fun PosterPriceScreen(
                                     modifier = Modifier.size(26.dp)
                                 )
                             }
-                            Column {
-                                Text(
-                                    text = "كتابة وتعديل قائمة الأسعار",
-                                    color = TextWhite,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 18.sp
-                                )
-                                Text(
-                                    text = "تعديل فوري وسلس لأسعار العبوات والخصومات بالسيرفر",
-                                    color = TextMuted,
-                                    fontSize = 11.5.sp
-                                )
-                            }
+                            Text(
+                                text = "كتابة وتعديل قائمة الأسعار",
+                                color = TextWhite,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp
+                            )
                         }
-                        GlassBadge(text = "مزامنة سحابية ⚡", color = PmpGreen)
                     }
 
                     // Currency Switch & Add New Kind Button
@@ -336,8 +367,14 @@ fun PosterPriceScreen(
             }
         }
 
-        // 4. Pure, High-Performance Price Cards
-        if (priceItems.isEmpty()) {
+        // 4. Pure, High-Performance Price Cards with Skeleton Loading
+        if (isInitialDataLoading && posterPrices.isEmpty()) {
+            item(key = "poster_prices_shimmer_skeleton") {
+                ProvideShimmerEffect(enabled = true) {
+                    PosterPricesSkeletonSection()
+                }
+            }
+        } else if (priceItems.isEmpty()) {
             item {
                 GlassCard(modifier = Modifier.fillMaxWidth()) {
                     Box(modifier = Modifier.padding(24.dp), contentAlignment = Alignment.Center) {

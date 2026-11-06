@@ -7,26 +7,31 @@ on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: 'Version Name (e.g. 2.2.0)'
+        description: 'Version Name (e.g. 2.8-PRO)'
         required: true
-        default: '2.2.0'
+        default: '2.8-PRO'
       version_code:
-        description: 'Version Code (must be > previous)'
+        description: 'Version Code (must be > previous installed versionCode)'
         required: true
-        default: '4'
+        default: '11'
       release_notes:
         description: 'Release Notes (Arabic or English)'
         required: false
         default: 'تحديث أمان واستقرار جديد لمنظومة PMP Paints مع الحفاظ التام على البيانات'
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    name: Build Signed APK
+    name: Build, Verify & Release Signed APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Latest Verified Commit
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -38,39 +43,101 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Restore Keystore from base64
+      - name: Restore Signing Keystore from base64
         run: |
           if [ -f debug.keystore.base64 ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           fi
+          if [ ! -f debug.keystore ]; then
+            echo "ERROR: debug.keystore is missing! Refusing to generate a new key to protect user data on update."
+            exit 1
+          fi
 
-      - name: Build APK
+      - name: Resolve Version Code & Version Name
+        id: resolve_version
         run: |
-          gradle :app:assembleDebug
+          GRADLE_V_CODE=$(grep -Eo 'versionCode\s*=.*:[[:space:]]*[0-9]+' app/build.gradle.kts | grep -Eo '[0-9]+$' | head -n 1)
+          GRADLE_V_NAME=$(grep -Eo 'versionName\s*=.*:[[:space:]]*"[^"]+"' app/build.gradle.kts | grep -Eo '"[^"]+"$' | tr -d '"' | head -n 1)
 
-      - name: Prepare APK Asset
+          INPUT_V_CODE="${{ github.event.inputs.version_code }}"
+          INPUT_V_NAME="${{ github.event.inputs.version_name }}"
+
+          if [ -n "$INPUT_V_CODE" ]; then
+            FINAL_V_CODE="$INPUT_V_CODE"
+          elif [ -n "$GRADLE_V_CODE" ]; then
+            FINAL_V_CODE="$GRADLE_V_CODE"
+          else
+            FINAL_V_CODE="11"
+          fi
+
+          if [ -n "$INPUT_V_NAME" ]; then
+            FINAL_V_NAME="$INPUT_V_NAME"
+          elif [[ "${{ github.ref_name }}" == v* ]]; then
+            FINAL_V_NAME="${GITHUB_REF_NAME#v}"
+          elif [ -n "$GRADLE_V_NAME" ]; then
+            FINAL_V_NAME="$GRADLE_V_NAME"
+          else
+            FINAL_V_NAME="2.8-PRO"
+          fi
+
+          TAG_NAME="v${FINAL_V_NAME#v}"
+          echo "version_code=$FINAL_V_CODE" >> $GITHUB_OUTPUT
+          echo "version_name=$FINAL_V_NAME" >> $GITHUB_OUTPUT
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "Resolved release: versionName=$FINAL_V_NAME, versionCode=$FINAL_V_CODE, tag=$TAG_NAME"
+
+      - name: Build Signed APK with Injected Version
+        run: |
+          gradle :app:assembleDebug \
+            -PversionCode="${{ steps.resolve_version.outputs.version_code }}" \
+            -PversionName="${{ steps.resolve_version.outputs.version_name }}"
+
+      - name: Verify APK Package ID, VersionCode, Signature & SHA-256
         id: prepare_apk
         run: |
           APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          TAG_NAME="${{ github.ref_name }}"
-          if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "main" ]; then
-            TAG_NAME="v${{ github.event.inputs.version_name || '2.2.0' }}"
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: APK file was not produced by Gradle build!"
+            exit 1
           fi
-          ASSET_NAME="pmp-paints-${TAG_NAME}.apk"
-          cp "$APK_PATH" "./$ASSET_NAME"
-          echo "apk_asset=./$ASSET_NAME" >> $GITHUB_OUTPUT
-          FILE_SIZE=$(du -m "./$ASSET_NAME" | cut -f1)
-          echo "file_size=$FILE_SIZE" >> $GITHUB_OUTPUT
-          SHA256=$(sha256sum "./$ASSET_NAME" | cut -d ' ' -f1)
-          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
-          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
 
-      - name: Generate version.json
+          AAPT2_BIN=$(find "$ANDROID_HOME/build-tools" -name "aapt2" | sort -V | tail -n 1)
+          if [ -n "$AAPT2_BIN" ]; then
+            BADGING=$("$AAPT2_BIN" dump badging "$APK_PATH" | head -n 5)
+            echo "$BADGING"
+            echo "$BADGING" | grep -q "name='com.pmp'" || { echo "ERROR: applicationId is not com.pmp!"; exit 1; }
+            echo "$BADGING" | grep -q "versionCode='${{ steps.resolve_version.outputs.version_code }}'" || { echo "ERROR: APK versionCode mismatch!"; exit 1; }
+          fi
+
+          APKSIGNER_BIN=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
+          if [ -n "$APKSIGNER_BIN" ]; then
+            "$APKSIGNER_BIN" verify --print-certs "$APK_PATH"
+          fi
+
+          TAG_NAME="${{ steps.resolve_version.outputs.tag_name }}"
+          ASSET_LOWER="pmp-paints-${TAG_NAME}.apk"
+          ASSET_UPPER="PMP-Paints-${TAG_NAME}.apk"
+          ASSET_LATEST="pmp-paints-latest.apk"
+
+          cp "$APK_PATH" "./$ASSET_LOWER"
+          cp "$APK_PATH" "./$ASSET_UPPER"
+          cp "$APK_PATH" "./$ASSET_LATEST"
+
+          FILE_SIZE=$(du -m "./$ASSET_LOWER" | cut -f1)
+          SHA256=$(sha256sum "./$ASSET_LOWER" | cut -d ' ' -f1)
+
+          echo "apk_lower=./$ASSET_LOWER" >> $GITHUB_OUTPUT
+          echo "apk_upper=./$ASSET_UPPER" >> $GITHUB_OUTPUT
+          echo "apk_latest=./$ASSET_LATEST" >> $GITHUB_OUTPUT
+          echo "file_size=$FILE_SIZE" >> $GITHUB_OUTPUT
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+
+      - name: Generate Verified version.json
         run: |
-          V_NAME="${{ github.event.inputs.version_name || github.ref_name || '2.2.0' }}"
-          V_CODE="${{ github.event.inputs.version_code || '4' }}"
-          NOTES="${{ github.event.inputs.release_notes || 'تحديث رسمي معتمد لنظام PMP Paints' }}"
-          TAG="${{ steps.prepare_apk.outputs.tag_name }}"
+          V_NAME="${{ steps.resolve_version.outputs.version_name }}"
+          V_CODE="${{ steps.resolve_version.outputs.version_code }}"
+          NOTES="${{ github.event.inputs.release_notes || 'تحديث رسمي معتمد لمنظومة PMP Paints مع الحفاظ الكامل على البيانات' }}"
+          TAG="${{ steps.resolve_version.outputs.tag_name }}"
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/pmp-paints-${TAG}.apk"
 
           cat <<EOF > version.json
@@ -84,17 +151,27 @@ jobs:
             "minSupportedVersion": 1
           }
           EOF
+          cp version.json public/version.json
           cat version.json
 
-      - name: Publish Release to GitHub
+      - name: Publish Verified Release to GitHub Releases
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
+          tag_name: ${{ steps.resolve_version.outputs.tag_name }}
           files: |
-            ${{ steps.prepare_apk.outputs.apk_asset }}
+            ${{ steps.prepare_apk.outputs.apk_lower }}
+            ${{ steps.prepare_apk.outputs.apk_upper }}
+            ${{ steps.prepare_apk.outputs.apk_latest }}
             version.json
-          name: PMP Paints ${{ steps.prepare_apk.outputs.tag_name }}
-          body: ${{ github.event.inputs.release_notes || 'تحديث رسمي جديد لتطبيق PMP Paints' }}
+          name: PMP Paints ${{ steps.resolve_version.outputs.tag_name }} (Build ${{ steps.resolve_version.outputs.version_code }})
+          body: |
+            ${{ github.event.inputs.release_notes || 'تحديث رسمي جديد لتطبيق PMP Paints' }}
+
+            - **رقم الإصدار (Version Name):** `${{ steps.resolve_version.outputs.version_name }}`
+            - **رقم البناء (Version Code):** `${{ steps.resolve_version.outputs.version_code }}`
+            - **معرف الحزمة (Application ID):** `com.pmp`
+            - **بصمة الملف (SHA-256):** `${{ steps.prepare_apk.outputs.sha256 }}`
           draft: false
           prerelease: false
         env:
