@@ -521,6 +521,7 @@ class UpdateManager(private val context: Context) {
                 add(DEFAULT_UPDATE_METADATA_URL)
                 add(GITHUB_PAGES_METADATA_URL)
                 add(GITHUB_RAW_METADATA_URL)
+                add(GITHUB_RAW_PUBLIC_METADATA_URL)
                 add(SECONDARY_UPDATE_METADATA_URL)
             }.distinct()
 
@@ -621,6 +622,7 @@ class UpdateManager(private val context: Context) {
                 add(DEFAULT_UPDATE_METADATA_URL)
                 add(GITHUB_PAGES_METADATA_URL)
                 add(GITHUB_RAW_METADATA_URL)
+                add(GITHUB_RAW_PUBLIC_METADATA_URL)
                 add(SECONDARY_UPDATE_METADATA_URL)
             }.distinct()
 
@@ -1691,12 +1693,20 @@ class UpdateManager(private val context: Context) {
         internal const val MIN_VALID_APK_SIZE_BYTES = 100 * 1024L // 100 KB minimum for real APK
 
         /**
-         * روابط المستودع الرسمي المعتمد (ow7ab/ow7ab) مع دعم GitHub Pages لتفادي خطأ 404 للمستودعات الخاصة
+         * بصمة شهادة التوقيع الأصلية المعتمدة لحزمة com.pmp (تطابق APK المثبت وdebug.keystore)
+         */
+        const val APPROVED_SIGNING_CERT_SHA256 =
+            "1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05"
+
+        /**
+         * روابط المستودع الرسمي المعتمد (ow7ab/ow7ab) مع دعم GitHub Pages وRaw Public لتفادي خطأ 404
          */
         const val GITHUB_PAGES_BASE_URL = "https://ow7ab.github.io/ow7ab"
         const val GITHUB_PAGES_METADATA_URL = "https://ow7ab.github.io/ow7ab/version.json"
         const val DEFAULT_UPDATE_METADATA_URL = "https://ow7ab.github.io/ow7ab/version.json"
         const val GITHUB_RAW_METADATA_URL = "https://raw.githubusercontent.com/ow7ab/ow7ab/main/version.json"
+        const val GITHUB_RAW_PUBLIC_METADATA_URL = "https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/version.json"
+        const val GITHUB_RAW_PUBLIC_APK_BASE_URL = "https://raw.githubusercontent.com/ow7ab/ow7ab/main/public"
         const val SECONDARY_UPDATE_METADATA_URL = "https://raw.githubusercontent.com/oaw7ab/pmp-paints-releases/main/version.json"
 
         const val GITHUB_RELEASES_API_URL = "https://api.github.com/repos/ow7ab/ow7ab/releases/latest"
@@ -1720,11 +1730,12 @@ class UpdateManager(private val context: Context) {
                 "4. إضافة لوحة تشخيص البناء والتحديثات للمدير (Admin Build & Update Diagnostic Panel).",
             isMandatory = false,
             minSupportedVersionCode = 1,
-            fileSizeMb = 18.5,
+            fileSizeMb = 30.6,
             fileSize = 0L,
             buildId = BuildConfig.BUILD_ID,
             gitCommit = BuildConfig.GIT_COMMIT_SHA,
-            publishedAt = BuildConfig.BUILD_TIMESTAMP_UTC
+            publishedAt = BuildConfig.BUILD_TIMESTAMP_UTC,
+            signingCertSha256 = APPROVED_SIGNING_CERT_SHA256
         )
 
         @Volatile
@@ -1827,13 +1838,19 @@ class UpdateManager(private val context: Context) {
                 add("$GITHUB_PAGES_BASE_URL/pmp-paints-v${vName}-b${vCode}.apk")
                 add("$GITHUB_PAGES_BASE_URL/pmp-paints-latest.apk")
 
-                // 2. GitHub Releases لمستودع ow7ab/ow7ab
+                // 2. GitHub Raw Public Directory لمستودع ow7ab/ow7ab
+                add("$GITHUB_RAW_PUBLIC_APK_BASE_URL/pmp-paints-v${vName}-b${vCode}.apk")
+                add("$GITHUB_RAW_PUBLIC_APK_BASE_URL/pmp-paints-latest.apk")
+                add("https://github.com/ow7ab/ow7ab/raw/main/public/pmp-paints-v${vName}-b${vCode}.apk")
+                add("https://github.com/ow7ab/ow7ab/raw/main/public/pmp-paints-latest.apk")
+
+                // 3. GitHub Releases لمستودع ow7ab/ow7ab
                 add("https://github.com/ow7ab/ow7ab/releases/download/v${vName}/pmp-paints-v${vName}-b${vCode}.apk")
                 add("https://github.com/ow7ab/ow7ab/releases/download/v${vName}/pmp-paints-latest.apk")
                 add("$DEFAULT_DOWNLOAD_PORTAL_URL/pmp-paints-v${vName}-b${vCode}.apk")
                 add("$DEFAULT_DOWNLOAD_PORTAL_URL/pmp-paints-latest.apk")
 
-                // 3. المستودع المساند oaw7ab/pmp-paints-releases
+                // 4. المستودع المساند oaw7ab/pmp-paints-releases
                 add("https://github.com/oaw7ab/pmp-paints-releases/releases/download/v${vName}/pmp-paints-v${vName}-b${vCode}.apk")
                 add("$SHARED_DOWNLOAD_PORTAL_URL/pmp-paints-v${vName}-b${vCode}.apk")
                 add("$SHARED_DOWNLOAD_PORTAL_URL/pmp-paints-latest.apk")

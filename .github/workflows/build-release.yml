@@ -318,12 +318,19 @@ jobs:
               )
 
           cert_sha256 = sha256_match.group(1).upper()
+          approved_cert_sha256 = "1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05"
+          if cert_sha256 != approved_cert_sha256:
+              fail_with_guidance(
+                  f"Keystore certificate SHA-256 mismatch! Expected approved PMP PAINTS certificate ({approved_cert_sha256}), "
+                  f"but found ({cert_sha256}). Refusing to build incompatible APK that would fail with INSTALL_FAILED_UPDATE_INCOMPATIBLE."
+              )
+
           github_env = os.environ.get("GITHUB_ENV")
           if github_env:
               with open(github_env, "a", encoding="utf-8") as env_f:
                   env_f.write(f"KEYSTORE_CERT_SHA256={cert_sha256}\n")
 
-          print(f"Verified valid debug.keystore (alias: androiddebugkey, SHA-256: {cert_sha256}).")
+          print(f"Verified valid debug.keystore (alias: androiddebugkey, SHA-256: {cert_sha256} matches approved PMP PAINTS certificate).")
           PYEOF
 
       - name: Resolve & Validate Version Metadata and Build Identity
@@ -401,6 +408,23 @@ jobs:
 
           print(f"Resolved Build Identity: {build_id} -> {apk_filename}")
           PYEOF
+
+      - name: Run Automated Unit & Update Verification Tests (Gate Before APK Build)
+        run: |
+          set -euo pipefail
+          if [ -x "./gradlew" ]; then
+            GRADLE_CMD="./gradlew"
+          else
+            GRADLE_CMD="gradle"
+          fi
+          echo "Running automated unit tests using ${GRADLE_CMD}..."
+          ${GRADLE_CMD} :app:testDebugUnitTest \
+            -PversionCode="${V_CODE}" \
+            -PversionName="${V_NAME}" \
+            -PgitCommit="${GIT_COMMIT_SHORT}" \
+            -PbuildTimestampUtc="${PUBLISHED_AT_UTC}" \
+            -PbuildId="${BUILD_ID}" \
+            --no-daemon
 
       - name: Build Signed APK with Embedded Build Identity
         run: |

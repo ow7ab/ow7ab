@@ -1,9 +1,18 @@
 {
-  "versionCode": 11,
-  "versionName": "2.8-PRO",
-  "downloadUrl": "https://ais-pre-3m3sbbrcjiswnj7jf3lwnz-658854365594.europe-west2.run.app/pmp-paints-latest.apk",
-  "releaseNotes": "الإصدار 2.8-PRO (Build 11): إصلاح جذري لمنظومة التحديثات السحابية ومعالجة مشكلة (ملف التحديث غير متوفر HTTP 404) عبر المسارات البديلة وحزمة التحديث الموقّعة، مع التحقق الصارم من رقم الإصدار والتوقيع وSHA-256 والحفاظ الكامل على البيانات.",
-  "fileSizeMb": 31.0,
-  "sha256": "",
-  "minSupportedVersion": 1
+  "versionCode": 13,
+  "versionName": "3.0-PRO",
+  "buildId": "PMP-v3.0-PRO-b13-8f4d2c1a",
+  "gitCommit": "8f4d2c1a",
+  "publishedAt": "2026-11-07T08:00:00Z",
+  "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v3.0-PRO-b13.apk",
+  "apkUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v3.0-PRO-b13.apk",
+  "githubReleaseUrl": "https://github.com/ow7ab/ow7ab/releases/download/v3.0-PRO/pmp-paints-v3.0-PRO-b13.apk",
+  "rawPublicApkUrl": "https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/pmp-paints-latest.apk",
+  "releaseNotes": "• إصلاح جذري وشامل لنظام التحديثات السحابية المباشرة (Cloud APK Update v3.0-PRO).\n• تضمين بصمة البناء الحقيقية (Build ID + Git Commit SHA + Timestamp) داخل التطبيق للتحقق المؤكد من تثبيت الكود الجديد.\n• فرض التحقق الصارم من سلامة ملف APK عبر SHA-256 Checksum وفحص حزمة PackageArchiveInfo وشهادة التوقيع قبل التثبيت.\n• فحص جاهزية رابط التنزيل المباشر (HTTP 200/206 + ZIP Header) قبل نشر التحديث من تطبيق المدير لمنع روابط 404.",
+  "fileSize": 32087352,
+  "fileSizeMb": 30.6,
+  "sha256": "19bd7aaf4bcf57b022354fc6543f350f5d0814ed2773244f868e3bc3a0cd2abc",
+  "signingCertSha256": "1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05",
+  "minSupportedVersion": 1,
+  "mandatory": false
 }

@@ -428,11 +428,42 @@ class ExampleUnitTest {
     )
     assertFalse("Must never auto-generate a random keystore", content.contains("-genkeypair"))
 
-    // 6. Must verify APK package name (com.pmp), versionCode, and signature before release
+    // 6. Must verify APK package name (com.pmp), versionCode, signature, and approved SHA-256 certificate before release
     assertTrue("Must verify com.pmp package name with aapt2", content.contains("name='com.pmp'"))
     assertTrue("Must verify APK signature with apksigner", content.contains("apksigner"))
+    assertTrue(
+      "Must enforce approved PMP PAINTS signing certificate SHA-256 in workflow",
+      content.contains(com.example.util.UpdateManager.APPROVED_SIGNING_CERT_SHA256)
+    )
+    assertTrue(
+      "Must run automated unit tests (:app:testDebugUnitTest) before building release APK",
+      content.contains(":app:testDebugUnitTest")
+    )
 
-    // 7. Verify README.md exists and documents DEBUG_KEYSTORE_BASE64 without leaking any raw keystore base64
+    // 7. Verify root version.json and public/version.json are synchronized at v3.0-PRO (versionCode 13)
+    val rootVersionFile = listOf(
+      java.io.File("version.json"),
+      java.io.File("../version.json")
+    ).firstOrNull { it.exists() }
+    val publicVersionFile = listOf(
+      java.io.File("public/version.json"),
+      java.io.File("../public/version.json")
+    ).firstOrNull { it.exists() }
+    assertNotNull("Root version.json must exist", rootVersionFile)
+    assertNotNull("public/version.json must exist", publicVersionFile)
+
+    val rootParsed = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(rootVersionFile!!.readText(Charsets.UTF_8))
+    val publicParsed = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(publicVersionFile!!.readText(Charsets.UTF_8))
+    assertNotNull(rootParsed)
+    assertNotNull(publicParsed)
+    assertEquals(13, rootParsed!!.versionCode)
+    assertEquals(rootParsed.versionCode, publicParsed!!.versionCode)
+    assertEquals(rootParsed.versionName, publicParsed.versionName)
+    assertEquals(rootParsed.buildId, publicParsed.buildId)
+    assertEquals(rootParsed.sha256Checksum, publicParsed.sha256Checksum)
+    assertEquals(64, rootParsed.sha256Checksum.length)
+
+    // 8. Verify README.md exists and documents DEBUG_KEYSTORE_BASE64 without leaking any raw keystore base64
     val readmeFile = listOf(
       java.io.File("README.md"),
       java.io.File("../README.md")
