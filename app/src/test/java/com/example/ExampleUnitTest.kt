@@ -418,8 +418,29 @@ class ExampleUnitTest {
     assertTrue("Must install platforms;android-36.1", content.contains("\"platforms;android-36.1\""))
     assertTrue("Must install build-tools;36.0.0", content.contains("\"build-tools;36.0.0\""))
 
-    // 5. Must verify APK package name (com.pmp), versionCode, and signature before release
+    // 5. Must restore debug.keystore safely from secrets.DEBUG_KEYSTORE_BASE64 (or debug.keystore.base64)
+    //    and never auto-generate a random keystore via -genkeypair
+    assertTrue("Must reference secrets.DEBUG_KEYSTORE_BASE64", content.contains("secrets.DEBUG_KEYSTORE_BASE64"))
+    assertTrue("Must verify androiddebugkey alias", content.contains("androiddebugkey"))
+    assertTrue(
+      "Must provide instructions for Settings -> Secrets and variables -> Actions -> New repository secret",
+      content.contains("Settings -> Secrets and variables -> Actions -> New repository secret")
+    )
+    assertFalse("Must never auto-generate a random keystore", content.contains("-genkeypair"))
+
+    // 6. Must verify APK package name (com.pmp), versionCode, and signature before release
     assertTrue("Must verify com.pmp package name with aapt2", content.contains("name='com.pmp'"))
     assertTrue("Must verify APK signature with apksigner", content.contains("apksigner"))
+
+    // 7. Verify README.md exists and documents DEBUG_KEYSTORE_BASE64 without leaking any raw keystore base64
+    val readmeFile = listOf(
+      java.io.File("README.md"),
+      java.io.File("../README.md")
+    ).firstOrNull { it.exists() }
+    assertNotNull("README.md must exist", readmeFile)
+    val readmeContent = readmeFile!!.readText(Charsets.UTF_8)
+    assertTrue(readmeContent.contains("DEBUG_KEYSTORE_BASE64"))
+    assertTrue(readmeContent.contains("New repository secret"))
+    assertFalse("README must not contain raw JKS magic base64 header (/u3+7Q)", readmeContent.contains("/u3+7Q"))
   }
 }
