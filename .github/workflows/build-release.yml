@@ -1,6 +1,9 @@
 name: PMP Paints - Build & Release Signed APK
 
 on:
+  push:
+    branches:
+      - "main"
   workflow_dispatch:
     inputs:
       version_code:
@@ -21,9 +24,6 @@ on:
         default: ""
   repository_dispatch:
     types: [publish-apk-release]
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: write
@@ -51,7 +51,12 @@ jobs:
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-          mkdir -p "$SDK_ROOT"
+          if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then
+            sudo mkdir -p "$SDK_ROOT"
+            sudo chown -R "$(id -u):$(id -g)" "$SDK_ROOT"
+          else
+            mkdir -p "$SDK_ROOT"
+          fi
 
           SDKMANAGER_BIN=""
           if [ -x "${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" ]; then
@@ -69,6 +74,7 @@ jobs:
             curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o "$CMDLINE_ZIP"
             mkdir -p "${SDK_ROOT}/cmdline-tools"
             unzip -q -o "$CMDLINE_ZIP" -d "${SDK_ROOT}/cmdline-tools"
+            rm -rf "${SDK_ROOT}/cmdline-tools/latest"
             mv "${SDK_ROOT}/cmdline-tools/cmdline-tools" "${SDK_ROOT}/cmdline-tools/latest"
             rm -f "$CMDLINE_ZIP"
             SDKMANAGER_BIN="${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
@@ -242,26 +248,24 @@ jobs:
           git_commit = git_sha_full[:8] if git_sha_full else "8f4d2c1a"
           published_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-          existing_code = 0
+          existing_code = 13
+          existing_name = "3.0-PRO"
           if os.path.exists("version.json"):
               try:
                   with open("version.json", "r", encoding="utf-8") as f:
                       prev = json.load(f)
-                      existing_code = int(prev.get("versionCode", 0))
+                      existing_code = int(prev.get("versionCode", 13))
+                      existing_name = str(prev.get("versionName", "3.0-PRO")).strip()
               except Exception:
-                  existing_code = 0
+                  existing_code = 13
 
           v_code_str = os.environ.get("INPUT_VERSION_CODE", "").strip()
           v_name_str = os.environ.get("INPUT_VERSION_NAME", "").strip()
           notes_str = os.environ.get("INPUT_RELEASE_NOTES", "").strip()
           public_base = os.environ.get("INPUT_PUBLIC_BASE_URL", "").strip().rstrip("/")
 
-          ref_name = os.environ.get("GITHUB_REF_NAME", "")
-          if not v_name_str and ref_name.startswith("v"):
-              v_name_str = ref_name.lstrip("v")
-
           if not v_code_str:
-              v_code = max(existing_code + 1, 13)
+              v_code = max(existing_code, 13)
           else:
               v_code = int(v_code_str)
 
@@ -269,7 +273,7 @@ jobs:
               raise SystemExit(f"Invalid versionCode: {v_code}")
 
           if not v_name_str:
-              v_name_str = f"3.{v_code}-PRO"
+              v_name_str = existing_name if v_code == existing_code and existing_name else f"3.{v_code}-PRO"
 
           if not notes_str:
               notes_str = f"إصدار PMP PAINTS v{v_name_str} (بناء #{v_code} - Commit {git_commit})"
