@@ -393,4 +393,33 @@ class ExampleUnitTest {
     assertTrue(errorState.canRetry)
     assertEquals("انقطاع الاتصال", errorState.message)
   }
+
+  @Test
+  fun testGitHubActionsWorkflowSdkLicenseAndBuildConfiguration() {
+    val workflowFile = listOf(
+      java.io.File(".github/workflows/build-release.yml"),
+      java.io.File("../.github/workflows/build-release.yml")
+    ).firstOrNull { it.exists() }
+    assertNotNull("Workflow file .github/workflows/build-release.yml must exist", workflowFile)
+    val content = workflowFile!!.readText(Charsets.UTF_8)
+
+    // 1. Must NOT use android-actions/setup-android@v3 which fails on interactive license prompt
+    assertFalse("Must not use android-actions/setup-android", content.contains("android-actions/setup-android"))
+
+    // 2. Must NOT use || true to hide SDK or build errors
+    assertFalse("Must not use '|| true' to mask errors", content.contains("|| true"))
+
+    // 3. Must configure JDK 21 and Gradle 9.3.1 for AGP 9.1.1 compatibility
+    assertTrue("Must use JDK 21", content.contains("java-version: \"21\""))
+    assertTrue("Must use Gradle 9.3.1", content.contains("gradle-version: \"9.3.1\""))
+
+    // 4. Must accept SDK licenses non-interactively via sdkmanager --licenses with check=True
+    assertTrue("Must invoke sdkmanager --licenses", content.contains("\"--licenses\""))
+    assertTrue("Must install platforms;android-36.1", content.contains("\"platforms;android-36.1\""))
+    assertTrue("Must install build-tools;36.0.0", content.contains("\"build-tools;36.0.0\""))
+
+    // 5. Must verify APK package name (com.pmp), versionCode, and signature before release
+    assertTrue("Must verify com.pmp package name with aapt2", content.contains("name='com.pmp'"))
+    assertTrue("Must verify APK signature with apksigner", content.contains("apksigner"))
+  }
 }

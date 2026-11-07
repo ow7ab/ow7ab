@@ -41,23 +41,171 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21 (Required for AGP 9.1.1 & Android SDK Command-Line Tools)
         uses: actions/setup-java@v4
         with:
           distribution: "temurin"
-          java-version: "17"
+          java-version: "21"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.11.1"
-
-      - name: Restore & Verify Compatible Signing Keystore (debug.keystore)
+      - name: Locate Android SDK & Verify sdkmanager Path
         run: |
           set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          mkdir -p "$SDK_ROOT"
+
+          SDKMANAGER_BIN=""
+          if [ -x "${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER_BIN="${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          else
+            FOUND_BIN=$(find "$SDK_ROOT/cmdline-tools" -type f -name "sdkmanager" 2>/dev/null | sort -V | tail -n 1)
+            if [ -n "$FOUND_BIN" ] && [ -x "$FOUND_BIN" ]; then
+              SDKMANAGER_BIN="$FOUND_BIN"
+            fi
+          fi
+
+          if [ -z "$SDKMANAGER_BIN" ]; then
+            echo "Installing official Android command-line tools into ${SDK_ROOT}/cmdline-tools/latest..."
+            CMDLINE_ZIP="/tmp/commandlinetools-linux.zip"
+            curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o "$CMDLINE_ZIP"
+            mkdir -p "${SDK_ROOT}/cmdline-tools"
+            unzip -q -o "$CMDLINE_ZIP" -d "${SDK_ROOT}/cmdline-tools"
+            mv "${SDK_ROOT}/cmdline-tools/cmdline-tools" "${SDK_ROOT}/cmdline-tools/latest"
+            rm -f "$CMDLINE_ZIP"
+            SDKMANAGER_BIN="${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          if [ ! -x "$SDKMANAGER_BIN" ]; then
+            echo "::error::sdkmanager binary not found or not executable at $SDKMANAGER_BIN"
+            exit 1
+          fi
+
+          echo "ANDROID_HOME=${SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "SDKMANAGER_BIN=${SDKMANAGER_BIN}" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER_BIN")" >> "$GITHUB_PATH"
+          echo "${SDK_ROOT}/platform-tools" >> "$GITHUB_PATH"
+
+          echo "Using ANDROID_SDK_ROOT=${SDK_ROOT}"
+          echo "Using sdkmanager=${SDKMANAGER_BIN}"
+          "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --version
+
+      - name: Accept All Android SDK Licenses Non-Interactively
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import os
+          import subprocess
+
+          sdk_root = os.environ["ANDROID_SDK_ROOT"]
+          sdkmanager = os.environ["SDKMANAGER_BIN"]
+          licenses_dir = os.path.join(sdk_root, "licenses")
+          os.makedirs(licenses_dir, exist_ok=True)
+
+          # Write standard Android SDK license hashes deterministically
+          standard_licenses = {
+              "android-sdk-license": [
+                  "8933bad161af4178b1185d1a37fbf41ea5269c55",
+                  "d56f5187479451eabf01fb78af6dfcb131a6481e",
+                  "24333f8a63b6825ea9c5514f83c2829b004d1fee",
+              ],
+              "android-sdk-preview-license": [
+                  "84831b9409646a918e30573bab4c9c91346d8abd",
+                  "504667f4c0de7af1a06de9f4b1727b84351f2910",
+              ],
+              "android-googletv-license": [
+                  "601085b94cd77f0b54ff86406957099ebe79c4d6",
+              ],
+              "android-googlexr-license": [
+                  "ceff83576aac4f7f37cb98fe189e9fb3c49d3b81",
+              ],
+              "android-sdk-arm-dbt-license": [
+                  "859f317696f67ef3d7f30a50a5560e7834b43903",
+              ],
+              "google-gdk-license": [
+                  "33b6a2b64607f11b759f320ef9dff4ae5c47d97a",
+                  "d975f751698a77b662f1254ddbeed3901e976f5a",
+              ],
+              "microxr-sysimage-license": [
+                  "3a7848b1d7366ca5cfa0be477627644ca73f47e3",
+              ],
+              "mips-android-sysimage-license": [
+                  "e9acab5b5fbb560a72cfaecce8946896ff6aab9d",
+              ],
+          }
+
+          for filename, hashes in standard_licenses.items():
+              path = os.path.join(licenses_dir, filename)
+              with open(path, "w", encoding="utf-8") as f:
+                  for h in hashes:
+                      f.write(f"\n{h}")
+                  f.write("\n")
+
+          # Run sdkmanager --licenses non-interactively with strict exit-code verification
+          result = subprocess.run(
+              [sdkmanager, f"--sdk_root={sdk_root}", "--licenses"],
+              input="y\n" * 120,
+              text=True,
+              capture_output=True,
+              check=True,
+          )
+          print("All Android SDK licenses accepted successfully.")
+          PYEOF
+
+      - name: Install Compatible Android SDK Platforms & Build Tools (API 36 / 36.1 & Build-Tools 36.0.0)
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import os
+          import subprocess
+
+          sdk_root = os.environ["ANDROID_SDK_ROOT"]
+          sdkmanager = os.environ["SDKMANAGER_BIN"]
+
+          packages = [
+              "platform-tools",
+              "build-tools;36.0.0",
+              "platforms;android-36",
+              "platforms;android-36.1",
+          ]
+
+          print(f"Installing Android SDK packages: {packages}")
+          subprocess.run(
+              [sdkmanager, f"--sdk_root={sdk_root}", *packages],
+              input="y\n" * 120,
+              text=True,
+              check=True,
+          )
+
+          required_paths = [
+              os.path.join(sdk_root, "platforms", "android-36"),
+              os.path.join(sdk_root, "platforms", "android-36.1"),
+              os.path.join(sdk_root, "build-tools", "36.0.0", "aapt2"),
+              os.path.join(sdk_root, "build-tools", "36.0.0", "apksigner"),
+          ]
+          for req in required_paths:
+              if not os.path.exists(req):
+                  raise SystemExit(f"Required Android SDK component missing after installation: {req}")
+
+          print("Verified Android SDK platforms (36 & 36.1) and build-tools (36.0.0) are ready.")
+          PYEOF
+
+      - name: Setup Gradle 9.3.1 (Compatible with AGP 9.1.1)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Prepare Environment Config & Verify Compatible Signing Keystore (debug.keystore)
+        run: |
+          set -euo pipefail
+          if [ ! -f ".env" ]; then
+            if [ -f ".env.example" ]; then
+              cp ".env.example" ".env"
+              echo "Created .env from .env.example for Secrets Gradle Plugin"
+            else
+              touch ".env"
+            fi
+          fi
+
           if [ -f "debug.keystore.base64" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
             echo "Restored debug.keystore from debug.keystore.base64"
@@ -67,6 +215,10 @@ jobs:
             exit 1
           fi
           KEYSTORE_CERT_SHA256=$(keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -i "SHA256:" | head -n 1 | awk '{print $2}')
+          if [ -z "$KEYSTORE_CERT_SHA256" ]; then
+            echo "::error::Unable to extract SHA-256 fingerprint from debug.keystore"
+            exit 1
+          fi
           echo "KEYSTORE_CERT_SHA256=${KEYSTORE_CERT_SHA256}" >> "$GITHUB_ENV"
           echo "Verified signing certificate SHA-256: ${KEYSTORE_CERT_SHA256}"
 
@@ -82,8 +234,6 @@ jobs:
           python3 - << 'PYEOF'
           import json
           import os
-          import re
-          import subprocess
           from datetime import datetime, timezone
 
           repo = os.environ.get("GITHUB_REPOSITORY", "ow7ab/ow7ab")
@@ -182,8 +332,14 @@ jobs:
           cp "$APK_SOURCE" "public/${APK_FILENAME}"
           cp "$APK_SOURCE" "public/pmp-paints-latest.apk"
 
-          AAPT2_BIN=$(find "$ANDROID_HOME/build-tools" -name "aapt2" | sort -V | tail -n 1)
-          APKSIGNER_BIN=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
+          AAPT2_BIN="${ANDROID_SDK_ROOT}/build-tools/36.0.0/aapt2"
+          APKSIGNER_BIN="${ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner"
+          if [ ! -x "$AAPT2_BIN" ]; then
+            AAPT2_BIN=$(find "$ANDROID_SDK_ROOT/build-tools" -name "aapt2" | sort -V | tail -n 1)
+          fi
+          if [ ! -x "$APKSIGNER_BIN" ]; then
+            APKSIGNER_BIN=$(find "$ANDROID_SDK_ROOT/build-tools" -name "apksigner" | sort -V | tail -n 1)
+          fi
 
           echo "=== Verifying APK Manifest with aapt2 ==="
           BADGING_OUT=$("$AAPT2_BIN" dump badging "release_out/${APK_FILENAME}")
@@ -197,9 +353,21 @@ jobs:
             echo "::error::APK versionCode does not match expected ${V_CODE}!"
             exit 1
           fi
+          if ! echo "$BADGING_OUT" | grep -q "versionName='${V_NAME}'"; then
+            echo "::error::APK versionName does not match expected ${V_NAME}!"
+            exit 1
+          fi
 
           echo "=== Verifying APK Cryptographic Signature with apksigner ==="
-          "$APKSIGNER_BIN" verify --verbose --print-certs "release_out/${APK_FILENAME}"
+          CERT_OUT=$("$APKSIGNER_BIN" verify --verbose --print-certs "release_out/${APK_FILENAME}")
+          echo "$CERT_OUT"
+
+          APK_CERT_SHA256=$(echo "$CERT_OUT" | grep -i "certificate SHA-256 digest:" | head -n 1 | awk '{print $NF}' | tr '[:lower:]' '[:upper:]')
+          EXPECTED_CERT_HEX=$(echo "${KEYSTORE_CERT_SHA256}" | tr -d ':' | tr '[:lower:]' '[:upper:]')
+          if [ -n "$APK_CERT_SHA256" ] && [ -n "$EXPECTED_CERT_HEX" ] && [ "$APK_CERT_SHA256" != "$EXPECTED_CERT_HEX" ]; then
+            echo "::error::APK signing certificate ($APK_CERT_SHA256) does not match debug.keystore certificate ($EXPECTED_CERT_HEX)!"
+            exit 1
+          fi
 
           SHA256_HASH=$(sha256sum "release_out/${APK_FILENAME}" | awk '{print $1}')
           FILE_SIZE_BYTES=$(stat -c%s "release_out/${APK_FILENAME}")
