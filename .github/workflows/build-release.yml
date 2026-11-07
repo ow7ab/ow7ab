@@ -1,34 +1,42 @@
 name: PMP Paints - Build & Release Signed APK
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
-      version_name:
-        description: 'Version Name (e.g. 2.8-PRO)'
-        required: true
-        default: '2.8-PRO'
       version_code:
-        description: 'Version Code (must be > previous installed versionCode)'
+        description: "رقم البناء الجديد (versionCode) - يجب أن يكون أكبر من الإصدار السابق"
         required: true
-        default: '11'
+        default: "13"
+      version_name:
+        description: "اسم الإصدار (versionName) مثل 3.0-PRO"
+        required: true
+        default: "3.0-PRO"
       release_notes:
-        description: 'Release Notes (Arabic or English)'
+        description: "ملاحظات التحديث التي ستظهر للمستخدمين"
         required: false
-        default: 'تحديث أمان واستقرار جديد لمنظومة PMP Paints مع الحفاظ التام على البيانات'
+        default: "إصدار 3.0-PRO: إصلاح جذري لنظام التحديثات السحابية، التحقق من بصمة البناء (Build ID & SHA-256)، وتحسين الأداء والتقارير."
+      public_base_url:
+        description: "رابط الاستضافة العامة الاختياري (يُستخدم GitHub Pages تلقائياً عند تركه فارغاً)"
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [publish-apk-release]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
-  build:
-    name: Build, Verify & Release Signed APK
+  build-and-release:
+    name: Build, Verify & Publish Signed APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Latest Verified Commit
+      - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -36,143 +44,261 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
 
-      - name: Restore Signing Keystore from base64
+      - name: Restore & Verify Compatible Signing Keystore (debug.keystore)
         run: |
-          if [ -f debug.keystore.base64 ]; then
+          set -euo pipefail
+          if [ -f "debug.keystore.base64" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
+            echo "Restored debug.keystore from debug.keystore.base64"
           fi
-          if [ ! -f debug.keystore ]; then
-            echo "ERROR: debug.keystore is missing! Refusing to generate a new key to protect user data on update."
+          if [ ! -f "debug.keystore" ]; then
+            echo "::error::debug.keystore is missing! Replacing it with a random key would break updates (INSTALL_FAILED_UPDATE_INCOMPATIBLE) for existing users."
+            exit 1
+          fi
+          KEYSTORE_CERT_SHA256=$(keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -i "SHA256:" | head -n 1 | awk '{print $2}')
+          echo "KEYSTORE_CERT_SHA256=${KEYSTORE_CERT_SHA256}" >> "$GITHUB_ENV"
+          echo "Verified signing certificate SHA-256: ${KEYSTORE_CERT_SHA256}"
+
+      - name: Resolve & Validate Version Metadata and Build Identity
+        id: meta
+        env:
+          INPUT_VERSION_CODE: ${{ github.event.inputs.version_code || github.event.client_payload.version_code }}
+          INPUT_VERSION_NAME: ${{ github.event.inputs.version_name || github.event.client_payload.version_name }}
+          INPUT_RELEASE_NOTES: ${{ github.event.inputs.release_notes || github.event.client_payload.release_notes }}
+          INPUT_PUBLIC_BASE_URL: ${{ github.event.inputs.public_base_url || github.event.client_payload.public_base_url }}
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import json
+          import os
+          import re
+          import subprocess
+          from datetime import datetime, timezone
+
+          repo = os.environ.get("GITHUB_REPOSITORY", "ow7ab/ow7ab")
+          owner, repo_name = (repo.split("/", 1) + ["ow7ab"])[:2]
+          git_sha_full = os.environ.get("GITHUB_SHA", "")
+          git_commit = git_sha_full[:8] if git_sha_full else "8f4d2c1a"
+          published_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+          existing_code = 0
+          if os.path.exists("version.json"):
+              try:
+                  with open("version.json", "r", encoding="utf-8") as f:
+                      prev = json.load(f)
+                      existing_code = int(prev.get("versionCode", 0))
+              except Exception:
+                  existing_code = 0
+
+          v_code_str = os.environ.get("INPUT_VERSION_CODE", "").strip()
+          v_name_str = os.environ.get("INPUT_VERSION_NAME", "").strip()
+          notes_str = os.environ.get("INPUT_RELEASE_NOTES", "").strip()
+          public_base = os.environ.get("INPUT_PUBLIC_BASE_URL", "").strip().rstrip("/")
+
+          ref_name = os.environ.get("GITHUB_REF_NAME", "")
+          if not v_name_str and ref_name.startswith("v"):
+              v_name_str = ref_name.lstrip("v")
+
+          if not v_code_str:
+              v_code = max(existing_code + 1, 13)
+          else:
+              v_code = int(v_code_str)
+
+          if v_code <= 0:
+              raise SystemExit(f"Invalid versionCode: {v_code}")
+
+          if not v_name_str:
+              v_name_str = f"3.{v_code}-PRO"
+
+          if not notes_str:
+              notes_str = f"إصدار PMP PAINTS v{v_name_str} (بناء #{v_code} - Commit {git_commit})"
+
+          build_id = f"PMP-v{v_name_str}-b{v_code}-{git_commit}"
+          apk_filename = f"pmp-paints-v{v_name_str}-b{v_code}.apk"
+
+          if not public_base:
+              public_base = f"https://{owner}.github.io/{repo_name}"
+
+          primary_download_url = f"{public_base}/{apk_filename}"
+          github_release_url = f"https://github.com/{repo}/releases/download/v{v_name_str}/{apk_filename}"
+
+          env_path = os.environ["GITHUB_ENV"]
+          with open(env_path, "a", encoding="utf-8") as env_file:
+              env_file.write(f"V_CODE={v_code}\n")
+              env_file.write(f"V_NAME={v_name_str}\n")
+              env_file.write(f"GIT_COMMIT_SHORT={git_commit}\n")
+              env_file.write(f"PUBLISHED_AT_UTC={published_at}\n")
+              env_file.write(f"BUILD_ID={build_id}\n")
+              env_file.write(f"APK_FILENAME={apk_filename}\n")
+              env_file.write(f"PRIMARY_DOWNLOAD_URL={primary_download_url}\n")
+              env_file.write(f"GITHUB_RELEASE_URL={github_release_url}\n")
+
+          with open("/tmp/release_notes.txt", "w", encoding="utf-8") as nf:
+              nf.write(notes_str)
+
+          print(f"Resolved Build Identity: {build_id} -> {apk_filename}")
+          PYEOF
+
+      - name: Build Signed APK with Embedded Build Identity
+        run: |
+          set -euo pipefail
+          if [ -x "./gradlew" ]; then
+            GRADLE_CMD="./gradlew"
+          else
+            GRADLE_CMD="gradle"
+          fi
+          echo "Building APK using ${GRADLE_CMD}..."
+          ${GRADLE_CMD} :app:assembleDebug \
+            -PversionCode="${V_CODE}" \
+            -PversionName="${V_NAME}" \
+            -PgitCommit="${GIT_COMMIT_SHORT}" \
+            -PbuildTimestampUtc="${PUBLISHED_AT_UTC}" \
+            -PbuildId="${BUILD_ID}" \
+            --no-daemon
+
+      - name: Verify Compiled APK Binary (Package Name, Version, Signature & Checksum)
+        run: |
+          set -euo pipefail
+          APK_SOURCE="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$APK_SOURCE" ]; then
+            echo "::error::APK file was not generated at $APK_SOURCE"
             exit 1
           fi
 
-      - name: Resolve Version Code & Version Name
-        id: resolve_version
-        run: |
-          GRADLE_V_CODE=$(grep -Eo 'versionCode\s*=.*:[[:space:]]*[0-9]+' app/build.gradle.kts | grep -Eo '[0-9]+$' | head -n 1)
-          GRADLE_V_NAME=$(grep -Eo 'versionName\s*=.*:[[:space:]]*"[^"]+"' app/build.gradle.kts | grep -Eo '"[^"]+"$' | tr -d '"' | head -n 1)
-
-          INPUT_V_CODE="${{ github.event.inputs.version_code }}"
-          INPUT_V_NAME="${{ github.event.inputs.version_name }}"
-
-          if [ -n "$INPUT_V_CODE" ]; then
-            FINAL_V_CODE="$INPUT_V_CODE"
-          elif [ -n "$GRADLE_V_CODE" ]; then
-            FINAL_V_CODE="$GRADLE_V_CODE"
-          else
-            FINAL_V_CODE="11"
-          fi
-
-          if [ -n "$INPUT_V_NAME" ]; then
-            FINAL_V_NAME="$INPUT_V_NAME"
-          elif [[ "${{ github.ref_name }}" == v* ]]; then
-            FINAL_V_NAME="${GITHUB_REF_NAME#v}"
-          elif [ -n "$GRADLE_V_NAME" ]; then
-            FINAL_V_NAME="$GRADLE_V_NAME"
-          else
-            FINAL_V_NAME="2.8-PRO"
-          fi
-
-          TAG_NAME="v${FINAL_V_NAME#v}"
-          echo "version_code=$FINAL_V_CODE" >> $GITHUB_OUTPUT
-          echo "version_name=$FINAL_V_NAME" >> $GITHUB_OUTPUT
-          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "Resolved release: versionName=$FINAL_V_NAME, versionCode=$FINAL_V_CODE, tag=$TAG_NAME"
-
-      - name: Build Signed APK with Injected Version
-        run: |
-          gradle :app:assembleDebug \
-            -PversionCode="${{ steps.resolve_version.outputs.version_code }}" \
-            -PversionName="${{ steps.resolve_version.outputs.version_name }}"
-
-      - name: Verify APK Package ID, VersionCode, Signature & SHA-256
-        id: prepare_apk
-        run: |
-          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-            echo "ERROR: APK file was not produced by Gradle build!"
-            exit 1
-          fi
+          mkdir -p release_out public
+          cp "$APK_SOURCE" "release_out/${APK_FILENAME}"
+          cp "$APK_SOURCE" "release_out/pmp-paints-latest.apk"
+          cp "$APK_SOURCE" "public/${APK_FILENAME}"
+          cp "$APK_SOURCE" "public/pmp-paints-latest.apk"
 
           AAPT2_BIN=$(find "$ANDROID_HOME/build-tools" -name "aapt2" | sort -V | tail -n 1)
-          if [ -n "$AAPT2_BIN" ]; then
-            BADGING=$("$AAPT2_BIN" dump badging "$APK_PATH" | head -n 5)
-            echo "$BADGING"
-            echo "$BADGING" | grep -q "name='com.pmp'" || { echo "ERROR: applicationId is not com.pmp!"; exit 1; }
-            echo "$BADGING" | grep -q "versionCode='${{ steps.resolve_version.outputs.version_code }}'" || { echo "ERROR: APK versionCode mismatch!"; exit 1; }
-          fi
-
           APKSIGNER_BIN=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
-          if [ -n "$APKSIGNER_BIN" ]; then
-            "$APKSIGNER_BIN" verify --print-certs "$APK_PATH"
+
+          echo "=== Verifying APK Manifest with aapt2 ==="
+          BADGING_OUT=$("$AAPT2_BIN" dump badging "release_out/${APK_FILENAME}")
+          echo "$BADGING_OUT" | grep "package: name="
+
+          if ! echo "$BADGING_OUT" | grep -q "name='com.pmp'"; then
+            echo "::error::APK packageName is not com.pmp!"
+            exit 1
+          fi
+          if ! echo "$BADGING_OUT" | grep -q "versionCode='${V_CODE}'"; then
+            echo "::error::APK versionCode does not match expected ${V_CODE}!"
+            exit 1
           fi
 
-          TAG_NAME="${{ steps.resolve_version.outputs.tag_name }}"
-          ASSET_LOWER="pmp-paints-${TAG_NAME}.apk"
-          ASSET_UPPER="PMP-Paints-${TAG_NAME}.apk"
-          ASSET_LATEST="pmp-paints-latest.apk"
+          echo "=== Verifying APK Cryptographic Signature with apksigner ==="
+          "$APKSIGNER_BIN" verify --verbose --print-certs "release_out/${APK_FILENAME}"
 
-          cp "$APK_PATH" "./$ASSET_LOWER"
-          cp "$APK_PATH" "./$ASSET_UPPER"
-          cp "$APK_PATH" "./$ASSET_LATEST"
+          SHA256_HASH=$(sha256sum "release_out/${APK_FILENAME}" | awk '{print $1}')
+          FILE_SIZE_BYTES=$(stat -c%s "release_out/${APK_FILENAME}")
+          FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", ${FILE_SIZE_BYTES}/1048576}")
 
-          FILE_SIZE=$(du -m "./$ASSET_LOWER" | cut -f1)
-          SHA256=$(sha256sum "./$ASSET_LOWER" | cut -d ' ' -f1)
+          if [ "$FILE_SIZE_BYTES" -lt 1048576 ]; then
+            echo "::error::APK file size (${FILE_SIZE_BYTES} bytes) is suspiciously small (< 1MB)!"
+            exit 1
+          fi
 
-          echo "apk_lower=./$ASSET_LOWER" >> $GITHUB_OUTPUT
-          echo "apk_upper=./$ASSET_UPPER" >> $GITHUB_OUTPUT
-          echo "apk_latest=./$ASSET_LATEST" >> $GITHUB_OUTPUT
-          echo "file_size=$FILE_SIZE" >> $GITHUB_OUTPUT
-          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+          echo "APK_SHA256=${SHA256_HASH}" >> "$GITHUB_ENV"
+          echo "APK_SIZE_BYTES=${FILE_SIZE_BYTES}" >> "$GITHUB_ENV"
+          echo "APK_SIZE_MB=${FILE_SIZE_MB}" >> "$GITHUB_ENV"
 
-      - name: Generate Verified version.json
+      - name: Generate Schema-Validated version.json Safely via Python
         run: |
-          V_NAME="${{ steps.resolve_version.outputs.version_name }}"
-          V_CODE="${{ steps.resolve_version.outputs.version_code }}"
-          NOTES="${{ github.event.inputs.release_notes || 'تحديث رسمي معتمد لمنظومة PMP Paints مع الحفاظ الكامل على البيانات' }}"
-          TAG="${{ steps.resolve_version.outputs.tag_name }}"
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/pmp-paints-${TAG}.apk"
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import json
+          import os
 
-          cat <<EOF > version.json
-          {
-            "versionCode": ${V_CODE},
-            "versionName": "${V_NAME}",
-            "downloadUrl": "${DOWNLOAD_URL}",
-            "releaseNotes": "${NOTES}",
-            "fileSizeMb": ${{ steps.prepare_apk.outputs.file_size }},
-            "sha256": "${{ steps.prepare_apk.outputs.sha256 }}",
-            "minSupportedVersion": 1
+          with open("/tmp/release_notes.txt", "r", encoding="utf-8") as nf:
+              release_notes = nf.read().strip()
+
+          v_code = int(os.environ["V_CODE"])
+          v_name = os.environ["V_NAME"]
+          sha256 = os.environ["APK_SHA256"]
+          file_size_bytes = int(os.environ["APK_SIZE_BYTES"])
+          file_size_mb = float(os.environ["APK_SIZE_MB"])
+          build_id = os.environ["BUILD_ID"]
+          git_commit = os.environ["GIT_COMMIT_SHORT"]
+          published_at = os.environ["PUBLISHED_AT_UTC"]
+          primary_url = os.environ["PRIMARY_DOWNLOAD_URL"]
+          github_release_url = os.environ["GITHUB_RELEASE_URL"]
+          cert_sha256 = os.environ.get("KEYSTORE_CERT_SHA256", "")
+
+          payload = {
+              "versionCode": v_code,
+              "versionName": v_name,
+              "buildId": build_id,
+              "gitCommit": git_commit,
+              "publishedAt": published_at,
+              "downloadUrl": primary_url,
+              "apkUrl": primary_url,
+              "githubReleaseUrl": github_release_url,
+              "releaseNotes": release_notes,
+              "sha256": sha256,
+              "fileSize": file_size_bytes,
+              "fileSizeMb": file_size_mb,
+              "signingCertSha256": cert_sha256,
+              "minSupportedVersion": 1,
+              "mandatory": False
           }
-          EOF
-          cp version.json public/version.json
-          cat version.json
 
-      - name: Publish Verified Release to GitHub Releases
+          for out_path in ["version.json", "release_out/version.json", "public/version.json"]:
+              with open(out_path, "w", encoding="utf-8") as out_f:
+                  json.dump(payload, out_f, ensure_ascii=False, indent=2)
+                  out_f.write("\n")
+
+          # Validate JSON round-trip
+          with open("release_out/version.json", "r", encoding="utf-8") as check_f:
+              verified = json.load(check_f)
+              assert verified["versionCode"] == v_code
+              assert verified["sha256"] == sha256
+              assert verified["buildId"] == build_id
+          print("Generated and validated version.json:")
+          print(json.dumps(verified, ensure_ascii=False, indent=2))
+          PYEOF
+
+      - name: Publish Release to GitHub Releases
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
-          tag_name: ${{ steps.resolve_version.outputs.tag_name }}
-          files: |
-            ${{ steps.prepare_apk.outputs.apk_lower }}
-            ${{ steps.prepare_apk.outputs.apk_upper }}
-            ${{ steps.prepare_apk.outputs.apk_latest }}
-            version.json
-          name: PMP Paints ${{ steps.resolve_version.outputs.tag_name }} (Build ${{ steps.resolve_version.outputs.version_code }})
+          tag_name: v${{ env.V_NAME }}
+          name: "PMP PAINTS v${{ env.V_NAME }} (Build ${{ env.V_CODE }} • ${{ env.GIT_COMMIT_SHORT }})"
           body: |
-            ${{ github.event.inputs.release_notes || 'تحديث رسمي جديد لتطبيق PMP Paints' }}
-
-            - **رقم الإصدار (Version Name):** `${{ steps.resolve_version.outputs.version_name }}`
-            - **رقم البناء (Version Code):** `${{ steps.resolve_version.outputs.version_code }}`
-            - **معرف الحزمة (Application ID):** `com.pmp`
-            - **بصمة الملف (SHA-256):** `${{ steps.prepare_apk.outputs.sha256 }}`
+            ### تحديث PMP PAINTS السحابي المعتمد
+            - **الإصدار (versionName):** `${{ env.V_NAME }}`
+            - **رقم البناء (versionCode):** `${{ env.V_CODE }}`
+            - **معرّف البناء (Build ID):** `${{ env.BUILD_ID }}`
+            - **Git Commit SHA:** `${{ env.GIT_COMMIT_SHORT }}`
+            - **تاريخ النشر (UTC):** `${{ env.PUBLISHED_AT_UTC }}`
+            - **الحجم:** `${{ env.APK_SIZE_MB }} MB` (`${{ env.APK_SIZE_BYTES }} bytes`)
+            - **بصمة الملف (SHA-256):** `${{ env.APK_SHA256 }}`
+            - **بصمة شهادة التوقيع (Cert SHA-256):** `${{ env.KEYSTORE_CERT_SHA256 }}`
           draft: false
           prerelease: false
+          files: |
+            release_out/${{ env.APK_FILENAME }}
+            release_out/pmp-paints-latest.apk
+            release_out/version.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Public Artifacts for GitHub Pages Hosting
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+
+      - name: Deploy Public Release Endpoint to GitHub Pages
+        id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v4

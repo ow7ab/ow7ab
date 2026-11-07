@@ -91,24 +91,34 @@ class ExampleUnitTest {
   @Test
   fun testCloudReleaseConfiguration() {
     val latestRelease = com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO
-    assertTrue(latestRelease.versionCode >= 12)
-    assertTrue(latestRelease.versionName.contains("2.9"))
+    assertTrue(latestRelease.versionCode >= 13)
+    assertTrue(latestRelease.versionName.contains("3.0"))
     assertTrue(latestRelease.downloadUrl.startsWith("https://"))
     assertTrue(latestRelease.releaseNotes.isNotBlank())
+    assertTrue(latestRelease.buildId.isNotBlank())
+    assertTrue(latestRelease.gitCommit.isNotBlank())
     assertEquals("com.pmp", BuildConfig.APPLICATION_ID)
-    assertEquals(12, BuildConfig.VERSION_CODE)
-    assertEquals("2.9-PRO", BuildConfig.VERSION_NAME)
+    assertEquals(13, BuildConfig.VERSION_CODE)
+    assertEquals("3.0-PRO", BuildConfig.VERSION_NAME)
+    assertEquals("PMP-v3.0-PRO-b13-8f4d2c1a", BuildConfig.BUILD_ID)
+    assertEquals("8f4d2c1a", BuildConfig.GIT_COMMIT_SHA)
+    assertTrue(BuildConfig.BUILD_TIMESTAMP_UTC.endsWith("Z"))
+    assertEquals("ow7ab/ow7ab", BuildConfig.GITHUB_RELEASE_REPO)
   }
 
   @Test
   fun testFirstAttemptUpdateDiscoveryAndVersionJsonParsing() {
     val sampleJson = """
       {
-        "versionCode": 13,
-        "versionName": "3.0-PRO",
-        "downloadUrl": "https://github.com/oaw7ab/pmp-paints-releases/releases/download/v3.0-PRO/pmp-paints-v3.0-PRO.apk",
-        "releaseNotes": "تحديث جديد",
-        "fileSizeMb": 31.5,
+        "versionCode": 14,
+        "versionName": "3.1-PRO",
+        "buildId": "PMP-v3.1-PRO-b14-9a8b7c6d",
+        "gitCommit": "9a8b7c6d",
+        "publishedAt": "2026-11-08T10:30:00Z",
+        "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v3.1-PRO-b14.apk",
+        "releaseNotes": "تحديث جديد يتضمن ميزات فعلية",
+        "fileSize": 19500000,
+        "fileSizeMb": 18.6,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "minSupportedVersion": 1
       }
@@ -116,16 +126,25 @@ class ExampleUnitTest {
 
     val parsed = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(sampleJson)
     assertNotNull(parsed)
-    assertEquals(13, parsed!!.versionCode)
-    assertEquals("3.0-PRO", parsed.versionName)
-    assertTrue(parsed.downloadUrl.endsWith("pmp-paints-v3.0-PRO.apk"))
+    assertEquals(14, parsed!!.versionCode)
+    assertEquals("3.1-PRO", parsed.versionName)
+    assertEquals("PMP-v3.1-PRO-b14-9a8b7c6d", parsed.buildId)
+    assertEquals("9a8b7c6d", parsed.gitCommit)
+    assertEquals("2026-11-08T10:30:00Z", parsed.publishedAt)
+    assertEquals(19500000L, parsed.fileSize)
+    assertTrue(parsed.downloadUrl.endsWith("pmp-paints-v3.1-PRO-b14.apk"))
     assertEquals(64, parsed.sha256Checksum.length)
 
-    // Verify highest version wins across multiple sources (e.g., stale Firestore v11 vs fresh JSON v13)
-    val staleSource = com.example.util.UpdateInfo(versionCode = 11, versionName = "2.8-PRO", downloadUrl = "https://example.com/old.apk")
+    // Verify highest version wins across multiple sources (e.g., stale Firestore v12 vs fresh JSON v14)
+    val staleSource = com.example.util.UpdateInfo(
+      versionCode = 12,
+      versionName = "2.9-PRO",
+      downloadUrl = "https://example.com/old.apk",
+      releaseNotes = "قديم"
+    )
     val bestCandidate = listOf(staleSource, parsed).maxByOrNull { it.versionCode }
     assertNotNull(bestCandidate)
-    assertEquals(13, bestCandidate!!.versionCode)
+    assertEquals(14, bestCandidate!!.versionCode)
     assertTrue(bestCandidate.versionCode > BuildConfig.VERSION_CODE)
   }
 
@@ -134,19 +153,96 @@ class ExampleUnitTest {
     val baseUrl = com.example.util.UpdateManager.DEFAULT_UPDATE_METADATA_URL
     val busted1 = com.example.util.UpdateManager.buildCacheBustedUrl(baseUrl, 1700000001L)
     val busted2 = com.example.util.UpdateManager.buildCacheBustedUrl(baseUrl, 1700000002L)
-    assertTrue(busted1.contains("?cb=1700000001"))
+    assertTrue(busted1.contains("?_cb=1700000001"))
     assertNotEquals(busted1, busted2)
 
     val updateInfo = com.example.util.UpdateInfo(
-      versionCode = 12,
-      versionName = "2.9-PRO",
-      downloadUrl = "https://github.com/oaw7ab/pmp-paints-releases/releases/download/v2.9-PRO/PMP-Paints-v2.9-PRO.apk"
+      versionCode = 14,
+      versionName = "3.1-PRO",
+      downloadUrl = "https://ow7ab.github.io/ow7ab/pmp-paints-v3.1-PRO-b14.apk",
+      releaseNotes = "تحديث"
     )
     val candidates = com.example.util.UpdateManager.buildCandidateDownloadUrls(updateInfo)
-    assertTrue(candidates.any { it.contains("pmp-paints-v2.9-PRO.apk") })
-    assertTrue(candidates.any { it.contains("PMP-Paints-v2.9-PRO.apk") })
-    assertTrue(candidates.any { it == "${com.example.util.UpdateManager.SHARED_DOWNLOAD_PORTAL_URL}/pmp-paints-latest.apk" })
+    assertTrue(candidates.any { it.contains("pmp-paints-v3.1-PRO-b14.apk") })
+    assertTrue(candidates.any { it == "${com.example.util.UpdateManager.GITHUB_PAGES_BASE_URL}/pmp-paints-latest.apk" })
     assertTrue(candidates.any { it == "${com.example.util.UpdateManager.DEFAULT_DOWNLOAD_PORTAL_URL}/pmp-paints-latest.apk" })
+    assertTrue(candidates.any { it == "${com.example.util.UpdateManager.SHARED_DOWNLOAD_PORTAL_URL}/pmp-paints-latest.apk" })
+  }
+
+  @Test
+  fun testVersionAtoVersionBBuildIdentityVerificationAndFailureCases() {
+    // Version A (Installed): versionCode = 12, buildId = "PMP-v2.9-PRO-b12-1111aaaa"
+    val versionACode = 12
+    val versionABuildId = "PMP-v2.9-PRO-b12-1111aaaa"
+
+    // Version B (Target Update): versionCode = 13, buildId = "PMP-v3.0-PRO-b13-8f4d2c1a"
+    val versionBUpdate = com.example.util.UpdateInfo(
+      versionCode = 13,
+      versionName = "3.0-PRO",
+      downloadUrl = "https://ow7ab.github.io/ow7ab/pmp-paints-v3.0-PRO-b13.apk",
+      releaseNotes = "ميزة جديدة في الإصدار 13",
+      sha256Checksum = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      fileSize = 19398656L,
+      buildId = "PMP-v3.0-PRO-b13-8f4d2c1a",
+      gitCommit = "8f4d2c1a",
+      publishedAt = "2026-11-07T08:00:00Z"
+    )
+
+    // 1. Validate metadata integrity for Version B against Version A -> MUST PASS
+    val validDecision = com.example.util.UpdateManager.validateUpdateMetadataIntegrity(
+      installedVersionCode = versionACode,
+      installedBuildId = versionABuildId,
+      candidate = versionBUpdate
+    )
+    assertTrue(validDecision.isValid)
+
+    // 2. Reject older or equal versionCode -> MUST FAIL
+    val olderDecision = com.example.util.UpdateManager.validateUpdateMetadataIntegrity(
+      installedVersionCode = 13,
+      installedBuildId = "PMP-v3.0-PRO-b13-8f4d2c1a",
+      candidate = versionBUpdate.copy(versionCode = 12)
+    )
+    assertFalse(olderDecision.isValid)
+
+    // 3. Reject fake version bump where versionCode increased to 13 but buildId is still Version A's buildId -> MUST FAIL
+    val fakeBumpDecision = com.example.util.UpdateManager.validateUpdateMetadataIntegrity(
+      installedVersionCode = versionACode,
+      installedBuildId = versionABuildId,
+      candidate = versionBUpdate.copy(buildId = versionABuildId)
+    )
+    assertFalse("Must reject update with identical buildId as installed version", fakeBumpDecision.isValid)
+
+    // 4. Reject corrupted / invalid SHA-256 format -> MUST FAIL
+    val badShaDecision = com.example.util.UpdateManager.validateUpdateMetadataIntegrity(
+      installedVersionCode = versionACode,
+      installedBuildId = versionABuildId,
+      candidate = versionBUpdate.copy(sha256Checksum = "invalid_short_sha")
+    )
+    assertFalse(badShaDecision.isValid)
+
+    // 5. Verify genuine transition from Version A -> Version B (both versionCode and BuildConfig.BUILD_ID changed)
+    val genuineTransition = com.example.util.UpdateManager.verifyBuildIdentityTransition(
+      previousVersionCode = versionACode,
+      previousBuildId = versionABuildId,
+      currentVersionCode = 13,
+      currentBuildId = "PMP-v3.0-PRO-b13-8f4d2c1a",
+      expectedUpdate = versionBUpdate
+    )
+    assertTrue(genuineTransition.isVerified)
+    assertTrue(genuineTransition.versionCodeAdvanced)
+    assertTrue(genuineTransition.buildIdChanged)
+    assertTrue(genuineTransition.matchesExpectedBuildId)
+
+    // 6. Detect spoofed update where versionCode changed to 13 but installed binary still has Version A's Build ID
+    val spoofedTransition = com.example.util.UpdateManager.verifyBuildIdentityTransition(
+      previousVersionCode = versionACode,
+      previousBuildId = versionABuildId,
+      currentVersionCode = 13,
+      currentBuildId = versionABuildId,
+      expectedUpdate = versionBUpdate
+    )
+    assertFalse("Spoofed update without binary change must fail verification", spoofedTransition.isVerified)
+    assertFalse(spoofedTransition.buildIdChanged)
   }
 
   @Test

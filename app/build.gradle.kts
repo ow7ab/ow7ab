@@ -1,5 +1,6 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 import java.time.Duration
+import java.time.Instant
 
 plugins {
   alias(libs.plugins.android.application)
@@ -9,6 +10,21 @@ plugins {
   alias(libs.plugins.google.services)
 }
 
+val resolvedVersionCode: Int =
+    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 13
+val resolvedVersionName: String =
+    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "3.0-PRO"
+val resolvedGitCommit: String =
+    (project.findProperty("gitCommit")?.toString()?.trim()?.takeIf { it.isNotBlank() })
+        ?: System.getenv("GITHUB_SHA")?.take(8)?.takeIf { it.isNotBlank() }
+        ?: "8f4d2c1a"
+val resolvedBuildTimestampUtc: String =
+    (project.findProperty("buildTimestampUtc")?.toString()?.trim()?.takeIf { it.isNotBlank() })
+        ?: "2026-11-07T08:00:00Z"
+val resolvedBuildId: String =
+    (project.findProperty("buildId")?.toString()?.trim()?.takeIf { it.isNotBlank() })
+        ?: "PMP-v${resolvedVersionName}-b${resolvedVersionCode}-${resolvedGitCommit}"
+
 android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
@@ -17,8 +33,13 @@ android {
     applicationId = "com.pmp"
     minSdk = 24
     targetSdk = 36
-    versionCode = (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 12
-    versionName = (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "2.9-PRO"
+    versionCode = resolvedVersionCode
+    versionName = resolvedVersionName
+
+    buildConfigField("String", "GIT_COMMIT_SHA", "\"$resolvedGitCommit\"")
+    buildConfigField("String", "BUILD_ID", "\"$resolvedBuildId\"")
+    buildConfigField("String", "BUILD_TIMESTAMP_UTC", "\"$resolvedBuildTimestampUtc\"")
+    buildConfigField("String", "GITHUB_RELEASE_REPO", "\"ow7ab/ow7ab\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

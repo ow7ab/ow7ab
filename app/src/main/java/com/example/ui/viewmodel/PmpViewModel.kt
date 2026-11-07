@@ -439,8 +439,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
                     updateManager.installStatusMessage.collect { statusPair ->
                         if (statusPair != null) {
-                            val (msg, isErr) = statusPair
-                            postMessage(msg, isError = isErr)
+                            val (msg, isOk) = statusPair
+                            postMessage(msg, isError = !isOk)
                             updateManager.clearInstallStatusMessage()
                             verifyPostInstallAndRefreshVersion()
                         }
@@ -454,15 +454,18 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 try {
                     updateManager.observeCloudUpdatesRealtime(serverClusterCode.value) { liveUpdate ->
                         val installedCode = updateManager.getEffectiveVersionCode()
-                        if (liveUpdate != null && liveUpdate.versionCode > installedCode) {
+                        if (liveUpdate.versionCode > installedCode) {
                             _availableUpdate.value = liveUpdate
                             _updateAvailable.value = true
-                            _lastUpdateCheckStatus.value = "تحديث جديد متوفر: ${liveUpdate.versionName} (Build ${liveUpdate.versionCode})"
+                            _lastUpdateCheckStatus.value =
+                                "تحديث جديد متوفر: ${liveUpdate.versionName} (Build ${liveUpdate.versionCode} • ${liveUpdate.buildId.ifBlank { "Verified" }})"
                         } else {
                             _availableUpdate.value = null
                             _updateAvailable.value = false
-                            _lastUpdateCheckStatus.value = "التطبيق محدّث إلى آخر إصدار (v${updateManager.getEffectiveVersionName()} • Build $installedCode)"
+                            _lastUpdateCheckStatus.value =
+                                "التطبيق محدّث إلى آخر إصدار (v${updateManager.getEffectiveVersionName()} • Build $installedCode • ${updateManager.getInstalledBuildId()})"
                         }
+                        refreshBuildIdentityReport()
                     }
                     checkForAppUpdates(manual = false)
                 } catch (e: Exception) {
@@ -474,18 +477,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 currentUser.collect { user ->
                     val isAdmin = user?.username?.equals("admin", ignoreCase = true) == true
                     updateManager.setAdminBroadcastGuardEnabled(isAdmin)
-                    if (isAdmin) {
-                        // Automatically publish the latest cloud release metadata (v2.9-PRO Build 12) so all connected devices receive it
-                        launch(Dispatchers.IO) {
-                            runCatching {
-                                updateManager.broadcastToAllClusters(
-                                    info = UpdateManager.LATEST_CLOUD_RELEASE_INFO,
-                                    activeClusterCode = serverClusterCode.value,
-                                    forceNewIncrement = false
-                                )
-                            }
-                        }
-                    }
+                    refreshBuildIdentityReport()
                 }
             }
 
@@ -1342,7 +1334,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     val availableUpdate: StateFlow<UpdateInfo?> = _availableUpdate.asStateFlow()
 
     private val _lastUpdateCheckStatus = MutableStateFlow(
-        "الإصدار المثبت فعلياً: v${updateManager.getEffectiveVersionName()} (Build ${updateManager.getEffectiveVersionCode()})"
+        "الإصدار المثبت فعلياً: v${updateManager.getEffectiveVersionName()} (Build ${updateManager.getEffectiveVersionCode()} • ${updateManager.getInstalledBuildId()})"
     )
     val lastUpdateCheckStatus: StateFlow<String> = _lastUpdateCheckStatus.asStateFlow()
 
@@ -1359,29 +1351,53 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     val customUpdateMetadataUrl = MutableStateFlow(UpdateManager.DEFAULT_UPDATE_METADATA_URL)
 
+    private val _buildIdentityReport = MutableStateFlow(
+        updateManager.getInstalledBuildIdentityReport(
+            updateSourceUrl = UpdateManager.DEFAULT_UPDATE_METADATA_URL,
+            latestRemoteUpdate = null
+        )
+    )
+    val buildIdentityReport: StateFlow<com.example.util.BuildIdentityReport> = _buildIdentityReport.asStateFlow()
+
+    fun refreshBuildIdentityReport() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val report = updateManager.getInstalledBuildIdentityReport(
+                updateSourceUrl = customUpdateMetadataUrl.value,
+                latestRemoteUpdate = _availableUpdate.value
+            )
+            _buildIdentityReport.value = report
+        }
+    }
+
     /**
-     * التحقق الفعلي من PackageManager عند فتح التطبيق أو العودة من شاشة التثبيت
+     * التحقق الفعلي من PackageManager وBuildConfig.BUILD_ID عند فتح التطبيق أو العودة من شاشة التثبيت
      * للتأكد مما إذا كان الإصدار الجديد قد تم تثبيته فعلياً أم فشل/أُلغي.
      */
     fun verifyPostInstallAndRefreshVersion() {
         updateManager.refreshInstalledVersionState()
         when (val verifyResult = updateManager.verifyPendingInstallation()) {
-            is com.example.util.PostInstallVerificationResult.VerifiedSuccess -> {
+            is com.example.util.PendingInstallVerification.VerifiedInstalled -> {
                 _availableUpdate.value = null
                 _updateAvailable.value = false
                 _downloadedApkFile.value = null
                 _updateProgress.value = 0
                 updateManager.resetDownloadState()
-                val msg = "تم التحديث بنجاح والتحقق من تثبيت الإصدار الفعلي (v${verifyResult.installedVersionName} • Build ${verifyResult.installedVersionCode}) مع الحفاظ الكامل على البيانات"
+                val msg = "تم التحديث بنجاح والتحقق من تثبيت الحزمة الفعلية (v${verifyResult.versionName} • Build ${verifyResult.versionCode} • ${verifyResult.buildId}) مع الحفاظ الكامل على البيانات"
                 _lastUpdateCheckStatus.value = msg
                 postMessage(msg, isError = false)
             }
-            is com.example.util.PostInstallVerificationResult.FailedOrIncomplete -> {
-                val errMsg = "لم يتم تحديث التطبيق إلى ${verifyResult.expectedVersionName} (الإصدار المثبت حالياً: v${verifyResult.installedVersionName} • Build ${verifyResult.installedVersionCode}). السبب: ${verifyResult.reason}"
+            is com.example.util.PendingInstallVerification.NotYetInstalled -> {
+                val installedName = updateManager.getEffectiveVersionName()
+                val reason = verifyResult.diagnosticError.ifBlank {
+                    "لم يكتمل تثبيت الحزمة الجديدة من نظام أندرويد بعد"
+                }
+                val errMsg = "تنبيه التثبيت: التطبيق يعمل حالياً بالإصدار v$installedName (Build ${verifyResult.currentInstalledCode}). $reason"
                 _lastUpdateCheckStatus.value = errMsg
-                postMessage(errMsg, isError = true)
+                if (verifyResult.diagnosticError.isNotBlank()) {
+                    postMessage(errMsg, isError = true)
+                }
             }
-            com.example.util.PostInstallVerificationResult.NoPendingInstall -> {
+            com.example.util.PendingInstallVerification.None -> {
                 val installedCode = updateManager.getEffectiveVersionCode()
                 val pending = _availableUpdate.value
                 if (pending != null && installedCode >= pending.versionCode) {
@@ -1393,6 +1409,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        refreshBuildIdentityReport()
     }
 
     fun checkForAppUpdates(manual: Boolean = true, customUrl: String? = null) {
@@ -1411,25 +1428,28 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
             val installedCode = updateManager.getEffectiveVersionCode()
             val installedName = updateManager.getEffectiveVersionName()
+            val installedBuildId = updateManager.getInstalledBuildId()
 
             result.onSuccess { updateInfo ->
                 if (updateInfo != null && updateInfo.versionCode > installedCode) {
                     _availableUpdate.value = updateInfo
                     _updateAvailable.value = true
                     val sizeLabel = if (updateInfo.fileSizeMb > 0) " (${updateInfo.fileSizeMb}MB)" else ""
-                    val statusMsg = "تحديث متوفر: ${updateInfo.versionName} (Build ${updateInfo.versionCode})$sizeLabel"
+                    val buildLabel = if (updateInfo.buildId.isNotBlank()) " • ${updateInfo.buildId}" else ""
+                    val statusMsg = "تحديث متوفر: ${updateInfo.versionName} (Build ${updateInfo.versionCode}$buildLabel)$sizeLabel"
                     _lastUpdateCheckStatus.value = statusMsg
                     postMessage("يتوفر تحديث جديد: ${updateInfo.versionName} (Build ${updateInfo.versionCode})$sizeLabel")
                 } else {
                     _availableUpdate.value = null
                     _updateAvailable.value = false
                     _downloadedApkFile.value = null
-                    val upToDateMsg = "التطبيق محدّث إلى آخر إصدار (v$installedName • Build $installedCode)"
+                    val upToDateMsg = "التطبيق محدّث إلى آخر إصدار فعلي (v$installedName • Build $installedCode • $installedBuildId)"
                     _lastUpdateCheckStatus.value = upToDateMsg
                     if (manual) {
                         postMessage(upToDateMsg)
                     }
                 }
+                refreshBuildIdentityReport()
             }.onFailure { err ->
                 val reason = err.message ?: "تعذر الاتصال بخادم التحديثات"
                 val failMsg = "تعذر التحقق من التحديثات: $reason"
@@ -1437,6 +1457,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 if (manual) {
                     postMessage(failMsg, isError = true)
                 }
+                refreshBuildIdentityReport()
             }
         }
     }
@@ -1445,7 +1466,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         vCode: Int,
         vName: String,
         dlUrl: String,
-        releaseNotes: String = "تحديث أمان واستقرار جديد لمنظومة PMP Paints"
+        releaseNotes: String = "تحديث أمان واستقرار جديد لمنظومة PMP Paints",
+        sha256: String = "",
+        buildId: String = "",
+        gitCommit: String = ""
     ) {
         val isAdmin = currentUser.value?.username?.equals("admin", ignoreCase = true) == true
         if (!isAdmin) {
@@ -1453,26 +1477,37 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         viewModelScope.launch {
+            _isCheckingUpdate.value = true
             val info = UpdateInfo(
                 versionCode = vCode,
                 versionName = vName,
                 downloadUrl = dlUrl,
                 releaseNotes = releaseNotes,
-                fileSizeMb = 31.0
+                sha256Checksum = sha256.trim(),
+                fileSizeMb = 18.5,
+                buildId = buildId.trim(),
+                gitCommit = gitCommit.trim()
             )
-            val res = updateManager.publishVersionToFirestore(info, serverClusterCode.value)
-            res.onSuccess {
-                postMessage("تم نشر بيانات الإصدار $vName ($vCode) على السحابة بنجاح")
+            val res = updateManager.publishVersionToFirestore(
+                info = info,
+                clusterCode = serverClusterCode.value,
+                requireRemoteBinaryVerification = true
+            )
+            _isCheckingUpdate.value = false
+            res.onSuccess { verified ->
+                postMessage("تم التحقق من ملف APK الفعلي ونشر الإصدار v${verified.versionName} (Build ${verified.versionCode} • ${verified.buildId}) على السحابة بنجاح!")
+                refreshBuildIdentityReport()
             }.onFailure {
-                postMessage("تعذر نشر التحديث: ${it.message}", isError = true)
+                postMessage("${it.message}", isError = true)
+                refreshBuildIdentityReport()
             }
         }
     }
 
     /**
-     * إرسال وبث التحديث المعتمد إلى كافة النسخ السابقة سحابياً (حصرياً لحساب admin فقط)
+     * التحقق من وجود حزمة APK المبنية على خادم الإصدارات ثم بث التحديث المعتمد إلى كافة النسخ السابقة سحابياً (حصرياً لحساب admin فقط)
      */
-    fun broadcastUpdateToAllPreviousVersions() {
+    fun broadcastUpdateToAllPreviousVersions(customCandidate: UpdateInfo? = null) {
         val isAdmin = currentUser.value?.username?.equals("admin", ignoreCase = true) == true
         if (!isAdmin) {
             postMessage("عفواً، صلاحية بث التحديثات للنسخ السابقة مخصصة لحساب (admin) فقط", isError = true)
@@ -1480,17 +1515,23 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             _isCheckingUpdate.value = true
-            val release = UpdateManager.LATEST_CLOUD_RELEASE_INFO
+            val release = customCandidate ?: _availableUpdate.value ?: UpdateManager.LATEST_CLOUD_RELEASE_INFO
             val res = updateManager.broadcastToAllClusters(
                 info = release,
-                activeClusterCode = serverClusterCode.value,
-                forceNewIncrement = true
+                primaryClusterCode = serverClusterCode.value,
+                forceNewIncrement = false
             )
             _isCheckingUpdate.value = false
-            res.onSuccess {
-                postMessage("تم إرسال وبث التحديث السحابي لكافة النسخ السابقة بنجاح!")
+            res.onSuccess { verified ->
+                _lastUpdateCheckStatus.value =
+                    "تم التحقق من الحزمة وبث الإصدار v${verified.versionName} (Build ${verified.versionCode} • ${verified.buildId}) لجميع المستخدمين."
+                postMessage("تم التحقق من ملف APK الفعلي وبث الإصدار v${verified.versionName} (Build ${verified.versionCode}) لكافة النسخ السابقة بنجاح!")
+                refreshBuildIdentityReport()
             }.onFailure { err ->
-                postMessage("تعذر بث التحديث سحابياً: ${err.message}", isError = true)
+                val msg = err.message ?: "تعذر بث التحديث سحابياً"
+                _lastUpdateCheckStatus.value = msg
+                postMessage(msg, isError = true)
+                refreshBuildIdentityReport()
             }
         }
     }
@@ -1516,13 +1557,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             result.onSuccess { apkFile ->
                 _downloadedApkFile.value = apkFile
                 _updateProgress.value = 100
-                _lastUpdateCheckStatus.value = "اكتمل تنزيل الحزمة (${update.versionName}) والتحقق من التوقيع وSHA-256 — جاهز للتثبيت"
-                postMessage("اكتمل تنزيل ملف APK الصحيح (${update.versionName}) والتحقق من سلامة الحزمة والتوقيع — اضغط لتأكيد التثبيت")
+                _lastUpdateCheckStatus.value =
+                    "اكتمل تنزيل الحزمة الفعلية (${update.versionName} • Build ${update.versionCode}) والتحقق من التوقيع وSHA-256 — جاهز للتثبيت"
+                postMessage("اكتمل تنزيل ملف APK الموثّق (${update.versionName}) والتحقق من سلامة الحزمة والتوقيع — اضغط لتأكيد التثبيت")
                 onReadyToInstall(apkFile)
             }.onFailure { err ->
                 _downloadedApkFile.value = null
                 _lastUpdateCheckStatus.value = "فشل تنزيل التحديث: ${err.message}"
-                postMessage("تعذر تنزيل ملف التحديث: ${err.message}", isError = true)
+                postMessage("${err.message}", isError = true)
             }
         }
     }
@@ -1534,26 +1576,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val pendingUpdate = _availableUpdate.value
-        val isExternalUpgrade = updateManager.isExternalBinaryApkUpgrade(target)
         val res = updateManager.installApk(context, target, pendingUpdate)
         res.onSuccess {
-            if (!isExternalUpgrade) {
-                _availableUpdate.value = null
-                _updateAvailable.value = false
-                _downloadedApkFile.value = null
-                _updateProgress.value = 0
-                updateManager.resetDownloadState()
-                verifyPostInstallAndRefreshVersion()
-                val newName = updateManager.getEffectiveVersionName()
-                val newCode = updateManager.getEffectiveVersionCode()
-                val successMsg = "تم التحديث بنجاح إلى الإصدار الفعلي (v$newName • Build $newCode) مع الحفاظ الكامل على البيانات"
-                _lastUpdateCheckStatus.value = successMsg
-                postMessage(successMsg, isError = false)
-            } else {
-                val targetName = pendingUpdate?.versionName ?: "الجديد"
-                _lastUpdateCheckStatus.value = "في انتظار موافقة المستخدم على تثبيت الإصدار $targetName من نافذة نظام أندرويد..."
-                postMessage("تم فتح مثبت نظام أندرويد لتثبيت الإصدار ($targetName) — يرجى الموافقة على التثبيت لإتمام الترقية")
-            }
+            val targetName = pendingUpdate?.versionName ?: "الجديد"
+            val targetCode = pendingUpdate?.versionCode ?: (updateManager.getEffectiveVersionCode() + 1)
+            _lastUpdateCheckStatus.value =
+                "في انتظار موافقة المستخدم على تثبيت الحزمة الفعلية v$targetName (Build $targetCode) من نافذة نظام أندرويد..."
+            postMessage("تم فتح شاشة تثبيت نظام أندرويد لتثبيت الحزمة الفعلية (v$targetName • Build $targetCode) — يرجى الضغط على «تثبيت / تحديث» لإتمام الترقية.")
         }.onFailure { err ->
             val errMsg = err.message ?: "تعذر بدء معالج التثبيت"
             _lastUpdateCheckStatus.value = "تعذر التثبيت: $errMsg"
@@ -1562,10 +1591,6 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun canRequestPackageInstalls(apkFile: File? = _downloadedApkFile.value): Boolean {
-        val target = apkFile ?: _downloadedApkFile.value
-        if (target != null && !updateManager.isExternalBinaryApkUpgrade(target)) {
-            return true
-        }
         return updateManager.canRequestPackageInstalls()
     }
 

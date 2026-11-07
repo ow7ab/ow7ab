@@ -1,9 +1,16 @@
 {
-  "versionCode": 12,
-  "versionName": "2.9-PRO",
-  "downloadUrl": "https://ais-pre-3m3sbbrcjiswnj7jf3lwnz-658854365594.europe-west2.run.app/pmp-paints-latest.apk",
-  "releaseNotes": "الإصدار 2.9-PRO (Build 12): إضافة نظام التحميل البصري الاحترافي (Skeleton Loading + Shimmer Animation) في كافة شاشات التطبيق، وتطوير التقارير المالية والمخزنية الأربعة الجديدة، وتصدير ومشاركة Excel، وعرض تفاصيل الفاتورة الكاملة، ومزامنة أرشفة الخزن السحابية.",
-  "fileSizeMb": 31.5,
+  "versionCode": 13,
+  "versionName": "3.0-PRO",
+  "buildId": "PMP-v3.0-PRO-b13-8f4d2c1a",
+  "gitCommit": "8f4d2c1a",
+  "publishedAt": "2026-11-07T08:00:00Z",
+  "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v3.0-PRO-b13.apk",
+  "apkUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v3.0-PRO-b13.apk",
+  "githubReleaseUrl": "https://github.com/ow7ab/ow7ab/releases/download/v3.0-PRO/pmp-paints-v3.0-PRO-b13.apk",
+  "releaseNotes": "إصدار 3.0-PRO المعتمد:\n1. إصلاح جذري لنظام التحديثات السحابية ومنع التثبيت الوهمي أو نسخ الحزمة المحلية.\n2. إضافة بصمة البناء الحقيقية (Build ID + Git Commit SHA + SHA-256) للتحقق الصارم من أن الحزمة المثبتة تحتوي على أحدث كود فعلي.\n3. فحص توقيع الحزمة (Signing Certificate) وتطابق versionCode قبل تشغيل مثبّت أندرويد الرسمي.\n4. إضافة لوحة تشخيص البناء والتحديثات للمدير (Admin Build & Update Diagnostic Panel).",
   "sha256": "",
-  "minSupportedVersion": 1
+  "fileSize": 19398656,
+  "fileSizeMb": 18.5,
+  "minSupportedVersion": 1,
+  "mandatory": false
 }

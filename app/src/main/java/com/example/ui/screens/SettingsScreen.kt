@@ -84,6 +84,7 @@ fun SettingsScreen(
     var profileConfirmPassword by remember { mutableStateOf("") }
     var isProfileSaving by remember { mutableStateOf(false) }
     var showUpdateInstallDialog by remember { mutableStateOf(false) }
+    var showAdminPublishDialog by remember { mutableStateOf(false) }
 
     val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
     val isDownloadingUpdate by viewModel.isDownloadingUpdate.collectAsState()
@@ -95,6 +96,7 @@ fun SettingsScreen(
     val effectiveVersionCode by viewModel.effectiveVersionCode.collectAsState()
     val effectiveVersionName by viewModel.effectiveVersionName.collectAsState()
     val lastUpdateCheckStatus by viewModel.lastUpdateCheckStatus.collectAsState()
+    val buildIdentityReport by viewModel.buildIdentityReport.collectAsState()
 
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
 
@@ -449,10 +451,14 @@ fun SettingsScreen(
 
                                 Text(
                                     text = when (val state = downloadState) {
-                                        is com.example.util.DownloadState.Connecting -> "جاري الاتصال وتجهيز التحديث..."
-                                        is com.example.util.DownloadState.Progress -> "جاري تنزيل التحديث ($updateProgress%)"
-                                        is com.example.util.DownloadState.Success -> "اكتمل التنزيل بنجاح"
-                                        is com.example.util.DownloadState.Error -> "تعذر التنزيل: ${state.message}"
+                                        is com.example.util.DownloadState.Downloading ->
+                                            "جاري تنزيل حزمة APK الفعلية (${state.progressPercent}% • ${String.format(Locale.US, "%.1f", state.downloadedMb)}/${String.format(Locale.US, "%.1f", state.totalMb)} MB)"
+                                        is com.example.util.DownloadState.VerifyingChecksum ->
+                                            "جاري التحقق من بصمة SHA-256 وشهادة التوقيع الرقمي..."
+                                        is com.example.util.DownloadState.ReadyToInstall ->
+                                            "اكتمل التنزيل والتحقق من الحزمة — جاهز للتثبيت"
+                                        is com.example.util.DownloadState.Failed ->
+                                            "تعذر التنزيل: ${state.errorMessage}"
                                         else -> "جاري تنزيل التحديث..."
                                     },
                                     color = PmpCyan,
@@ -506,12 +512,101 @@ fun SettingsScreen(
                         )
                     }
 
-                    // حصرياً لحساب admin فقط — مخفي تماماً عن جميع المستخدمين الآخرين
+                    // حصرياً لحساب admin فقط — لوحة تشخيص البناء الفعلي ونشر التحديثات الموثّقة
                     if (isSuperAdmin && currentUser?.username?.equals("admin", ignoreCase = true) == true) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(PmpBrandNavy.copy(alpha = 0.65f))
+                                .border(
+                                    1.dp,
+                                    if (buildIdentityReport.isIdentityVerified) PmpCyan.copy(alpha = 0.45f) else PmpRedLight.copy(alpha = 0.7f),
+                                    RoundedCornerShape(14.dp)
+                                )
+                                .padding(14.dp)
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (buildIdentityReport.isIdentityVerified) Icons.Default.VerifiedUser else Icons.Default.Warning,
+                                            contentDescription = null,
+                                            tint = if (buildIdentityReport.isIdentityVerified) PmpGreen else PmpRedLight,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Text(
+                                            text = "تشخيص هوية البناء الفعلي (Admin Build Identity)",
+                                            color = PmpCyan,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.5.sp
+                                        )
+                                    }
+                                    GlassBadge(
+                                        text = if (buildIdentityReport.isIdentityVerified) "موثّق" else "تنبيه تطابق",
+                                        color = if (buildIdentityReport.isIdentityVerified) PmpGreen else PmpRedLight
+                                    )
+                                }
+
+                                Text(
+                                    text = "• الحزمة والإصدار (PackageManager): ${buildIdentityReport.packageName} | v${buildIdentityReport.versionName} (versionCode = ${buildIdentityReport.versionCode})",
+                                    color = TextWhite,
+                                    fontSize = 11.sp
+                                )
+                                Text(
+                                    text = "• معرّف البناء المدمج (Build ID): ${buildIdentityReport.buildId}",
+                                    color = PmpGold,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 11.sp
+                                )
+                                Text(
+                                    text = "• بصمة الكود والتاريخ: Commit ${buildIdentityReport.gitCommitSha} | ${buildIdentityReport.buildTimestampUtc}",
+                                    color = TextMuted,
+                                    fontSize = 10.5.sp
+                                )
+                                if (buildIdentityReport.signingCertSha256.isNotBlank()) {
+                                    Text(
+                                        text = "• شهادة التوقيع (Cert SHA-256): ${buildIdentityReport.signingCertSha256.take(29)}...",
+                                        color = TextMuted,
+                                        fontSize = 10.5.sp
+                                    )
+                                }
+                                if (buildIdentityReport.installedApkSha256.isNotBlank()) {
+                                    Text(
+                                        text = "• بصمة APK المثبت (SHA-256): ${buildIdentityReport.installedApkSha256.take(24)}...",
+                                        color = TextMuted,
+                                        fontSize = 10.5.sp
+                                    )
+                                }
+                                Text(
+                                    text = "• مصدر التحديث: ${buildIdentityReport.updateSourceUrl}",
+                                    color = TextSubtle,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = buildIdentityReport.statusSummary,
+                                    color = if (buildIdentityReport.isIdentityVerified) PmpGreen else PmpRedLight,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+
                         Button(
                             onClick = {
                                 viewModel.broadcastUpdateToAllPreviousVersions()
                             },
+                            enabled = !isCheckingUpdate,
                             colors = ButtonDefaults.buttonColors(containerColor = PmpCyan),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
@@ -521,10 +616,29 @@ fun SettingsScreen(
                             Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color.Black, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "بث التحديث الجديد لجميع النسخ السابقة (Admin فقط)",
+                                text = "فحص الحزمة وبث التحديث المعتمد لجميع النسخ (Admin فقط)",
                                 color = Color.Black,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = { showAdminPublishDialog = true },
+                            enabled = !isCheckingUpdate,
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, PmpCyan.copy(alpha = 0.6f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("admin_custom_release_publish_button")
+                        ) {
+                            Icon(Icons.Default.Verified, contentDescription = null, tint = PmpCyan, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "نشر إصدار مخصص بعد التحقق من ملف APK وSHA-256",
+                                color = PmpCyan,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
                     }
@@ -862,6 +976,8 @@ fun SettingsScreen(
     if (showUpdateInstallDialog) {
         val targetApk = downloadedApkFile
         val updateName = availableUpdate?.versionName ?: "الجديد"
+        val updateCode = availableUpdate?.versionCode ?: (effectiveVersionCode + 1)
+        val updateBuildId = availableUpdate?.buildId.orEmpty()
         val hasInstallPermission = viewModel.canRequestPackageInstalls(targetApk)
 
         AlertDialog(
@@ -869,13 +985,13 @@ fun SettingsScreen(
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.Default.Verified, contentDescription = null, tint = PmpGreen)
-                    Text(text = "تثبيت التحديث الجديد", color = TextWhite, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text(text = "تثبيت الحزمة الموثّقة (v$updateName)", color = TextWhite, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 }
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "تم تنزيل التحديث بنجاح وهو جاهز للتثبيت مع الحفاظ على جميع البيانات.",
+                        text = "تم التحقق من سلامة ملف APK وتوقيعه الرقمي (Build $updateCode${if (updateBuildId.isNotBlank()) " • $updateBuildId" else ""}). عند الضغط على بدء التثبيت ستفتح شاشة نظام أندرويد الرسمية لترقية التطبيق مع الحفاظ الكامل على جميع البيانات.",
                         color = TextWhite,
                         fontSize = 13.sp
                     )
@@ -892,7 +1008,7 @@ fun SettingsScreen(
             },
             confirmButton = {
                 GlassButton(
-                    text = if (hasInstallPermission) "بدء التثبيت الآن" else "تفعيل إذن التثبيت من الإعدادات",
+                    text = if (hasInstallPermission) "بدء التثبيت الفعلي الآن" else "تفعيل إذن التثبيت من الإعدادات",
                     gradient = PmpBrandRedGradient,
                     onClick = {
                         if (!hasInstallPermission) {
@@ -906,6 +1022,112 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showUpdateInstallDialog = false }) {
+                    Text("إلغاء", color = TextMuted)
+                }
+            },
+            containerColor = PmpNavySurface
+        )
+    }
+
+    if (showAdminPublishDialog) {
+        var inputVersionCode by remember { mutableStateOf((effectiveVersionCode + 1).toString()) }
+        var inputVersionName by remember { mutableStateOf("3.${effectiveVersionCode + 1}-PRO") }
+        var inputDownloadUrl by remember(inputVersionName, inputVersionCode) {
+            mutableStateOf("https://ow7ab.github.io/ow7ab/pmp-paints-v${inputVersionName}-b${inputVersionCode}.apk")
+        }
+        var inputBuildId by remember(inputVersionName, inputVersionCode) {
+            mutableStateOf("PMP-v${inputVersionName}-b${inputVersionCode}-${BuildConfig.GIT_COMMIT_SHA}")
+        }
+        var inputSha256 by remember { mutableStateOf("") }
+        var inputNotes by remember {
+            mutableStateOf("تحديث معتمد لتطبيق PMP PAINTS يتضمن أحدث التعديلات البرمجية وتحسينات الأداء.")
+        }
+
+        AlertDialog(
+            onDismissRequest = { showAdminPublishDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.CloudUpload, contentDescription = null, tint = PmpCyan)
+                    Text(
+                        text = "نشر إصدار موثّق (Admin Release Publisher)",
+                        color = TextWhite,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "ملاحظة أمنية: يقوم النظام بالتحقق الفعلي من وجود ملف APK على الرابط (HTTP 200 + ترويسة ZIP) قبل نشر التحديث للمستخدمين لمنع التحديثات الوهمية.",
+                        color = PmpGold,
+                        fontSize = 11.5.sp
+                    )
+                    OutlinedTextField(
+                        value = inputVersionCode,
+                        onValueChange = { inputVersionCode = it.filter { ch -> ch.isDigit() } },
+                        label = { Text("رقم البناء (versionCode)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = inputVersionName,
+                        onValueChange = { inputVersionName = it },
+                        label = { Text("اسم الإصدار (versionName)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = inputDownloadUrl,
+                        onValueChange = { inputDownloadUrl = it },
+                        label = { Text("رابط APK المباشر (HTTPS)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = inputBuildId,
+                        onValueChange = { inputBuildId = it },
+                        label = { Text("معرّف البناء (Build ID)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = inputSha256,
+                        onValueChange = { inputSha256 = it },
+                        label = { Text("بصمة SHA-256 (اختياري - 64 محرفاً)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = inputNotes,
+                        onValueChange = { inputNotes = it },
+                        label = { Text("ملاحظات الإصدار (Release Notes)") },
+                        maxLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "التحقق من APK ونشر التحديث",
+                    gradient = PmpBrandRedGradient,
+                    onClick = {
+                        val vCode = inputVersionCode.toIntOrNull() ?: 0
+                        showAdminPublishDialog = false
+                        viewModel.publishReleaseToCloud(
+                            vCode = vCode,
+                            vName = inputVersionName.trim(),
+                            dlUrl = inputDownloadUrl.trim(),
+                            releaseNotes = inputNotes.trim(),
+                            sha256 = inputSha256.trim(),
+                            buildId = inputBuildId.trim(),
+                            gitCommit = BuildConfig.GIT_COMMIT_SHA
+                        )
+                    }
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { showAdminPublishDialog = false }) {
                     Text("إلغاء", color = TextMuted)
                 }
             },

@@ -8,7 +8,7 @@ import android.os.Build
 import android.util.Log
 
 /**
- * مستقبل إشعارات حالة جلسات PackageInstaller عند اكتمال أو إلغاء أو تعذر التثبيت
+ * مستقبل إشعارات حالة جلسات PackageInstaller عند اكتمال أو إلغاء أو تعذر التثبيت الفعلي للحزمة
  */
 class InstallStatusReceiver : BroadcastReceiver() {
 
@@ -43,14 +43,13 @@ class InstallStatusReceiver : BroadcastReceiver() {
                 }
             }
             PackageInstaller.STATUS_SUCCESS -> {
-                Log.i(TAG, "تم تثبيت التحديث بنجاح.")
+                Log.i(TAG, "اكتملت جلسة تثبيت الحزمة من النظام؛ جارٍ التحقق من PackageManager.")
                 runCatching {
                     UpdateManager.getInstance(context).onPackageInstallerStatus(status, message)
                 }
             }
             PackageInstaller.STATUS_FAILURE_ABORTED -> {
-                // المستخدم أغلق نافذة تأكيد النظام أو تم الاكتفاء بالتحديث السحابي المباشر (OTA)
-                Log.i(TAG, "تم إغلاق نافذة التثبيت الخارجية واعتماد التحديث السحابي (الرمز: $status)")
+                Log.w(TAG, "ألغى المستخدم عملية تثبيت التحديث (الرمز: $status, التفاصيل: $message)")
                 runCatching {
                     UpdateManager.getInstance(context).onPackageInstallerStatus(status, message)
                 }
@@ -61,7 +60,7 @@ class InstallStatusReceiver : BroadcastReceiver() {
             PackageInstaller.STATUS_FAILURE_INCOMPATIBLE,
             PackageInstaller.STATUS_FAILURE_INVALID,
             PackageInstaller.STATUS_FAILURE_STORAGE -> {
-                Log.w(TAG, "حالة جلسة التثبيت (الرمز: $status, التفاصيل: $message)")
+                Log.e(TAG, "فشل تثبيت التحديث (الرمز: $status, التفاصيل: $message)")
                 runCatching {
                     UpdateManager.getInstance(context).onPackageInstallerStatus(status, message)
                 }
