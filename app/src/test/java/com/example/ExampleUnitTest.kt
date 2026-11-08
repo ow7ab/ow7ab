@@ -474,4 +474,312 @@ class ExampleUnitTest {
     assertTrue(readmeContent.contains("New repository secret"))
     assertFalse("README must not contain raw JKS magic base64 header (/u3+7Q)", readmeContent.contains("/u3+7Q"))
   }
+
+  @Test
+  fun testGenerateVersionJsonAndFirebaseStorageEndpoints() {
+    val sampleInfo = com.example.util.UpdateInfo(
+      versionCode = 15,
+      versionName = "3.2-PRO",
+      downloadUrl = "https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/pmp-paints-latest.apk",
+      releaseNotes = "تحديث سحابي جديد عبر Firebase Storage لتحديث صفحة التنزيل تلقائياً",
+      isMandatory = true,
+      sha256Checksum = "19bd7aaf4bcf57b022354fc6543f350f5d0814ed2773244f868e3bc3a0cd2abc",
+      fileSizeMb = 30.8,
+      fileSize = 32296140L,
+      buildId = "PMP-v3.2-PRO-b15-8f4d2c1a",
+      gitCommit = "8f4d2c1a",
+      publishedAt = "2026-11-08T12:00:00Z",
+      signingCertSha256 = com.example.util.UpdateManager.APPROVED_SIGNING_CERT_SHA256
+    )
+
+    val generatedJson = com.example.util.UpdateManager.generateVersionJsonString(sampleInfo)
+    assertTrue(generatedJson.contains("\"versionCode\": 15"))
+    assertTrue(generatedJson.contains("\"versionName\": \"3.2-PRO\""))
+    assertTrue(generatedJson.contains("\"isMandatory\": true"))
+
+    val roundTrip = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(generatedJson)
+    assertNotNull(roundTrip)
+    assertEquals(15, roundTrip!!.versionCode)
+    assertEquals("3.2-PRO", roundTrip.versionName)
+    assertEquals("PMP-v3.2-PRO-b15-8f4d2c1a", roundTrip.buildId)
+    assertTrue(roundTrip.isMandatory)
+    assertEquals(sampleInfo.sha256Checksum, roundTrip.sha256Checksum)
+
+    assertEquals(
+      "gen-lang-client-0220128746.firebasestorage.app",
+      com.example.util.UpdateManager.FIREBASE_STORAGE_BUCKET
+    )
+    assertTrue(
+      com.example.util.UpdateManager.FIREBASE_STORAGE_VERSION_JSON_URL.startsWith(
+        "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0220128746.firebasestorage.app/o/version.json"
+      )
+    )
+
+    // Verify public/index.html is wired to Firebase Storage version.json URL
+    val indexHtmlFile = listOf(
+      java.io.File("public/index.html"),
+      java.io.File("../public/index.html")
+    ).firstOrNull { it.exists() }
+    assertNotNull("public/index.html must exist", indexHtmlFile)
+    val indexHtml = indexHtmlFile!!.readText(Charsets.UTF_8)
+    assertTrue(
+      "public/index.html must fetch from Firebase Storage version.json URL",
+      indexHtml.contains(com.example.util.UpdateManager.FIREBASE_STORAGE_VERSION_JSON_URL)
+    )
+
+    // Verify PmpViewModel declares all class properties BEFORE init {} to prevent startup NullPointerException
+    val vmFile = listOf(
+      java.io.File("app/src/main/java/com/example/ui/viewmodel/PmpViewModel.kt"),
+      java.io.File("src/main/java/com/example/ui/viewmodel/PmpViewModel.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("PmpViewModel.kt must exist", vmFile)
+    val vmLines = vmFile!!.readLines(Charsets.UTF_8)
+    val initLineIndex = vmLines.indexOfFirst { it.trim() == "init {" }
+    assertTrue("init { block must exist in PmpViewModel.kt", initLineIndex > 0)
+    val propsAfterInit = vmLines.drop(initLineIndex + 1).filter { line ->
+      Regex("""^    (private |internal |public )?(val |var )\w+""").containsMatchIn(line)
+    }
+    assertTrue(
+      "No class-level val/var properties may be declared after init {} in PmpViewModel (found: $propsAfterInit)",
+      propsAfterInit.isEmpty()
+    )
+  }
+
+  @Test
+  fun testRuntimeCrashPreventionGuards() {
+    // 1. Verify MainActivity resolves effectiveCurrentScreen BEFORE Crossfade so SaveableStateProvider never receives duplicate keys
+    val mainActivityFile = listOf(
+      java.io.File("app/src/main/java/com/example/MainActivity.kt"),
+      java.io.File("src/main/java/com/example/MainActivity.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("MainActivity.kt must exist", mainActivityFile)
+    val mainContent = mainActivityFile!!.readText(Charsets.UTF_8)
+    assertTrue(
+      "MainActivity must pass effectiveCurrentScreen into Crossfade to prevent duplicate SaveableStateProvider keys",
+      mainContent.contains("Crossfade(") && mainContent.contains("targetState = effectiveCurrentScreen")
+    )
+    assertTrue(
+      "MainActivity must install defensive UncaughtExceptionHandler",
+      mainContent.contains("installDefensiveUncaughtExceptionHandler()")
+    )
+
+    // 2. Verify PmpDatabase is upgraded to version 10 with MIGRATION_9_10 schema repair
+    val dbFile = listOf(
+      java.io.File("app/src/main/java/com/example/data/local/PmpDatabase.kt"),
+      java.io.File("src/main/java/com/example/data/local/PmpDatabase.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("PmpDatabase.kt must exist", dbFile)
+    val dbContent = dbFile!!.readText(Charsets.UTF_8)
+    assertTrue("PmpDatabase must be at version = 10", dbContent.contains("version = 10"))
+    assertTrue("PmpDatabase must register MIGRATION_9_10", dbContent.contains("MIGRATION_9_10"))
+
+    // 3. Verify PmpDao has no bare @Insert annotations that could throw SQLiteConstraintException
+    val daoFile = listOf(
+      java.io.File("app/src/main/java/com/example/data/local/PmpDao.kt"),
+      java.io.File("src/main/java/com/example/data/local/PmpDao.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("PmpDao.kt must exist", daoFile)
+    val bareInserts = daoFile!!.readLines(Charsets.UTF_8).filter { it.trim() == "@Insert" }
+    assertTrue("All @Insert in PmpDao must specify OnConflictStrategy.REPLACE (found bare @Insert: $bareInserts)", bareInserts.isEmpty())
+
+    // 4. Verify UpdateManager includes Firebase Storage APK URL in candidate download URLs and avoids broken EXTRA_RETURN_RESULT
+    val updateManagerFile = listOf(
+      java.io.File("app/src/main/java/com/example/util/UpdateManager.kt"),
+      java.io.File("src/main/java/com/example/util/UpdateManager.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("UpdateManager.kt must exist", updateManagerFile)
+    val umContent = updateManagerFile!!.readText(Charsets.UTF_8)
+    assertFalse(
+      "UpdateManager must not combine Intent.EXTRA_RETURN_RESULT with FLAG_ACTIVITY_NEW_TASK",
+      umContent.contains("Intent.EXTRA_RETURN_RESULT")
+    )
+    assertTrue(
+      "UpdateManager must support Firebase Storage direct APK hosting",
+      umContent.contains("FIREBASE_STORAGE_LATEST_APK_URL")
+    )
+  }
+
+  @Test
+  fun testAdminFirebaseUploadProgressBarAndProfessionalDarkMode() {
+    // 1. Test Professional Dark Mode reactive controller and color tokens
+    val controller = com.example.ui.theme.PmpThemeController
+    val originalMode = controller.selectedThemeMode
+    val originalDark = controller.isDarkModeActive
+    try {
+      controller.selectedThemeMode = com.example.ui.theme.PmpThemeMode.LIGHT
+      controller.isDarkModeActive = false
+      val lightSurface = com.example.ui.theme.PmpWhiteSurface
+      val lightText = com.example.ui.theme.TextDark
+
+      controller.selectedThemeMode = com.example.ui.theme.PmpThemeMode.DARK
+      controller.isDarkModeActive = true
+      val darkSurface = com.example.ui.theme.PmpWhiteSurface
+      val darkText = com.example.ui.theme.TextDark
+
+      assertNotEquals("Surface color must adapt between Light and Dark Pro modes", lightSurface, darkSurface)
+      assertNotEquals("Primary text color must adapt between Light and Dark Pro modes", lightText, darkText)
+    } finally {
+      controller.selectedThemeMode = originalMode
+      controller.isDarkModeActive = originalDark
+    }
+
+    // 2. Verify SettingsScreen includes the Admin Firebase Upload Progress Bar and Dark Mode Pro controls
+    val settingsFile = listOf(
+      java.io.File("app/src/main/java/com/example/ui/screens/SettingsScreen.kt"),
+      java.io.File("src/main/java/com/example/ui/screens/SettingsScreen.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("SettingsScreen.kt must exist", settingsFile)
+    val settingsContent = settingsFile!!.readText(Charsets.UTF_8)
+    assertTrue(
+      "SettingsScreen must include admin_firebase_upload_progress_bar",
+      settingsContent.contains("admin_firebase_upload_progress_bar")
+    )
+    assertTrue(
+      "SettingsScreen must include admin_firebase_upload_progress_text",
+      settingsContent.contains("admin_firebase_upload_progress_text")
+    )
+    assertTrue(
+      "SettingsScreen must include dialog_firebase_upload_progress_bar",
+      settingsContent.contains("dialog_firebase_upload_progress_bar")
+    )
+    assertTrue(
+      "SettingsScreen must include dark_mode_toggle_switch",
+      settingsContent.contains("dark_mode_toggle_switch")
+    )
+    assertTrue(
+      "SettingsScreen must include professional_dark_mode_card",
+      settingsContent.contains("professional_dark_mode_card")
+    )
+  }
+
+  @Test
+  fun testCompleteOtaUpdateSystemAndCleanArabicUiAndErrorSanitization() {
+    // 1. Verify all 10 required Firebase / version.json schema fields in UpdateInfo & buildFirestoreUpdatePayload
+    val update = com.example.util.UpdateInfo(
+      versionCode = 14,
+      versionName = "3.1-PRO",
+      downloadUrl = "https://github.com/ow7ab/ow7ab/releases/download/v3.1-PRO/pmp-paints-v3.1-PRO-b14.apk",
+      releaseNotes = "• تحسين سرعة المزامنة السحابية.\n• تحسين استقرار الواجهة.",
+      isMandatory = true,
+      sha256Checksum = "9bb5d7bc646468b5d838303cd7e08846a3e14b939615e9a8e00600d8a146f57a",
+      fileSize = 32494119L,
+      fileSizeMb = 30.99,
+      minSupportedVersionCode = 10,
+      buildId = "PMP-v3.1-PRO-b14-9f8e7d6c",
+      gitCommit = "9f8e7d6c",
+      publishedAt = "2026-11-08T15:00:00Z",
+      releaseStatus = "PUBLISHED"
+    )
+
+    assertEquals("9bb5d7bc646468b5d838303cd7e08846a3e14b939615e9a8e00600d8a146f57a", update.apkSha256)
+    assertEquals(32494119L, update.apkSize)
+    assertEquals(10, update.minimumSupportedVersion)
+    assertTrue(update.mandatoryUpdate)
+    assertEquals("PUBLISHED", update.releaseStatus)
+
+    val payload = com.example.util.UpdateManager.buildFirestoreUpdatePayload(update, "admin")
+    val requiredTenFields = listOf(
+      "versionName",
+      "versionCode",
+      "downloadUrl",
+      "releaseNotes",
+      "apkSha256",
+      "apkSize",
+      "minimumSupportedVersion",
+      "mandatoryUpdate",
+      "publishedAt",
+      "releaseStatus"
+    )
+    for (field in requiredTenFields) {
+      assertTrue("Firestore update payload must include required field '$field'", payload.containsKey(field))
+    }
+    assertEquals("3.1-PRO", payload["versionName"])
+    assertEquals(14, payload["versionCode"])
+    assertEquals("PUBLISHED", payload["releaseStatus"])
+
+    // 2. Verify DRAFT / UNPUBLISHED releases are rejected by validateUpdateMetadataIntegrity
+    val draftDecision = com.example.util.UpdateManager.validateUpdateMetadataIntegrity(
+      installedVersionCode = 13,
+      installedBuildId = "PMP-v3.0-PRO-b13-8f4d2c1a",
+      candidate = update.copy(releaseStatus = "DRAFT")
+    )
+    assertFalse("Draft or unpublished release must be rejected", draftDecision.isValid)
+
+    // 3. Verify User-Facing Error Message Sanitization (never expose HTTP 404, ow7ab/ow7ab, .apk, com.pmp, SHA-256)
+    val raw404Error = "تعذر تنزيل ملف التحديث الفعلي (APK) للإصدار v3.22-PRO (Build 22). تفاصيل الخادم: [HTTP 404 (pmp-paints-v3.22-PRO-b22.apk), HTTP 404 (pmp-paints-latest.apk)]. يرجى التأكد من اكتمال بناء ورفع ملف APK عبر GitHub Actions في المستودع (ow7ab/ow7ab)."
+    val cleanUserError = com.example.util.UpdateManager.sanitizeUserFacingErrorMessage(raw404Error)
+    assertFalse("User error must not contain HTTP 404", cleanUserError.contains("HTTP 404", ignoreCase = true))
+    assertFalse("User error must not contain ow7ab/ow7ab", cleanUserError.contains("ow7ab", ignoreCase = true))
+    assertFalse("User error must not contain .apk filename", cleanUserError.contains(".apk", ignoreCase = true))
+    assertEquals("تعذر تنزيل التحديث حالياً. يرجى المحاولة لاحقاً.", cleanUserError)
+
+    val rawSigError = "Package com.pmp signature mismatch: Cert SHA-256 1F:F7:75 does not match installed PackageManager signature"
+    val cleanSigError = com.example.util.UpdateManager.sanitizeUserFacingErrorMessage(rawSigError)
+    assertFalse(cleanSigError.contains("com.pmp"))
+    assertFalse(cleanSigError.contains("SHA-256"))
+    assertEquals("ملف التحديث غير صالح أو غير مكتمل.", cleanSigError)
+
+    // 4. Verify User-Facing Release Notes Sanitization
+    val technicalReleaseNotes = "• إصلاح جذري لملف pmp-paints-latest.apk في مستودع ow7ab/ow7ab.\n• فحص SHA-256 Checksum عبر PackageManager.\n• تحسين سرعة استجابة الواجهة وتجربة المستخدم."
+    val cleanNotes = com.example.util.UpdateManager.sanitizeUserFacingReleaseNotes(technicalReleaseNotes)
+    assertFalse(cleanNotes.contains("pmp-paints-latest.apk"))
+    assertFalse(cleanNotes.contains("ow7ab"))
+    assertFalse(cleanNotes.contains("SHA-256"))
+    assertTrue(cleanNotes.contains("تحسين سرعة استجابة الواجهة وتجربة المستخدم"))
+
+    // 5. Verify DeveloperUpdateLogger records technical diagnostics for developers without exposing to regular UI
+    com.example.util.DeveloperUpdateLogger.clear()
+    com.example.util.DeveloperUpdateLogger.logError("DownloadCheck", "HTTP 404 on https://github.com/ow7ab/ow7ab/releases/download/v3.22-PRO/pmp-paints-v3.22-PRO-b22.apk")
+    val devLogs = com.example.util.DeveloperUpdateLogger.getRecentLogs()
+    assertTrue(devLogs.isNotEmpty())
+    assertTrue(devLogs.first().contains("HTTP 404"))
+
+    // 6. Verify UpdateUiState covers all required lifecycle states
+    val states = com.example.util.UpdateUiState.entries.map { it.name }.toSet()
+    val expectedStates = setOf(
+      "IDLE", "CHECKING", "UP_TO_DATE", "AVAILABLE",
+      "DOWNLOADING", "VERIFYING", "READY_TO_INSTALL", "INSTALLING",
+      "FAILED", "CANCELLED"
+    )
+    assertEquals(expectedStates, states)
+
+    // 7. Verify UpdateManager no longer contains fake OTA version bumping or self-APK copy fallback
+    val umFile = listOf(
+      java.io.File("app/src/main/java/com/example/util/UpdateManager.kt"),
+      java.io.File("src/main/java/com/example/util/UpdateManager.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull(umFile)
+    val umSource = umFile!!.readText(Charsets.UTF_8)
+    assertFalse(
+      "UpdateManager must never copy installed sourceDir as a fake downloaded update",
+      umSource.contains("sourceApk.copyTo(targetFile")
+    )
+    assertFalse(
+      "UpdateManager must never fake-install when !isExternalBinaryUpgrade",
+      umSource.contains("commitVerifiedOtaUpdate(")
+    )
+
+    // 8. Verify redesigned SettingsScreen contains the clean Arabic Updates card and state-driven buttons
+    val settingsFile = listOf(
+      java.io.File("app/src/main/java/com/example/ui/screens/SettingsScreen.kt"),
+      java.io.File("src/main/java/com/example/ui/screens/SettingsScreen.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull(settingsFile)
+    val settingsSource = settingsFile!!.readText(Charsets.UTF_8)
+    assertTrue(settingsSource.contains("تحديثات التطبيق"))
+    assertTrue(settingsSource.contains("التطبيق محدّث"))
+    assertTrue(settingsSource.contains("أنت تستخدم أحدث إصدار من PMP PAINTS."))
+    assertTrue(settingsSource.contains("تحديث جديد متاح"))
+    assertTrue(settingsSource.contains("يتوفر إصدار جديد يتضمن تحسينات وإصلاحات."))
+    assertTrue(settingsSource.contains("app_updates_card"))
+    assertTrue(settingsSource.contains("update_status_up_to_date_card"))
+    assertTrue(settingsSource.contains("update_status_available_card"))
+    assertTrue(settingsSource.contains("update_status_downloading_card"))
+    assertTrue(settingsSource.contains("update_status_ready_card"))
+    assertTrue(settingsSource.contains("update_status_failed_card"))
+    assertTrue(settingsSource.contains("check_for_updates_button"))
+    assertTrue(settingsSource.contains("download_install_update_button"))
+    assertTrue(settingsSource.contains("cancel_update_download_button"))
+  }
 }
+

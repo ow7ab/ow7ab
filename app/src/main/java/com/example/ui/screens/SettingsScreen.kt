@@ -29,6 +29,8 @@ import com.example.util.BiometricAuthManager
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.example.isSuperAdminAccount
 import com.example.isSystemManager
 
@@ -85,18 +87,38 @@ fun SettingsScreen(
     var isProfileSaving by remember { mutableStateOf(false) }
     var showUpdateInstallDialog by remember { mutableStateOf(false) }
     var showAdminPublishDialog by remember { mutableStateOf(false) }
+    var showVersionJsonUploadDialog by remember { mutableStateOf(false) }
+    var versionJsonEditorText by remember { mutableStateOf("") }
 
     val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
     val isDownloadingUpdate by viewModel.isDownloadingUpdate.collectAsState()
     val updateProgress by viewModel.updateProgress.collectAsState()
     val downloadState by viewModel.downloadState.collectAsState()
+    val updateUiState by viewModel.updateUiState.collectAsState()
     val availableUpdate by viewModel.availableUpdate.collectAsState()
     val updateAvailable by viewModel.updateAvailable.collectAsState()
     val downloadedApkFile by viewModel.downloadedApkFile.collectAsState()
     val effectiveVersionCode by viewModel.effectiveVersionCode.collectAsState()
     val effectiveVersionName by viewModel.effectiveVersionName.collectAsState()
     val lastUpdateCheckStatus by viewModel.lastUpdateCheckStatus.collectAsState()
-    val buildIdentityReport by viewModel.buildIdentityReport.collectAsState()
+    val isUploadingVersionJson by viewModel.isUploadingVersionJson.collectAsState()
+    val versionJsonUploadStatus by viewModel.versionJsonUploadStatus.collectAsState()
+    val firebaseUploadProgress by viewModel.firebaseUploadProgress.collectAsState()
+    val firebaseUploadStageText by viewModel.firebaseUploadStageText.collectAsState()
+    val isUploadingUpdateToFirebase by viewModel.isUploadingUpdateToFirebase.collectAsState()
+    val themeMode by viewModel.themeMode.collectAsState()
+    val isDarkActive = PmpThemeController.isDarkModeActive
+    var showAdminCloudTools by remember { mutableStateOf(false) }
+
+    val versionJsonFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.uploadVersionJsonFromUri(context, uri) { loadedJson ->
+                versionJsonEditorText = loadedJson
+            }
+        }
+    }
 
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
 
@@ -136,6 +158,119 @@ fun SettingsScreen(
         }
 
         if (activeSettingsTab == 0 || !isSuperAdmin) {
+        // Section 0: Professional Dark Mode & Appearance Card (الوضع المظلم الاحترافي والمظهر)
+        item {
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("professional_dark_mode_card"),
+                cornerRadius = 20.dp
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = if (isDarkActive) Icons.Default.DarkMode else Icons.Default.LightMode,
+                                contentDescription = "الوضع المظلم الاحترافي",
+                                tint = if (isDarkActive) PmpGold else PmpCyan,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "الوضع المظلم الاحترافي (Dark Mode Pro)",
+                                    color = TextWhite,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 15.5.sp
+                                )
+                                Text(
+                                    text = if (isDarkActive) {
+                                        "مفعّل حالياً • مظهر كحلي داكن مريح للعين وعالي التباين"
+                                    } else {
+                                        "الوضع الفاتح الكلاسيكي • يمكنك التبديل الفوري للوضع المظلم"
+                                    },
+                                    color = TextMuted,
+                                    fontSize = 11.5.sp
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = isDarkActive,
+                            onCheckedChange = { enableDark ->
+                                viewModel.setThemeMode(if (enableDark) PmpThemeMode.DARK else PmpThemeMode.LIGHT)
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = PmpCyan,
+                                uncheckedThumbColor = TextMuted,
+                                uncheckedTrackColor = PmpNavySurface
+                            ),
+                            modifier = Modifier.testTag("dark_mode_toggle_switch")
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val modes = listOf(
+                            Triple(PmpThemeMode.LIGHT, "فاتح", Icons.Default.LightMode),
+                            Triple(PmpThemeMode.DARK, "مظلم احترافي", Icons.Default.DarkMode),
+                            Triple(PmpThemeMode.SYSTEM, "تلقائي للنظام", Icons.Default.BrightnessAuto)
+                        )
+                        modes.forEach { (mode, label, icon) ->
+                            val selected = themeMode == mode
+                            Surface(
+                                onClick = { viewModel.setThemeMode(mode) },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (selected) PmpBrandRed else PmpNavySurface,
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    if (selected) PmpBrandRed else GlassBorder
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 48.dp)
+                                    .testTag("theme_mode_${mode.name.lowercase()}_button")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = label,
+                                        tint = if (selected) Color.White else TextWhite,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = label,
+                                        color = if (selected) Color.White else TextWhite,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                                        fontSize = 11.5.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Section 1: User Profile Card (الملف الشخصي للمستخدم)
         item {
             GlassCard(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
@@ -261,13 +396,19 @@ fun SettingsScreen(
             }
         }
 
-        // Section 2: In-App Updates Card (تحديث التطبيق المباشر)
+        // Section 2: Modern App Updates Card (تحديثات التطبيق)
         item {
-            GlassCard(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("app_updates_card"),
+                cornerRadius = 22.dp
+            ) {
                 Column(
-                    modifier = Modifier.padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    // Header: تحديثات التطبيق
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -275,371 +416,624 @@ fun SettingsScreen(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(end = 8.dp)
                         ) {
-                            Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = PmpGreen, modifier = Modifier.size(24.dp))
-                            Column {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = PmpGreen.copy(alpha = 0.14f),
+                                modifier = Modifier.size(44.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.SystemUpdate,
+                                        contentDescription = "تحديثات التطبيق",
+                                        tint = PmpGreen,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text(
-                                    text = "تحديث التطبيق",
+                                    text = "تحديثات التطبيق",
                                     color = TextWhite,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 16.sp
+                                    fontSize = 17.sp
                                 )
                                 Text(
-                                    text = if (isSuperAdmin) {
-                                        "الإصدار الحالي المثبت: v$effectiveVersionName (Build $effectiveVersionCode)"
-                                    } else {
-                                        "الإصدار الحالي المثبت: v$effectiveVersionName"
-                                    },
+                                    text = "الإصدار الحالي: $effectiveVersionName",
                                     color = TextMuted,
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
                                 )
                             }
                         }
                         GlassBadge(
-                            text = if (isSuperAdmin) "v$effectiveVersionName ($effectiveVersionCode)" else "v$effectiveVersionName",
+                            text = effectiveVersionName,
                             color = PmpGreen
                         )
                     }
 
-                    // Available Update Banner or Shimmer Skeleton while checking
                     val activeUpdate = availableUpdate
-                    if (isCheckingUpdate && activeUpdate == null) {
-                        UpdateVersionCardSkeleton()
-                    } else if (activeUpdate != null && updateAvailable) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(PmpBrandNavy.copy(alpha = 0.7f))
-                                .border(1.dp, PmpCyan.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
-                                .padding(14.dp)
-                        ) {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val resolvedUiState = when {
+                        isCheckingUpdate -> com.example.util.UpdateUiState.CHECKING
+                        isDownloadingUpdate -> com.example.util.UpdateUiState.DOWNLOADING
+                        downloadedApkFile != null -> com.example.util.UpdateUiState.READY_TO_INSTALL
+                        updateUiState == com.example.util.UpdateUiState.FAILED ||
+                            updateUiState == com.example.util.UpdateUiState.CANCELLED -> updateUiState
+                        activeUpdate != null && updateAvailable -> com.example.util.UpdateUiState.AVAILABLE
+                        else -> com.example.util.UpdateUiState.UP_TO_DATE
+                    }
+
+                    when (resolvedUiState) {
+                        com.example.util.UpdateUiState.CHECKING -> {
+                            UpdateVersionCardSkeleton()
+                            GlassButton(
+                                text = "جاري التحقق من وجود تحديث...",
+                                icon = Icons.Default.Refresh,
+                                gradient = GlassAccentBlueGradient,
+                                enabled = false,
+                                onClick = {},
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("check_for_updates_button")
+                            )
+                        }
+
+                        com.example.util.UpdateUiState.UP_TO_DATE,
+                        com.example.util.UpdateUiState.IDLE -> {
+                            // بطاقة الحالة: التطبيق محدّث
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(PmpGreen.copy(alpha = 0.10f))
+                                    .border(1.dp, PmpGreen.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+                                    .padding(16.dp)
+                                    .testTag("update_status_up_to_date_card")
+                            ) {
                                 Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .padding(end = 8.dp)
-                                    ) {
-                                        Icon(Icons.Default.NewReleases, contentDescription = null, tint = PmpCyan, modifier = Modifier.size(20.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = PmpGreen,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                         Text(
-                                            text = if (isSuperAdmin) {
-                                                "تحديث جديد متوفر (${activeUpdate.versionName} • Build ${activeUpdate.versionCode})"
+                                            text = "التطبيق محدّث",
+                                            color = TextWhite,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 15.sp
+                                        )
+                                        Text(
+                                            text = "أنت تستخدم أحدث إصدار من PMP PAINTS.",
+                                            color = TextMuted,
+                                            fontSize = 12.5.sp,
+                                            lineHeight = 18.sp
+                                        )
+                                    }
+                                }
+                            }
+
+                            // زر الإجراء الوحيد: التحقق من وجود تحديث
+                            GlassButton(
+                                text = "التحقق من وجود تحديث",
+                                icon = Icons.Default.Refresh,
+                                gradient = GlassAccentBlueGradient,
+                                enabled = true,
+                                onClick = { viewModel.checkForAppUpdates(manual = true) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("check_for_updates_button")
+                            )
+                        }
+
+                        com.example.util.UpdateUiState.AVAILABLE -> {
+                            val cleanNotes = com.example.util.UpdateManager.sanitizeUserFacingReleaseNotes(
+                                activeUpdate?.releaseNotes
+                            )
+                            val sizeMbText = activeUpdate?.fileSizeMb?.takeIf { it > 0.0 }?.let {
+                                String.format(Locale.US, "%.1f ميجابايت", it)
+                            }
+
+                            // بطاقة الحالة: تحديث جديد متاح
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(PmpNavySurface.copy(alpha = 0.85f))
+                                    .border(1.dp, PmpCyan.copy(alpha = 0.50f), RoundedCornerShape(16.dp))
+                                    .padding(16.dp)
+                                    .testTag("update_status_available_card")
+                            ) {
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.NewReleases,
+                                                contentDescription = null,
+                                                tint = PmpCyan,
+                                                modifier = Modifier.size(22.dp)
+                                            )
+                                            Column {
+                                                Text(
+                                                    text = "تحديث جديد متاح",
+                                                    color = TextWhite,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 15.sp
+                                                )
+                                                Text(
+                                                    text = "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات.",
+                                                    color = TextMuted,
+                                                    fontSize = 12.sp
+                                                )
+                                            }
+                                        }
+                                        if (activeUpdate != null) {
+                                            GlassBadge(
+                                                text = "الإصدار ${activeUpdate.versionName}",
+                                                color = PmpGold
+                                            )
+                                        }
+                                    }
+
+                                    HorizontalDivider(color = GlassBorder.copy(alpha = 0.5f))
+
+                                    Text(
+                                        text = cleanNotes,
+                                        color = TextWhite.copy(alpha = 0.92f),
+                                        fontSize = 12.5.sp,
+                                        lineHeight = 19.sp
+                                    )
+
+                                    if (sizeMbText != null) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Storage,
+                                                contentDescription = null,
+                                                tint = TextMuted,
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                            Text(
+                                                text = "حجم التحديث: $sizeMbText",
+                                                color = TextMuted,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // زر الإجراء الوحيد: تنزيل التحديث
+                            GlassButton(
+                                text = "تنزيل التحديث",
+                                icon = Icons.Default.CloudDownload,
+                                gradient = PmpBrandRedGradient,
+                                enabled = true,
+                                onClick = {
+                                    viewModel.startUpdateDownload()
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("download_install_update_button")
+                            )
+                        }
+
+                        com.example.util.UpdateUiState.DOWNLOADING,
+                        com.example.util.UpdateUiState.VERIFYING -> {
+                            val progressFraction = (updateProgress.coerceIn(0, 100)) / 100f
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(PmpNavySurface.copy(alpha = 0.85f))
+                                    .border(1.dp, PmpCyan.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+                                    .padding(16.dp)
+                                    .testTag("update_status_downloading_card")
+                            ) {
+                                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(20.dp),
+                                                color = PmpCyan,
+                                                strokeWidth = 2.5.dp
+                                            )
+                                            Text(
+                                                text = if (resolvedUiState == com.example.util.UpdateUiState.VERIFYING) {
+                                                    "جاري التحقق من سلامة التحديث..."
+                                                } else {
+                                                    "جاري تنزيل التحديث..."
+                                                },
+                                                color = TextWhite,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 14.sp
+                                            )
+                                        }
+                                        GlassBadge(
+                                            text = "${updateProgress.coerceIn(0, 100)}%",
+                                            color = PmpCyan,
+                                            modifier = Modifier.testTag("update_download_percent_badge")
+                                        )
+                                    }
+
+                                    LinearProgressIndicator(
+                                        progress = { progressFraction },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(9.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .testTag("update_download_progress_bar"),
+                                        color = PmpCyan,
+                                        trackColor = PmpWhiteBorder.copy(alpha = 0.5f)
+                                    )
+
+                                    if (downloadState is com.example.util.DownloadState.Downloading) {
+                                        val dl = downloadState as com.example.util.DownloadState.Downloading
+                                        Text(
+                                            text = "${String.format(Locale.US, "%.1f", dl.downloadedMb)} من ${String.format(Locale.US, "%.1f", dl.totalMb)} ميجابايت",
+                                            color = TextMuted,
+                                            fontSize = 11.5.sp
+                                        )
+                                    }
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = { viewModel.cancelUpdateDownload() },
+                                shape = RoundedCornerShape(12.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("cancel_update_download_button")
+                            ) {
+                                Icon(Icons.Default.PauseCircleOutline, contentDescription = null, tint = TextMuted, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "إيقاف التنزيل مؤقتاً",
+                                    color = TextWhite,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+
+                        com.example.util.UpdateUiState.READY_TO_INSTALL,
+                        com.example.util.UpdateUiState.INSTALLING -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(PmpGreen.copy(alpha = 0.12f))
+                                    .border(1.dp, PmpGreen.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
+                                    .padding(16.dp)
+                                    .testTag("update_status_ready_card")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = PmpGreen,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(
+                                            text = "تم تنزيل التحديث بنجاح.",
+                                            color = TextWhite,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 15.sp
+                                        )
+                                        Text(
+                                            text = "التحديث جاهز للتثبيت الآن مع الحفاظ الكامل على بياناتك.",
+                                            color = TextMuted,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                }
+                            }
+
+                            // زر الإجراء الوحيد: تثبيت التحديث
+                            GlassButton(
+                                text = "تثبيت التحديث",
+                                icon = Icons.Default.InstallMobile,
+                                gradient = PmpBrandRedGradient,
+                                enabled = true,
+                                onClick = {
+                                    if (viewModel.canRequestPackageInstalls(downloadedApkFile)) {
+                                        viewModel.launchApkInstallation(context, downloadedApkFile)
+                                    } else {
+                                        showUpdateInstallDialog = true
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("download_install_update_button")
+                            )
+                        }
+
+                        com.example.util.UpdateUiState.FAILED,
+                        com.example.util.UpdateUiState.CANCELLED -> {
+                            val cleanErrorMessage = if (resolvedUiState == com.example.util.UpdateUiState.CANCELLED) {
+                                "تم إيقاف تنزيل التحديث مؤقتاً. يمكنك استئناف التنزيل في أي وقت."
+                            } else {
+                                com.example.util.UpdateManager.sanitizeUserFacingErrorMessage(lastUpdateCheckStatus)
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(PmpRedLight.copy(alpha = 0.10f))
+                                    .border(1.dp, PmpRedLight.copy(alpha = 0.40f), RoundedCornerShape(16.dp))
+                                    .padding(16.dp)
+                                    .testTag("update_status_failed_card")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ErrorOutline,
+                                        contentDescription = null,
+                                        tint = PmpRedLight,
+                                        modifier = Modifier.size(26.dp)
+                                    )
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(
+                                            text = if (resolvedUiState == com.example.util.UpdateUiState.CANCELLED) {
+                                                "تم إيقاف التنزيل"
                                             } else {
-                                                "تحديث جديد متوفر (${activeUpdate.versionName})"
+                                                "تعذر إتمام العملية"
                                             },
                                             color = TextWhite,
                                             fontWeight = FontWeight.Bold,
-                                            fontSize = 13.5.sp
+                                            fontSize = 14.5.sp
+                                        )
+                                        Text(
+                                            text = cleanErrorMessage,
+                                            color = TextMuted,
+                                            fontSize = 12.sp,
+                                            lineHeight = 18.sp
                                         )
                                     }
-                                    GlassBadge(
-                                        text = if (isSuperAdmin) "Build ${activeUpdate.versionCode}" else "إصدار جديد",
-                                        color = PmpGold
-                                    )
                                 }
-
-                                Text(
-                                    text = if (isSuperAdmin && activeUpdate.releaseNotes.isNotBlank()) {
-                                        activeUpdate.releaseNotes
-                                    } else {
-                                        "يتوفر تحديث جديد للتطبيق يتضمن تحسينات في الأداء والسرعة مع الحفاظ الكامل على كافة البيانات."
-                                    },
-                                    color = TextWhite.copy(alpha = 0.9f),
-                                    fontSize = 12.sp,
-                                    lineHeight = 17.sp
-                                )
                             }
+
+                            // زر الإجراء الوحيد: إعادة المحاولة
+                            GlassButton(
+                                text = "إعادة المحاولة",
+                                icon = Icons.Default.Refresh,
+                                gradient = PmpBrandRedGradient,
+                                enabled = true,
+                                onClick = {
+                                    if (activeUpdate != null && updateAvailable) {
+                                        viewModel.startUpdateDownload()
+                                    } else {
+                                        viewModel.checkForAppUpdates(manual = true)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("download_install_update_button")
+                            )
                         }
-                    } else if (!isDownloadingUpdate) {
-                        val isErrorStatus = lastUpdateCheckStatus.startsWith("تعذر") ||
-                            lastUpdateCheckStatus.startsWith("فشل") ||
-                            lastUpdateCheckStatus.startsWith("لم يتم")
-                        val statusColor = if (isErrorStatus) PmpRedLight else PmpGreen
-                        val userFacingStatus = if (isSuperAdmin) {
-                            lastUpdateCheckStatus
-                        } else {
-                            lastUpdateCheckStatus.replace(Regex("\\s*[•(]?Build\\s*\\d+\\)?", RegexOption.IGNORE_CASE), "").trim()
-                        }
-                        Box(
+                    }
+
+                    // قسم إدارة النشر السحابي للمدير العام فقط (قابل للطي للحفاظ على نظافة وبساطة الواجهة)
+                    if (isSuperAdmin || currentUser?.username?.equals("admin", ignoreCase = true) == true) {
+                        HorizontalDivider(color = GlassBorder.copy(alpha = 0.5f))
+
+                        Surface(
+                            onClick = { showAdminCloudTools = !showAdminCloudTools },
+                            shape = RoundedCornerShape(12.dp),
+                            color = PmpNavySurface.copy(alpha = 0.6f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(statusColor.copy(alpha = 0.12f))
-                                .border(1.dp, statusColor.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                .padding(12.dp)
+                                .heightIn(min = 48.dp)
+                                .testTag("toggle_admin_cloud_tools_button")
                         ) {
                             Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CloudUpload,
+                                        contentDescription = null,
+                                        tint = PmpCyan,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "إدارة نشر التحديثات السحابية (للمدير)",
+                                        color = TextWhite,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 12.5.sp
+                                    )
+                                }
                                 Icon(
-                                    imageVector = if (isErrorStatus) Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
+                                    imageVector = if (showAdminCloudTools) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                                     contentDescription = null,
-                                    tint = statusColor,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Text(
-                                    text = userFacingStatus,
-                                    color = statusColor,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp
+                                    tint = TextMuted
                                 )
                             }
                         }
-                    }
 
-                    if (isDownloadingUpdate) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(PmpBrandNavy.copy(alpha = 0.5f))
-                                .border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
-                                .padding(16.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                        // شريط تقدم الرفع السحابي إلى Firebase يظهر للمدير عند تفعيل الأدوات أو أثناء الرفع
+                        if (showAdminCloudTools || isUploadingUpdateToFirebase || isUploadingVersionJson) {
+                            val normalizedUploadProgress = (firebaseUploadProgress.coerceIn(0, 100)) / 100f
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(PmpNavySurface.copy(alpha = 0.85f))
+                                    .border(
+                                        1.dp,
+                                        if (isUploadingUpdateToFirebase || isUploadingVersionJson) PmpCyan else GlassBorder,
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .padding(12.dp)
+                                    .testTag("admin_firebase_upload_progress_container")
                             ) {
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier.size(72.dp)
-                                ) {
-                                    if (updateProgress > 0) {
-                                        CircularProgressIndicator(
-                                            progress = { updateProgress / 100f },
-                                            modifier = Modifier.size(72.dp),
-                                            color = PmpCyan,
-                                            trackColor = PmpNavySurface,
-                                            strokeWidth = 6.dp
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (firebaseUploadProgress >= 100 && !isUploadingUpdateToFirebase) {
+                                                    Icons.Default.CheckCircle
+                                                } else {
+                                                    Icons.Default.CloudUpload
+                                                },
+                                                contentDescription = "حالة الرفع إلى Firebase",
+                                                tint = if (firebaseUploadProgress >= 100 && !isUploadingUpdateToFirebase) PmpGreen else PmpCyan,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Text(
+                                                text = "تقدم الرفع السحابي",
+                                                color = TextWhite,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
+                                            )
+                                        }
+                                        GlassBadge(
+                                            text = "${firebaseUploadProgress.coerceIn(0, 100)}%",
+                                            color = if (firebaseUploadProgress >= 100 && !isUploadingUpdateToFirebase) PmpGreen else PmpCyan,
+                                            modifier = Modifier.testTag("admin_firebase_upload_progress_text")
                                         )
+                                    }
+
+                                    LinearProgressIndicator(
+                                        progress = { normalizedUploadProgress },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(9.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .testTag("admin_firebase_upload_progress_bar"),
+                                        color = if (firebaseUploadProgress >= 100 && !isUploadingUpdateToFirebase) PmpGreen else PmpCyan,
+                                        trackColor = PmpWhiteBorder.copy(alpha = 0.55f)
+                                    )
+
+                                    if (firebaseUploadStageText.isNotBlank()) {
                                         Text(
-                                            text = "$updateProgress%",
-                                            color = TextWhite,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 14.sp
-                                        )
-                                    } else {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(72.dp),
-                                            color = PmpCyan,
-                                            strokeWidth = 6.dp
-                                        )
-                                        Icon(
-                                            imageVector = Icons.Default.CloudDownload,
-                                            contentDescription = null,
-                                            tint = PmpCyan,
-                                            modifier = Modifier.size(28.dp)
+                                            text = firebaseUploadStageText,
+                                            color = if (isUploadingUpdateToFirebase || isUploadingVersionJson) PmpCyan else TextMuted,
+                                            fontSize = 11.sp
                                         )
                                     }
                                 }
+                            }
 
+                            Button(
+                                onClick = {
+                                    viewModel.broadcastUpdateToAllPreviousVersions(forceNewIncrement = false)
+                                },
+                                enabled = !isCheckingUpdate && !isUploadingUpdateToFirebase,
+                                colors = ButtonDefaults.buttonColors(containerColor = PmpCyan),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("broadcast_update_previous_versions_button")
+                            ) {
+                                Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color.Black, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = when (val state = downloadState) {
-                                        is com.example.util.DownloadState.Downloading ->
-                                            "جاري تنزيل حزمة APK الفعلية (${state.progressPercent}% • ${String.format(Locale.US, "%.1f", state.downloadedMb)}/${String.format(Locale.US, "%.1f", state.totalMb)} MB)"
-                                        is com.example.util.DownloadState.VerifyingChecksum ->
-                                            "جاري التحقق من بصمة SHA-256 وشهادة التوقيع الرقمي..."
-                                        is com.example.util.DownloadState.ReadyToInstall ->
-                                            "اكتمل التنزيل والتحقق من الحزمة — جاهز للتثبيت"
-                                        is com.example.util.DownloadState.Failed ->
-                                            "تعذر التنزيل: ${state.errorMessage}"
-                                        else -> "جاري تنزيل التحديث..."
+                                    text = if (isUploadingUpdateToFirebase) {
+                                        "جاري الرفع ($firebaseUploadProgress%)..."
+                                    } else {
+                                        "مزامنة الإصدار الحالي ($effectiveVersionName) للأجهزة السابقة"
                                     },
+                                    color = Color.Black,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = { showAdminPublishDialog = true },
+                                enabled = !isCheckingUpdate && !isUploadingUpdateToFirebase,
+                                shape = RoundedCornerShape(12.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, PmpCyan.copy(alpha = 0.6f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("admin_custom_release_publish_button")
+                            ) {
+                                Icon(Icons.Default.Verified, contentDescription = null, tint = PmpCyan, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "نشر إصدار سحابي موثّق",
                                     color = PmpCyan,
                                     fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    textAlign = TextAlign.Center
+                                    fontWeight = FontWeight.SemiBold
                                 )
                             }
-                        }
-                    }
 
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        GlassButton(
-                            text = if (isCheckingUpdate) "جاري التحقق من التحديثات..." else "فحص التحديثات الآن",
-                            icon = Icons.Default.Refresh,
-                            gradient = GlassAccentBlueGradient,
-                            enabled = !isCheckingUpdate && !isDownloadingUpdate,
-                            onClick = { viewModel.checkForAppUpdates(manual = true) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("check_for_updates_button")
-                        )
-
-                        val buttonText = when {
-                            isDownloadingUpdate -> "جاري تنزيل التحديث..."
-                            downloadedApkFile != null -> "تثبيت التحديث الآن"
-                            availableUpdate != null -> "تنزيل وتثبيت التحديث الجديد"
-                            else -> "تنزيل التحديث"
-                        }
-
-                        GlassButton(
-                            text = buttonText,
-                            icon = if (downloadedApkFile != null) Icons.Default.InstallMobile else Icons.Default.CloudDownload,
-                            gradient = PmpBrandRedGradient,
-                            enabled = !isDownloadingUpdate && (availableUpdate != null || downloadedApkFile != null),
-                            onClick = {
-                                if (downloadedApkFile != null) {
-                                    showUpdateInstallDialog = true
-                                } else {
-                                    viewModel.downloadAndInstallUpdate(context) {
-                                        showUpdateInstallDialog = true
+                            OutlinedButton(
+                                onClick = {
+                                    if (versionJsonEditorText.isBlank()) {
+                                        versionJsonEditorText = viewModel.generateDefaultVersionJsonForAdmin()
                                     }
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("download_install_update_button")
-                        )
-                    }
-
-                    // حصرياً لحساب admin فقط — لوحة تشخيص البناء الفعلي ونشر التحديثات الموثّقة
-                    if (isSuperAdmin && currentUser?.username?.equals("admin", ignoreCase = true) == true) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(PmpBrandNavy.copy(alpha = 0.65f))
-                                .border(
-                                    1.dp,
-                                    if (buildIdentityReport.isIdentityVerified) PmpCyan.copy(alpha = 0.45f) else PmpRedLight.copy(alpha = 0.7f),
-                                    RoundedCornerShape(14.dp)
-                                )
-                                .padding(14.dp)
-                        ) {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = if (buildIdentityReport.isIdentityVerified) Icons.Default.VerifiedUser else Icons.Default.Warning,
-                                            contentDescription = null,
-                                            tint = if (buildIdentityReport.isIdentityVerified) PmpGreen else PmpRedLight,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Text(
-                                            text = "تشخيص هوية البناء الفعلي (Admin Build Identity)",
-                                            color = PmpCyan,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 12.5.sp
-                                        )
-                                    }
-                                    GlassBadge(
-                                        text = if (buildIdentityReport.isIdentityVerified) "موثّق" else "تنبيه تطابق",
-                                        color = if (buildIdentityReport.isIdentityVerified) PmpGreen else PmpRedLight
-                                    )
-                                }
-
+                                    showVersionJsonUploadDialog = true
+                                },
+                                enabled = !isUploadingVersionJson,
+                                shape = RoundedCornerShape(12.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, PmpGold.copy(alpha = 0.7f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("open_version_json_editor_button")
+                            ) {
+                                Icon(Icons.Default.UploadFile, contentDescription = null, tint = PmpGold, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "• الحزمة والإصدار (PackageManager): ${buildIdentityReport.packageName} | v${buildIdentityReport.versionName} (versionCode = ${buildIdentityReport.versionCode})",
-                                    color = TextWhite,
-                                    fontSize = 11.sp
-                                )
-                                Text(
-                                    text = "• معرّف البناء المدمج (Build ID): ${buildIdentityReport.buildId}",
+                                    text = "رفع ملف بيانات الإصدار (version.json)",
                                     color = PmpGold,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 11.sp
-                                )
-                                Text(
-                                    text = "• بصمة الكود والتاريخ: Commit ${buildIdentityReport.gitCommitSha} | ${buildIdentityReport.buildTimestampUtc}",
-                                    color = TextMuted,
-                                    fontSize = 10.5.sp
-                                )
-                                if (buildIdentityReport.signingCertSha256.isNotBlank()) {
-                                    Text(
-                                        text = "• شهادة التوقيع (Cert SHA-256): ${buildIdentityReport.signingCertSha256.take(29)}...",
-                                        color = TextMuted,
-                                        fontSize = 10.5.sp
-                                    )
-                                }
-                                if (buildIdentityReport.installedApkSha256.isNotBlank()) {
-                                    Text(
-                                        text = "• بصمة APK المثبت (SHA-256): ${buildIdentityReport.installedApkSha256.take(24)}...",
-                                        color = TextMuted,
-                                        fontSize = 10.5.sp
-                                    )
-                                }
-                                Text(
-                                    text = "• مصدر التحديث: ${buildIdentityReport.updateSourceUrl}",
-                                    color = TextSubtle,
-                                    fontSize = 10.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = buildIdentityReport.statusSummary,
-                                    color = if (buildIdentityReport.isIdentityVerified) PmpGreen else PmpRedLight,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 11.sp
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
                                 )
                             }
-                        }
-
-                        Button(
-                            onClick = {
-                                viewModel.broadcastUpdateToAllPreviousVersions()
-                            },
-                            enabled = !isCheckingUpdate,
-                            colors = ButtonDefaults.buttonColors(containerColor = PmpCyan),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("broadcast_update_previous_versions_button")
-                        ) {
-                            Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color.Black, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "فحص الحزمة وبث التحديث المعتمد لجميع النسخ (Admin فقط)",
-                                color = Color.Black,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        OutlinedButton(
-                            onClick = { showAdminPublishDialog = true },
-                            enabled = !isCheckingUpdate,
-                            shape = RoundedCornerShape(12.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, PmpCyan.copy(alpha = 0.6f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("admin_custom_release_publish_button")
-                        ) {
-                            Icon(Icons.Default.Verified, contentDescription = null, tint = PmpCyan, modifier = Modifier.size(17.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "نشر إصدار مخصص بعد التحقق من ملف APK وSHA-256",
-                                color = PmpCyan,
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
                         }
                     }
                 }
@@ -976,8 +1370,6 @@ fun SettingsScreen(
     if (showUpdateInstallDialog) {
         val targetApk = downloadedApkFile
         val updateName = availableUpdate?.versionName ?: "الجديد"
-        val updateCode = availableUpdate?.versionCode ?: (effectiveVersionCode + 1)
-        val updateBuildId = availableUpdate?.buildId.orEmpty()
         val hasInstallPermission = viewModel.canRequestPackageInstalls(targetApk)
 
         AlertDialog(
@@ -985,22 +1377,27 @@ fun SettingsScreen(
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.Default.Verified, contentDescription = null, tint = PmpGreen)
-                    Text(text = "تثبيت الحزمة الموثّقة (v$updateName)", color = TextWhite, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text(
+                        text = "تثبيت التحديث ($updateName)",
+                        color = TextWhite,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
                 }
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "تم التحقق من سلامة ملف APK وتوقيعه الرقمي (Build $updateCode${if (updateBuildId.isNotBlank()) " • $updateBuildId" else ""}). عند الضغط على بدء التثبيت ستفتح شاشة نظام أندرويد الرسمية لترقية التطبيق مع الحفاظ الكامل على جميع البيانات.",
+                        text = "تم تنزيل التحديث بنجاح والتحقق من سلامته. عند المتابعة ستفتح نافذة التثبيت الرسمية لترقية التطبيق مع الحفاظ الكامل على بياناتك.",
                         color = TextWhite,
                         fontSize = 13.sp
                     )
                     if (!hasInstallPermission) {
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "تنبيه: يتطلب أندرويد تفعيل خيار 'تثبيت التطبيقات غير المعروفة' لهذا التطبيق مرة واحدة فقط قبل التثبيت.",
+                            text = "ملاحظة: يرجى السماح بتثبيت التحديثات من هذا المصدر في إعدادات النظام للمتابعة.",
                             color = PmpGold,
-                            fontSize = 11.5.sp,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold
                         )
                     }
@@ -1008,7 +1405,7 @@ fun SettingsScreen(
             },
             confirmButton = {
                 GlassButton(
-                    text = if (hasInstallPermission) "بدء التثبيت الفعلي الآن" else "تفعيل إذن التثبيت من الإعدادات",
+                    text = if (hasInstallPermission) "تثبيت التحديث" else "السماح بالتثبيت من الإعدادات",
                     gradient = PmpBrandRedGradient,
                     onClick = {
                         if (!hasInstallPermission) {
@@ -1033,15 +1430,17 @@ fun SettingsScreen(
         var inputVersionCode by remember { mutableStateOf((effectiveVersionCode + 1).toString()) }
         var inputVersionName by remember { mutableStateOf("3.${effectiveVersionCode + 1}-PRO") }
         var inputDownloadUrl by remember(inputVersionName, inputVersionCode) {
-            mutableStateOf("https://ow7ab.github.io/ow7ab/pmp-paints-v${inputVersionName}-b${inputVersionCode}.apk")
+            mutableStateOf("https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/pmp-paints-latest.apk")
         }
         var inputBuildId by remember(inputVersionName, inputVersionCode) {
             mutableStateOf("PMP-v${inputVersionName}-b${inputVersionCode}-${BuildConfig.GIT_COMMIT_SHA}")
         }
         var inputSha256 by remember { mutableStateOf("") }
         var inputNotes by remember {
-            mutableStateOf("تحديث معتمد لتطبيق PMP PAINTS يتضمن أحدث التعديلات البرمجية وتحسينات الأداء.")
+            mutableStateOf("تحديث سحابي معتمد لتطبيق PMP PAINTS يتضمن أحدث التعديلات البرمجية وتحسينات الأداء والتقارير.")
         }
+        var isMandatoryRelease by remember { mutableStateOf(false) }
+        var requireStrictRemoteProbe by remember { mutableStateOf(false) }
 
         AlertDialog(
             onDismissRequest = { showAdminPublishDialog = false },
@@ -1049,7 +1448,7 @@ fun SettingsScreen(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.Default.CloudUpload, contentDescription = null, tint = PmpCyan)
                     Text(
-                        text = "نشر إصدار موثّق (Admin Release Publisher)",
+                        text = "إرسال ونشر تحديث سحابي (Admin Cloud Publisher)",
                         color = TextWhite,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp
@@ -1059,24 +1458,49 @@ fun SettingsScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "ملاحظة أمنية: يقوم النظام بالتحقق الفعلي من وجود ملف APK على الرابط (HTTP 200 + ترويسة ZIP) قبل نشر التحديث للمستخدمين لمنع التحديثات الوهمية.",
+                        text = "سيتم بث هذا التحديث سحابياً عبر Firebase Firestore ليظهر فوراً لجميع المستخدمين والكلاسترات المتصلة.",
                         color = PmpGold,
                         fontSize = 11.5.sp
                     )
-                    OutlinedTextField(
-                        value = inputVersionCode,
-                        onValueChange = { inputVersionCode = it.filter { ch -> ch.isDigit() } },
-                        label = { Text("رقم البناء (versionCode)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = inputVersionName,
-                        onValueChange = { inputVersionName = it },
-                        label = { Text("اسم الإصدار (versionName)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = inputVersionCode,
+                            onValueChange = { inputVersionCode = it.filter { ch -> ch.isDigit() } },
+                            label = { Text("رقم البناء (Code)") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = inputVersionName,
+                            onValueChange = { inputVersionName = it },
+                            label = { Text("اسم الإصدار") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        TextButton(
+                            onClick = {
+                                inputDownloadUrl = "https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/pmp-paints-latest.apk"
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("رابط GitHub المباشر", color = PmpCyan, fontSize = 10.5.sp)
+                        }
+                        TextButton(
+                            onClick = {
+                                inputDownloadUrl = "https://ow7ab.github.io/ow7ab/pmp-paints-v${inputVersionName}-b${inputVersionCode}.apk"
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("رابط GitHub Pages", color = PmpGold, fontSize = 10.5.sp)
+                        }
+                    }
+
                     OutlinedTextField(
                         value = inputDownloadUrl,
                         onValueChange = { inputDownloadUrl = it },
@@ -1101,27 +1525,55 @@ fun SettingsScreen(
                     OutlinedTextField(
                         value = inputNotes,
                         onValueChange = { inputNotes = it },
-                        label = { Text("ملاحظات الإصدار (Release Notes)") },
+                        label = { Text("ملاحظات التحديث للمستخدمين") },
                         maxLines = 3,
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("تحديث إلزامي عاجل للمستخدمين:", color = TextWhite, fontSize = 12.sp)
+                        Switch(
+                            checked = isMandatoryRelease,
+                            onCheckedChange = { isMandatoryRelease = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = PmpBrandRed)
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("اشتراط فحص رابط APK قبل النشر:", color = TextMuted, fontSize = 11.5.sp)
+                        Switch(
+                            checked = requireStrictRemoteProbe,
+                            onCheckedChange = { requireStrictRemoteProbe = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = PmpCyan)
+                        )
+                    }
                 }
             },
             confirmButton = {
                 GlassButton(
-                    text = "التحقق من APK ونشر التحديث",
+                    text = "إرسال ونشر التحديث سحابياً الآن",
                     gradient = PmpBrandRedGradient,
                     onClick = {
-                        val vCode = inputVersionCode.toIntOrNull() ?: 0
+                        val vCode = inputVersionCode.toIntOrNull() ?: (effectiveVersionCode + 1)
                         showAdminPublishDialog = false
                         viewModel.publishReleaseToCloud(
                             vCode = vCode,
-                            vName = inputVersionName.trim(),
+                            vName = inputVersionName.trim().ifBlank { "3.$vCode-PRO" },
                             dlUrl = inputDownloadUrl.trim(),
                             releaseNotes = inputNotes.trim(),
                             sha256 = inputSha256.trim(),
                             buildId = inputBuildId.trim(),
-                            gitCommit = BuildConfig.GIT_COMMIT_SHA
+                            gitCommit = BuildConfig.GIT_COMMIT_SHA,
+                            isMandatory = isMandatoryRelease,
+                            requireRemoteBinaryVerification = requireStrictRemoteProbe
                         )
                     }
                 )
@@ -1129,6 +1581,177 @@ fun SettingsScreen(
             dismissButton = {
                 TextButton(onClick = { showAdminPublishDialog = false }) {
                     Text("إلغاء", color = TextMuted)
+                }
+            },
+            containerColor = PmpNavySurface
+        )
+    }
+
+    if (showVersionJsonUploadDialog) {
+        var quickVersionCode by remember { mutableStateOf((effectiveVersionCode + 1).toString()) }
+        var quickVersionName by remember { mutableStateOf("3.${effectiveVersionCode + 1}-PRO") }
+        var quickDownloadUrl by remember {
+            mutableStateOf("https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/pmp-paints-latest.apk")
+        }
+        var quickNotes by remember {
+            mutableStateOf("إصدار سحابي جديد لتطبيق PMP PAINTS — تحديث مباشر لصفحة التنزيل وكافة المستخدمين.")
+        }
+
+        AlertDialog(
+            onDismissRequest = { if (!isUploadingVersionJson) showVersionJsonUploadDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.CloudUpload, contentDescription = null, tint = PmpGold)
+                    Text(
+                        text = "رفع ملف version.json إلى Firebase Storage",
+                        color = TextWhite,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "يرفع هذا المحرر ملف version.json مباشرة إلى Firebase Storage (gs://${com.example.util.UpdateManager.FIREBASE_STORAGE_BUCKET}/version.json) ويزامن Firestore، مما يحدّث صفحة التنزيل تلقائياً للمستخدمين دون الحاجة لتعديل الكود يدوياً.",
+                        color = PmpGold,
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = quickVersionCode,
+                            onValueChange = { quickVersionCode = it.filter { ch -> ch.isDigit() } },
+                            label = { Text("versionCode") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = quickVersionName,
+                            onValueChange = { quickVersionName = it },
+                            label = { Text("versionName") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        TextButton(
+                            onClick = {
+                                val code = quickVersionCode.toIntOrNull() ?: (effectiveVersionCode + 1)
+                                val name = quickVersionName.ifBlank { "3.$code-PRO" }
+                                val generated = com.example.util.UpdateManager.generateVersionJsonString(
+                                    com.example.util.UpdateInfo(
+                                        versionCode = code,
+                                        versionName = name,
+                                        downloadUrl = quickDownloadUrl,
+                                        releaseNotes = quickNotes,
+                                        isMandatory = false,
+                                        sha256Checksum = "",
+                                        fileSizeMb = 30.6,
+                                        fileSize = 0L,
+                                        buildId = "PMP-v${name}-b${code}-${BuildConfig.GIT_COMMIT_SHA}",
+                                        gitCommit = BuildConfig.GIT_COMMIT_SHA,
+                                        signingCertSha256 = com.example.util.UpdateManager.APPROVED_SIGNING_CERT_SHA256
+                                    )
+                                )
+                                versionJsonEditorText = generated
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.AutoFixHigh, contentDescription = null, tint = PmpCyan, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("توليد JSON تلقائياً", color = PmpCyan, fontSize = 11.sp)
+                        }
+
+                        TextButton(
+                            onClick = { versionJsonFilePickerLauncher.launch("*/*") },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null, tint = PmpGold, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("استيراد ملف من الهاتف", color = PmpGold, fontSize = 11.sp)
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = versionJsonEditorText,
+                        onValueChange = { versionJsonEditorText = it },
+                        label = { Text("محتوى ملف version.json") },
+                        minLines = 6,
+                        maxLines = 10,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("version_json_raw_input")
+                    )
+
+                    if (isUploadingVersionJson || isUploadingUpdateToFirebase || firebaseUploadProgress > 0) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(PmpWhiteSurface)
+                                .border(1.dp, PmpGold.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "تقدم الرفع إلى Firebase:",
+                                    color = TextWhite,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp
+                                )
+                                Text(
+                                    text = "${firebaseUploadProgress.coerceIn(0, 100)}%",
+                                    color = PmpGold,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            LinearProgressIndicator(
+                                progress = { (firebaseUploadProgress.coerceIn(0, 100)) / 100f },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .testTag("dialog_firebase_upload_progress_bar"),
+                                color = PmpGold,
+                                trackColor = PmpWhiteBorder
+                            )
+                            Text(
+                                text = firebaseUploadStageText,
+                                color = TextMuted,
+                                fontSize = 10.5.sp
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                GlassButton(
+                    text = if (isUploadingVersionJson) "جاري الرفع ($firebaseUploadProgress%)..." else "رفع version.json وتحديث صفحة التنزيل الآن",
+                    gradient = PmpBrandRedGradient,
+                    enabled = !isUploadingVersionJson && versionJsonEditorText.isNotBlank(),
+                    onClick = {
+                        viewModel.uploadVersionJsonToFirebaseStorage(versionJsonEditorText) { _, _ ->
+                            showVersionJsonUploadDialog = false
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_upload_version_json_button")
+                )
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showVersionJsonUploadDialog = false },
+                    enabled = !isUploadingVersionJson
+                ) {
+                    Text("إغلاق", color = TextMuted)
                 }
             },
             containerColor = PmpNavySurface

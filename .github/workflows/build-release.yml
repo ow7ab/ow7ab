@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - "main"
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version_code:
@@ -533,19 +535,27 @@ jobs:
           payload = {
               "versionCode": v_code,
               "versionName": v_name,
-              "buildId": build_id,
-              "gitCommit": git_commit,
-              "publishedAt": published_at,
               "downloadUrl": primary_url,
               "apkUrl": primary_url,
               "githubReleaseUrl": github_release_url,
               "releaseNotes": release_notes,
+              "apkSha256": sha256,
               "sha256": sha256,
+              "sha256Checksum": sha256,
+              "apkSize": file_size_bytes,
               "fileSize": file_size_bytes,
               "fileSizeMb": file_size_mb,
-              "signingCertSha256": cert_sha256,
+              "minimumSupportedVersion": 1,
               "minSupportedVersion": 1,
-              "mandatory": False
+              "minSupportedVersionCode": 1,
+              "mandatoryUpdate": False,
+              "isMandatory": False,
+              "mandatory": False,
+              "publishedAt": published_at,
+              "releaseStatus": "PUBLISHED",
+              "buildId": build_id,
+              "gitCommit": git_commit,
+              "signingCertSha256": cert_sha256
           }
 
           for out_path in ["version.json", "release_out/version.json", "public/version.json"]:
@@ -557,7 +567,9 @@ jobs:
           with open("release_out/version.json", "r", encoding="utf-8") as check_f:
               verified = json.load(check_f)
               assert verified["versionCode"] == v_code
-              assert verified["sha256"] == sha256
+              assert verified["apkSha256"] == sha256
+              assert verified["apkSize"] == file_size_bytes
+              assert verified["releaseStatus"] == "PUBLISHED"
               assert verified["buildId"] == build_id
           print("Generated and validated version.json:")
           print(json.dumps(verified, ensure_ascii=False, indent=2))
@@ -586,6 +598,17 @@ jobs:
             release_out/version.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify Published Release Asset Download URL
+        run: |
+          set -euo pipefail
+          echo "Verifying published GitHub Release asset reachability: ${GITHUB_RELEASE_URL}"
+          HTTP_STATUS=$(curl -sL -o /tmp/probe_apk_head.bin -w "%{http_code}" -r 0-3 "${GITHUB_RELEASE_URL}" || echo "000")
+          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "206" ]; then
+            echo "Verified public GitHub Release URL is reachable (HTTP $HTTP_STATUS)."
+          else
+            echo "::warning::Direct unauthenticated probe returned HTTP $HTTP_STATUS (expected if repository is private; GitHub Pages deployment will serve public assets)."
+          fi
 
       - name: Upload Public Artifacts for GitHub Pages Hosting
         uses: actions/upload-pages-artifact@v3

@@ -1334,7 +1334,10 @@ fun ReportsScreen(
                             }
                         }
                     } else {
-                        items(customerDebtRows, key = { "debt_${it.customerId}" }) { row ->
+                        items(
+                            customerDebtRows.distinctBy { "${it.customerId}_${it.currency}" },
+                            key = { "debt_${it.customerId}_${it.currency}" }
+                        ) { row ->
                             GlassCard(modifier = Modifier.fillMaxWidth()) {
                                 Column(
                                     modifier = Modifier

@@ -300,9 +300,9 @@
 <body>
 
     <div class="container">
-        <div class="badge-live">
+        <div class="badge-live" id="liveSyncBadge">
             <span class="badge-dot"></span>
-            تحديث مباشر وتلقائي متصل بالسيرفر
+            <span id="liveSyncText">متصل بـ Firebase Storage السحابي — تحديث تلقائي مباشر</span>
         </div>
 
         <h1 class="logo-title">PMP <span>PAINTS</span></h1>
@@ -331,7 +331,7 @@
             </div>
 
             <div class="release-notes shimmer-target" id="releaseNotes">
-                ✨ <strong>النسخة المحسنة v3.0-PRO (بناء #13):</strong> إصلاح جذري لنظام التحديثات السحابية، التحقق الصارم من بصمة البناء (Build ID &amp; SHA-256) وشهادة التوقيع، فحص جاهزية رابط APK قبل النشر، وتحسين سرعة استجابة التطبيق والتقارير المالية.
+                ✨ <strong>النسخة المحسنة v3.0-PRO (بناء #13):</strong> إصلاح جذري لنظام التحديثات السحابية، التحقق الصارم من بصمة البناء (Build ID &amp; SHA-256) وشهادة التوقيع، وربط رفع version.json المباشر إلى Firebase Storage لتحديث صفحة التنزيل تلقائياً.
             </div>
         </div>
 
@@ -345,7 +345,7 @@
 
         <ul class="instructions-list">
             <li>التحديث آمن ومباشر: لن يتم حذف أي بيانات أو إعدادات أو أرصدة سابقة.</li>
-            <li>إذا طلب هاتفك الإذن: اسمح لـ "تثبيت التطبيقات غير المعروفة" لمرة واحدة فقط.</li>
+            <li>يتم تحديث هذه الصفحة تلقائياً فور رفع ملف <code>version.json</code> من واجهة المدير داخل التطبيق إلى Firebase Storage.</li>
             <li>يقوم التطبيق بالترقية الفورية (In-Place Package Upgrade) تلقائياً.</li>
         </ul>
 
@@ -355,49 +355,139 @@
     </div>
 
     <script>
+        const FIREBASE_STORAGE_VERSION_URL =
+            'https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0220128746.firebasestorage.app/o/version.json?alt=media';
+        const FIRESTORE_VERSION_JSON_DOC_URL =
+            'https://firestore.googleapis.com/v1/projects/gen-lang-client-0220128746/databases/ai-studio-android-glassdro-d6052420-cbc0-47dd-8cdd-8caa5e6a7248/documents/app_updates/version_json';
+        const FIRESTORE_LATEST_DOC_URL =
+            'https://firestore.googleapis.com/v1/projects/gen-lang-client-0220128746/databases/ai-studio-android-glassdro-d6052420-cbc0-47dd-8cdd-8caa5e6a7248/documents/app_updates/latest';
+
         const versionCard = document.getElementById('versionCard');
-        if (versionCard) {
-            versionCard.classList.add('is-loading');
-            versionCard.setAttribute('aria-busy', 'true');
+        const liveSyncText = document.getElementById('liveSyncText');
+
+        function parseFirestoreFields(docJson) {
+            if (!docJson || !docJson.fields) return null;
+            const f = docJson.fields;
+            if (f.rawVersionJson && f.rawVersionJson.stringValue) {
+                try {
+                    const parsedRaw = JSON.parse(f.rawVersionJson.stringValue);
+                    if (parsedRaw && parsedRaw.versionCode) return parsedRaw;
+                } catch (_) {}
+            }
+            const getStr = (k) => (f[k] && f[k].stringValue) ? f[k].stringValue : '';
+            const getInt = (k) => (f[k] && f[k].integerValue) ? parseInt(f[k].integerValue, 10) : 0;
+            const getDouble = (k) => (f[k] && (f[k].doubleValue !== undefined)) ? parseFloat(f[k].doubleValue) : (getInt(k) || 0);
+            const vCode = getInt('versionCode') || getInt('version_code');
+            if (!vCode) return null;
+            return {
+                versionCode: vCode,
+                versionName: getStr('versionName') || getStr('version_name') || ('3.' + vCode + '-PRO'),
+                buildId: getStr('buildId') || getStr('build_id'),
+                fileSizeMb: getDouble('fileSizeMb') || 30.6,
+                releaseNotes: getStr('releaseNotes') || getStr('release_notes'),
+                downloadUrl: getStr('downloadUrl') || getStr('apkUrl'),
+                updatedAt: getInt('updatedAt')
+            };
         }
 
-        // جلب بيانات الإصدار الحديث ديناميكياً من ملف version.json إن وُجد
-        fetch('./version.json?t=' + Date.now(), { cache: 'no-store' })
-            .then(res => {
-                if (!res.ok) throw new Error('Failed to load version.json');
-                return res.json();
-            })
-            .then(data => {
-                if (data.versionName) {
-                    const cleanVer = String(data.versionName).startsWith('v')
-                        ? data.versionName
-                        : 'v' + data.versionName;
-                    document.getElementById('versionName').textContent = cleanVer + ' (Build ' + (data.versionCode || '') + ')';
+        function applyVersionDataToDom(data, sourceLabel) {
+            if (!data || !data.versionCode) return;
+            if (data.versionName) {
+                const cleanVer = String(data.versionName).startsWith('v')
+                    ? data.versionName
+                    : 'v' + data.versionName;
+                document.getElementById('versionName').textContent =
+                    cleanVer + ' (Build ' + data.versionCode + ')';
+            }
+            if (data.buildId) {
+                const buildIdEl = document.getElementById('buildId');
+                if (buildIdEl) buildIdEl.textContent = data.buildId;
+            }
+            if (data.fileSizeMb) {
+                document.getElementById('fileSize').textContent = data.fileSizeMb + ' ميجابايت';
+            }
+            if (data.releaseNotes) {
+                const notesEl = document.getElementById('releaseNotes');
+                if (notesEl) {
+                    notesEl.textContent = '';
+                    const strongEl = document.createElement('strong');
+                    strongEl.textContent = '✨ جديد التحديث: ';
+                    notesEl.appendChild(strongEl);
+                    notesEl.appendChild(document.createTextNode(String(data.releaseNotes)));
                 }
-                if (data.buildId) {
-                    const buildIdEl = document.getElementById('buildId');
-                    if (buildIdEl) buildIdEl.textContent = data.buildId;
+            }
+            if (data.downloadUrl) {
+                const dlBtn = document.getElementById('downloadBtn');
+                if (dlBtn) {
+                    dlBtn.href = data.downloadUrl;
+                    const vClean = String(data.versionName || '3.0-PRO').replace(/^v/i, '');
+                    dlBtn.setAttribute('download', 'pmp-paints-v' + vClean + '-b' + data.versionCode + '.apk');
                 }
-                if (data.fileSizeMb) {
-                    document.getElementById('fileSize').textContent = data.fileSizeMb + ' ميجابايت';
+            }
+            if (liveSyncText && sourceLabel) {
+                liveSyncText.textContent = sourceLabel;
+            }
+        }
+
+        async function refreshDownloadPageMetadata(isInitialLoad) {
+            if (isInitialLoad && versionCard) {
+                versionCard.classList.add('is-loading');
+                versionCard.setAttribute('aria-busy', 'true');
+            }
+            const cb = Date.now();
+            const candidates = [];
+
+            // 1. Firebase Storage Direct version.json
+            try {
+                const res = await fetch(FIREBASE_STORAGE_VERSION_URL + '&_cb=' + cb, { cache: 'no-store' });
+                if (res.ok) {
+                    const json = await res.json();
+                    if (json && json.versionCode) {
+                        candidates.push({ data: json, source: 'محدّث تلقائياً من Firebase Storage (version.json)' });
+                    }
                 }
-                if (data.releaseNotes) {
-                    document.getElementById('releaseNotes').innerHTML = '✨ <strong>جديد التحديث:</strong> ' + data.releaseNotes;
+            } catch (_) {}
+
+            // 2. Cloud Firestore Mirror (app_updates/version_json & app_updates/latest)
+            for (const docUrl of [FIRESTORE_VERSION_JSON_DOC_URL, FIRESTORE_LATEST_DOC_URL]) {
+                try {
+                    const res = await fetch(docUrl + '?_cb=' + cb, { cache: 'no-store' });
+                    if (res.ok) {
+                        const docJson = await res.json();
+                        const parsed = parseFirestoreFields(docJson);
+                        if (parsed && parsed.versionCode) {
+                            candidates.push({ data: parsed, source: 'محدّث تلقائياً من Firebase Cloud السحابي' });
+                        }
+                    }
+                } catch (_) {}
+            }
+
+            // 3. Local ./version.json
+            try {
+                const res = await fetch('./version.json?_cb=' + cb, { cache: 'no-store' });
+                if (res.ok) {
+                    const json = await res.json();
+                    if (json && json.versionCode) {
+                        candidates.push({ data: json, source: 'تحديث مباشر وتلقائي متصل بالسيرفر' });
+                    }
                 }
-                if (data.downloadUrl) {
-                    const dlBtn = document.getElementById('downloadBtn');
-                    if (dlBtn) dlBtn.href = data.downloadUrl;
-                }
-            })
-            .catch(() => {
-                // استخدام البيانات الافتراضية المكتوبة مسبقاً
-            })
-            .finally(() => {
-                if (versionCard) {
-                    versionCard.classList.remove('is-loading');
-                    versionCard.setAttribute('aria-busy', 'false');
-                }
-            });
+            } catch (_) {}
+
+            if (candidates.length > 0) {
+                candidates.sort((a, b) => (b.data.versionCode || 0) - (a.data.versionCode || 0));
+                const best = candidates[0];
+                applyVersionDataToDom(best.data, best.source);
+            }
+
+            if (versionCard) {
+                versionCard.classList.remove('is-loading');
+                versionCard.setAttribute('aria-busy', 'false');
+            }
+        }
+
+        refreshDownloadPageMetadata(true);
+        // تحديث تلقائي كل 15 ثانية دون الحاجة لإعادة تحميل الصفحة
+        setInterval(() => refreshDownloadPageMetadata(false), 15000);
     </script>
 </body>
 </html>

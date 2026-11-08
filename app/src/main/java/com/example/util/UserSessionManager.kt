@@ -68,12 +68,8 @@ class UserSessionManager(
 
     private fun getFirestore(): FirebaseFirestore {
         if (firestoreInstance != null) return firestoreInstance
-        val dbId = runCatching { appContext.getString(R.string.firestore_database_id) }.getOrNull()
-        return if (!dbId.isNullOrBlank()) {
-            FirebaseFirestore.getInstance(dbId)
-        } else {
-            FirebaseFirestore.getInstance()
-        }
+        val dbId = appContext.getString(R.string.firestore_database_id)
+        return FirebaseFirestore.getInstance(dbId)
     }
 
     /**

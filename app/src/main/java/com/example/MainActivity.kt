@@ -64,9 +64,12 @@ import androidx.fragment.app.FragmentActivity
 class MainActivity : FragmentActivity() {
 
     private val viewModel: PmpViewModel by viewModels()
+    private val openUpdatesScreenTrigger = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        installDefensiveUncaughtExceptionHandler()
         super.onCreate(savedInstanceState)
+        handleIncomingUpdateIntent(intent)
         runCatching {
             if (FirebaseApp.getApps(applicationContext).isEmpty()) {
                 FirebaseApp.initializeApp(applicationContext)
@@ -84,11 +87,29 @@ class MainActivity : FragmentActivity() {
         )
 
         setContent {
+            val shouldOpenUpdates by openUpdatesScreenTrigger.collectAsState()
             MyApplicationTheme {
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-                    PmpAppContent(viewModel = viewModel)
+                    PmpAppContent(
+                        viewModel = viewModel,
+                        openUpdatesScreenRequest = shouldOpenUpdates,
+                        onOpenUpdatesScreenConsumed = { openUpdatesScreenTrigger.value = false }
+                    )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingUpdateIntent(intent)
+    }
+
+    private fun handleIncomingUpdateIntent(incomingIntent: android.content.Intent?) {
+        if (incomingIntent?.getBooleanExtra(com.example.util.UpdateNotificationHelper.EXTRA_OPEN_UPDATES_SCREEN, false) == true) {
+            openUpdatesScreenTrigger.value = true
+            incomingIntent.removeExtra(com.example.util.UpdateNotificationHelper.EXTRA_OPEN_UPDATES_SCREEN)
         }
     }
 
@@ -97,6 +118,36 @@ class MainActivity : FragmentActivity() {
         runCatching {
             viewModel.verifyPostInstallAndRefreshVersion()
         }
+    }
+
+    private fun installDefensiveUncaughtExceptionHandler() {
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        if (previousHandler?.javaClass?.name?.contains("PmpSafeExceptionHandler") == true) return
+        Thread.setDefaultUncaughtExceptionHandler(
+            object : Thread.UncaughtExceptionHandler {
+                override fun uncaughtException(thread: Thread, throwable: Throwable) {
+                    runCatching {
+                        android.util.Log.e(
+                            "PmpCrashGuard",
+                            "Caught unhandled exception on thread ${thread.name}: ${throwable.message}",
+                            throwable
+                        )
+                    }
+                    val isMainThread = android.os.Looper.getMainLooper()?.thread === thread
+                    if (!isMainThread) {
+                        // Prevent transient background sync/network/Firebase worker thread exceptions from killing the app process
+                        runCatching {
+                            viewModel.postMessage(
+                                "تنبيه تقني: تم احتواء خطأ خلفي طارئ دون إيقاف التطبيق (${throwable.javaClass.simpleName})",
+                                isError = true
+                            )
+                        }
+                        return
+                    }
+                    previousHandler?.uncaughtException(thread, throwable)
+                }
+            }
+        )
     }
 }
 
@@ -212,7 +263,11 @@ fun UserAccountEntity?.hasReportTabPermission(tabName: String): Boolean {
 }
 
 @Composable
-fun PmpAppContent(viewModel: PmpViewModel) {
+fun PmpAppContent(
+    viewModel: PmpViewModel,
+    openUpdatesScreenRequest: Boolean = false,
+    onOpenUpdatesScreenConsumed: () -> Unit = {}
+) {
     val context = LocalContext.current
     val activity = context as? androidx.fragment.app.FragmentActivity
     val coroutineScope = rememberCoroutineScope()
@@ -262,6 +317,31 @@ fun PmpAppContent(viewModel: PmpViewModel) {
     val availableUpdate by viewModel.availableUpdate.collectAsState()
     val effectiveVersionName by viewModel.effectiveVersionName.collectAsState()
 
+    val notificationPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    LaunchedEffect(isSessionAuthenticated) {
+        if (isSessionAuthenticated && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                runCatching {
+                    notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(openUpdatesScreenRequest, isSessionAuthenticated) {
+        if (openUpdatesScreenRequest && isSessionAuthenticated) {
+            currentScreen = PmpScreen.SETTINGS
+            onOpenUpdatesScreenConsumed()
+        }
+    }
+
     // Only de-authenticate if the currently active employee was explicitly deactivated/suspended by the manager
     LaunchedEffect(currentUser, isSessionAuthenticated, activeUserId) {
         val user = currentUser
@@ -276,6 +356,7 @@ fun PmpAppContent(viewModel: PmpViewModel) {
         PmpScreen.entries.filter { screen ->
             when (screen) {
                 PmpScreen.DASHBOARD -> true
+                PmpScreen.SETTINGS -> true // Allow all authenticated users to access personal profile, biometrics, and app updates
                 PmpScreen.TREASURY -> currentUser.hasModulePermission("الخزن") || currentUser.hasModulePermission("التحويلات")
                 PmpScreen.PURCHASES -> currentUser.hasModulePermission("المشتريات") || currentUser.hasModulePermission("مواد الإنتاج") || currentUser.hasModulePermission("المصنع") || currentUser.isSystemManager()
                 PmpScreen.FACTORY -> currentUser.hasModulePermission("المصنع") || currentUser.hasModulePermission("مواد الإنتاج") || currentUser.hasModulePermission("التعبئة والتغليف")
@@ -436,7 +517,7 @@ fun PmpAppContent(viewModel: PmpViewModel) {
                 // Top Bar moves together with the page content as a single unified One UI surface
                 Column(modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars)) {
                     Surface(
-                        color = Color.White.copy(alpha = 0.95f),
+                        color = PmpWhiteSurface.copy(alpha = 0.96f),
                         shadowElevation = 2.dp,
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -478,7 +559,7 @@ fun PmpAppContent(viewModel: PmpViewModel) {
                             }
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 if (updateAvailable && availableUpdate != null) {
                                     Box(
@@ -510,6 +591,20 @@ fun PmpAppContent(viewModel: PmpViewModel) {
                                         }
                                     }
                                 }
+                                // Quick Dark Mode Pro toggle button in Top Bar
+                                IconButton(
+                                    onClick = { viewModel.toggleDarkModeQuick() },
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .testTag("top_bar_theme_toggle_button")
+                                ) {
+                                    Icon(
+                                        imageVector = if (PmpThemeController.isDarkModeActive) Icons.Default.LightMode else Icons.Default.DarkMode,
+                                        contentDescription = if (PmpThemeController.isDarkModeActive) "تفعيل الوضع الفاتح" else "تفعيل الوضع المظلم الاحترافي",
+                                        tint = if (PmpThemeController.isDarkModeActive) PmpGold else PmpBrandNavy,
+                                        modifier = Modifier.size(21.dp)
+                                    )
+                                }
                                 // Clean Logout Icon Button (no text "تسجيل الخروج" as requested)
                                 IconButton(
                                     onClick = { handleSignOut() },
@@ -522,6 +617,78 @@ fun PmpAppContent(viewModel: PmpViewModel) {
                                         contentDescription = "خروج",
                                         tint = PmpBrandNavy,
                                         modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    val liveCloudUpdate = availableUpdate
+                    if (updateAvailable && liveCloudUpdate != null && currentScreen != PmpScreen.SETTINGS) {
+                        Surface(
+                            color = if (liveCloudUpdate.isMandatory) Color(0xFFB91C1C) else Color(0xFF0F172A),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { currentScreen = PmpScreen.SETTINGS }
+                                .testTag("live_cloud_update_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.SystemUpdate,
+                                        contentDescription = null,
+                                        tint = Color(0xFF34D399),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            text = if (liveCloudUpdate.isMandatory) {
+                                                "تحديث إلزامي متاح الآن (الإصدار ${liveCloudUpdate.versionName})"
+                                            } else {
+                                                "تحديث جديد متاح (الإصدار ${liveCloudUpdate.versionName})"
+                                            },
+                                            color = Color.White,
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        val cleanNote = remember(liveCloudUpdate.releaseNotes) {
+                                            com.example.util.UpdateManager.sanitizeUserFacingReleaseNotes(liveCloudUpdate.releaseNotes)
+                                                .lineSequence()
+                                                .firstOrNull()
+                                                .orEmpty()
+                                        }
+                                        if (cleanNote.isNotBlank()) {
+                                            Text(
+                                                text = cleanNote,
+                                                color = Color(0xFFCBD5E1),
+                                                fontSize = 10.sp,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xFF10B981))
+                                        .clickable { currentScreen = PmpScreen.SETTINGS }
+                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        text = "تحديث الآن",
+                                        color = Color.Black,
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.ExtraBold
                                     )
                                 }
                             }
@@ -565,15 +732,16 @@ fun PmpAppContent(viewModel: PmpViewModel) {
                         .fillMaxWidth()
                         .background(GlassBackgroundBrush)
                 ) {
+                    val effectiveCurrentScreen = if (currentScreen in allowedScreens) currentScreen else PmpScreen.DASHBOARD
                     // Fast, smooth screen transition with SaveableStateProvider so scroll positions and states are preserved across tabs
+                    // Resolving effectiveCurrentScreen BEFORE Crossfade prevents two Crossfade branches from ever mapping to the same SaveableStateProvider key ("dashboard") simultaneously.
                     Crossfade(
-                        targetState = currentScreen,
+                        targetState = effectiveCurrentScreen,
                         animationSpec = tween(durationMillis = 120),
                         label = "ScreenTransition"
                     ) { screen ->
-                        val effectiveScreen = if (screen in allowedScreens) screen else PmpScreen.DASHBOARD
-                        saveableStateHolder.SaveableStateProvider(effectiveScreen.route) {
-                            when (effectiveScreen) {
+                        saveableStateHolder.SaveableStateProvider(screen.route) {
+                            when (screen) {
                                 PmpScreen.DASHBOARD -> DashboardScreen(
                                     viewModel = viewModel,
                                     onNavigate = handleDashboardNavigate,
@@ -720,7 +888,7 @@ fun PmpAppContent(viewModel: PmpViewModel) {
             ) {
                 Surface(
                     shape = RoundedCornerShape(20.dp),
-                    color = Color.White,
+                    color = PmpWhiteSurface,
                     shadowElevation = 16.dp,
                     modifier = Modifier
                         .widthIn(max = 360.dp)
@@ -752,7 +920,7 @@ fun PmpAppContent(viewModel: PmpViewModel) {
                         Text(
                             text = "يرجى الانتظار، يتم تأمين صلاحياتك ومنع تداخل البيانات",
                             fontSize = 11.5.sp,
-                            color = Color(0xFF64748B),
+                            color = TextSubtle,
                             textAlign = TextAlign.Center
                         )
                     }
@@ -781,13 +949,14 @@ fun GlassBottomNavigationBar(
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color.White.copy(alpha = 0.98f))
+            .background(PmpWhiteSurface.copy(alpha = 0.98f))
             .border(0.5.dp, GlassBorder, RoundedCornerShape(0.dp))
             .windowInsetsPadding(WindowInsets.navigationBars)
             .padding(vertical = 4.dp)
     ) {
-        val totalWidth = maxWidth
-        val visibleColumns = allowedScreens.size.coerceIn(1, 5)
+        val totalWidth = if (maxWidth != androidx.compose.ui.unit.Dp.Infinity && maxWidth.value.isFinite() && maxWidth > 0.dp) maxWidth else 360.dp
+        val distinctScreens = remember(allowedScreens) { allowedScreens.distinctBy { it.route } }
+        val visibleColumns = distinctScreens.size.coerceIn(1, 5)
         val itemWidth = (totalWidth / visibleColumns.toFloat()).coerceAtLeast(64.dp)
 
         LazyRow(
@@ -796,7 +965,7 @@ fun GlassBottomNavigationBar(
             contentPadding = PaddingValues(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-                items(allowedScreens, key = { it.route }) { screen ->
+                items(distinctScreens, key = { it.route }) { screen ->
                     val selected = currentScreen == screen
                     val color = if (selected) PmpBrandRed else TextSubtle
 
@@ -814,7 +983,13 @@ fun GlassBottomNavigationBar(
                                 .height(32.dp)
                                 .width(50.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(if (selected) Color(0xFFFEE2E2) else Color.Transparent)
+                                .background(
+                                    if (selected) {
+                                        if (PmpThemeController.isDarkModeActive) PmpBrandRed.copy(alpha = 0.22f) else Color(0xFFFEE2E2)
+                                    } else {
+                                        Color.Transparent
+                                    }
+                                )
                                 .then(
                                     if (selected) {
                                         Modifier.border(
@@ -894,8 +1069,8 @@ fun ReorderBottomNavDialog(
                     itemsIndexed(screensList, key = { _, screen -> screen.route }) { index, screen ->
                         Surface(
                             shape = RoundedCornerShape(12.dp),
-                            color = Color(0xFFF8FAFC),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                            color = PmpWhiteCard,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
@@ -1013,7 +1188,7 @@ fun ReorderBottomNavDialog(
                 Text("إلغاء", color = TextSubtle)
             }
         },
-        containerColor = Color.White,
+        containerColor = PmpWhiteSurface,
         shape = RoundedCornerShape(20.dp)
     )
 }
@@ -1045,7 +1220,7 @@ fun PmpNavigationMenuModal(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = Color(0xFFF8FAFC),
+        containerColor = PmpWhiteBg,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
         dragHandle = {
             Box(
@@ -1403,7 +1578,7 @@ fun PmpSplashScreen() {
         ) {
             Surface(
                 shape = RoundedCornerShape(28.dp),
-                color = Color.White,
+                color = PmpWhiteSurface,
                 shadowElevation = 10.dp,
                 border = BorderStroke(2.dp, PmpBrandRed.copy(alpha = 0.25f)),
                 modifier = Modifier.size(116.dp)

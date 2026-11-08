@@ -10,6 +10,7 @@ import com.example.data.remote.LinkedAccountModel
 import com.example.data.repository.GoogleSignInBindingResult
 import com.example.data.repository.PmpRepository
 import com.example.isSystemManager
+import com.example.isSuperAdminAccount
 import com.example.hasModulePermission
 import com.example.util.DeviceSessionStore
 import com.google.firebase.Firebase
@@ -79,6 +80,41 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     )
     val defaultAccountCurrency: StateFlow<String> = _defaultAccountCurrency.asStateFlow()
 
+    private val themePrefs = application.getSharedPreferences("pmp_ui_theme_prefs", android.content.Context.MODE_PRIVATE)
+    private val _themeMode = MutableStateFlow(
+        runCatching {
+            val savedKey = themePrefs.getString("theme_mode", com.example.ui.theme.PmpThemeMode.LIGHT.storageKey)
+                ?: com.example.ui.theme.PmpThemeMode.LIGHT.storageKey
+            com.example.ui.theme.PmpThemeMode.entries.firstOrNull { it.storageKey == savedKey }
+                ?: com.example.ui.theme.PmpThemeMode.LIGHT
+        }.getOrDefault(com.example.ui.theme.PmpThemeMode.LIGHT)
+    )
+    val themeMode: StateFlow<com.example.ui.theme.PmpThemeMode> = _themeMode.asStateFlow()
+
+    fun setThemeMode(mode: com.example.ui.theme.PmpThemeMode) {
+        _themeMode.value = mode
+        themePrefs.edit().putString("theme_mode", mode.storageKey).apply()
+        val isDark = when (mode) {
+            com.example.ui.theme.PmpThemeMode.DARK -> true
+            com.example.ui.theme.PmpThemeMode.LIGHT -> false
+            com.example.ui.theme.PmpThemeMode.SYSTEM -> {
+                val nightFlags = getApplication<Application>().resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+                nightFlags == android.content.res.Configuration.UI_MODE_NIGHT_YES
+            }
+        }
+        com.example.ui.theme.PmpThemeController.updateDarkModeState(isDark, mode)
+        postMessage("تم تفعيل وضع المظهر: ${mode.arabicLabel}")
+    }
+
+    fun toggleDarkModeQuick() {
+        val nextMode = if (com.example.ui.theme.PmpThemeController.isDarkModeActive) {
+            com.example.ui.theme.PmpThemeMode.LIGHT
+        } else {
+            com.example.ui.theme.PmpThemeMode.DARK
+        }
+        setThemeMode(nextMode)
+    }
+
     fun setDefaultAccountCurrency(currency: String) {
         val clean = currency.trim().uppercase().takeIf { it in listOf("SDG", "EGP", "USD") } ?: "SDG"
         _defaultAccountCurrency.value = clean
@@ -141,73 +177,145 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }.distinctBy { it.name.trim().lowercase() }
         }
         .onEach { _isInitialDataLoading.value = false }
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in cashboxes flow", e)
+            _isInitialDataLoading.value = false
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val movements = repository.getMovements()
         .onEach { _isInitialDataLoading.value = false }
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in movements flow", e)
+            _isInitialDataLoading.value = false
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val transfers = repository.getTransfers()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in transfers flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val dailyClosings = repository.getDailyClosings()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in dailyClosings flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val customers = repository.getCustomers()
         .onEach { _isInitialDataLoading.value = false }
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in customers flow", e)
+            _isInitialDataLoading.value = false
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val invoices = repository.getInvoices()
         .onEach { _isInitialDataLoading.value = false }
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in invoices flow", e)
+            _isInitialDataLoading.value = false
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val invoiceItems = repository.getAllInvoiceItems()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in invoiceItems flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val invoicePayments = repository.getInvoicePayments()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in invoicePayments flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val warehouses = repository.getWarehouses()
         .onEach { _isInitialDataLoading.value = false }
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in warehouses flow", e)
+            _isInitialDataLoading.value = false
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val products = repository.getProducts()
         .onEach { _isInitialDataLoading.value = false }
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in products flow", e)
+            _isInitialDataLoading.value = false
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val stockMoves = repository.getStockMoves()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in stockMoves flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val factoryItems = repository.getFactoryItems()
         .onEach { _isInitialDataLoading.value = false }
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in factoryItems flow", e)
+            _isInitialDataLoading.value = false
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val factoryMachines = repository.getFactoryMachines()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in factoryMachines flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val factoryMoves = repository.getFactoryMoves()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in factoryMoves flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val halfaInvoices = repository.getHalfaInvoices()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in halfaInvoices flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val posterPrices = repository.getPosterPrices()
         .onEach { _isInitialDataLoading.value = false }
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in posterPrices flow", e)
+            _isInitialDataLoading.value = false
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
@@ -223,10 +331,15 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         (defaultPaintColors + fromProds + fromPosters + custom).distinct()
     }
         .flowOn(Dispatchers.Default)
+        .catch { emit(defaultPaintColors) }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, defaultPaintColors)
 
     val auditLogs = repository.getAuditLogs()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in auditLogs flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
@@ -253,18 +366,35 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             result.sortedBy { it.id }
         }
         .onEach { _isInitialDataLoading.value = false }
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in userAccounts flow", e)
+            _isInitialDataLoading.value = false
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val formulations = repository.getFormulations()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in formulations flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val chemicalSafetyList = repository.getChemicalSafety()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in chemicalSafetyList flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val productionBatches = repository.getProductionBatches()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in productionBatches flow", e)
+            emit(emptyList())
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
@@ -361,7 +491,87 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
+    // --- In-App Update & Cloud Diagnostics Properties (Must be initialized BEFORE init {}) ---
+    private val updateManager: UpdateManager = UpdateManager.getInstance(application)
+
+    val effectiveVersionCode: StateFlow<Int> = updateManager.effectiveVersionCode
+    val effectiveVersionName: StateFlow<String> = updateManager.effectiveVersionName
+
+    private val _isCheckingUpdate = MutableStateFlow(false)
+    val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate.asStateFlow()
+
+    private val _updateAvailable = MutableStateFlow(false)
+    val updateAvailable: StateFlow<Boolean> = _updateAvailable.asStateFlow()
+
+    private val _availableUpdate = MutableStateFlow<UpdateInfo?>(null)
+    val availableUpdate: StateFlow<UpdateInfo?> = _availableUpdate.asStateFlow()
+
+    private val _updateUiState = MutableStateFlow(com.example.util.UpdateUiState.IDLE)
+    val updateUiState: StateFlow<com.example.util.UpdateUiState> = _updateUiState.asStateFlow()
+
+    private val _lastUpdateCheckStatus = MutableStateFlow(
+        "أنت تستخدم أحدث إصدار من PMP PAINTS."
+    )
+    val lastUpdateCheckStatus: StateFlow<String> = _lastUpdateCheckStatus.asStateFlow()
+
+    private val _updateProgress = MutableStateFlow(0)
+    val updateProgress: StateFlow<Int> = _updateProgress.asStateFlow()
+
+    private val _isDownloadingUpdate = MutableStateFlow(false)
+    val isDownloadingUpdate: StateFlow<Boolean> = _isDownloadingUpdate.asStateFlow()
+
+    val downloadState: StateFlow<com.example.util.DownloadState> = updateManager.downloadState
+
+    private val _downloadedApkFile = MutableStateFlow<File?>(null)
+    val downloadedApkFile: StateFlow<File?> = _downloadedApkFile.asStateFlow()
+
+    val customUpdateMetadataUrl = MutableStateFlow(UpdateManager.DEFAULT_UPDATE_METADATA_URL)
+
+    private val _buildIdentityReport = MutableStateFlow(
+        updateManager.getInstalledBuildIdentityReport(
+            updateSourceUrl = UpdateManager.DEFAULT_UPDATE_METADATA_URL,
+            latestRemoteUpdate = null,
+            computeHeavyApkHash = false
+        )
+    )
+    val buildIdentityReport: StateFlow<com.example.util.BuildIdentityReport> = _buildIdentityReport.asStateFlow()
+
+    private val _isUploadingVersionJson = MutableStateFlow(false)
+    val isUploadingVersionJson: StateFlow<Boolean> = _isUploadingVersionJson.asStateFlow()
+
+    private val _firebaseUploadProgress = MutableStateFlow(0)
+    val firebaseUploadProgress: StateFlow<Int> = _firebaseUploadProgress.asStateFlow()
+
+    private val _firebaseUploadStageText = MutableStateFlow("")
+    val firebaseUploadStageText: StateFlow<String> = _firebaseUploadStageText.asStateFlow()
+
+    private val _isUploadingUpdateToFirebase = MutableStateFlow(false)
+    val isUploadingUpdateToFirebase: StateFlow<Boolean> = _isUploadingUpdateToFirebase.asStateFlow()
+
+    private val _lastUploadedVersionJsonUrl = MutableStateFlow(UpdateManager.FIREBASE_STORAGE_VERSION_JSON_URL)
+    val lastUploadedVersionJsonUrl: StateFlow<String> = _lastUploadedVersionJsonUrl.asStateFlow()
+
+    private val _versionJsonUploadStatus = MutableStateFlow("جاهز لرفع ملف version.json إلى Firebase Storage وتحديث صفحة التنزيل تلقائياً")
+    val versionJsonUploadStatus: StateFlow<String> = _versionJsonUploadStatus.asStateFlow()
+
+    val syncDiagnostics = cloudErpSyncRepo.diagnostics
+    val lastSuccessfulSyncTime = cloudErpSyncRepo.lastSuccessfulSyncTime
+    val pendingSyncErrors = cloudErpSyncRepo.pendingErrors
+    val transactionTraces = com.example.util.RoomTransactionLogger.traces
+    val pendingApprovalUserCode = MutableStateFlow<String?>(null)
+
     init {
+        val initialMode = _themeMode.value
+        val isDarkInitial = when (initialMode) {
+            com.example.ui.theme.PmpThemeMode.DARK -> true
+            com.example.ui.theme.PmpThemeMode.LIGHT -> false
+            com.example.ui.theme.PmpThemeMode.SYSTEM -> {
+                val nightFlags = application.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+                nightFlags == android.content.res.Configuration.UI_MODE_NIGHT_YES
+            }
+        }
+        com.example.ui.theme.PmpThemeController.updateDarkModeState(isDarkInitial, initialMode)
+
         // Restore active user session BEFORE hiding splash screen so LoginScreen never flashes when already logged in
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -432,6 +642,63 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 _isInitialDataLoading.value = false
             }
 
+            // تهيئة قناة إشعارات التحديث والاشتراك في موضوع FCM
+            runCatching {
+                com.example.util.UpdateNotificationHelper.ensureChannelAndSubscribe(application)
+            }
+
+            // مزامنة حالة آلة حالات التحديث (UpdateUiState) مع DownloadState
+            viewModelScope.launch {
+                updateManager.downloadState.collect { dlState ->
+                    when (dlState) {
+                        is com.example.util.DownloadState.Downloading -> {
+                            _updateUiState.value = com.example.util.UpdateUiState.DOWNLOADING
+                            _lastUpdateCheckStatus.value = "جاري تنزيل التحديث... (${dlState.progressPercent}%)"
+                        }
+                        is com.example.util.DownloadState.VerifyingChecksum -> {
+                            _updateUiState.value = com.example.util.UpdateUiState.VERIFYING
+                            _lastUpdateCheckStatus.value = "جاري التحقق من سلامة ملف التحديث..."
+                        }
+                        is com.example.util.DownloadState.ReadyToInstall -> {
+                            _downloadedApkFile.value = dlState.apkFile
+                            _updateUiState.value = com.example.util.UpdateUiState.READY_TO_INSTALL
+                            _lastUpdateCheckStatus.value = "تم تنزيل التحديث بنجاح."
+                        }
+                        is com.example.util.DownloadState.Installing -> {
+                            _updateUiState.value = com.example.util.UpdateUiState.INSTALLING
+                            _lastUpdateCheckStatus.value = "جاري تثبيت التحديث..."
+                        }
+                        is com.example.util.DownloadState.Failed -> {
+                            _updateUiState.value = com.example.util.UpdateUiState.FAILED
+                            _lastUpdateCheckStatus.value =
+                                UpdateManager.sanitizeUserFacingErrorMessage(dlState.reason)
+                        }
+                        is com.example.util.DownloadState.Cancelled -> {
+                            _updateUiState.value = com.example.util.UpdateUiState.CANCELLED
+                            _lastUpdateCheckStatus.value = "تم إيقاف تنزيل التحديث مؤقتاً. يمكنك إعادة المحاولة في أي وقت."
+                        }
+                        is com.example.util.DownloadState.Idle -> {
+                            if (!_isCheckingUpdate.value) {
+                                _updateUiState.value = if (_updateAvailable.value && _availableUpdate.value != null) {
+                                    com.example.util.UpdateUiState.AVAILABLE
+                                } else {
+                                    com.example.util.UpdateUiState.UP_TO_DATE
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // الاستماع لإشارات إشعارات FCM الواردة عند نشر إصدار جديد
+            viewModelScope.launch {
+                com.example.util.UpdateNotificationHelper.fcmUpdateSignal.collect { signal ->
+                    if (signal != null) {
+                        checkForAppUpdates(manual = false)
+                    }
+                }
+            }
+
             // التحقق الفعلي من PackageManager بعد أي عملية تثبيت سابقة، والاستماع اللحظي للتحديثات السحابية
             viewModelScope.launch {
                 try {
@@ -440,7 +707,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     updateManager.installStatusMessage.collect { statusPair ->
                         if (statusPair != null) {
                             val (msg, isOk) = statusPair
-                            postMessage(msg, isError = !isOk)
+                            val cleanMsg = if (isOk) msg else UpdateManager.sanitizeUserFacingErrorMessage(msg)
+                            postMessage(cleanMsg, isError = !isOk)
                             updateManager.clearInstallStatusMessage()
                             verifyPostInstallAndRefreshVersion()
                         }
@@ -457,13 +725,25 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         if (liveUpdate.versionCode > installedCode) {
                             _availableUpdate.value = liveUpdate
                             _updateAvailable.value = true
-                            _lastUpdateCheckStatus.value =
-                                "تحديث جديد متوفر: ${liveUpdate.versionName} (Build ${liveUpdate.versionCode} • ${liveUpdate.buildId.ifBlank { "Verified" }})"
+                            if (_updateUiState.value != com.example.util.UpdateUiState.DOWNLOADING &&
+                                _updateUiState.value != com.example.util.UpdateUiState.READY_TO_INSTALL &&
+                                _updateUiState.value != com.example.util.UpdateUiState.INSTALLING
+                            ) {
+                                _updateUiState.value = com.example.util.UpdateUiState.AVAILABLE
+                                _lastUpdateCheckStatus.value = "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات."
+                            }
+                            com.example.util.UpdateNotificationHelper.notifyNewUpdateAvailableIfNeeded(
+                                context = application,
+                                updateInfo = liveUpdate,
+                                installedVersionCode = installedCode
+                            )
                         } else {
                             _availableUpdate.value = null
                             _updateAvailable.value = false
-                            _lastUpdateCheckStatus.value =
-                                "التطبيق محدّث إلى آخر إصدار (v${updateManager.getEffectiveVersionName()} • Build $installedCode • ${updateManager.getInstalledBuildId()})"
+                            if (!_isDownloadingUpdate.value) {
+                                _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
+                                _lastUpdateCheckStatus.value = "أنت تستخدم أحدث إصدار من PMP PAINTS."
+                            }
                         }
                         refreshBuildIdentityReport()
                     }
@@ -475,7 +755,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
             viewModelScope.launch {
                 currentUser.collect { user ->
-                    val isAdmin = user?.username?.equals("admin", ignoreCase = true) == true
+                    val isAdmin = user.isSuperAdminAccount() || user?.username?.equals("admin", ignoreCase = true) == true
                     updateManager.setAdminBroadcastGuardEnabled(isAdmin)
                     refreshBuildIdentityReport()
                 }
@@ -1319,53 +1599,135 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // --- In-App Update Management ---
-    private val updateManager: UpdateManager = UpdateManager.getInstance(application)
-
-    val effectiveVersionCode: StateFlow<Int> = updateManager.effectiveVersionCode
-    val effectiveVersionName: StateFlow<String> = updateManager.effectiveVersionName
-
-    private val _isCheckingUpdate = MutableStateFlow(false)
-    val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate.asStateFlow()
-
-    private val _updateAvailable = MutableStateFlow(false)
-    val updateAvailable: StateFlow<Boolean> = _updateAvailable.asStateFlow()
-
-    private val _availableUpdate = MutableStateFlow<UpdateInfo?>(null)
-    val availableUpdate: StateFlow<UpdateInfo?> = _availableUpdate.asStateFlow()
-
-    private val _lastUpdateCheckStatus = MutableStateFlow(
-        "الإصدار المثبت فعلياً: v${updateManager.getEffectiveVersionName()} (Build ${updateManager.getEffectiveVersionCode()} • ${updateManager.getInstalledBuildId()})"
-    )
-    val lastUpdateCheckStatus: StateFlow<String> = _lastUpdateCheckStatus.asStateFlow()
-
-    private val _updateProgress = MutableStateFlow(0)
-    val updateProgress: StateFlow<Int> = _updateProgress.asStateFlow()
-
-    private val _isDownloadingUpdate = MutableStateFlow(false)
-    val isDownloadingUpdate: StateFlow<Boolean> = _isDownloadingUpdate.asStateFlow()
-
-    val downloadState: StateFlow<com.example.util.DownloadState> = updateManager.downloadState
-
-    private val _downloadedApkFile = MutableStateFlow<File?>(null)
-    val downloadedApkFile: StateFlow<File?> = _downloadedApkFile.asStateFlow()
-
-    val customUpdateMetadataUrl = MutableStateFlow(UpdateManager.DEFAULT_UPDATE_METADATA_URL)
-
-    private val _buildIdentityReport = MutableStateFlow(
-        updateManager.getInstalledBuildIdentityReport(
-            updateSourceUrl = UpdateManager.DEFAULT_UPDATE_METADATA_URL,
-            latestRemoteUpdate = null
-        )
-    )
-    val buildIdentityReport: StateFlow<com.example.util.BuildIdentityReport> = _buildIdentityReport.asStateFlow()
-
     fun refreshBuildIdentityReport() {
         viewModelScope.launch(Dispatchers.IO) {
-            val report = updateManager.getInstalledBuildIdentityReport(
-                updateSourceUrl = customUpdateMetadataUrl.value,
-                latestRemoteUpdate = _availableUpdate.value
+            runCatching {
+                val report = updateManager.getInstalledBuildIdentityReport(
+                    updateSourceUrl = customUpdateMetadataUrl.value,
+                    latestRemoteUpdate = _availableUpdate.value,
+                    computeHeavyApkHash = true
+                )
+                _buildIdentityReport.value = report
+            }
+        }
+    }
+
+    /**
+     * توليد محتوى version.json الافتراضي الجاهز للتعديل أو الرفع المباشر من واجهة المدير
+     */
+    fun generateDefaultVersionJsonForAdmin(): String {
+        val currentOrNext = _availableUpdate.value ?: run {
+            val nextCode = updateManager.getEffectiveVersionCode() + 1
+            val nextName = "3.${nextCode}-PRO"
+            UpdateManager.LATEST_CLOUD_RELEASE_INFO.copy(
+                versionCode = nextCode,
+                versionName = nextName,
+                downloadUrl = "https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/pmp-paints-latest.apk",
+                buildId = "PMP-v${nextName}-b${nextCode}-${BuildConfig.GIT_COMMIT_SHA}",
+                gitCommit = BuildConfig.GIT_COMMIT_SHA,
+                releaseNotes = "إصدار v${nextName} (Build ${nextCode}): تحديث سحابي جديد لتطبيق PMP PAINTS مع الحفاظ الكامل على البيانات."
             )
-            _buildIdentityReport.value = report
+        }
+        return UpdateManager.generateVersionJsonString(currentOrNext)
+    }
+
+    /**
+     * رفع محتوى ملف version.json مباشرة إلى Firebase Storage ومزامنته مع Firestore لتحديث صفحة التنزيل تلقائياً
+     */
+    fun uploadVersionJsonToFirebaseStorage(
+        rawJson: String,
+        onSuccess: (UpdateInfo, String) -> Unit = { _, _ -> }
+    ) {
+        val user = currentUser.value
+        val isAdmin = user.isSuperAdminAccount() || user?.username?.equals("admin", ignoreCase = true) == true
+        if (!isAdmin) {
+            postMessage("عفواً، صلاحية رفع ملف version.json إلى Firebase Storage مخصصة لحساب المدير العام (admin) فقط", isError = true)
+            return
+        }
+        if (_isUploadingVersionJson.value) {
+            postMessage("جاري رفع ملف version.json بالفعل، يرجى الانتظار...")
+            return
+        }
+        viewModelScope.launch {
+            _isUploadingVersionJson.value = true
+            _isUploadingUpdateToFirebase.value = true
+            _firebaseUploadProgress.value = 5
+            _firebaseUploadStageText.value = "جاري بدء رفع ملف version.json إلى Firebase Storage..."
+            _versionJsonUploadStatus.value = "جاري رفع ملف version.json إلى Firebase Storage ومزامنة صفحة التنزيل..."
+            updateManager.setAdminBroadcastGuardEnabled(true)
+
+            val res = updateManager.uploadVersionJsonToFirebaseStorage(
+                rawVersionJson = rawJson,
+                clusterCode = serverClusterCode.value,
+                onProgress = { pct, stage ->
+                    _firebaseUploadProgress.value = pct
+                    _firebaseUploadStageText.value = stage
+                    _versionJsonUploadStatus.value = stage
+                }
+            )
+            _isUploadingVersionJson.value = false
+            _isUploadingUpdateToFirebase.value = false
+
+            res.onSuccess { (verifiedInfo, storageUrl) ->
+                _firebaseUploadProgress.value = 100
+                _lastUploadedVersionJsonUrl.value = storageUrl
+                if (verifiedInfo.versionCode > updateManager.getEffectiveVersionCode()) {
+                    _availableUpdate.value = verifiedInfo
+                    _updateAvailable.value = true
+                }
+                val successMsg =
+                    "تم رفع version.json إلى Firebase Storage بنجاح (100%)! تم تحديث صفحة التنزيل تلقائياً إلى v${verifiedInfo.versionName} (Build ${verifiedInfo.versionCode})"
+                _firebaseUploadStageText.value = successMsg
+                _versionJsonUploadStatus.value = successMsg
+                _lastUpdateCheckStatus.value = successMsg
+                postMessage(successMsg, isError = false)
+                refreshBuildIdentityReport()
+                onSuccess(verifiedInfo, storageUrl)
+            }.onFailure { err ->
+                _firebaseUploadProgress.value = 0
+                val failMsg = err.message ?: "تعذر رفع ملف version.json إلى Firebase Storage"
+                _firebaseUploadStageText.value = failMsg
+                _versionJsonUploadStatus.value = failMsg
+                postMessage(failMsg, isError = true)
+            }
+        }
+    }
+
+    /**
+     * قراءة ملف version.json المختار من ذاكرة الهاتف ورفعه مباشرة إلى Firebase Storage
+     */
+    fun uploadVersionJsonFromUri(
+        context: android.content.Context,
+        uri: android.net.Uri,
+        onLoadedJson: (String) -> Unit = {}
+    ) {
+        val user = currentUser.value
+        val isAdmin = user.isSuperAdminAccount() || user?.username?.equals("admin", ignoreCase = true) == true
+        if (!isAdmin) {
+            postMessage("عفواً، صلاحية رفع ملف version.json مخصصة لحساب المدير العام (admin) فقط", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            _isUploadingUpdateToFirebase.value = true
+            _firebaseUploadProgress.value = 2
+            _firebaseUploadStageText.value = "جاري قراءة ملف version.json من ذاكرة الجهاز..."
+            val readResult = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                        ?: throw Exception("تعذر فتح الملف المختار للقراءة")
+                }
+            }
+            readResult.onSuccess { rawJson ->
+                onLoadedJson(rawJson)
+                uploadVersionJsonToFirebaseStorage(rawJson)
+            }.onFailure { err ->
+                _isUploadingUpdateToFirebase.value = false
+                _firebaseUploadProgress.value = 0
+                val msg = "تعذر قراءة ملف version.json المختار: ${err.localizedMessage}"
+                _firebaseUploadStageText.value = msg
+                _versionJsonUploadStatus.value = msg
+                postMessage(msg, isError = true)
+            }
         }
     }
 
@@ -1382,19 +1744,19 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 _downloadedApkFile.value = null
                 _updateProgress.value = 0
                 updateManager.resetDownloadState()
-                val msg = "تم التحديث بنجاح والتحقق من تثبيت الحزمة الفعلية (v${verifyResult.versionName} • Build ${verifyResult.versionCode} • ${verifyResult.buildId}) مع الحفاظ الكامل على البيانات"
+                _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
+                val msg = "تم تحديث التطبيق بنجاح إلى الإصدار ${verifyResult.versionName}."
                 _lastUpdateCheckStatus.value = msg
                 postMessage(msg, isError = false)
             }
             is com.example.util.PendingInstallVerification.NotYetInstalled -> {
-                val installedName = updateManager.getEffectiveVersionName()
                 val reason = verifyResult.diagnosticError.ifBlank {
-                    "لم يكتمل تثبيت الحزمة الجديدة من نظام أندرويد بعد"
+                    "لم يكتمل تثبيت التحديث بعد."
                 }
-                val errMsg = "تنبيه التثبيت: التطبيق يعمل حالياً بالإصدار v$installedName (Build ${verifyResult.currentInstalledCode}). $reason"
-                _lastUpdateCheckStatus.value = errMsg
+                val cleanMsg = UpdateManager.sanitizeUserFacingErrorMessage(reason)
+                _lastUpdateCheckStatus.value = cleanMsg
                 if (verifyResult.diagnosticError.isNotBlank()) {
-                    postMessage(errMsg, isError = true)
+                    postMessage(cleanMsg, isError = true)
                 }
             }
             com.example.util.PendingInstallVerification.None -> {
@@ -1406,6 +1768,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     _downloadedApkFile.value = null
                     _updateProgress.value = 0
                     updateManager.resetDownloadState()
+                    _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
                 }
             }
         }
@@ -1415,47 +1778,54 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun checkForAppUpdates(manual: Boolean = true, customUrl: String? = null) {
         if (_isCheckingUpdate.value) {
             if (manual) {
-                postMessage("جاري التحقق من التحديثات بالفعل، يرجى الانتظار لحظات...")
+                postMessage("جاري التحقق من التحديثات، يرجى الانتظار...")
             }
             return
         }
         viewModelScope.launch {
             _isCheckingUpdate.value = true
+            _updateUiState.value = com.example.util.UpdateUiState.CHECKING
+            _lastUpdateCheckStatus.value = "جاري التحقق من وجود تحديثات..."
             verifyPostInstallAndRefreshVersion()
             val url = customUrl ?: customUpdateMetadataUrl.value
             val result = updateManager.checkForUpdates(url, serverClusterCode.value)
             _isCheckingUpdate.value = false
 
             val installedCode = updateManager.getEffectiveVersionCode()
-            val installedName = updateManager.getEffectiveVersionName()
-            val installedBuildId = updateManager.getInstalledBuildId()
 
             result.onSuccess { updateInfo ->
                 if (updateInfo != null && updateInfo.versionCode > installedCode) {
                     _availableUpdate.value = updateInfo
                     _updateAvailable.value = true
-                    val sizeLabel = if (updateInfo.fileSizeMb > 0) " (${updateInfo.fileSizeMb}MB)" else ""
-                    val buildLabel = if (updateInfo.buildId.isNotBlank()) " • ${updateInfo.buildId}" else ""
-                    val statusMsg = "تحديث متوفر: ${updateInfo.versionName} (Build ${updateInfo.versionCode}$buildLabel)$sizeLabel"
+                    _updateUiState.value = com.example.util.UpdateUiState.AVAILABLE
+                    val statusMsg = "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات."
                     _lastUpdateCheckStatus.value = statusMsg
-                    postMessage("يتوفر تحديث جديد: ${updateInfo.versionName} (Build ${updateInfo.versionCode})$sizeLabel")
+                    com.example.util.UpdateNotificationHelper.notifyNewUpdateAvailableIfNeeded(
+                        context = getApplication(),
+                        updateInfo = updateInfo,
+                        installedVersionCode = installedCode
+                    )
+                    if (manual) {
+                        postMessage("يتوفر تحديث جديد (${updateInfo.versionName}).")
+                    }
                 } else {
                     _availableUpdate.value = null
                     _updateAvailable.value = false
                     _downloadedApkFile.value = null
-                    val upToDateMsg = "التطبيق محدّث إلى آخر إصدار فعلي (v$installedName • Build $installedCode • $installedBuildId)"
+                    _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
+                    val upToDateMsg = "أنت تستخدم أحدث إصدار من PMP PAINTS."
                     _lastUpdateCheckStatus.value = upToDateMsg
                     if (manual) {
-                        postMessage(upToDateMsg)
+                        postMessage("التطبيق محدّث — أنت تستخدم أحدث إصدار من PMP PAINTS.")
                     }
                 }
                 refreshBuildIdentityReport()
             }.onFailure { err ->
-                val reason = err.message ?: "تعذر الاتصال بخادم التحديثات"
-                val failMsg = "تعذر التحقق من التحديثات: $reason"
-                _lastUpdateCheckStatus.value = failMsg
+                val cleanErr = UpdateManager.sanitizeUserFacingErrorMessage(err.message)
+                _updateUiState.value = com.example.util.UpdateUiState.FAILED
+                _lastUpdateCheckStatus.value = cleanErr
                 if (manual) {
-                    postMessage(failMsg, isError = true)
+                    postMessage(cleanErr, isError = true)
                 }
                 refreshBuildIdentityReport()
             }
@@ -1466,86 +1836,147 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         vCode: Int,
         vName: String,
         dlUrl: String,
-        releaseNotes: String = "تحديث أمان واستقرار جديد لمنظومة PMP Paints",
+        releaseNotes: String = "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات.",
         sha256: String = "",
         buildId: String = "",
-        gitCommit: String = ""
+        gitCommit: String = "",
+        isMandatory: Boolean = false,
+        requireRemoteBinaryVerification: Boolean = true
     ) {
-        val isAdmin = currentUser.value?.username?.equals("admin", ignoreCase = true) == true
+        val user = currentUser.value
+        val isAdmin = user.isSuperAdminAccount() || user?.username?.equals("admin", ignoreCase = true) == true
         if (!isAdmin) {
-            postMessage("عفواً، صلاحية بث ونشر التحديثات السحابية مخصصة لحساب (admin) فقط", isError = true)
+            postMessage("عفواً، صلاحية بث ونشر التحديثات السحابية مخصصة لحساب المدير العام (admin) فقط", isError = true)
             return
         }
         viewModelScope.launch {
             _isCheckingUpdate.value = true
+            _isUploadingUpdateToFirebase.value = true
+            _firebaseUploadProgress.value = 5
+            _firebaseUploadStageText.value = "جاري التحقق من جاهزية الإصدار ونشره في السحابة..."
+            updateManager.setAdminBroadcastGuardEnabled(true)
             val info = UpdateInfo(
                 versionCode = vCode,
                 versionName = vName,
                 downloadUrl = dlUrl,
                 releaseNotes = releaseNotes,
+                isMandatory = isMandatory,
                 sha256Checksum = sha256.trim(),
-                fileSizeMb = 18.5,
+                fileSizeMb = 30.6,
+                fileSize = if (vCode == UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionCode) {
+                    UpdateManager.LATEST_CLOUD_RELEASE_INFO.fileSize
+                } else {
+                    0L
+                },
                 buildId = buildId.trim(),
-                gitCommit = gitCommit.trim()
+                gitCommit = gitCommit.trim().ifBlank { BuildConfig.GIT_COMMIT_SHA },
+                signingCertSha256 = UpdateManager.APPROVED_SIGNING_CERT_SHA256,
+                releaseStatus = "PUBLISHED"
             )
             val res = updateManager.publishVersionToFirestore(
                 info = info,
                 clusterCode = serverClusterCode.value,
-                requireRemoteBinaryVerification = true
+                requireRemoteBinaryVerification = requireRemoteBinaryVerification,
+                onProgress = { pct, stage ->
+                    _firebaseUploadProgress.value = pct
+                    _firebaseUploadStageText.value = stage
+                }
             )
             _isCheckingUpdate.value = false
+            _isUploadingUpdateToFirebase.value = false
             res.onSuccess { verified ->
-                postMessage("تم التحقق من ملف APK الفعلي ونشر الإصدار v${verified.versionName} (Build ${verified.versionCode} • ${verified.buildId}) على السحابة بنجاح!")
+                _firebaseUploadProgress.value = 100
+                if (verified.versionCode > updateManager.getEffectiveVersionCode()) {
+                    _availableUpdate.value = verified
+                    _updateAvailable.value = true
+                    _updateUiState.value = com.example.util.UpdateUiState.AVAILABLE
+                }
+                val msg = "تم نشر التحديث السحابي (${verified.versionName}) بنجاح لجميع الأجهزة."
+                _firebaseUploadStageText.value = msg
+                _lastUpdateCheckStatus.value = msg
+                postMessage(msg, isError = false)
                 refreshBuildIdentityReport()
             }.onFailure {
-                postMessage("${it.message}", isError = true)
+                _firebaseUploadProgress.value = 0
+                val errMsg = it.message ?: "تعذر نشر التحديث في السحابة."
+                _firebaseUploadStageText.value = errMsg
+                postMessage(errMsg, isError = true)
                 refreshBuildIdentityReport()
             }
         }
     }
 
     /**
-     * التحقق من وجود حزمة APK المبنية على خادم الإصدارات ثم بث التحديث المعتمد إلى كافة النسخ السابقة سحابياً (حصرياً لحساب admin فقط)
+     * بث التحديث المعتمد إلى كافة النسخ السابقة أو جميع الأجهزة سحابياً عبر حساب المدير (admin)
      */
-    fun broadcastUpdateToAllPreviousVersions(customCandidate: UpdateInfo? = null) {
-        val isAdmin = currentUser.value?.username?.equals("admin", ignoreCase = true) == true
+    fun broadcastUpdateToAllPreviousVersions(
+        customCandidate: UpdateInfo? = null,
+        forceNewIncrement: Boolean = false
+    ) {
+        val user = currentUser.value
+        val isAdmin = user.isSuperAdminAccount() || user?.username?.equals("admin", ignoreCase = true) == true
         if (!isAdmin) {
-            postMessage("عفواً، صلاحية بث التحديثات للنسخ السابقة مخصصة لحساب (admin) فقط", isError = true)
+            postMessage("عفواً، صلاحية بث التحديثات السحابية مخصصة لحساب المدير العام (admin) فقط", isError = true)
             return
         }
         viewModelScope.launch {
             _isCheckingUpdate.value = true
+            _isUploadingUpdateToFirebase.value = true
+            _firebaseUploadProgress.value = 5
+            _firebaseUploadStageText.value = "جاري التحقق من حزمة التحديث ورفعها إلى السحابة..."
+            updateManager.setAdminBroadcastGuardEnabled(true)
             val release = customCandidate ?: _availableUpdate.value ?: UpdateManager.LATEST_CLOUD_RELEASE_INFO
             val res = updateManager.broadcastToAllClusters(
                 info = release,
                 primaryClusterCode = serverClusterCode.value,
-                forceNewIncrement = false
+                forceNewIncrement = forceNewIncrement,
+                onProgress = { pct, stage ->
+                    _firebaseUploadProgress.value = pct
+                    _firebaseUploadStageText.value = stage
+                }
             )
             _isCheckingUpdate.value = false
+            _isUploadingUpdateToFirebase.value = false
             res.onSuccess { verified ->
-                _lastUpdateCheckStatus.value =
-                    "تم التحقق من الحزمة وبث الإصدار v${verified.versionName} (Build ${verified.versionCode} • ${verified.buildId}) لجميع المستخدمين."
-                postMessage("تم التحقق من ملف APK الفعلي وبث الإصدار v${verified.versionName} (Build ${verified.versionCode}) لكافة النسخ السابقة بنجاح!")
+                _firebaseUploadProgress.value = 100
+                if (verified.versionCode > updateManager.getEffectiveVersionCode()) {
+                    _availableUpdate.value = verified
+                    _updateAvailable.value = true
+                    _updateUiState.value = com.example.util.UpdateUiState.AVAILABLE
+                }
+                val doneMsg = "تم بث التحديث السحابي (${verified.versionName}) لجميع الأجهزة بنجاح."
+                _firebaseUploadStageText.value = doneMsg
+                _lastUpdateCheckStatus.value = doneMsg
+                postMessage(doneMsg)
                 refreshBuildIdentityReport()
             }.onFailure { err ->
-                val msg = err.message ?: "تعذر بث التحديث سحابياً"
-                _lastUpdateCheckStatus.value = msg
+                _firebaseUploadProgress.value = 0
+                val msg = err.message ?: "تعذر بث التحديث سحابياً."
+                _firebaseUploadStageText.value = msg
                 postMessage(msg, isError = true)
                 refreshBuildIdentityReport()
             }
         }
     }
 
-    fun downloadAndInstallUpdate(context: android.content.Context, onReadyToInstall: (File) -> Unit) {
+    fun cancelUpdateDownload() {
+        updateManager.cancelDownload()
+        _isDownloadingUpdate.value = false
+        _updateUiState.value = com.example.util.UpdateUiState.CANCELLED
+        _lastUpdateCheckStatus.value = "تم إيقاف تنزيل التحديث مؤقتاً. يمكنك إعادة المحاولة في أي وقت."
+    }
+
+    fun startUpdateDownload(onReadyToInstall: (File) -> Unit = {}) {
         if (_isDownloadingUpdate.value) return
         val update = _availableUpdate.value
         if (update == null) {
-            postMessage("لا يوجد تحديث متاح حالياً للتنزيل، قم بالضغط على فحص التحديثات أولاً", isError = true)
+            postMessage("لا يوجد تحديث متاح حالياً للتنزيل.", isError = true)
             return
         }
 
         viewModelScope.launch {
             _isDownloadingUpdate.value = true
+            _updateUiState.value = com.example.util.UpdateUiState.DOWNLOADING
             _updateProgress.value = 0
             val result = updateManager.downloadApk(update) { percent, _, _ ->
                 if (percent >= 0) {
@@ -1557,35 +1988,42 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             result.onSuccess { apkFile ->
                 _downloadedApkFile.value = apkFile
                 _updateProgress.value = 100
-                _lastUpdateCheckStatus.value =
-                    "اكتمل تنزيل الحزمة الفعلية (${update.versionName} • Build ${update.versionCode}) والتحقق من التوقيع وSHA-256 — جاهز للتثبيت"
-                postMessage("اكتمل تنزيل ملف APK الموثّق (${update.versionName}) والتحقق من سلامة الحزمة والتوقيع — اضغط لتأكيد التثبيت")
+                _updateUiState.value = com.example.util.UpdateUiState.READY_TO_INSTALL
+                _lastUpdateCheckStatus.value = "تم تنزيل التحديث بنجاح."
                 onReadyToInstall(apkFile)
             }.onFailure { err ->
                 _downloadedApkFile.value = null
-                _lastUpdateCheckStatus.value = "فشل تنزيل التحديث: ${err.message}"
-                postMessage("${err.message}", isError = true)
+                if (err is kotlinx.coroutines.CancellationException) {
+                    _updateUiState.value = com.example.util.UpdateUiState.CANCELLED
+                    _lastUpdateCheckStatus.value = "تم إيقاف تنزيل التحديث مؤقتاً."
+                } else {
+                    val cleanErr = UpdateManager.sanitizeUserFacingErrorMessage(err.message)
+                    _updateUiState.value = com.example.util.UpdateUiState.FAILED
+                    _lastUpdateCheckStatus.value = cleanErr
+                    postMessage(cleanErr, isError = true)
+                }
             }
         }
+    }
+
+    fun downloadAndInstallUpdate(context: android.content.Context, onReadyToInstall: (File) -> Unit = {}) {
+        startUpdateDownload(onReadyToInstall = onReadyToInstall)
     }
 
     fun launchApkInstallation(context: android.content.Context, apkFile: File? = null) {
         val target = apkFile ?: _downloadedApkFile.value
         if (target == null || !target.exists()) {
-            postMessage("ملف الـ APK غير متوفر، يرجى إعادة تنزيل التحديث", isError = true)
+            postMessage("يرجى تنزيل التحديث أولاً قبل التثبيت.", isError = true)
             return
         }
         val pendingUpdate = _availableUpdate.value
         val res = updateManager.installApk(context, target, pendingUpdate)
         res.onSuccess {
-            val targetName = pendingUpdate?.versionName ?: "الجديد"
-            val targetCode = pendingUpdate?.versionCode ?: (updateManager.getEffectiveVersionCode() + 1)
-            _lastUpdateCheckStatus.value =
-                "في انتظار موافقة المستخدم على تثبيت الحزمة الفعلية v$targetName (Build $targetCode) من نافذة نظام أندرويد..."
-            postMessage("تم فتح شاشة تثبيت نظام أندرويد لتثبيت الحزمة الفعلية (v$targetName • Build $targetCode) — يرجى الضغط على «تثبيت / تحديث» لإتمام الترقية.")
+            _updateUiState.value = com.example.util.UpdateUiState.INSTALLING
+            _lastUpdateCheckStatus.value = "يرجى المتابعة في نافذة التثبيت لإتمام تحديث التطبيق."
         }.onFailure { err ->
-            val errMsg = err.message ?: "تعذر بدء معالج التثبيت"
-            _lastUpdateCheckStatus.value = "تعذر التثبيت: $errMsg"
+            val errMsg = UpdateManager.sanitizeUserFacingErrorMessage(err.message)
+            _lastUpdateCheckStatus.value = errMsg
             postMessage(errMsg, isError = true)
         }
     }
@@ -1835,12 +2273,6 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-
-    val syncDiagnostics = cloudErpSyncRepo.diagnostics
-    val lastSuccessfulSyncTime = cloudErpSyncRepo.lastSuccessfulSyncTime
-    val pendingSyncErrors = cloudErpSyncRepo.pendingErrors
-
-    val transactionTraces = com.example.util.RoomTransactionLogger.traces
 
     fun clearTransactionTraces() {
         com.example.util.RoomTransactionLogger.clearTraces()
@@ -2096,8 +2528,6 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-
-    val pendingApprovalUserCode = MutableStateFlow<String?>(null)
 
     fun submitNewEmployeeRequest(
         fullName: String,

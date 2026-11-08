@@ -1,14 +1,19 @@
 package com.example.data.local
 
 import android.content.Context
+import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 @Database(
     entities = [
@@ -34,7 +39,7 @@ import kotlinx.coroutines.launch
         ChemicalSafetyEntity::class,
         ProductionBatchEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
@@ -318,15 +323,42 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+            }
+        }
+
+        private val dbCallbackMutex = Mutex()
+        private val dbCallbackScope = CoroutineScope(
+            SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
+                Log.e("PmpDatabase", "Caught exception in DatabaseCallback", throwable)
+            }
+        )
+
         fun getDatabase(context: Context): PmpDatabase {
             return INSTANCE ?: synchronized(this) {
                 val appContext = context.applicationContext
+                runCatching {
+                    DeletedAccountsRegistry.init(appContext)
+                    DeletedRecordsRegistry.init(appContext)
+                }
                 val instance = Room.databaseBuilder(
                     appContext,
                     PmpDatabase::class.java,
                     "pmp_paints_v16.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                    .addMigrations(
+                        MIGRATION_1_2,
+                        MIGRATION_2_3,
+                        MIGRATION_3_4,
+                        MIGRATION_4_5,
+                        MIGRATION_5_6,
+                        MIGRATION_6_7,
+                        MIGRATION_7_8,
+                        MIGRATION_8_9,
+                        MIGRATION_9_10
+                    )
                     .fallbackToDestructiveMigration()
                     .addCallback(DatabaseCallback(appContext))
                     .build()
@@ -339,26 +371,42 @@ abstract class PmpDatabase : RoomDatabase() {
     private class DatabaseCallback(private val appContext: Context) : Callback() {
         override fun onCreate(db: SupportSQLiteDatabase) {
             super.onCreate(db)
-            CoroutineScope(Dispatchers.IO).launch {
-                INSTANCE?.let { database ->
-                    val dao = database.pmpDao()
-                    val restored = DatabaseBackupManager.restoreIfEmpty(appContext, dao)
-                    if (!restored) {
-                        seedInitialData(dao)
+            dbCallbackScope.launch {
+                dbCallbackMutex.withLock {
+                    try {
+                        DeletedAccountsRegistry.init(appContext)
+                        DeletedRecordsRegistry.init(appContext)
+                        INSTANCE?.let { database ->
+                            val dao = database.pmpDao()
+                            val restored = DatabaseBackupManager.restoreIfEmpty(appContext, dao)
+                            if (!restored) {
+                                seedInitialData(dao)
+                            }
+                            DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
+                        }
+                    } catch (t: Throwable) {
+                        Log.e("PmpDatabase", "Error in DatabaseCallback.onCreate", t)
                     }
-                    DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
                 }
             }
         }
 
         override fun onOpen(db: SupportSQLiteDatabase) {
             super.onOpen(db)
-            CoroutineScope(Dispatchers.IO).launch {
-                INSTANCE?.let { database ->
-                    val dao = database.pmpDao()
-                    DatabaseBackupManager.restoreIfEmpty(appContext, dao)
-                    seedDefaultUsersIfEmpty(dao)
-                    DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
+            dbCallbackScope.launch {
+                dbCallbackMutex.withLock {
+                    try {
+                        DeletedAccountsRegistry.init(appContext)
+                        DeletedRecordsRegistry.init(appContext)
+                        INSTANCE?.let { database ->
+                            val dao = database.pmpDao()
+                            DatabaseBackupManager.restoreIfEmpty(appContext, dao)
+                            seedDefaultUsersIfEmpty(dao)
+                            DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
+                        }
+                    } catch (t: Throwable) {
+                        Log.e("PmpDatabase", "Error in DatabaseCallback.onOpen", t)
+                    }
                 }
             }
         }

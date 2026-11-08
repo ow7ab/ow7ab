@@ -25,7 +25,7 @@ interface PmpDao {
     @Query("SELECT * FROM movements WHERE cashbox = :cashbox ORDER BY id DESC")
     fun getMovementsByCashbox(cashbox: String): Flow<List<MovementEntity>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMovement(movement: MovementEntity): Long
 
     @Query("DELETE FROM movements WHERE cashbox = :cashbox")
@@ -38,7 +38,7 @@ interface PmpDao {
     @Query("SELECT * FROM transfers ORDER BY id DESC")
     fun getAllTransfers(): Flow<List<TransferEntity>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTransfer(transfer: TransferEntity): Long
 
     @Query("DELETE FROM transfers WHERE id = :id")
@@ -48,7 +48,7 @@ interface PmpDao {
     @Query("SELECT * FROM daily_closings ORDER BY id DESC")
     fun getAllDailyClosings(): Flow<List<DailyClosingEntity>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDailyClosing(closing: DailyClosingEntity): Long
 
     // --- Customers ---
@@ -83,7 +83,7 @@ interface PmpDao {
     @Query("SELECT * FROM invoices WHERE id = :invoiceId LIMIT 1")
     suspend fun getInvoiceById(invoiceId: Long): InvoiceEntity?
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertInvoice(invoice: InvoiceEntity): Long
 
     @Update
@@ -98,7 +98,7 @@ interface PmpDao {
     @Query("SELECT * FROM invoice_items WHERE invoiceId = :invoiceId")
     fun getInvoiceItems(invoiceId: Long): Flow<List<InvoiceItemEntity>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertInvoiceItems(items: List<InvoiceItemEntity>)
 
     // --- Payments ---
@@ -108,7 +108,7 @@ interface PmpDao {
     @Query("SELECT * FROM invoice_payments WHERE invoiceId = :invoiceId")
     fun getInvoicePayments(invoiceId: Long): Flow<List<InvoicePaymentEntity>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertInvoicePayment(payment: InvoicePaymentEntity): Long
 
     @Update
@@ -142,7 +142,7 @@ interface PmpDao {
     @Query("SELECT * FROM stock_moves ORDER BY id DESC")
     fun getAllStockMoves(): Flow<List<StockMoveEntity>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertStockMove(stockMove: StockMoveEntity): Long
 
     @Query("DELETE FROM stock_moves WHERE warehouseId = :warehouseId")
@@ -179,13 +179,13 @@ interface PmpDao {
     @Query("SELECT * FROM factory_moves ORDER BY id DESC")
     fun getAllFactoryMoves(): Flow<List<FactoryMoveEntity>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFactoryMove(move: FactoryMoveEntity): Long
 
     @Query("SELECT * FROM halfa_invoices ORDER BY id DESC")
     fun getAllHalfaInvoices(): Flow<List<HalfaInvoiceEntity>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertHalfaInvoice(invoice: HalfaInvoiceEntity): Long
 
     // --- Poster Prices ---
@@ -202,7 +202,7 @@ interface PmpDao {
     @Query("SELECT * FROM audit_log ORDER BY id DESC LIMIT 500")
     fun getAuditLogs(): Flow<List<AuditLogEntity>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAuditLog(log: AuditLogEntity): Long
 
     // --- User Accounts & Server Sync ---

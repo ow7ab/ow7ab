@@ -48,17 +48,21 @@ import com.example.ui.theme.*
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
-private val TopHighlightBrush = Brush.horizontalGradient(
-    colors = listOf(
-        Color.Transparent,
-        Color.White.copy(alpha = 0.90f),
-        Color.Transparent
+private val TopHighlightBrush: Brush
+    get() = Brush.horizontalGradient(
+        colors = listOf(
+            Color.Transparent,
+            if (PmpThemeController.isDarkModeActive) Color(0xFF64748B).copy(alpha = 0.55f) else Color.White.copy(alpha = 0.90f),
+            Color.Transparent
+        )
     )
-)
 
-private val DisabledButtonBrush = Brush.linearGradient(
-    listOf(Color(0xFFE2EAF2), Color(0xFFD6E2EE))
-)
+private val DisabledButtonBrush: Brush
+    get() = if (PmpThemeController.isDarkModeActive) {
+        Brush.linearGradient(listOf(Color(0xFF1E293B), Color(0xFF0F172A)))
+    } else {
+        Brush.linearGradient(listOf(Color(0xFFE2EAF2), Color(0xFFD6E2EE)))
+    }
 
 @Composable
 fun GlassCard(
@@ -70,12 +74,13 @@ fun GlassCard(
     onClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
+    val isDark = PmpThemeController.isDarkModeActive
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
     val clickModifier = if (onClick != null) {
         Modifier.clickable(onClick = onClick)
     } else Modifier
 
-    val borderBrush = remember(borderColor) {
+    val borderBrush = remember(borderColor, isDark) {
         if (borderColor != null) {
             Brush.linearGradient(
                 listOf(
@@ -88,18 +93,33 @@ fun GlassCard(
         }
     }
 
-    val cardBgBrush = remember(backgroundColor, glowAccentColor) {
+    val cardBgBrush = remember(backgroundColor, glowAccentColor, isDark) {
+        val effectiveBg = if (isDark && backgroundColor == Color.White) {
+            Color(0xFF1E293B)
+        } else {
+            backgroundColor
+        }
         when {
-            backgroundColor != null -> Brush.verticalGradient(
-                listOf(backgroundColor, backgroundColor.copy(alpha = 0.95f))
+            effectiveBg != null -> Brush.verticalGradient(
+                listOf(effectiveBg, effectiveBg.copy(alpha = 0.95f))
             )
-            glowAccentColor != null -> Brush.linearGradient(
-                listOf(
-                    Color.White.copy(alpha = 0.97f),
-                    glowAccentColor.copy(alpha = 0.05f),
-                    Color(0xFFF8FAFC).copy(alpha = 0.95f)
+            glowAccentColor != null -> if (isDark) {
+                Brush.linearGradient(
+                    listOf(
+                        Color(0xFF1E293B).copy(alpha = 0.96f),
+                        glowAccentColor.copy(alpha = 0.14f),
+                        Color(0xFF0F172A).copy(alpha = 0.96f)
+                    )
                 )
-            )
+            } else {
+                Brush.linearGradient(
+                    listOf(
+                        Color.White.copy(alpha = 0.97f),
+                        glowAccentColor.copy(alpha = 0.05f),
+                        Color(0xFFF8FAFC).copy(alpha = 0.95f)
+                    )
+                )
+            }
             else -> FrostedGlassGradient
         }
     }
@@ -416,6 +436,7 @@ fun GlassTextField(
     isNumber: Boolean = false,
     readOnly: Boolean = false
 ) {
+    val isDark = PmpThemeController.isDarkModeActive
     Column(modifier = modifier) {
         if (label.isNotBlank()) {
             Text(
@@ -449,7 +470,7 @@ fun GlassTextField(
             textStyle = LocalTextStyle.current.copy(fontSize = 13.sp, fontWeight = FontWeight.Medium),
             shape = RoundedCornerShape(14.dp),
             colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = Color.White,
+                focusedContainerColor = if (isDark) Color(0xFF1E293B) else Color.White,
                 unfocusedContainerColor = GlassInput,
                 focusedBorderColor = PmpBlue,
                 unfocusedBorderColor = GlassBorder,
@@ -527,7 +548,7 @@ fun GlassDropdown(
                 expanded = expanded,
                 onDismissRequest = { expanded = false },
                 modifier = Modifier
-                    .background(Color.White)
+                    .background(PmpWhiteSurface)
                     .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
             ) {
                 options.forEach { option ->
@@ -571,6 +592,7 @@ fun OneUiPullDownContainer(
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val viewConfiguration = LocalViewConfiguration.current
+    val isDark = PmpThemeController.isDarkModeActive
 
     // Raw accumulated finger pull distance (in pixels); mapped through hyperbolic elastic damping
     var rawPullPx by remember { mutableFloatStateOf(0f) }
@@ -585,23 +607,37 @@ fun OneUiPullDownContainer(
         animatedOffsetPx.snapTo(0f)
     }
 
+    val pullRevealBgBrush = if (isDark) {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF060911),
+                Color(0xFF0B1120),
+                Color(0xFF0F172A)
+            )
+        )
+    } else {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFFE2E8F0),
+                Color(0xFFEDF2F7),
+                Color(0xFFF8FAFC)
+            )
+        )
+    }
+
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFFE2E8F0),
-                        Color(0xFFEDF2F7),
-                        Color(0xFFF8FAFC)
-                    )
-                )
-            )
+            .background(pullRevealBgBrush)
             .testTag("one_ui_pull_down_root")
     ) {
-        val containerHeightPx = with(density) { maxHeight.toPx().coerceAtLeast(600f) }
+        val containerHeightPx = if (maxHeight != androidx.compose.ui.unit.Dp.Infinity && maxHeight.value.isFinite() && maxHeight > 0.dp) {
+            with(density) { maxHeight.toPx().coerceIn(600f, 4000f) }
+        } else {
+            1800f
+        }
         val maxElasticTranslationPx = remember(containerHeightPx) {
-            (containerHeightPx * 0.44f).coerceAtLeast(320f)
+            (containerHeightPx * 0.44f).coerceIn(320f, 1800f)
         }
         val deepPullThresholdPx = remember(maxElasticTranslationPx) {
             maxElasticTranslationPx * 0.58f

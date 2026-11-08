@@ -81,6 +81,50 @@ class CloudErpSyncRepository(
     // Global mutex guaranteeing non-overlapping synchronization passes (prevents sync concurrency collisions)
     private val syncMutex = Mutex()
 
+    private val syncExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
+        Log.e(TAG, "Recovered uncaught sync coroutine exception: ${throwable.message}", throwable)
+    }
+
+    private fun com.google.firebase.firestore.DocumentSnapshot.safeString(field: String): String? =
+        runCatching {
+            when (val raw = get(field)) {
+                is String -> raw
+                is Number -> raw.toString()
+                is Boolean -> raw.toString()
+                is com.google.firebase.Timestamp -> raw.toDate().toInstant().toString()
+                else -> getString(field)
+            }
+        }.getOrNull()
+
+    private fun com.google.firebase.firestore.DocumentSnapshot.safeLong(field: String): Long? =
+        runCatching {
+            when (val raw = get(field)) {
+                is Number -> raw.toLong()
+                is String -> raw.trim().toLongOrNull()
+                is com.google.firebase.Timestamp -> raw.toDate().time
+                else -> getLong(field)
+            }
+        }.getOrNull()
+
+    private fun com.google.firebase.firestore.DocumentSnapshot.safeDouble(field: String): Double? =
+        runCatching {
+            when (val raw = get(field)) {
+                is Number -> raw.toDouble()
+                is String -> raw.trim().toDoubleOrNull()
+                else -> getDouble(field)
+            }
+        }.getOrNull()
+
+    private fun com.google.firebase.firestore.DocumentSnapshot.safeBoolean(field: String): Boolean? =
+        runCatching {
+            when (val raw = get(field)) {
+                is Boolean -> raw
+                is String -> raw.trim().equals("true", ignoreCase = true) || raw.trim() == "1"
+                is Number -> raw.toInt() != 0
+                else -> getBoolean(field)
+            }
+        }.getOrNull()
+
     fun clearPendingError(errorId: String) {
         _pendingErrors.value = _pendingErrors.value.filter { it.id != errorId }
     }
@@ -1963,18 +2007,18 @@ class CloudErpSyncRepository(
                     return@addSnapshotListener
                 }
                 if (snapshot != null && !snapshot.isEmpty) {
-                    scope.launch(Dispatchers.IO) {
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             val localUsers = dao.getUserAccountsDirect()
                             val activeId = currentActiveUserId()
 
                             for (doc in snapshot.documents) {
-                                val code = doc.getString("userCode") ?: doc.id
-                                val uname = doc.getString("username") ?: ""
-                                val email = doc.getString("phoneOrEmail") ?: ""
-                                val remoteUid = doc.getString("remoteServerId") ?: ""
+                                val code = doc.safeString("userCode") ?: doc.id
+                                val uname = doc.safeString("username") ?: ""
+                                val email = doc.safeString("phoneOrEmail") ?: ""
+                                val remoteUid = doc.safeString("remoteServerId") ?: ""
 
-                                val isExplicitlyDeleted = doc.getBoolean("deleted") == true
+                                val isExplicitlyDeleted = doc.safeBoolean("deleted") == true
                                 if (isExplicitlyDeleted || DeletedAccountsRegistry.isDeleted(code, uname, email)) {
                                     val existingDel = localUsers.firstOrNull {
                                         it.userCode.equals(code, ignoreCase = true) ||
@@ -2001,25 +2045,25 @@ class CloudErpSyncRepository(
                                     existing?.isCurrentSession == true
                                 }
 
-                                val resolvedActive = if (isThisUserActiveSession) true else (doc.getBoolean("active") ?: existing?.active ?: true)
+                                val resolvedActive = if (isThisUserActiveSession) true else (doc.safeBoolean("active") ?: existing?.active ?: true)
 
                                 val entity = UserAccountEntity(
                                     id = existing?.id ?: 0L,
                                     userCode = code,
-                                    fullName = doc.getString("fullName") ?: existing?.fullName ?: uname,
+                                    fullName = doc.safeString("fullName") ?: existing?.fullName ?: uname,
                                     username = uname.ifBlank { existing?.username ?: code.lowercase() },
                                     phoneOrEmail = email.ifBlank { existing?.phoneOrEmail ?: "" },
-                                    pinOrPassword = doc.getString("pinOrPassword") ?: existing?.pinOrPassword ?: "1234",
-                                    role = doc.getString("role") ?: existing?.role ?: "محاسب خزنة ومبيعات",
-                                    branch = doc.getString("branch") ?: existing?.branch ?: "فرع السودان (SD-001)",
-                                    permissions = doc.getString("permissions") ?: existing?.permissions ?: "",
-                                    serverSyncToken = doc.getString("serverSyncToken") ?: existing?.serverSyncToken ?: "SYNC-$code",
+                                    pinOrPassword = doc.safeString("pinOrPassword") ?: existing?.pinOrPassword ?: "1234",
+                                    role = doc.safeString("role") ?: existing?.role ?: "محاسب خزنة ومبيعات",
+                                    branch = doc.safeString("branch") ?: existing?.branch ?: "فرع السودان (SD-001)",
+                                    permissions = doc.safeString("permissions") ?: existing?.permissions ?: "",
+                                    serverSyncToken = doc.safeString("serverSyncToken") ?: existing?.serverSyncToken ?: "SYNC-$code",
                                     remoteServerId = remoteUid.ifBlank { existing?.remoteServerId ?: "" },
-                                    syncStatus = doc.getString("syncStatus") ?: existing?.syncStatus ?: "CLOUD_SYNCED",
-                                    serverEndpoint = doc.getString("serverEndpoint") ?: "https://firestore.googleapis.com/v1",
+                                    syncStatus = doc.safeString("syncStatus") ?: existing?.syncStatus ?: "CLOUD_SYNCED",
+                                    serverEndpoint = doc.safeString("serverEndpoint") ?: "https://firestore.googleapis.com/v1",
                                     isCurrentSession = isThisUserActiveSession,
                                     active = resolvedActive,
-                                    createdAt = doc.getLong("createdAt") ?: existing?.createdAt ?: System.currentTimeMillis()
+                                    createdAt = doc.safeLong("createdAt") ?: existing?.createdAt ?: System.currentTimeMillis()
                                 )
 
                                 if (existing != null) {
@@ -2031,7 +2075,7 @@ class CloudErpSyncRepository(
                                 }
                             }
                             trySend(snapshot.size())
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             Log.e(TAG, "Failed to merge realtime cluster users", e)
                         }
                     }
@@ -2055,13 +2099,13 @@ class CloudErpSyncRepository(
         val tombListener = cRef.collection("deleted_records")
             .addSnapshotListener { snapshot, error ->
                 if (error == null && snapshot != null && !snapshot.isEmpty) {
-                    scope.launch(Dispatchers.IO) {
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             val tombstones = snapshot.documents.mapNotNull { it.data }
                             DeletedRecordsRegistry.mergeRemoteTombstones(tombstones)
                             for (doc in snapshot.documents) {
-                                val col = doc.getString("collection") ?: ""
-                                val docId = doc.getString("docId") ?: doc.id
+                                val col = doc.safeString("collection") ?: ""
+                                val docId = doc.safeString("docId") ?: doc.id
                                 val numId = (doc.get("entityId") as? Number)?.toLong() ?: docId.filter { it.isDigit() }.toLongOrNull()
                                 when (col) {
                                     "movements" -> if (numId != null) dao.deleteMovementById(numId)
@@ -2072,7 +2116,7 @@ class CloudErpSyncRepository(
                                     "products" -> if (numId != null) dao.deleteProduct(numId)
                                     "warehouses" -> if (numId != null) dao.deleteWarehouse(numId)
                                     "cashboxes" -> {
-                                        val entityIdStr = doc.getString("entityId")?.trim().orEmpty()
+                                        val entityIdStr = doc.safeString("entityId")?.trim().orEmpty()
                                         if (numId != null && numId > 0L) {
                                             dao.deleteCashbox(numId)
                                         }
@@ -2091,7 +2135,7 @@ class CloudErpSyncRepository(
                                 }
                             }
                             trySend(snapshot.size())
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             Log.w(TAG, "Notice merging realtime tombstones: ${e.message}")
                         }
                     }
@@ -2102,11 +2146,11 @@ class CloudErpSyncRepository(
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
                 if (error == null && snapshot != null) {
                     if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
-                    scope.launch(Dispatchers.IO) {
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             for (dc in snapshot.documentChanges) {
                                 if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
-                                    val invId = dc.document.getLong("id")
+                                    val invId = dc.document.safeLong("id")
                                     if (invId != null) {
                                         dao.deleteInvoiceById(invId)
                                     }
@@ -2118,8 +2162,8 @@ class CloudErpSyncRepository(
                                 val restoredPayments = mutableListOf<InvoicePaymentEntity>()
 
                                 for (doc in snapshot.documents) {
-                                    val invId = doc.getLong("id") ?: continue
-                                    val invNo = doc.getString("invoiceNo") ?: doc.id
+                                    val invId = doc.safeLong("id") ?: continue
+                                    val invNo = doc.safeString("invoiceNo") ?: doc.id
 
                                     val isDel = DeletedRecordsRegistry.isDeleted("invoices", invId) ||
                                         DeletedRecordsRegistry.isDeleted("invoices", invNo) ||
@@ -2134,17 +2178,17 @@ class CloudErpSyncRepository(
                                         InvoiceEntity(
                                             id = invId,
                                             invoiceNo = invNo,
-                                            customerId = doc.getLong("customerId") ?: 1L,
-                                            customerName = doc.getString("customerName") ?: "عميل",
-                                            invoiceDate = doc.getString("invoiceDate") ?: "2026-10-26",
-                                            currency = doc.getString("currency") ?: "SDG",
-                                            subtotal = doc.getDouble("subtotal") ?: 0.0,
-                                            discount = doc.getDouble("discount") ?: 0.0,
-                                            total = doc.getDouble("total") ?: 0.0,
-                                            notes = doc.getString("notes") ?: "",
-                                            status = doc.getString("status") ?: "active",
-                                            cancelReason = doc.getString("cancelReason"),
-                                            createdBy = doc.getString("createdBy") ?: "المدير"
+                                            customerId = doc.safeLong("customerId") ?: 1L,
+                                            customerName = doc.safeString("customerName") ?: "عميل",
+                                            invoiceDate = doc.safeString("invoiceDate") ?: "2026-10-26",
+                                            currency = doc.safeString("currency") ?: "SDG",
+                                            subtotal = doc.safeDouble("subtotal") ?: 0.0,
+                                            discount = doc.safeDouble("discount") ?: 0.0,
+                                            total = doc.safeDouble("total") ?: 0.0,
+                                            notes = doc.safeString("notes") ?: "",
+                                            status = doc.safeString("status") ?: "active",
+                                            cancelReason = doc.safeString("cancelReason"),
+                                            createdBy = doc.safeString("createdBy") ?: "المدير"
                                         )
                                     )
                                     val rawItems = doc.get("items") as? List<Map<String, Any>>
@@ -2185,7 +2229,7 @@ class CloudErpSyncRepository(
                                 if (restoredPayments.isNotEmpty()) dao.upsertInvoicePayments(restoredPayments)
                             }
                             trySend(snapshot.size())
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             Log.e(TAG, "Error syncing live invoices", e)
                         }
                     }
@@ -2206,11 +2250,11 @@ class CloudErpSyncRepository(
                 }
                 if (snapshot != null) {
                     if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
-                    scope.launch(Dispatchers.IO) {
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             for (dc in snapshot.documentChanges) {
                                 if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
-                                    val movId = dc.document.getLong("id")
+                                    val movId = dc.document.safeLong("id")
                                     if (movId != null) {
                                         dao.deleteMovementById(movId)
                                     }
@@ -2218,8 +2262,8 @@ class CloudErpSyncRepository(
                             }
                             if (!snapshot.isEmpty) {
                                 for (doc in snapshot.documents) {
-                                    val movId = doc.getLong("id") ?: continue
-                                    val docCreatedAt = doc.getLong("createdAt") ?: 0L
+                                    val movId = doc.safeLong("id") ?: continue
+                                    val docCreatedAt = doc.safeLong("createdAt") ?: 0L
                                     val isDel = DeletedRecordsRegistry.isDeleted("movements", movId) ||
                                         DeletedRecordsRegistry.isDeleted("movements", "MOV-$movId") ||
                                         DeletedRecordsRegistry.isDeleted("movements", doc.id) ||
@@ -2230,8 +2274,8 @@ class CloudErpSyncRepository(
                                     }
                                 }
                                 val list = snapshot.documents.mapNotNull { doc ->
-                                    val id = doc.getLong("id") ?: return@mapNotNull null
-                                    val docCreatedAt = doc.getLong("createdAt") ?: 0L
+                                    val id = doc.safeLong("id") ?: return@mapNotNull null
+                                    val docCreatedAt = doc.safeLong("createdAt") ?: 0L
                                     if (DeletedRecordsRegistry.isDeleted("movements", id) ||
                                         DeletedRecordsRegistry.isDeleted("movements", "MOV-$id") ||
                                         DeletedRecordsRegistry.isDeleted("movements", doc.id) ||
@@ -2239,20 +2283,20 @@ class CloudErpSyncRepository(
                                     ) return@mapNotNull null
                                     MovementEntity(
                                         id = id,
-                                        txDate = doc.getString("txDate") ?: "2026-10-26",
-                                        cashbox = doc.getString("cashbox") ?: "خزنة السودان",
-                                        currency = doc.getString("currency") ?: "SDG",
-                                        direction = doc.getString("direction") ?: "وارد",
-                                        amount = doc.getDouble("amount") ?: 0.0,
-                                        description = doc.getString("description") ?: "",
-                                        reference = doc.getString("reference") ?: doc.id,
-                                        createdBy = doc.getString("createdBy") ?: "المدير"
+                                        txDate = doc.safeString("txDate") ?: "2026-10-26",
+                                        cashbox = doc.safeString("cashbox") ?: "خزنة السودان",
+                                        currency = doc.safeString("currency") ?: "SDG",
+                                        direction = doc.safeString("direction") ?: "وارد",
+                                        amount = doc.safeDouble("amount") ?: 0.0,
+                                        description = doc.safeString("description") ?: "",
+                                        reference = doc.safeString("reference") ?: doc.id,
+                                        createdBy = doc.safeString("createdBy") ?: "المدير"
                                     )
                                 }
                                 if (list.isNotEmpty()) dao.upsertMovements(list)
                             }
                             trySend(snapshot.size())
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             Log.e(TAG, "Error syncing live movements", e)
                             RoomTransactionLogger.recordSyncBreakage(
                                 operation = "APPLY_LIVE_MOVEMENTS_TO_ROOM",
@@ -2270,11 +2314,11 @@ class CloudErpSyncRepository(
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
                 if (error == null && snapshot != null) {
                     if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
-                    scope.launch(Dispatchers.IO) {
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             for (dc in snapshot.documentChanges) {
                                 if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
-                                    val custId = dc.document.getLong("id")
+                                    val custId = dc.document.safeLong("id")
                                     if (custId != null) {
                                         dao.deleteCustomer(custId)
                                     }
@@ -2282,7 +2326,7 @@ class CloudErpSyncRepository(
                             }
                             if (!snapshot.isEmpty) {
                                 for (doc in snapshot.documents) {
-                                    val custId = doc.getLong("id") ?: continue
+                                    val custId = doc.safeLong("id") ?: continue
                                     val isDel = DeletedRecordsRegistry.isDeleted("customers", custId) ||
                                         DeletedRecordsRegistry.isDeleted("customers", "CUST-$custId") ||
                                         DeletedRecordsRegistry.isDeleted("customers", doc.id)
@@ -2292,23 +2336,23 @@ class CloudErpSyncRepository(
                                     }
                                 }
                                 val list = snapshot.documents.mapNotNull { doc ->
-                                    val id = doc.getLong("id") ?: return@mapNotNull null
+                                    val id = doc.safeLong("id") ?: return@mapNotNull null
                                     if (DeletedRecordsRegistry.isDeleted("customers", id) ||
                                         DeletedRecordsRegistry.isDeleted("customers", "CUST-$id") ||
                                         DeletedRecordsRegistry.isDeleted("customers", doc.id)
                                     ) return@mapNotNull null
                                     CustomerEntity(
                                         id = id,
-                                        name = doc.getString("name") ?: "عميل",
-                                        phone = doc.getString("phone") ?: "",
-                                        address = doc.getString("address") ?: "",
-                                        notes = doc.getString("notes") ?: "",
-                                        active = doc.getBoolean("active") ?: true
+                                        name = doc.safeString("name") ?: "عميل",
+                                        phone = doc.safeString("phone") ?: "",
+                                        address = doc.safeString("address") ?: "",
+                                        notes = doc.safeString("notes") ?: "",
+                                        active = doc.safeBoolean("active") ?: true
                                     )
                                 }
                                 if (list.isNotEmpty()) dao.upsertCustomers(list)
                             }
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             Log.e(TAG, "Error syncing live customers", e)
                         }
                     }
@@ -2318,11 +2362,11 @@ class CloudErpSyncRepository(
         val prodListener = cRef.collection("products")
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
                 if (error == null && snapshot != null) {
-                    scope.launch(Dispatchers.IO) {
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             for (dc in snapshot.documentChanges) {
                                 if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
-                                    val prodId = dc.document.getLong("id")
+                                    val prodId = dc.document.safeLong("id")
                                     if (prodId != null) {
                                         dao.deleteProduct(prodId)
                                     }
@@ -2330,7 +2374,7 @@ class CloudErpSyncRepository(
                             }
                             if (!snapshot.isEmpty) {
                                 val list = snapshot.documents.mapNotNull { doc ->
-                                    val id = doc.getLong("id") ?: return@mapNotNull null
+                                    val id = doc.safeLong("id") ?: return@mapNotNull null
                                     if (DeletedRecordsRegistry.isDeleted("products", id) ||
                                         DeletedRecordsRegistry.isDeleted("products", "PROD-$id") ||
                                         DeletedRecordsRegistry.isDeleted("products", doc.id)
@@ -2341,21 +2385,21 @@ class CloudErpSyncRepository(
                                     }
                                     ProductEntity(
                                         id = id,
-                                        sku = doc.getString("sku") ?: "PMP-$id",
-                                        name = doc.getString("name") ?: "منتج",
-                                        category = doc.getString("category") ?: "بوهيات",
-                                        unit = doc.getString("unit") ?: "كرتونة",
-                                        purchasePrice = doc.getDouble("purchasePrice") ?: 0.0,
-                                        salePrice = doc.getDouble("salePrice") ?: 0.0,
-                                        minimumStock = doc.getDouble("minimumStock") ?: 10.0,
-                                        paintColor = doc.getString("paintColor") ?: "أبيض",
-                                        packageWeight = doc.getString("packageWeight") ?: "900",
-                                        active = doc.getBoolean("active") ?: true
+                                        sku = doc.safeString("sku") ?: "PMP-$id",
+                                        name = doc.safeString("name") ?: "منتج",
+                                        category = doc.safeString("category") ?: "بوهيات",
+                                        unit = doc.safeString("unit") ?: "كرتونة",
+                                        purchasePrice = doc.safeDouble("purchasePrice") ?: 0.0,
+                                        salePrice = doc.safeDouble("salePrice") ?: 0.0,
+                                        minimumStock = doc.safeDouble("minimumStock") ?: 10.0,
+                                        paintColor = doc.safeString("paintColor") ?: "أبيض",
+                                        packageWeight = doc.safeString("packageWeight") ?: "900",
+                                        active = doc.safeBoolean("active") ?: true
                                     )
                                 }
                                 if (list.isNotEmpty()) dao.upsertProducts(list)
                             }
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             Log.e(TAG, "Error syncing live products", e)
                         }
                     }
@@ -2366,11 +2410,11 @@ class CloudErpSyncRepository(
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
                 if (error == null && snapshot != null) {
                     if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
-                    scope.launch(Dispatchers.IO) {
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             for (dc in snapshot.documentChanges) {
                                 if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
-                                    val fiId = dc.document.getLong("id")
+                                    val fiId = dc.document.safeLong("id")
                                     if (fiId != null) {
                                         dao.deleteFactoryItemById(fiId)
                                     }
@@ -2378,8 +2422,8 @@ class CloudErpSyncRepository(
                             }
                             if (!snapshot.isEmpty) {
                                 val list = snapshot.documents.mapNotNull { doc ->
-                                    val id = doc.getLong("id") ?: return@mapNotNull null
-                                    val name = doc.getString("name") ?: "خامة"
+                                    val id = doc.safeLong("id") ?: return@mapNotNull null
+                                    val name = doc.safeString("name") ?: "خامة"
                                     if (DeletedRecordsRegistry.isDeleted("factory_items", id) ||
                                         DeletedRecordsRegistry.isDeleted("factory_items", "FI-$id") ||
                                         DeletedRecordsRegistry.isDeleted("factory_items", doc.id) ||
@@ -2392,13 +2436,13 @@ class CloudErpSyncRepository(
                                     FactoryItemEntity(
                                         id = id,
                                         name = name,
-                                        unit = doc.getString("unit") ?: "كجم",
-                                        category = doc.getString("category") ?: "خامات إنتاج"
+                                        unit = doc.safeString("unit") ?: "كجم",
+                                        category = doc.safeString("category") ?: "خامات إنتاج"
                                     )
                                 }
                                 if (list.isNotEmpty()) dao.upsertFactoryItems(list)
                             }
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             Log.e(TAG, "Error syncing live factory items", e)
                         }
                     }
@@ -2409,13 +2453,13 @@ class CloudErpSyncRepository(
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
                 if (error == null && snapshot != null) {
                     if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
-                    scope.launch(Dispatchers.IO) {
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             val localBoxes = dao.getCashboxesDirect()
                             for (dc in snapshot.documentChanges) {
                                 if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
-                                    val removedName = dc.document.getString("name")?.trim().orEmpty()
-                                    val removedId = dc.document.getLong("id")
+                                    val removedName = dc.document.safeString("name")?.trim().orEmpty()
+                                    val removedId = dc.document.safeLong("id")
                                     if (removedId != null && removedId > 0L) {
                                         dao.deleteCashbox(removedId)
                                     }
@@ -2428,9 +2472,9 @@ class CloudErpSyncRepository(
                             if (!snapshot.isEmpty) {
                                 val currentLocal = dao.getCashboxesDirect()
                                 val validList = snapshot.documents.mapNotNull { doc ->
-                                    val name = doc.getString("name")?.trim() ?: return@mapNotNull null
+                                    val name = doc.safeString("name")?.trim() ?: return@mapNotNull null
                                     if (name.isBlank()) return@mapNotNull null
-                                    val remoteId = doc.getLong("id") ?: 0L
+                                    val remoteId = doc.safeLong("id") ?: 0L
                                     val cbDocId = DeletedRecordsRegistry.cashboxDocId(name, remoteId)
                                     if (DeletedRecordsRegistry.isDeleted("cashboxes", name) ||
                                         DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId) ||
@@ -2452,7 +2496,7 @@ class CloudErpSyncRepository(
                                     dao.upsertCashboxes(validList)
                                 }
                             }
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             Log.e(TAG, "Error syncing live cashboxes", e)
                         }
                     }

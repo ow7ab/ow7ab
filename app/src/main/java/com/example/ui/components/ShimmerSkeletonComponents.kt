@@ -131,18 +131,20 @@ fun ProvideShimmerEffect(
 @Composable
 fun Modifier.pmpShimmerBackground(
     cornerRadius: Dp = 10.dp,
-    baseColor: Color = Color(0xFFE2E8F0),
-    highlightColor: Color = Color(0xFFF8FAFC),
+    baseColor: Color = if (PmpThemeController.isDarkModeActive) Color(0xFF1E293B) else Color(0xFFE2E8F0),
+    highlightColor: Color = if (PmpThemeController.isDarkModeActive) Color(0xFF334155) else Color(0xFFF8FAFC),
     accentTint: Color = PmpBrandNavy.copy(alpha = 0.06f)
 ): Modifier {
     val progress = LocalShimmerProgress.current
     val reduceMotion = LocalReduceMotionEnabled.current
+    val isDark = PmpThemeController.isDarkModeActive
 
     return this.drawWithCache {
         val radiusPx = cornerRadius.toPx()
         val width = size.width.coerceAtLeast(1f)
         val height = size.height.coerceAtLeast(1f)
         val shimmerBandWidth = (width * 0.65f).coerceAtLeast(120f)
+        val centerShine = if (isDark) Color(0xFF475569).copy(alpha = 0.85f) else Color.White.copy(alpha = 0.96f)
 
         onDrawBehind {
             if (reduceMotion) {
@@ -157,7 +159,7 @@ fun Modifier.pmpShimmerBackground(
                     colors = listOf(
                         baseColor.copy(alpha = 0.82f),
                         accentTint.compositeOver(highlightColor),
-                        Color.White.copy(alpha = 0.96f),
+                        centerShine,
                         accentTint.compositeOver(highlightColor),
                         baseColor.copy(alpha = 0.82f)
                     ),
@@ -195,7 +197,7 @@ fun ShimmerBlock(
     height: Dp = 14.dp,
     width: Dp? = null,
     cornerRadius: Dp = 8.dp,
-    baseColor: Color = Color(0xFFE2E8F0)
+    baseColor: Color = if (PmpThemeController.isDarkModeActive) Color(0xFF1E293B) else Color(0xFFE2E8F0)
 ) {
     val sizeMod = if (width != null) {
         modifier.width(width).height(height)
@@ -784,7 +786,7 @@ fun UpdateVersionCardSkeleton(modifier: Modifier = Modifier) {
             modifier = modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
-                .background(Color(0xFFF8FAFC))
+                .background(PmpWhiteCard)
                 .border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
                 .padding(14.dp)
                 .testTag("version_card_shimmer_skeleton")

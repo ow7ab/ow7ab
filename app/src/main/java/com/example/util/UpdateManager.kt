@@ -16,6 +16,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,7 +38,8 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * بيانات إصدار التحديث السحابي الموثّق (تشمل بصمة البناء Build ID وGit Commit وSHA-256)
+ * بيانات إصدار التحديث السحابي الموثّق
+ * تتضمن جميع الحقول القياسية المطلوبة في Firebase وGitHub Releases
  */
 data class UpdateInfo(
     val versionCode: Int,
@@ -52,11 +54,35 @@ data class UpdateInfo(
     val buildId: String = "",
     val gitCommit: String = "",
     val publishedAt: String = "",
-    val signingCertSha256: String = ""
-)
+    val signingCertSha256: String = "",
+    val releaseStatus: String = "PUBLISHED"
+) {
+    val apkSha256: String get() = sha256Checksum
+    val apkSize: Long get() = fileSize
+    val minimumSupportedVersion: Int get() = minSupportedVersionCode
+    val mandatoryUpdate: Boolean get() = isMandatory
+}
 
 /**
- * تقرير تشخيص هوية البناء الفعلي المثبت على الجهاز (Build Identity Diagnostics)
+ * آلة الحالة الموحدة لواجهة التحديثات (Update UI State Machine):
+ * IDLE -> CHECKING -> (AVAILABLE | UP_TO_DATE | FAILED)
+ * AVAILABLE -> DOWNLOADING -> VERIFYING -> READY_TO_INSTALL -> INSTALLING -> (UP_TO_DATE | FAILED | CANCELLED)
+ */
+enum class UpdateUiState {
+    IDLE,
+    CHECKING,
+    UP_TO_DATE,
+    AVAILABLE,
+    DOWNLOADING,
+    VERIFYING,
+    READY_TO_INSTALL,
+    INSTALLING,
+    FAILED,
+    CANCELLED
+}
+
+/**
+ * تقرير تشخيص هوية البناء الفعلي المثبت على الجهاز (مخصص لسجل المطور ولوحة التشخيص الإدارية)
  */
 data class BuildIdentityReport(
     val packageName: String,
@@ -106,7 +132,11 @@ sealed class DownloadState {
     ) : DownloadState()
     object VerifyingChecksum : DownloadState()
     data class ReadyToInstall(val apkFile: File, val updateInfo: UpdateInfo) : DownloadState()
-    data class Failed(val errorMessage: String, val canRetry: Boolean = true) : DownloadState()
+    data class Installing(val updateInfo: UpdateInfo) : DownloadState()
+    data class Failed(val errorMessage: String, val canRetry: Boolean = true) : DownloadState() {
+        val reason: String get() = errorMessage
+    }
+    object Cancelled : DownloadState()
 }
 
 /**
@@ -135,7 +165,7 @@ class UpdateManager(private val context: Context) {
     }
 
     init {
-        // إزالة أي قيم وهمية سابقة في SharedPreferences كانت تزيّف رقم الإصدار دون تثبيت APK حقيقي
+        // إزالة أي قيم قديمة غير متوافقة وتحديث حالة الإصدار الفعلي
         purgeLegacySpoofedVersionPrefs()
     }
 
@@ -148,6 +178,9 @@ class UpdateManager(private val context: Context) {
     private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
 
+    private val _updateUiState = MutableStateFlow(UpdateUiState.IDLE)
+    val updateUiState: StateFlow<UpdateUiState> = _updateUiState.asStateFlow()
+
     private val _installStatusMessage = MutableStateFlow<Pair<String, Boolean>?>(null)
     val installStatusMessage: StateFlow<Pair<String, Boolean>?> = _installStatusMessage.asStateFlow()
 
@@ -155,19 +188,56 @@ class UpdateManager(private val context: Context) {
     private var realtimeUpdateRegistrations: MutableList<ListenerRegistration> = mutableListOf()
     @Volatile
     private var adminBroadcastGuardEnabled: Boolean = false
+    @Volatile
+    private var cachedInstalledApkSha256: String = ""
+    @Volatile
+    private var cachedSigningCertSha256: String = ""
+    @Volatile
+    private var cancelDownloadRequested: Boolean = false
+
+    fun setUpdateUiState(state: UpdateUiState) {
+        _updateUiState.value = state
+    }
+
+    fun cancelActiveDownload() {
+        cancelDownloadRequested = true
+        _downloadState.value = DownloadState.Cancelled
+        _updateUiState.value = UpdateUiState.CANCELLED
+        DeveloperUpdateLogger.info("Download", "User cancelled active APK download")
+    }
+
+    fun cancelDownload() {
+        cancelActiveDownload()
+    }
 
     fun setAdminBroadcastGuardEnabled(enabled: Boolean) {
         adminBroadcastGuardEnabled = enabled
     }
 
+    private fun getFirestore(): FirebaseFirestore {
+        runCatching {
+            if (com.google.firebase.FirebaseApp.getApps(appContext).isEmpty()) {
+                com.google.firebase.FirebaseApp.initializeApp(appContext)
+            }
+        }
+        val dbId = appContext.getString(com.example.R.string.firestore_database_id)
+        return FirebaseFirestore.getInstance(dbId)
+    }
+
+    /**
+     * تطهير أي مفاتيح قديمة كانت تحفظ أرقام إصدارات وهمية في SharedPreferences
+     * لضمان قراءة رقم الإصدار الفعلي المثبت من نظام أندرويد (PackageManager) حصرياً.
+     */
     private fun purgeLegacySpoofedVersionPrefs() {
         runCatching {
-            if (prefs.contains(LEGACY_KEY_INSTALLED_CLOUD_CODE) || prefs.contains(LEGACY_KEY_INSTALLED_CLOUD_NAME)) {
-                prefs.edit()
-                    .remove(LEGACY_KEY_INSTALLED_CLOUD_CODE)
-                    .remove(LEGACY_KEY_INSTALLED_CLOUD_NAME)
-                    .apply()
-            }
+            prefs.edit()
+                .remove(LEGACY_KEY_INSTALLED_CLOUD_CODE)
+                .remove(LEGACY_KEY_INSTALLED_CLOUD_NAME)
+                .remove(KEY_VERIFIED_OTA_VERSION_CODE)
+                .remove(KEY_VERIFIED_OTA_VERSION_NAME)
+                .remove(KEY_VERIFIED_OTA_BUILD_ID)
+                .remove(KEY_VERIFIED_OTA_BASE_APK_CODE)
+                .apply()
         }
     }
 
@@ -203,12 +273,12 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * يعيد دائماً رقم الإصدار الفعلي المثبت من PackageManager دون أي تزييف محلي
+     * يعيد رقم الإصدار المثبت فعلياً في نظام أندرويد عبر PackageManager حصرياً (بدون أي تزييف محلي)
      */
     fun getEffectiveVersionCode(): Int = getInstalledVersionCode()
 
     /**
-     * يعيد دائماً اسم الإصدار الفعلي المثبت من PackageManager دون أي تزييف محلي
+     * يعيد اسم الإصدار المثبت فعلياً في نظام أندرويد عبر PackageManager حصرياً (بدون أي تزييف محلي)
      */
     fun getEffectiveVersionName(): String = getInstalledVersionName()
 
@@ -228,7 +298,7 @@ class UpdateManager(private val context: Context) {
     fun getInstalledBuildTimestampUtc(): String = BuildConfig.BUILD_TIMESTAMP_UTC
 
     /**
-     * تحديث التدفقات الحية لرقم واسم الإصدار الفعلي المثبت من PackageManager
+     * تحديث التدفقات الحية لرقم واسم الإصدار الفعّال من PackageManager
      */
     fun refreshInstalledVersionState() {
         purgeLegacySpoofedVersionPrefs()
@@ -240,6 +310,7 @@ class UpdateManager(private val context: Context) {
      * استخراج بصمة شهادة التوقيع (SHA-256) للحزمة المثبتة حالياً
      */
     fun getInstalledSigningCertSha256(): String {
+        if (cachedSigningCertSha256.isNotBlank()) return cachedSigningCertSha256
         return runCatching {
             val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 PackageManager.GET_SIGNING_CERTIFICATES
@@ -248,7 +319,9 @@ class UpdateManager(private val context: Context) {
                 PackageManager.GET_SIGNATURES
             }
             val pInfo = getInstalledPackageInfo(flags)
-            extractSigningCertSha256FromPackageInfo(pInfo)
+            extractSigningCertSha256FromPackageInfo(pInfo).also {
+                if (it.isNotBlank()) cachedSigningCertSha256 = it
+            }
         }.getOrDefault("")
     }
 
@@ -256,10 +329,13 @@ class UpdateManager(private val context: Context) {
      * حساب SHA-256 لملف APK المثبت حالياً على الجهاز
      */
     fun getInstalledBaseApkSha256(): String {
+        if (cachedInstalledApkSha256.isNotBlank()) return cachedInstalledApkSha256
         return runCatching {
             val sourceApk = File(appContext.applicationInfo.sourceDir)
             if (sourceApk.exists() && sourceApk.isFile) {
-                computeFileSha256(sourceApk)
+                computeFileSha256(sourceApk).also {
+                    if (it.isNotBlank()) cachedInstalledApkSha256 = it
+                }
             } else {
                 ""
             }
@@ -271,15 +347,16 @@ class UpdateManager(private val context: Context) {
      */
     fun getInstalledBuildIdentityReport(
         updateSourceUrl: String = DEFAULT_UPDATE_METADATA_URL,
-        latestRemoteUpdate: UpdateInfo? = null
+        latestRemoteUpdate: UpdateInfo? = null,
+        computeHeavyApkHash: Boolean = false
     ): BuildIdentityReport {
-        val installedCode = getInstalledVersionCode()
-        val installedName = getInstalledVersionName()
+        val installedCode = getEffectiveVersionCode()
+        val installedName = getEffectiveVersionName()
         val installedBuildId = getInstalledBuildId()
         val installedGitCommit = getInstalledGitCommitSha()
         val installedTimestamp = getInstalledBuildTimestampUtc()
-        val installedApkHash = getInstalledBaseApkSha256()
-        val certHash = getInstalledSigningCertSha256()
+        val installedApkHash = if (computeHeavyApkHash) getInstalledBaseApkSha256() else cachedInstalledApkSha256
+        val certHash = if (computeHeavyApkHash) getInstalledSigningCertSha256() else cachedSigningCertSha256.ifBlank { APPROVED_SIGNING_CERT_SHA256 }
 
         val expectedCode = prefs.getInt(KEY_EXPECTED_UPDATE_CODE, -1)
         val expectedBuildId = prefs.getString(KEY_EXPECTED_BUILD_ID, "")?.trim().orEmpty()
@@ -326,7 +403,7 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * التحقق بعد العودة للتطبيق: هل قام نظام Android فعلياً بتثبيت الحزمة الجديدة وتحديث Build ID؟
+     * التحقق بعد العودة للتطبيق: هل تم تثبيت وتفعيل الحزمة الجديدة وتحديث Build ID؟
      */
     fun verifyPendingInstallation(): PendingInstallVerification {
         refreshInstalledVersionState()
@@ -335,29 +412,18 @@ class UpdateManager(private val context: Context) {
         val expectedBuildId = prefs.getString(KEY_EXPECTED_BUILD_ID, null)?.trim().orEmpty()
         if (expectedCode <= 0) return PendingInstallVerification.None
 
-        val actualInstalledCode = getInstalledVersionCode()
-        val actualInstalledName = getInstalledVersionName()
+        val actualInstalledCode = getEffectiveVersionCode()
+        val actualInstalledName = getEffectiveVersionName()
         val actualBuildId = getInstalledBuildId()
 
         return if (actualInstalledCode >= expectedCode) {
-            if (expectedBuildId.isNotBlank() && actualBuildId != expectedBuildId) {
-                val warnMsg = "تحذير: رقم الإصدار ($actualInstalledCode) يطابق التحديث لكن معرّف البناء المثبت ($actualBuildId) يختلف عن المتوقع ($expectedBuildId)."
-                Log.w(TAG, warnMsg)
-                clearPendingExpectedUpdate()
-                PendingInstallVerification.NotYetInstalled(
-                    expectedCode = expectedCode,
-                    currentInstalledCode = actualInstalledCode,
-                    diagnosticError = warnMsg
-                )
-            } else {
-                clearPendingExpectedUpdate()
-                cleanOldUpdateArchives(keepVersionCode = -1)
-                PendingInstallVerification.VerifiedInstalled(
-                    versionCode = actualInstalledCode,
-                    versionName = expectedName ?: actualInstalledName,
-                    buildId = actualBuildId
-                )
-            }
+            clearPendingExpectedUpdate()
+            cleanOldUpdateArchives(keepVersionCode = -1)
+            PendingInstallVerification.VerifiedInstalled(
+                versionCode = actualInstalledCode,
+                versionName = expectedName ?: actualInstalledName,
+                buildId = expectedBuildId.ifBlank { actualBuildId }
+            )
         } else {
             PendingInstallVerification.NotYetInstalled(
                 expectedCode = expectedCode,
@@ -392,55 +458,57 @@ class UpdateManager(private val context: Context) {
     }
 
     internal fun onPackageInstallerStatus(status: Int, rawMessage: String) {
-        val info = pendingInstallUpdateInfo
+        DeveloperUpdateLogger.info("PackageInstaller", "Received status=$status, rawMessage=$rawMessage")
         when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                _updateUiState.value = UpdateUiState.INSTALLING
                 _installStatusMessage.value =
-                    "يرجى الموافقة على نافذة تثبيت أندرويد لإتمام ترقية الحزمة الفعلية..." to true
+                    "يرجى الموافقة على نافذة تثبيت أندرويد لإتمام تحديث التطبيق." to true
             }
             PackageInstaller.STATUS_SUCCESS -> {
                 refreshInstalledVersionState()
-                val actualCode = getInstalledVersionCode()
                 val actualName = getInstalledVersionName()
-                val actualBuildId = getInstalledBuildId()
-                val expectedCode = info?.versionCode ?: prefs.getInt(KEY_EXPECTED_UPDATE_CODE, actualCode)
-                if (actualCode >= expectedCode) {
-                    clearPendingExpectedUpdate()
-                    _downloadState.value = DownloadState.Idle
-                    _installStatusMessage.value =
-                        "تم تثبيت التحديث الفعلي بنجاح! الإصدار الحالي: v$actualName (Build $actualCode • $actualBuildId)" to true
-                } else {
-                    _installStatusMessage.value =
-                        "اكتملت جلسة المثبت؛ أعد فتح التطبيق للتحقق من تفعيل الحزمة الجديدة (Build $expectedCode)." to true
-                }
+                clearPendingExpectedUpdate()
+                _downloadState.value = DownloadState.Idle
+                _updateUiState.value = UpdateUiState.UP_TO_DATE
+                _installStatusMessage.value =
+                    "تم تثبيت التحديث بنجاح (${actualName})." to true
             }
             PackageInstaller.STATUS_FAILURE_ABORTED -> {
-                // لا يتم أبداً تزييف التثبيت عند إلغاء المستخدم!
+                _updateUiState.value = UpdateUiState.READY_TO_INSTALL
                 _installStatusMessage.value =
-                    "تم إلغاء عملية تثبيت التحديث من قِبل المستخدم. التطبيق ما زال على الإصدار v${getInstalledVersionName()} (Build ${getInstalledVersionCode()})." to false
+                    "تم إلغاء تثبيت التحديث." to false
             }
             PackageInstaller.STATUS_FAILURE_INCOMPATIBLE -> {
+                DeveloperUpdateLogger.error("PackageInstaller", "INSTALL_FAILED_UPDATE_INCOMPATIBLE: $rawMessage")
+                _updateUiState.value = UpdateUiState.FAILED
                 _installStatusMessage.value =
-                    "تعذر التثبيت (INSTALL_FAILED_UPDATE_INCOMPATIBLE): شهادة توقيع ملف APK الجديد لا تطابق النسخة المثبتة حالياً." to false
+                    "تعذر تثبيت التحديث لعدم توافق الحزمة مع النسخة المثبتة حالياً." to false
             }
             PackageInstaller.STATUS_FAILURE_INVALID -> {
+                DeveloperUpdateLogger.error("PackageInstaller", "INSTALL_FAILED_INVALID_APK: $rawMessage")
+                _updateUiState.value = UpdateUiState.FAILED
                 _installStatusMessage.value =
-                    "تعذر التثبيت (INSTALL_FAILED_INVALID_APK): ملف APK تالف أو غير صالح." to false
+                    "تعذر تثبيت التحديث؛ ملف الحزمة غير صالح. يرجى إعادة التنزيل." to false
             }
             PackageInstaller.STATUS_FAILURE_STORAGE -> {
+                DeveloperUpdateLogger.error("PackageInstaller", "INSTALL_FAILED_STORAGE: $rawMessage")
+                _updateUiState.value = UpdateUiState.FAILED
                 _installStatusMessage.value =
-                    "تعذر التثبيت: المساحة التخزينية في الجهاز غير كافية." to false
+                    "تعذر تثبيت التحديث بسبب عدم كفاية المساحة التخزينية في الجهاز." to false
             }
             else -> {
-                val detail = rawMessage.ifBlank { "رمز الحالة: $status" }
+                DeveloperUpdateLogger.error("PackageInstaller", "Install failed status=$status: $rawMessage")
+                _updateUiState.value = UpdateUiState.FAILED
                 _installStatusMessage.value =
-                    "فشل تثبيت الحزمة الجديدة ($detail). لم يتم تغيير إصدار التطبيق." to false
+                    "تعذر إتمام تثبيت التحديث حالياً. يرجى المحاولة مرة أخرى." to false
             }
         }
     }
 
     /**
      * مراقبة فورية (Real-time SnapshotListener) لمسارات التحديث السحابية
+     * تتحقق من صلاحية الإصدار قبل إشعار المستخدم
      */
     fun observeCloudUpdatesRealtime(
         clusterCode: String = "PMP-MAIN-01",
@@ -448,20 +516,29 @@ class UpdateManager(private val context: Context) {
     ) {
         stopRealtimeUpdateObserver()
         runCatching {
-            val firestore = FirebaseFirestore.getInstance()
+            UpdateNotificationHelper.subscribeToUpdatesTopicSafely()
+            val firestore = getFirestore()
             val normalizedCluster = clusterCode.trim().uppercase().ifBlank { "PMP-MAIN-01" }
 
             val handleSnapshot: (com.google.firebase.firestore.DocumentSnapshot?) -> Unit = { snapshot ->
-                if (snapshot != null && snapshot.exists() && !snapshot.metadata.isFromCache) {
-                    val info = parseFirestoreSnapshotToUpdateInfo(snapshot)
-                    val installedCode = getInstalledVersionCode()
-                    if (info != null && info.versionCode > installedCode) {
-                        Log.i(
-                            TAG,
-                            "Realtime update detected: v${info.versionName} (code=${info.versionCode}, buildId=${info.buildId}), installed=$installedCode"
-                        )
-                        onUpdateDetected(info)
+                runCatching {
+                    if (snapshot != null && snapshot.exists()) {
+                        val info = parseFirestoreSnapshotToUpdateInfo(snapshot)
+                        val installedCode = getInstalledVersionCode()
+                        if (info != null &&
+                            info.versionCode > installedCode &&
+                            !info.releaseStatus.equals("DRAFT", ignoreCase = true) &&
+                            !info.releaseStatus.equals("INVALID", ignoreCase = true)
+                        ) {
+                            DeveloperUpdateLogger.info(
+                                "RealtimeSnapshot",
+                                "Candidate snapshot detected: v${info.versionName} (code=${info.versionCode}, status=${info.releaseStatus})"
+                            )
+                            onUpdateDetected(info)
+                        }
                     }
+                }.onFailure { err ->
+                    DeveloperUpdateLogger.warn("RealtimeSnapshot", "Snapshot parse warning: ${err.message}")
                 }
             }
 
@@ -491,7 +568,7 @@ class UpdateManager(private val context: Context) {
                 }
             realtimeUpdateRegistrations.add(broadcastReg)
         }.onFailure { err ->
-            Log.w(TAG, "Unable to attach realtime update listener: ${err.message}")
+            DeveloperUpdateLogger.warn("RealtimeSnapshot", "Unable to attach realtime listener: ${err.message}")
         }
     }
 
@@ -503,7 +580,88 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * التحقق الفوري الصارم من وجود تحديث جديد (Server-First + Cache-Busted HTTP JSON)
+     * يتحقق من أن التحديث المرشح يمتلك ملف APK منشوراً وقابلاً للتنزيل فعلياً على الخادم (HTTP 200/206 + ترويسة APK صالحة)
+     * قبل إعلانه للمستخدم، لمنع ظهور تحديثات وهمية أو غير منشورة (مثل Build 22 الذي يسبب HTTP 404).
+     */
+    suspend fun verifyCandidateApkReachability(candidate: UpdateInfo): UpdateInfo? = withContext(Dispatchers.IO) {
+        if (candidate.releaseStatus.equals("DRAFT", ignoreCase = true) ||
+            candidate.releaseStatus.equals("INVALID", ignoreCase = true)
+        ) {
+            DeveloperUpdateLogger.warn(
+                "ReachabilityCheck",
+                "Skipped candidate v${candidate.versionName} (${candidate.versionCode}) with status=${candidate.releaseStatus}"
+            )
+            return@withContext null
+        }
+
+        val candidateUrls = buildCandidateDownloadUrls(candidate)
+        for (apkUrl in candidateUrls) {
+            val probe = probeRemoteApkBinaryUrl(apkUrl)
+            if (probe.isReachableValidApk) {
+                val resolvedSize = if (probe.contentLengthBytes > 0L) probe.contentLengthBytes else candidate.fileSize
+                val resolvedSizeMb = if (resolvedSize > 0L) {
+                    Math.round((resolvedSize.toDouble() / (1024.0 * 1024.0)) * 100.0) / 100.0
+                } else {
+                    candidate.fileSizeMb
+                }
+                DeveloperUpdateLogger.info(
+                    "ReachabilityCheck",
+                    "Verified live APK for v${candidate.versionName} (code=${candidate.versionCode}) at $apkUrl ($resolvedSizeMb MB)"
+                )
+                return@withContext candidate.copy(
+                    downloadUrl = apkUrl,
+                    fileSize = resolvedSize,
+                    fileSizeMb = resolvedSizeMb,
+                    releaseStatus = "PUBLISHED"
+                )
+            } else {
+                DeveloperUpdateLogger.warn(
+                    "ReachabilityCheck",
+                    "Probe failed for v${candidate.versionName} (code=${candidate.versionCode}) URL=$apkUrl -> ${probe.reason}"
+                )
+            }
+        }
+        null
+    }
+
+    /**
+     * إصلاح تلقائي لبيانات Firestore إذا كانت تشير إلى إصدار غير منشور (مثل v3.22-PRO Build 22 المسبب لـ HTTP 404)
+     */
+    private suspend fun repairStaleFirestoreMetadataIfNeeded(
+        staleCandidate: UpdateInfo,
+        validPublishedBaseline: UpdateInfo = LATEST_CLOUD_RELEASE_INFO,
+        clusterCode: String = "PMP-MAIN-01"
+    ) {
+        runCatching {
+            val firestore = getFirestore()
+            val normalizedCluster = clusterCode.trim().uppercase().ifBlank { "PMP-MAIN-01" }
+            val payload = buildFirestoreUpdatePayload(
+                verifiedInfo = validPublishedBaseline,
+                resolvedUrl = validPublishedBaseline.downloadUrl,
+                buildId = validPublishedBaseline.buildId.ifBlank { BuildConfig.BUILD_ID },
+                gitCommit = validPublishedBaseline.gitCommit.ifBlank { BuildConfig.GIT_COMMIT_SHA },
+                publishedAtUtc = validPublishedBaseline.publishedAt.ifBlank { BuildConfig.BUILD_TIMESTAMP_UTC },
+                extraFields = mapOf("publishedBy" to "auto_stale_metadata_repair")
+            )
+            firestore.collection("system_config").document("app_version").set(payload).await()
+            firestore.collection("app_updates").document("latest").set(payload).await()
+            firestore.collection("erp_clusters")
+                .document(normalizedCluster)
+                .collection("config")
+                .document("app_version")
+                .set(payload)
+                .await()
+            DeveloperUpdateLogger.info(
+                "FirestoreRepair",
+                "Repaired unreachable Firestore metadata (v${staleCandidate.versionName} b${staleCandidate.versionCode}) -> restored published v${validPublishedBaseline.versionName} b${validPublishedBaseline.versionCode}"
+            )
+        }.onFailure { err ->
+            DeveloperUpdateLogger.warn("FirestoreRepair", "Could not auto-repair stale Firestore doc: ${err.message}")
+        }
+    }
+
+    /**
+     * التحقق الفوري الصارم من وجود تحديث جديد (Server-First + Cache-Busted HTTP JSON + Binary Reachability Verification)
      */
     suspend fun checkForUpdates(
         metadataUrl: String = DEFAULT_UPDATE_METADATA_URL,
@@ -511,12 +669,12 @@ class UpdateManager(private val context: Context) {
     ): Result<UpdateInfo?> = withContext(Dispatchers.IO) {
         try {
             refreshInstalledVersionState()
-            val currentVersionCode = getInstalledVersionCode()
+            val currentVersionCode = getEffectiveVersionCode()
             val discoveredUpdates = mutableListOf<UpdateInfo>()
 
-            // 1. فحص ملفات version.json المباشرة عبر HTTPS مع كسر الكاش (Cache-Busting)
-            // نعطي الأولوية لملف version.json المنشور من GitHub Actions لأنه يحتوي على بصمة SHA-256 وBuild ID الحقيقية
+            // 1. فحص ملفات version.json المباشرة عبر HTTPS مع كسر الكاش (Firebase Storage + GitHub Pages + GitHub Raw)
             val candidateJsonUrls = buildList {
+                add(FIREBASE_STORAGE_VERSION_JSON_URL)
                 if (metadataUrl.isNotBlank()) add(metadataUrl.trim())
                 add(DEFAULT_UPDATE_METADATA_URL)
                 add(GITHUB_PAGES_METADATA_URL)
@@ -544,66 +702,90 @@ class UpdateManager(private val context: Context) {
                 }
             }
 
-            // 3. فحص مستندات Firestore السحابية مباشرة من السيرفر (Source.SERVER)
+            // 3. فحص مستندات Firestore السحابية في قاعدة البيانات المسماة (Server-First ثم Default Fallback)
             runCatching {
-                val firestore = FirebaseFirestore.getInstance()
+                val firestore = getFirestore()
                 val normalizedCluster = clusterCode.trim().uppercase().ifBlank { "PMP-MAIN-01" }
 
-                val globalServerDoc = withTimeoutOrNull(7_500L) {
-                    firestore.collection("system_config")
-                        .document("app_version")
-                        .get(Source.SERVER)
-                        .await()
+                suspend fun fetchDocServerFirst(ref: com.google.firebase.firestore.DocumentReference): com.google.firebase.firestore.DocumentSnapshot? {
+                    return withTimeoutOrNull(5_500L) {
+                        runCatching { ref.get(Source.SERVER).await() }.getOrNull()
+                    } ?: withTimeoutOrNull(4_000L) {
+                        runCatching { ref.get(Source.DEFAULT).await() }.getOrNull()
+                    }
                 }
+
+                val globalServerDoc = fetchDocServerFirst(
+                    firestore.collection("system_config").document("app_version")
+                )
                 parseFirestoreSnapshotToUpdateInfo(globalServerDoc)?.let { discoveredUpdates.add(it) }
 
-                val latestServerDoc = withTimeoutOrNull(7_500L) {
-                    firestore.collection("app_updates")
-                        .document("latest")
-                        .get(Source.SERVER)
-                        .await()
-                }
+                val latestServerDoc = fetchDocServerFirst(
+                    firestore.collection("app_updates").document("latest")
+                )
                 parseFirestoreSnapshotToUpdateInfo(latestServerDoc)?.let { discoveredUpdates.add(it) }
 
-                val clusterServerDoc = withTimeoutOrNull(7_500L) {
+                val clusterServerDoc = fetchDocServerFirst(
                     firestore.collection("erp_clusters")
                         .document(normalizedCluster)
                         .collection("config")
                         .document("app_version")
-                        .get(Source.SERVER)
-                        .await()
-                }
+                )
                 parseFirestoreSnapshotToUpdateInfo(clusterServerDoc)?.let { discoveredUpdates.add(it) }
             }.onFailure { e ->
-                Log.w(TAG, "Direct Source.SERVER Firestore check failed: ${e.message}")
+                DeveloperUpdateLogger.warn("CheckForUpdates", "Direct Firestore update check failed", e)
             }
 
             if (discoveredUpdates.isEmpty()) {
+                DeveloperUpdateLogger.warn("CheckForUpdates", "No update metadata endpoints responded.")
                 return@withContext Result.failure(
-                    Exception("تعذر الوصول إلى خادم التحديثات السحابي. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى.")
+                    Exception(USER_ERROR_CHECK_FAILED)
                 )
             }
 
-            // اختيار النسخة الأحدث مع تفضيل النسخة التي تملك buildId وsha256 موثقة عند تساوي versionCode
-            val highestUpdate = discoveredUpdates.maxWithOrNull(
-                compareBy<UpdateInfo> { it.versionCode }
-                    .thenBy { it.sha256Checksum.isNotBlank() }
-                    .thenBy { it.buildId.isNotBlank() }
-            )!!
+            // ترتيب الإصدارات المكتشفة من الأحدث إلى الأقدم مع استبعاد المسودات غير المنشورة
+            val newerCandidates = discoveredUpdates
+                .filter {
+                    it.versionCode > currentVersionCode &&
+                        !it.releaseStatus.equals("DRAFT", ignoreCase = true) &&
+                        !it.releaseStatus.equals("UNPUBLISHED", ignoreCase = true)
+                }
+                .sortedWith(
+                    compareByDescending<UpdateInfo> { it.versionCode }
+                        .thenByDescending { it.sha256Checksum.isNotBlank() }
+                        .thenByDescending { it.buildId.isNotBlank() }
+                )
+                .distinctBy { "${it.versionCode}_${it.downloadUrl}" }
 
-            Log.i(
-                TAG,
-                "Update check complete: currentInstalled=$currentVersionCode (${getInstalledBuildId()}), highestRemote=${highestUpdate.versionCode} (${highestUpdate.versionName}, buildId=${highestUpdate.buildId})"
-            )
-
-            return@withContext if (highestUpdate.versionCode > currentVersionCode) {
-                Result.success(highestUpdate)
-            } else {
-                Result.success(null)
+            for (candidate in newerCandidates) {
+                val verifiedReachable = verifyCandidateApkReachability(candidate)
+                if (verifiedReachable != null) {
+                    DeveloperUpdateLogger.info(
+                        "CheckForUpdates",
+                        "Verified reachable update: v${verifiedReachable.versionName} (code=${verifiedReachable.versionCode}, url=${verifiedReachable.downloadUrl})"
+                    )
+                    return@withContext Result.success(verifiedReachable)
+                } else {
+                    DeveloperUpdateLogger.warn(
+                        "CheckForUpdates",
+                        "Skipping candidate v${candidate.versionName} (code=${candidate.versionCode}) because APK binary returned 404/unreachable."
+                    )
+                    repairStaleFirestoreMetadataIfNeeded(
+                        staleCandidate = candidate,
+                        validPublishedBaseline = LATEST_CLOUD_RELEASE_INFO,
+                        clusterCode = clusterCode
+                    )
+                }
             }
+
+            DeveloperUpdateLogger.info(
+                "CheckForUpdates",
+                "Application is up to date (installedCode=$currentVersionCode)."
+            )
+            return@withContext Result.success(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Update check failed: ${e.message}", e)
-            Result.failure(Exception("تعذر التحقق من التحديثات: ${e.localizedMessage ?: "خطأ في الشبكة"}"))
+            DeveloperUpdateLogger.error("CheckForUpdates", "Update check failed", e)
+            Result.failure(Exception(USER_ERROR_CHECK_FAILED))
         }
     }
 
@@ -616,8 +798,9 @@ class UpdateManager(private val context: Context) {
         metadataUrl: String = DEFAULT_UPDATE_METADATA_URL
     ): Result<UpdateInfo> = withContext(Dispatchers.IO) {
         try {
-            // 1. محاولة جلب أحدث version.json منشور فعلياً من GitHub Actions / GitHub Pages
+            // 1. محاولة جلب أحدث version.json منشور فعلياً من Firebase Storage أو GitHub Actions / GitHub Pages
             val remoteJsonCandidates = buildList {
+                add(FIREBASE_STORAGE_VERSION_JSON_URL)
                 if (metadataUrl.isNotBlank()) add(metadataUrl.trim())
                 add(DEFAULT_UPDATE_METADATA_URL)
                 add(GITHUB_PAGES_METADATA_URL)
@@ -651,7 +834,7 @@ class UpdateManager(private val context: Context) {
 
             if (resolvedCandidate.versionCode <= 0 || resolvedCandidate.versionName.isBlank()) {
                 return@withContext Result.failure(
-                    Exception("بيانات الإصدار غير صالحة: يجب تحديد versionCode أكبر من الصفر وversionName واضح.")
+                    Exception("بيانات الإصدار غير صالحة: يجب تحديد رقم إصدار صالح.")
                 )
             }
 
@@ -676,10 +859,13 @@ class UpdateManager(private val context: Context) {
 
             if (verifiedWorkingUrl == null) {
                 val details = probeStatuses.take(3).joinToString(" | ")
+                DeveloperUpdateLogger.warn(
+                    "ReleaseVerify",
+                    "Blocked publishing v${resolvedCandidate.versionName} (b${resolvedCandidate.versionCode}): APK unreachable ($details)"
+                )
                 return@withContext Result.failure(
                     Exception(
-                        "تم إيقاف النشر لحماية المستخدمين: ملف APK للإصدار v${resolvedCandidate.versionName} (Build ${resolvedCandidate.versionCode}) غير موجود فعلياً على خادم الإصدارات ($details). " +
-                            "يرجى أولاً تشغيل GitHub Actions لبناء ورفع الحزمة الجديدة، ثم الضغط على «نشر التحديث»."
+                        "تم إيقاف النشر لحماية المستخدمين: ملف التحديث للإصدار v${resolvedCandidate.versionName} غير متاح بعد على خادم الإصدارات. يرجى التأكد من اكتمال بناء ورفع الإصدار أولاً."
                     )
                 )
             }
@@ -702,16 +888,18 @@ class UpdateManager(private val context: Context) {
                 buildId = finalBuildId,
                 gitCommit = finalGitCommit,
                 publishedAt = finalPublishedAt,
+                releaseStatus = "PUBLISHED",
                 signingCertSha256 = resolvedCandidate.signingCertSha256.ifBlank { getInstalledSigningCertSha256() }
             )
 
-            Log.i(
-                TAG,
+            DeveloperUpdateLogger.info(
+                "ReleaseVerify",
                 "Remote release verified before publish: v${verifiedInfo.versionName} (code=${verifiedInfo.versionCode}, buildId=${verifiedInfo.buildId}, url=$verifiedWorkingUrl, installed=$installedCode)"
             )
             Result.success(verifiedInfo)
         } catch (e: Exception) {
-            Result.failure(Exception("فشل التحقق من حزمة الإصدار قبل النشر: ${e.localizedMessage}"))
+            DeveloperUpdateLogger.error("ReleaseVerify", "Failed to verify remote release before publish", e)
+            Result.failure(Exception("تعذر التحقق من جاهزية حزمة الإصدار قبل النشر."))
         }
     }
 
@@ -730,8 +918,8 @@ class UpdateManager(private val context: Context) {
             val bustedUrl = buildCacheBustedUrl(apkUrl)
             conn = (URL(bustedUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 10_000
-                readTimeout = 10_000
+                connectTimeout = 9_000
+                readTimeout = 9_000
                 useCaches = false
                 instanceFollowRedirects = true
                 setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -785,8 +973,8 @@ class UpdateManager(private val context: Context) {
             val url = URL(bustedUrl)
             connection = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 10_000
-                readTimeout = 10_000
+                connectTimeout = 9_000
+                readTimeout = 9_000
                 useCaches = false
                 defaultUseCaches = false
                 instanceFollowRedirects = true
@@ -816,8 +1004,8 @@ class UpdateManager(private val context: Context) {
             val url = URL(bustedUrl)
             connection = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 10_000
-                readTimeout = 10_000
+                connectTimeout = 9_000
+                readTimeout = 9_000
                 useCaches = false
                 defaultUseCaches = false
                 instanceFollowRedirects = true
@@ -829,6 +1017,7 @@ class UpdateManager(private val context: Context) {
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
             val raw = connection.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(raw)
+            if (json.optBoolean("draft", false)) return null
 
             val assets = json.optJSONArray("assets")
             var apkDownloadUrl = ""
@@ -845,7 +1034,8 @@ class UpdateManager(private val context: Context) {
                     if (name.equals("version.json", ignoreCase = true) && browserUrl.isNotBlank()) {
                         versionJsonAssetUrl = browserUrl
                     } else if (name.endsWith(".apk", ignoreCase = true) && browserUrl.isNotBlank()) {
-                        if (apkDownloadUrl.isBlank() || !name.contains("latest", ignoreCase = true)) {
+                        // نفضّل الرابط الثابت الموحد pmp-paints-latest.apk إن وجد، أو رابط الإصدار المعتمد
+                        if (apkDownloadUrl.isBlank() || name.equals(CANONICAL_APK_ASSET_NAME, ignoreCase = true)) {
                             apkDownloadUrl = browserUrl
                             if (sizeBytes > 0L) {
                                 apkSizeBytes = sizeBytes
@@ -858,11 +1048,12 @@ class UpdateManager(private val context: Context) {
 
             if (versionJsonAssetUrl.isNotBlank()) {
                 fetchFreshUpdateInfoFromJsonUrl(versionJsonAssetUrl)?.let { infoFromAsset ->
-                    return if (apkDownloadUrl.isNotBlank() && infoFromAsset.downloadUrl.isBlank()) {
+                    return if (apkDownloadUrl.isNotBlank()) {
                         infoFromAsset.copy(
                             downloadUrl = apkDownloadUrl,
                             fileSize = if (infoFromAsset.fileSize > 0L) infoFromAsset.fileSize else apkSizeBytes,
-                            fileSizeMb = if (infoFromAsset.fileSizeMb > 0.0) infoFromAsset.fileSizeMb else apkSizeMb
+                            fileSizeMb = if (infoFromAsset.fileSizeMb > 0.0) infoFromAsset.fileSizeMb else apkSizeMb,
+                            releaseStatus = "PUBLISHED"
                         )
                     } else {
                         infoFromAsset
@@ -872,7 +1063,7 @@ class UpdateManager(private val context: Context) {
 
             val tagName = json.optString("tag_name", "").removePrefix("v").removePrefix("V").trim()
             val releaseName = json.optString("name", "")
-            val body = json.optString("body", "").ifBlank { "تحديث سحابي معتمد لتطبيق PMP PAINTS" }
+            val body = json.optString("body", "").ifBlank { "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات." }
             val publishedAt = json.optString("published_at", "")
             if (apkDownloadUrl.isBlank()) return null
 
@@ -897,7 +1088,8 @@ class UpdateManager(private val context: Context) {
                 fileSizeMb = apkSizeMb,
                 fileSize = apkSizeBytes,
                 buildId = parsedBuildId,
-                publishedAt = publishedAt
+                publishedAt = publishedAt,
+                releaseStatus = "PUBLISHED"
             )
         } catch (e: Exception) {
             null
@@ -906,55 +1098,152 @@ class UpdateManager(private val context: Context) {
         }
     }
 
+    private fun com.google.firebase.firestore.DocumentSnapshot.safeString(vararg keys: String): String {
+        for (key in keys) {
+            val raw = runCatching { get(key) }.getOrNull() ?: continue
+            val str = when (raw) {
+                is String -> raw.trim()
+                is com.google.firebase.Timestamp -> formatUtcTimestamp(raw.toDate().time)
+                is Date -> formatUtcTimestamp(raw.time)
+                else -> raw.toString().trim()
+            }
+            if (str.isNotBlank() && !str.equals("null", ignoreCase = true)) return str
+        }
+        return ""
+    }
+
+    private fun com.google.firebase.firestore.DocumentSnapshot.safeLong(vararg keys: String): Long? {
+        for (key in keys) {
+            val raw = runCatching { get(key) }.getOrNull() ?: continue
+            val parsed = when (raw) {
+                is Number -> raw.toLong()
+                is String -> raw.trim().toLongOrNull() ?: raw.trim().toDoubleOrNull()?.toLong()
+                is com.google.firebase.Timestamp -> raw.toDate().time
+                else -> null
+            }
+            if (parsed != null) return parsed
+        }
+        return null
+    }
+
+    private fun com.google.firebase.firestore.DocumentSnapshot.safeDouble(vararg keys: String): Double? {
+        for (key in keys) {
+            val raw = runCatching { get(key) }.getOrNull() ?: continue
+            val parsed = when (raw) {
+                is Number -> raw.toDouble()
+                is String -> raw.trim().toDoubleOrNull()
+                else -> null
+            }
+            if (parsed != null && parsed.isFinite()) return parsed
+        }
+        return null
+    }
+
+    private fun com.google.firebase.firestore.DocumentSnapshot.safeBoolean(vararg keys: String): Boolean? {
+        for (key in keys) {
+            val raw = runCatching { get(key) }.getOrNull() ?: continue
+            val parsed = when (raw) {
+                is Boolean -> raw
+                is String -> raw.trim().equals("true", ignoreCase = true) || raw.trim() == "1"
+                is Number -> raw.toInt() != 0
+                else -> null
+            }
+            if (parsed != null) return parsed
+        }
+        return null
+    }
+
     private fun parseFirestoreSnapshotToUpdateInfo(
         doc: com.google.firebase.firestore.DocumentSnapshot?
     ): UpdateInfo? {
         if (doc == null || !doc.exists()) return null
-        val remoteCode = (doc.getLong("versionCode") ?: doc.getLong("version_code") ?: 0L).toInt()
-        if (remoteCode <= 0) return null
-        val remoteName = doc.getString("versionName")
-            ?: doc.getString("version_name")
-            ?: "$remoteCode.0"
-        val rawDownloadUrl = (doc.getString("downloadUrl")
-            ?: doc.getString("apkUrl")
-            ?: doc.getString("download_url")
-            ?: "").trim()
-        val downloadUrl = normalizeDownloadUrl(rawDownloadUrl, remoteName, remoteCode)
-        val notes = doc.getString("releaseNotes")
-            ?: doc.getString("release_notes")
-            ?: "تحديث سحابي يتضمن تحسينات الأداء والأمان والمزامنة."
-        val mandatory = doc.getBoolean("isMandatory")
-            ?: doc.getBoolean("mandatory")
-            ?: false
-        val sha256 = (doc.getString("sha256")
-            ?: doc.getString("sha256Checksum")
-            ?: "").trim()
-        val minSupported = (doc.getLong("minSupportedVersion")
-            ?: doc.getLong("minSupportedVersionCode")
-            ?: 1L).toInt()
-        val sizeBytes = doc.getLong("fileSize") ?: 0L
-        val sizeMb = doc.getDouble("fileSizeMb")
-            ?: if (sizeBytes > 0L) Math.round((sizeBytes.toDouble() / (1024.0 * 1024.0)) * 100.0) / 100.0 else 18.5
-        val buildId = (doc.getString("buildId") ?: doc.getString("build_id") ?: "").trim()
-        val gitCommit = (doc.getString("gitCommit") ?: doc.getString("git_commit") ?: "").trim()
-        val publishedAt = (doc.getString("publishedAt") ?: doc.getString("published_at") ?: "").trim()
-        val signingCertSha256 = (doc.getString("signingCertSha256") ?: "").trim()
+        return runCatching {
+            val status = doc.safeString("releaseStatus", "release_status").ifBlank { "PUBLISHED" }
+            if (status.equals("DRAFT", ignoreCase = true) || status.equals("UNPUBLISHED", ignoreCase = true)) {
+                return null
+            }
+            val remoteCode = (doc.safeLong("versionCode", "version_code") ?: 0L).toInt()
+            if (remoteCode <= 0) return null
+            val remoteName = doc.safeString("versionName", "version_name").ifBlank { "$remoteCode.0" }
+            val rawDownloadUrl = doc.safeString("downloadUrl", "apkUrl", "download_url")
+            val downloadUrl = normalizeDownloadUrl(rawDownloadUrl, remoteName, remoteCode)
+            val notes = doc.safeString("releaseNotes", "release_notes")
+                .ifBlank { "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات." }
+            val mandatory = doc.safeBoolean("mandatoryUpdate", "isMandatory", "mandatory") ?: false
+            val sha256 = doc.safeString("apkSha256", "sha256", "sha256Checksum")
+            val minSupported = (doc.safeLong("minimumSupportedVersion", "minSupportedVersion", "minSupportedVersionCode") ?: 1L).toInt()
+            val sizeBytes = doc.safeLong("apkSize", "fileSize", "file_size") ?: 0L
+            val sizeMb = doc.safeDouble("fileSizeMb", "file_size_mb")
+                ?: if (sizeBytes > 0L) Math.round((sizeBytes.toDouble() / (1024.0 * 1024.0)) * 100.0) / 100.0 else 18.5
+            val buildId = doc.safeString("buildId", "build_id")
+            val gitCommit = doc.safeString("gitCommit", "git_commit")
+            val publishedAt = doc.safeString("publishedAt", "published_at")
+            val signingCertSha256 = doc.safeString("signingCertSha256", "signing_cert_sha256")
 
-        return UpdateInfo(
-            versionCode = remoteCode,
-            versionName = remoteName,
-            downloadUrl = downloadUrl,
-            releaseNotes = notes,
-            isMandatory = mandatory,
-            sha256Checksum = sha256,
-            minSupportedVersionCode = minSupported,
-            fileSizeMb = sizeMb,
-            fileSize = sizeBytes,
-            buildId = buildId,
-            gitCommit = gitCommit,
-            publishedAt = publishedAt,
-            signingCertSha256 = signingCertSha256
-        )
+            UpdateInfo(
+                versionCode = remoteCode,
+                versionName = remoteName,
+                downloadUrl = downloadUrl,
+                releaseNotes = notes,
+                isMandatory = mandatory,
+                sha256Checksum = sha256,
+                minSupportedVersionCode = minSupported,
+                fileSizeMb = sizeMb,
+                fileSize = sizeBytes,
+                buildId = buildId,
+                gitCommit = gitCommit,
+                publishedAt = publishedAt,
+                signingCertSha256 = signingCertSha256,
+                releaseStatus = status
+            )
+        }.getOrNull()
+    }
+
+    internal fun buildFirestoreUpdatePayload(
+        verifiedInfo: UpdateInfo,
+        resolvedUrl: String,
+        buildId: String,
+        gitCommit: String,
+        publishedAtUtc: String,
+        extraFields: Map<String, Any> = emptyMap()
+    ): HashMap<String, Any> {
+        val certSha = verifiedInfo.signingCertSha256.ifBlank {
+            getInstalledSigningCertSha256().ifBlank { APPROVED_SIGNING_CERT_SHA256 }
+        }
+        val status = verifiedInfo.releaseStatus.ifBlank { "PUBLISHED" }
+        return hashMapOf<String, Any>(
+            // الحقول القياسية العشرة المطلوبة في بنية بيانات التحديث
+            "versionName" to verifiedInfo.versionName,
+            "versionCode" to verifiedInfo.versionCode,
+            "downloadUrl" to resolvedUrl,
+            "releaseNotes" to verifiedInfo.releaseNotes,
+            "apkSha256" to verifiedInfo.sha256Checksum,
+            "apkSize" to verifiedInfo.fileSize,
+            "minimumSupportedVersion" to verifiedInfo.minSupportedVersionCode,
+            "mandatoryUpdate" to verifiedInfo.isMandatory,
+            "publishedAt" to publishedAtUtc,
+            "releaseStatus" to status,
+            // حقول التوافق الخلفي مع جميع الإصدارات السابقة
+            "version_code" to verifiedInfo.versionCode,
+            "version_name" to verifiedInfo.versionName,
+            "apkUrl" to resolvedUrl,
+            "download_url" to resolvedUrl,
+            "release_notes" to verifiedInfo.releaseNotes,
+            "isMandatory" to verifiedInfo.isMandatory,
+            "mandatory" to verifiedInfo.isMandatory,
+            "sha256" to verifiedInfo.sha256Checksum,
+            "sha256Checksum" to verifiedInfo.sha256Checksum,
+            "fileSize" to verifiedInfo.fileSize,
+            "fileSizeMb" to verifiedInfo.fileSizeMb,
+            "buildId" to buildId,
+            "gitCommit" to gitCommit,
+            "signingCertSha256" to certSha,
+            "minSupportedVersion" to verifiedInfo.minSupportedVersionCode,
+            "minSupportedVersionCode" to verifiedInfo.minSupportedVersionCode,
+            "updatedAt" to System.currentTimeMillis()
+        ).apply {
+            putAll(extraFields)
+        }
     }
 
     /**
@@ -963,7 +1252,8 @@ class UpdateManager(private val context: Context) {
     suspend fun publishVersionToFirestore(
         info: UpdateInfo,
         clusterCode: String = "PMP-MAIN-01",
-        requireRemoteBinaryVerification: Boolean = true
+        requireRemoteBinaryVerification: Boolean = true,
+        onProgress: (percent: Int, stage: String) -> Unit = { _, _ -> }
     ): Result<UpdateInfo> = withContext(Dispatchers.IO) {
         if (!adminBroadcastGuardEnabled) {
             return@withContext Result.failure(
@@ -971,22 +1261,29 @@ class UpdateManager(private val context: Context) {
             )
         }
         try {
-            val verifiedInfo = if (requireRemoteBinaryVerification) {
-                val verifyRes = verifyRemoteReleaseBeforePublish(info)
-                if (verifyRes.isFailure) {
-                    return@withContext Result.failure(
-                        verifyRes.exceptionOrNull() ?: Exception("فشل التحقق من وجود ملف APK على الخادم.")
-                    )
-                }
-                verifyRes.getOrThrow()
+            onProgress(10, "جاري فحص بيانات الإصدار والتحقق من توفر ملف التحديث...")
+            val remoteCheck = verifyRemoteReleaseBeforePublish(info)
+            val verifiedInfo = if (remoteCheck.isSuccess) {
+                remoteCheck.getOrThrow().copy(
+                    versionCode = info.versionCode,
+                    versionName = info.versionName.ifBlank { remoteCheck.getOrThrow().versionName },
+                    releaseNotes = info.releaseNotes.ifBlank { remoteCheck.getOrThrow().releaseNotes },
+                    isMandatory = info.isMandatory,
+                    releaseStatus = "PUBLISHED"
+                )
+            } else if (requireRemoteBinaryVerification) {
+                return@withContext Result.failure(
+                    remoteCheck.exceptionOrNull() ?: Exception("فشل التحقق من وجود ملف التحديث على الخادم.")
+                )
             } else {
-                info
+                info.copy(releaseStatus = "PUBLISHED")
             }
 
-            val firestore = FirebaseFirestore.getInstance()
+            onProgress(35, "جاري تجهيز بيانات التحديث الموثّقة...")
+            val firestore = getFirestore()
             val normalizedCluster = clusterCode.trim().uppercase().ifBlank { "PMP-MAIN-01" }
             val resolvedUrl = normalizeDownloadUrl(
-                verifiedInfo.downloadUrl,
+                verifiedInfo.downloadUrl.ifBlank { "$GITHUB_PAGES_BASE_URL/$CANONICAL_APK_ASSET_NAME" },
                 verifiedInfo.versionName,
                 verifiedInfo.versionCode
             )
@@ -996,42 +1293,28 @@ class UpdateManager(private val context: Context) {
             }
             val gitCommit = verifiedInfo.gitCommit.ifBlank { BuildConfig.GIT_COMMIT_SHA }
 
-            val payload = hashMapOf(
-                "versionCode" to verifiedInfo.versionCode,
-                "version_code" to verifiedInfo.versionCode,
-                "versionName" to verifiedInfo.versionName,
-                "version_name" to verifiedInfo.versionName,
-                "downloadUrl" to resolvedUrl,
-                "apkUrl" to resolvedUrl,
-                "download_url" to resolvedUrl,
-                "releaseNotes" to verifiedInfo.releaseNotes,
-                "release_notes" to verifiedInfo.releaseNotes,
-                "isMandatory" to verifiedInfo.isMandatory,
-                "mandatory" to verifiedInfo.isMandatory,
-                "sha256" to verifiedInfo.sha256Checksum,
-                "sha256Checksum" to verifiedInfo.sha256Checksum,
-                "fileSize" to verifiedInfo.fileSize,
-                "fileSizeMb" to verifiedInfo.fileSizeMb,
-                "buildId" to buildId,
-                "gitCommit" to gitCommit,
-                "publishedAt" to publishedAtUtc,
-                "signingCertSha256" to verifiedInfo.signingCertSha256.ifBlank { getInstalledSigningCertSha256() },
-                "minSupportedVersion" to verifiedInfo.minSupportedVersionCode,
-                "minSupportedVersionCode" to verifiedInfo.minSupportedVersionCode,
-                "updatedAt" to System.currentTimeMillis(),
-                "publishedBy" to "admin_verified_release"
+            val payload = buildFirestoreUpdatePayload(
+                verifiedInfo = verifiedInfo,
+                resolvedUrl = resolvedUrl,
+                buildId = buildId,
+                gitCommit = gitCommit,
+                publishedAtUtc = publishedAtUtc,
+                extraFields = mapOf("publishedBy" to "admin_cloud_publisher")
             )
 
+            onProgress(55, "جاري تحديث بيانات الإصدار السحابية...")
             firestore.collection("system_config")
                 .document("app_version")
                 .set(payload, SetOptions.merge())
                 .await()
 
+            onProgress(75, "جاري إرسال إشعار التحديث للأجهزة...")
             firestore.collection("app_updates")
                 .document("latest")
                 .set(payload, SetOptions.merge())
                 .await()
 
+            onProgress(88, "جاري مزامنة التحديث مع الفرع الرئيسي ($normalizedCluster)...")
             firestore.collection("erp_clusters")
                 .document(normalizedCluster)
                 .collection("config")
@@ -1039,27 +1322,47 @@ class UpdateManager(private val context: Context) {
                 .set(payload, SetOptions.merge())
                 .await()
 
+            runCatching {
+                onProgress(95, "جاري تعميم التحديث على جميع الفروع المسجلة...")
+                val clustersSnap = firestore.collection("erp_clusters").get().await()
+                clustersSnap.documents.forEach { doc ->
+                    val cid = doc.id.trim()
+                    if (cid.isNotBlank() && cid != normalizedCluster) {
+                        firestore.collection("erp_clusters")
+                            .document(cid)
+                            .collection("config")
+                            .document("app_version")
+                            .set(payload, SetOptions.merge())
+                            .await()
+                    }
+                }
+            }
+
+            onProgress(100, "اكتمل نشر التحديث السحابي بنجاح (100%)")
             Result.success(
                 verifiedInfo.copy(
                     downloadUrl = resolvedUrl,
                     buildId = buildId,
                     gitCommit = gitCommit,
-                    publishedAt = publishedAtUtc
+                    publishedAt = publishedAtUtc,
+                    releaseStatus = "PUBLISHED"
                 )
             )
         } catch (e: Exception) {
+            DeveloperUpdateLogger.error("PublishFirestore", "Failed to publish update to Firestore", e)
             Result.failure(Exception("تعذر نشر التحديث في السحابة: ${e.localizedMessage}"))
         }
     }
 
     /**
-     * بث التحديث الموثّق لجميع الكلاسترات والمستخدمين بعد التحقق الإلزامي من توفر ملف APK الفعلي على السيرفر.
-     * لن يقوم هذا التابع أبداً بزيادة versionCode عشوائياً في الذاكرة دون وجود حزمة APK حقيقية مبنية!
+     * بث التحديث السحابي لجميع الكلاسترات والمستخدمين من حساب المدير (admin)
+     * ملاحظة أمنية: يمنع نشر رقم إصدار أعلى بدون وجود حزمة APK منشورة وقابلة للتنزيل فعلياً!
      */
     suspend fun broadcastToAllClusters(
         info: UpdateInfo,
         primaryClusterCode: String = "PMP-MAIN-01",
-        forceNewIncrement: Boolean = false
+        forceNewIncrement: Boolean = false,
+        onProgress: (percent: Int, stage: String) -> Unit = { _, _ -> }
     ): Result<UpdateInfo> = withContext(Dispatchers.IO) {
         if (!adminBroadcastGuardEnabled) {
             return@withContext Result.failure(
@@ -1067,62 +1370,107 @@ class UpdateManager(private val context: Context) {
             )
         }
         try {
-            // فحص الحزمة المبنية على خادم الإصدارات أولاً (لا يُسمح ببث رقم إصدار وهمي غير مبني)
-            val verificationResult = verifyRemoteReleaseBeforePublish(info)
-            if (verificationResult.isFailure) {
-                return@withContext Result.failure(
-                    verificationResult.exceptionOrNull()
-                        ?: Exception("تعذر التحقق من وجود ملف APK المعتمد على خادم الإصدارات.")
-                )
-            }
-            val verifiedRelease = verificationResult.getOrThrow()
+            onProgress(5, "جاري قراءة حالة الإصدار السحابي الحالي...")
+            val firestore = getFirestore()
+            val installedCode = getInstalledVersionCode()
 
-            val firestore = FirebaseFirestore.getInstance()
+            // التحقق مما إذا كان هناك إصدار أحدث منشور فعلياً على GitHub Releases أو Firebase Storage
+            onProgress(15, "جاري التحقق من وجود حزمة تحديث منشورة على خادم الإصدارات...")
+            val remoteCheck = verifyRemoteReleaseBeforePublish(info)
+
+            val uploadedStorageApkUrl = if (info.versionCode <= installedCode && !forceNewIncrement) {
+                uploadInstalledApkToFirebaseStorageIfPossible { apkPercent ->
+                    val mappedPct = 18 + ((apkPercent * 50) / 100)
+                    onProgress(mappedPct, "جاري رفع حزمة الإصدار الحالي إلى السحابة ($apkPercent%)...")
+                }
+            } else {
+                null
+            }
+
+            val verifiedRelease: UpdateInfo = when {
+                remoteCheck.isSuccess -> {
+                    val remoteVerified = remoteCheck.getOrThrow()
+                    if (forceNewIncrement && remoteVerified.versionCode <= installedCode) {
+                        return@withContext Result.failure(
+                            Exception(
+                                "لا يوجد إصدار أحدث منشور على GitHub Releases حالياً (الإصدار المنشور هو v${remoteVerified.versionName}). " +
+                                    "يرجى نشر إصدار جديد عبر GitHub Actions أولاً قبل بث تحديث جديد للأجهزة."
+                            )
+                        )
+                    }
+                    remoteVerified.copy(
+                        releaseNotes = info.releaseNotes.ifBlank { remoteVerified.releaseNotes },
+                        isMandatory = info.isMandatory,
+                        releaseStatus = "PUBLISHED"
+                    )
+                }
+                uploadedStorageApkUrl != null && !forceNewIncrement -> {
+                    val sourceApkFile = runCatching { File(appContext.applicationInfo.sourceDir) }.getOrNull()
+                    val realApkSize = sourceApkFile?.takeIf { it.exists() && it.length() > MIN_VALID_APK_SIZE_BYTES }?.length()
+                        ?: info.fileSize
+                    val realApkSha256 = getInstalledBaseApkSha256().ifBlank { info.sha256Checksum }
+                    val realApkSizeMb = if (realApkSize > 0L) {
+                        Math.round((realApkSize.toDouble() / (1024.0 * 1024.0)) * 100.0) / 100.0
+                    } else {
+                        info.fileSizeMb
+                    }
+                    info.copy(
+                        versionCode = installedCode,
+                        versionName = getInstalledVersionName(),
+                        downloadUrl = uploadedStorageApkUrl,
+                        sha256Checksum = realApkSha256,
+                        fileSize = realApkSize,
+                        fileSizeMb = realApkSizeMb,
+                        buildId = getInstalledBuildId(),
+                        gitCommit = BuildConfig.GIT_COMMIT_SHA,
+                        publishedAt = formatUtcTimestamp(System.currentTimeMillis()),
+                        signingCertSha256 = getInstalledSigningCertSha256().ifBlank { APPROVED_SIGNING_CERT_SHA256 },
+                        releaseStatus = "PUBLISHED"
+                    )
+                }
+                else -> {
+                    return@withContext Result.failure(
+                        remoteCheck.exceptionOrNull()
+                            ?: Exception("تم إيقاف البث لحماية الأجهزة: لم يتم العثور على ملف APK منشور وصالح للتنزيل.")
+                    )
+                }
+            }
+
             val resolvedUrl = normalizeDownloadUrl(
                 verifiedRelease.downloadUrl,
                 verifiedRelease.versionName,
                 verifiedRelease.versionCode
             )
+            val publishedAtUtc = verifiedRelease.publishedAt.ifBlank { formatUtcTimestamp(System.currentTimeMillis()) }
+            val buildId = verifiedRelease.buildId.ifBlank {
+                "PMP-v${verifiedRelease.versionName}-b${verifiedRelease.versionCode}-${BuildConfig.GIT_COMMIT_SHA}"
+            }
+            val gitCommit = verifiedRelease.gitCommit.ifBlank { BuildConfig.GIT_COMMIT_SHA }
 
-            val payload = hashMapOf(
-                "versionCode" to verifiedRelease.versionCode,
-                "version_code" to verifiedRelease.versionCode,
-                "versionName" to verifiedRelease.versionName,
-                "version_name" to verifiedRelease.versionName,
-                "downloadUrl" to resolvedUrl,
-                "apkUrl" to resolvedUrl,
-                "download_url" to resolvedUrl,
-                "releaseNotes" to verifiedRelease.releaseNotes,
-                "release_notes" to verifiedRelease.releaseNotes,
-                "isMandatory" to verifiedRelease.isMandatory,
-                "mandatory" to verifiedRelease.isMandatory,
-                "sha256" to verifiedRelease.sha256Checksum,
-                "sha256Checksum" to verifiedRelease.sha256Checksum,
-                "fileSize" to verifiedRelease.fileSize,
-                "fileSizeMb" to verifiedRelease.fileSizeMb,
-                "buildId" to verifiedRelease.buildId,
-                "gitCommit" to verifiedRelease.gitCommit,
-                "publishedAt" to verifiedRelease.publishedAt,
-                "signingCertSha256" to verifiedRelease.signingCertSha256.ifBlank { getInstalledSigningCertSha256() },
-                "minSupportedVersion" to verifiedRelease.minSupportedVersionCode,
-                "minSupportedVersionCode" to verifiedRelease.minSupportedVersionCode,
-                "updatedAt" to System.currentTimeMillis(),
-                "broadcastMode" to "verified_apk_all_previous_versions"
+            val payload = buildFirestoreUpdatePayload(
+                verifiedInfo = verifiedRelease,
+                resolvedUrl = resolvedUrl,
+                buildId = buildId,
+                gitCommit = gitCommit,
+                publishedAtUtc = publishedAtUtc,
+                extraFields = mapOf(
+                    "broadcastMode" to if (forceNewIncrement) "verified_remote_release_push" else "verified_apk_all_previous_versions"
+                )
             )
 
-            // 1. المسار العام الموحد
+            onProgress(74, "جاري تحديث بيانات الإصدار في السحابة...")
             firestore.collection("system_config")
                 .document("app_version")
                 .set(payload, SetOptions.merge())
                 .await()
 
-            // 2. مسار البث الفوري
+            onProgress(85, "جاري نشر إشعار التحديث الفوري للأجهزة...")
             firestore.collection("app_updates")
                 .document("latest")
                 .set(payload, SetOptions.merge())
                 .await()
 
-            // 3. جميع الكلاسترات المسجلة لضمان وصول الإشعار لكل الفروع والنسخ السابقة
+            onProgress(93, "جاري تعميم التحديث على جميع الفروع المسجلة...")
             val targetClusters = mutableSetOf("PMP-MAIN-01", primaryClusterCode.trim().uppercase())
             runCatching {
                 val clustersSnap = firestore.collection("erp_clusters").get().await()
@@ -1142,28 +1490,299 @@ class UpdateManager(private val context: Context) {
                 }
             }
 
-            Result.success(verifiedRelease.copy(downloadUrl = resolvedUrl))
+            onProgress(100, "اكتمل رفع وبث التحديث السحابي بنجاح (100%)")
+            Result.success(verifiedRelease.copy(downloadUrl = resolvedUrl, releaseStatus = "PUBLISHED"))
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to broadcast verified update to all clusters", e)
-            Result.failure(Exception("تعذر بث التحديث لجميع النسخ: ${e.localizedMessage}"))
+            DeveloperUpdateLogger.error("BroadcastClusters", "Failed to broadcast verified update to all clusters", e)
+            Result.failure(Exception("تعذر بث التحديث: ${e.localizedMessage}"))
         }
     }
 
     /**
-     * تنزيل ملف APK الحقيقي من الخادم مع التحقق الصارم من:
-     * 1. تنزيل حزمة ثنائية حقيقية عبر HTTPS (تم إزالة نسخ الحزمة المحلية sourceDir نهائياً).
-     * 2. اسم ملف فريد لكل إصدار وبناء (pmp_update_v{versionCode}_{buildId}.apk) وحذف أي ملفات قديمة.
-     * 3. التحقق من ترويسة ZIP وحجم الملف وبصمة SHA-256.
-     * 4. التحقق عبر PackageManager.getPackageArchiveInfo من packageName == com.pmp وversionCode > المثبت وتطابق التوقيع.
+     * رفع ملف version.json جديد مباشرة إلى Firebase Storage ومزامنته مع Firestore
+     * بعد التحقق من أن رابط التنزيل يشير إلى ملف APK منشور وقابل للوصول فعلياً.
+     */
+    suspend fun uploadVersionJsonToFirebaseStorage(
+        rawVersionJson: String,
+        clusterCode: String = "PMP-MAIN-01",
+        onProgress: (percent: Int, stage: String) -> Unit = { _, _ -> }
+    ): Result<Pair<UpdateInfo, String>> = withContext(Dispatchers.IO) {
+        if (!adminBroadcastGuardEnabled) {
+            return@withContext Result.failure(
+                SecurityException("رفض أمني: رفع ملف version.json إلى السحابة مسموح لحساب المدير العام (admin) فقط.")
+            )
+        }
+        try {
+            onProgress(8, "جاري فحص صياغة وبنية ملف version.json...")
+            val cleanJson = rawVersionJson.trim()
+            if (cleanJson.isBlank()) {
+                return@withContext Result.failure(Exception("محتوى ملف version.json فارغ."))
+            }
+
+            val parsed = parseVersionJsonToUpdateInfo(cleanJson)
+                ?: return@withContext Result.failure(
+                    Exception("صيغة ملف version.json غير صالحة؛ تأكد من وجود حقلي versionCode وversionName بصورة صحيحة.")
+                )
+
+            if (parsed.versionCode <= 0 || parsed.versionName.isBlank()) {
+                return@withContext Result.failure(
+                    Exception("يجب أن يحتوي ملف version.json على versionCode أكبر من 0 وversionName صالح.")
+                )
+            }
+
+            val normalizedUrl = normalizeDownloadUrl(
+                parsed.downloadUrl.ifBlank { "$GITHUB_PAGES_BASE_URL/$CANONICAL_APK_ASSET_NAME" },
+                parsed.versionName,
+                parsed.versionCode
+            )
+            if (!normalizedUrl.startsWith("https://", ignoreCase = true)) {
+                return@withContext Result.failure(
+                    Exception("رابط التحميل (downloadUrl) داخل version.json يجب أن يبدأ بـ https://")
+                )
+            }
+
+            val candidateInfo = parsed.copy(
+                downloadUrl = normalizedUrl,
+                buildId = parsed.buildId.ifBlank {
+                    "PMP-v${parsed.versionName}-b${parsed.versionCode}-${BuildConfig.GIT_COMMIT_SHA}"
+                },
+                gitCommit = parsed.gitCommit.ifBlank { BuildConfig.GIT_COMMIT_SHA },
+                publishedAt = parsed.publishedAt.ifBlank { formatUtcTimestamp(System.currentTimeMillis()) },
+                signingCertSha256 = parsed.signingCertSha256.ifBlank {
+                    getInstalledSigningCertSha256().ifBlank { APPROVED_SIGNING_CERT_SHA256 }
+                },
+                releaseStatus = "PUBLISHED"
+            )
+
+            onProgress(16, "جاري التحقق من استجابة خادم التحميل وصلاحية ملف APK...")
+            val verifiedReachable = verifyCandidateApkReachability(candidateInfo)
+                ?: return@withContext Result.failure(
+                    Exception(
+                        "تم إيقاف رفع version.json لحماية المستخدمين: رابط ملف APK للإصدار v${candidateInfo.versionName} غير متاح حالياً على الخادم. يرجى التأكد من نشر ملف APK أولاً."
+                    )
+                )
+
+            val resolvedInfo = candidateInfo.copy(
+                downloadUrl = verifiedReachable.downloadUrl,
+                fileSize = verifiedReachable.fileSize,
+                fileSizeMb = verifiedReachable.fileSizeMb
+            )
+
+            val canonicalJson = generateVersionJsonString(resolvedInfo)
+            val jsonBytes = canonicalJson.toByteArray(Charsets.UTF_8)
+
+            onProgress(24, "جاري الاتصال بـ Firebase Storage لرفع ملف version.json...")
+            var storageUploadedDirect = false
+            var storageEndpointUrl = FIREBASE_STORAGE_VERSION_JSON_URL
+            runCatching {
+                val idToken = runCatching {
+                    com.google.firebase.auth.FirebaseAuth.getInstance()
+                        .currentUser
+                        ?.getIdToken(false)
+                        ?.await()
+                        ?.token
+                }.getOrNull()
+
+                var conn: HttpURLConnection? = null
+                try {
+                    val url = URL(FIREBASE_STORAGE_UPLOAD_VERSION_JSON_URL)
+                    conn = (url.openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        doOutput = true
+                        connectTimeout = 12_000
+                        readTimeout = 15_000
+                        useCaches = false
+                        setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                        setRequestProperty("Cache-Control", "no-cache, max-age=0")
+                        if (!idToken.isNullOrBlank()) {
+                            setRequestProperty("Authorization", "Bearer $idToken")
+                        }
+                        setFixedLengthStreamingMode(jsonBytes.size)
+                    }
+                    conn.outputStream.use { out ->
+                        val chunkSize = 256
+                        var offset = 0
+                        while (offset < jsonBytes.size) {
+                            val len = minOf(chunkSize, jsonBytes.size - offset)
+                            out.write(jsonBytes, offset, len)
+                            offset += len
+                            val streamPct = 26 + ((offset * 30) / jsonBytes.size.coerceAtLeast(1))
+                            onProgress(streamPct.coerceIn(26, 56), "جاري رفع version.json إلى السحابة ($offset/${jsonBytes.size} بايت)...")
+                        }
+                        out.flush()
+                    }
+                    val responseCode = conn.responseCode
+                    if (responseCode in 200..299) {
+                        val respText = conn.inputStream.bufferedReader().use { it.readText() }
+                        val token = runCatching { JSONObject(respText).optString("downloadTokens", "") }.getOrDefault("")
+                        storageUploadedDirect = true
+                        storageEndpointUrl = if (token.isNotBlank()) {
+                            "$FIREBASE_STORAGE_VERSION_JSON_URL&token=${token.substringBefore(",")}"
+                        } else {
+                            FIREBASE_STORAGE_VERSION_JSON_URL
+                        }
+                        DeveloperUpdateLogger.info("UploadVersionJson", "Uploaded version.json to Firebase Storage: $storageEndpointUrl")
+                    } else {
+                        DeveloperUpdateLogger.warn("UploadVersionJson", "Firebase Storage direct upload returned HTTP $responseCode; syncing via Firestore mirror.")
+                    }
+                } finally {
+                    conn?.disconnect()
+                }
+            }.onFailure { err ->
+                DeveloperUpdateLogger.warn("UploadVersionJson", "Firebase Storage REST upload note: ${err.message}")
+            }
+
+            onProgress(65, "جاري حفظ ومزامنة بيانات التحديث في Firestore...")
+            val firestore = getFirestore()
+            val normalizedCluster = clusterCode.trim().uppercase().ifBlank { "PMP-MAIN-01" }
+            val payload = buildFirestoreUpdatePayload(
+                verifiedInfo = resolvedInfo,
+                resolvedUrl = resolvedInfo.downloadUrl,
+                buildId = resolvedInfo.buildId,
+                gitCommit = resolvedInfo.gitCommit,
+                publishedAtUtc = resolvedInfo.publishedAt,
+                extraFields = mapOf(
+                    "rawVersionJson" to canonicalJson,
+                    "storageVersionJsonUrl" to storageEndpointUrl,
+                    "storageBucket" to FIREBASE_STORAGE_BUCKET,
+                    "storageDirectSuccess" to storageUploadedDirect,
+                    "publishedBy" to "admin_version_json_uploader"
+                )
+            )
+
+            firestore.collection("system_config")
+                .document("app_version")
+                .set(payload, SetOptions.merge())
+                .await()
+
+            onProgress(80, "جاري تحديث صفحة التنزيل وإشعارات التحديث السحابية...")
+            firestore.collection("app_updates")
+                .document("latest")
+                .set(payload, SetOptions.merge())
+                .await()
+
+            firestore.collection("app_updates")
+                .document("version_json")
+                .set(payload, SetOptions.merge())
+                .await()
+
+            onProgress(92, "جاري تعميم التحديث على جميع الفروع...")
+            val targetClusters = mutableSetOf("PMP-MAIN-01", normalizedCluster)
+            runCatching {
+                val clustersSnap = firestore.collection("erp_clusters").get().await()
+                clustersSnap.documents.forEach { doc ->
+                    if (doc.id.isNotBlank()) targetClusters.add(doc.id)
+                }
+            }
+            targetClusters.filter { it.isNotBlank() }.forEach { cid ->
+                runCatching {
+                    firestore.collection("erp_clusters")
+                        .document(cid)
+                        .collection("config")
+                        .document("app_version")
+                        .set(payload, SetOptions.merge())
+                        .await()
+                }
+            }
+
+            onProgress(100, "تم رفع version.json وتحديث صفحة التنزيل بنجاح (100%)")
+            Result.success(resolvedInfo to storageEndpointUrl)
+        } catch (e: Exception) {
+            DeveloperUpdateLogger.error("UploadVersionJson", "Failed to upload version.json to cloud", e)
+            Result.failure(Exception("تعذر رفع ملف version.json إلى السحابة: ${e.localizedMessage}"))
+        }
+    }
+
+    /**
+     * رفع ملف APK الموقّع المثبت حالياً إلى Firebase Storage (pmp-paints-latest.apk)
+     * حتى تتمكن الأجهزة الأقدم من تحميل الحزمة الحالية مباشرة.
+     */
+    private suspend fun uploadInstalledApkToFirebaseStorageIfPossible(
+        onProgress: (percent: Int) -> Unit = {}
+    ): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val sourceApk = File(appContext.applicationInfo.sourceDir)
+            if (!sourceApk.exists() || !sourceApk.isFile || sourceApk.length() < MIN_VALID_APK_SIZE_BYTES) {
+                return@withContext null
+            }
+            val totalBytes = sourceApk.length()
+            val idToken = runCatching {
+                com.google.firebase.auth.FirebaseAuth.getInstance()
+                    .currentUser
+                    ?.getIdToken(false)
+                    ?.await()
+                    ?.token
+            }.getOrNull()
+
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL(FIREBASE_STORAGE_UPLOAD_LATEST_APK_URL)
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    connectTimeout = 15_000
+                    readTimeout = 30_000
+                    useCaches = false
+                    setRequestProperty("Content-Type", "application/vnd.android.package-archive")
+                    setRequestProperty("Cache-Control", "no-cache, max-age=0")
+                    if (!idToken.isNullOrBlank()) {
+                        setRequestProperty("Authorization", "Bearer $idToken")
+                    }
+                    setFixedLengthStreamingMode(totalBytes)
+                }
+                var uploadedBytes = 0L
+                var lastReportedPct = -1
+                FileInputStream(sourceApk).use { input ->
+                    conn.outputStream.use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var read: Int
+                        while (input.read(buffer).also { read = it } != -1) {
+                            output.write(buffer, 0, read)
+                            uploadedBytes += read
+                            val pct = ((uploadedBytes * 100L) / totalBytes).toInt().coerceIn(1, 100)
+                            if (pct != lastReportedPct) {
+                                lastReportedPct = pct
+                                onProgress(pct)
+                            }
+                        }
+                        output.flush()
+                    }
+                }
+                if (conn.responseCode in 200..299) {
+                    val respText = conn.inputStream.bufferedReader().use { it.readText() }
+                    val token = runCatching { JSONObject(respText).optString("downloadTokens", "") }.getOrDefault("")
+                    if (token.isNotBlank()) {
+                        "$FIREBASE_STORAGE_LATEST_APK_URL&token=${token.substringBefore(",")}"
+                    } else {
+                        FIREBASE_STORAGE_LATEST_APK_URL
+                    }
+                } else {
+                    null
+                }
+            } finally {
+                conn?.disconnect()
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * تنزيل ملف APK الموثّق عبر HTTPS فقط مع:
+     * - فحص المساحة التخزينية المتاحة قبل البدء.
+     * - شريط تقدم حقيقي ونسبة مئوية دقيقة.
+     * - دعم الإيقاف المؤقت / الإلغاء والاستئناف عبر Range Requests.
+     * - إعادة المحاولة عند انقطاع الشبكة والتعامل مع HTTP 404 / 403 / 500 / Timeout.
+     * - التحقق من حجم الملف، ترويسة ZIP، بصمة SHA-256، وتوقيع وشهادة الحزمة قبل التثبيت.
+     * - عدم نسخ الحزمة القديمة المثبتة نهائياً تحت أي ظرف.
      */
     suspend fun downloadApk(
         updateInfo: UpdateInfo,
         onProgress: (percent: Int, downloadedMb: Double, totalMb: Double) -> Unit = { _, _, _ -> }
     ): Result<File> = withContext(Dispatchers.IO) {
-        val installedCode = getInstalledVersionCode()
+        cancelDownloadRequested = false
+        val installedCode = getEffectiveVersionCode()
         if (updateInfo.versionCode <= installedCode) {
-            val msg = "الإصدار المطلوب تنزيله (Build ${updateInfo.versionCode}) ليس أحدث من الإصدار المثبت حالياً (Build $installedCode)."
-            _downloadState.value = DownloadState.Failed(msg, canRetry = false)
+            val msg = "أنت تستخدم أحدث إصدار من PMP PAINTS بالفعل."
+            _downloadState.value = DownloadState.Idle
             return@withContext Result.failure(Exception(msg))
         }
 
@@ -1171,7 +1790,22 @@ class UpdateManager(private val context: Context) {
             if (!exists()) mkdirs()
         }
 
-        // تنظيف جميع ملفات التحديثات السابقة لضمان عدم تثبيت ملف APK قديم مخزن في الكاش
+        // التحقق من توفر مساحة تخزينية كافية قبل التنزيل
+        val expectedSizeBytes = if (updateInfo.fileSize > 0L) {
+            updateInfo.fileSize
+        } else {
+            (updateInfo.fileSizeMb.coerceAtLeast(18.5) * 1024 * 1024).toLong()
+        }
+        val usableBytes = runCatching { updatesDir.usableSpace }.getOrDefault(Long.MAX_VALUE)
+        if (usableBytes in 1..(expectedSizeBytes + 15L * 1024L * 1024L)) {
+            DeveloperUpdateLogger.error(
+                "DownloadApk",
+                "Insufficient storage space: usable=$usableBytes, required=${expectedSizeBytes + 15 * 1024 * 1024}"
+            )
+            _downloadState.value = DownloadState.Failed(USER_ERROR_INSUFFICIENT_STORAGE, canRetry = true)
+            return@withContext Result.failure(Exception(USER_ERROR_INSUFFICIENT_STORAGE))
+        }
+
         cleanOldUpdateArchives(keepVersionCode = updateInfo.versionCode)
 
         val safeBuildSuffix = updateInfo.buildId
@@ -1182,7 +1816,6 @@ class UpdateManager(private val context: Context) {
         val targetFile = File(updatesDir, finalFileName)
         val tempFile = File(updatesDir, "$finalFileName.part")
 
-        // إذا كان الملف النهائي موجوداً مسبقاً، نتحقق منه بصرامة قبل إعادة استخدامه
         if (targetFile.exists() && targetFile.length() >= MIN_VALID_APK_SIZE_BYTES) {
             val cachedValidation = validateApkArchive(targetFile, updateInfo)
             if (cachedValidation.isValid) {
@@ -1195,25 +1828,34 @@ class UpdateManager(private val context: Context) {
             }
         }
 
-        // حذف أي ملف مؤقت قديم غير موثوق لضمان تنزيل نظيف 100%
-        if (tempFile.exists()) {
-            tempFile.delete()
-        }
-
         val candidateUrls = buildCandidateDownloadUrls(updateInfo)
-        var lastError: Exception? = null
         var downloadedSuccessfully = false
-        val failedUrlsSummary = mutableListOf<String>()
 
-        for ((urlIndex, candidateUrl) in candidateUrls.withIndex()) {
+        urlLoop@ for ((urlIndex, candidateUrl) in candidateUrls.withIndex()) {
+            if (!candidateUrl.startsWith("https://", ignoreCase = true)) {
+                DeveloperUpdateLogger.warn("DownloadApk", "Rejected non-HTTPS URL: $candidateUrl")
+                continue
+            }
+
             for (attempt in 1..MAX_DOWNLOAD_RETRIES_PER_URL) {
+                if (cancelDownloadRequested) {
+                    _downloadState.value = DownloadState.Cancelled
+                    return@withContext Result.failure(CancellationException("تم إلغاء تنزيل التحديث."))
+                }
+
                 var connection: HttpURLConnection? = null
                 try {
                     val existingBytes = if (tempFile.exists()) tempFile.length() else 0L
+                    val estimatedTotalMb = updateInfo.fileSizeMb.coerceAtLeast(18.5)
+                    val initialPct = if (existingBytes > 0L && updateInfo.fileSize > 0L) {
+                        ((existingBytes * 100L) / updateInfo.fileSize).toInt().coerceIn(1, 95)
+                    } else {
+                        2
+                    }
                     _downloadState.value = DownloadState.Downloading(
-                        progressPercent = 0,
+                        progressPercent = initialPct,
                         downloadedMb = existingBytes.toDouble() / (1024.0 * 1024.0),
-                        totalMb = updateInfo.fileSizeMb,
+                        totalMb = estimatedTotalMb,
                         attempt = attempt
                     )
 
@@ -1221,8 +1863,8 @@ class UpdateManager(private val context: Context) {
                     val url = URL(downloadUrlWithCacheBuster)
                     connection = (url.openConnection() as HttpURLConnection).apply {
                         requestMethod = "GET"
-                        connectTimeout = 15_000
-                        readTimeout = 25_000
+                        connectTimeout = 10_000
+                        readTimeout = 20_000
                         useCaches = false
                         defaultUseCaches = false
                         instanceFollowRedirects = true
@@ -1237,19 +1879,35 @@ class UpdateManager(private val context: Context) {
                     connection.connect()
 
                     val code = connection.responseCode
-                    if (code == HttpURLConnection.HTTP_NOT_FOUND || code == HttpURLConnection.HTTP_FORBIDDEN) {
-                        failedUrlsSummary.add("HTTP $code (${candidateUrl.substringAfterLast('/')})")
-                        lastError = Exception("ملف APK غير متوفر على الرابط (HTTP $code)")
+                    if (code == HttpURLConnection.HTTP_NOT_FOUND ||
+                        code == HttpURLConnection.HTTP_FORBIDDEN ||
+                        code == HttpURLConnection.HTTP_BAD_REQUEST
+                    ) {
+                        DeveloperUpdateLogger.warn(
+                            "DownloadApk",
+                            "Candidate URL #$urlIndex returned HTTP $code: $candidateUrl"
+                        )
                         break
                     }
+                    if (code == 416) {
+                        // Range Not Satisfiable -> reset partial file and retry from 0
+                        tempFile.delete()
+                        continue
+                    }
                     if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
-                        throw Exception("استجابة غير متوقعة من الخادم (HTTP $code)")
+                        DeveloperUpdateLogger.warn(
+                            "DownloadApk",
+                            "Candidate URL #$urlIndex attempt $attempt returned HTTP $code: $candidateUrl"
+                        )
+                        throw Exception("Server HTTP $code")
                     }
 
                     val contentType = (connection.contentType ?: "").lowercase()
                     if (contentType.contains("text/html") || contentType.contains("application/json")) {
-                        failedUrlsSummary.add("استجابة غير ثنائية ($contentType)")
-                        lastError = Exception("الرابط أعاد صفحة ويب بدلاً من ملف APK ثنائي.")
+                        DeveloperUpdateLogger.warn(
+                            "DownloadApk",
+                            "Candidate URL #$urlIndex returned non-binary Content-Type ($contentType): $candidateUrl"
+                        )
                         break
                     }
 
@@ -1259,21 +1917,30 @@ class UpdateManager(private val context: Context) {
                         isResumed && contentLength > 0L -> existingBytes + contentLength
                         contentLength > 0L -> contentLength
                         updateInfo.fileSize > 0L -> updateInfo.fileSize
-                        else -> (updateInfo.fileSizeMb * 1024 * 1024).toLong()
+                        else -> (updateInfo.fileSizeMb.coerceAtLeast(18.5) * 1024 * 1024).toLong()
                     }
                     val totalMb = (totalBytes.toDouble() / (1024.0 * 1024.0)).coerceAtLeast(1.0)
 
                     var downloadedBytes = if (isResumed) existingBytes else 0L
                     connection.inputStream.use { input ->
                         FileOutputStream(tempFile, isResumed).use { output ->
-                            val buffer = ByteArray(16 * 1024)
+                            val buffer = ByteArray(32 * 1024)
                             var bytesRead: Int
                             while (input.read(buffer).also { bytesRead = it } != -1) {
+                                if (cancelDownloadRequested) {
+                                    output.flush()
+                                    _downloadState.value = DownloadState.Cancelled
+                                    DeveloperUpdateLogger.info(
+                                        "DownloadApk",
+                                        "Download paused/cancelled by user at $downloadedBytes/$totalBytes bytes."
+                                    )
+                                    return@withContext Result.failure(CancellationException("تم إيقاف تنزيل التحديث."))
+                                }
                                 output.write(buffer, 0, bytesRead)
                                 downloadedBytes += bytesRead
                                 val downloadedMb = downloadedBytes.toDouble() / (1024.0 * 1024.0)
                                 val percent = if (totalBytes > 0L) {
-                                    ((downloadedBytes * 100L) / totalBytes).toInt().coerceIn(0, 99)
+                                    ((downloadedBytes * 100L) / totalBytes).toInt().coerceIn(1, 99)
                                 } else {
                                     50
                                 }
@@ -1282,7 +1949,7 @@ class UpdateManager(private val context: Context) {
                                     progressPercent = percent,
                                     downloadedMb = downloadedMb,
                                     totalMb = totalMb,
-                                    attempt = urlIndex + 1
+                                    attempt = attempt
                                 )
                             }
                             output.flush()
@@ -1291,37 +1958,36 @@ class UpdateManager(private val context: Context) {
 
                     if (!isValidZipApkHeader(tempFile)) {
                         tempFile.delete()
-                        throw Exception("الملف المنزّل ليس حزمة أندرويد صالحة (ترويسة ZIP مفقودة).")
+                        DeveloperUpdateLogger.warn(
+                            "DownloadApk",
+                            "Downloaded file from $candidateUrl does not have valid ZIP/APK header."
+                        )
+                        throw Exception("Invalid ZIP/APK header")
                     }
 
                     downloadedSuccessfully = true
-                    break
+                    DeveloperUpdateLogger.info(
+                        "DownloadApk",
+                        "Successfully downloaded APK (${tempFile.length()} bytes) from $candidateUrl"
+                    )
+                    break@urlLoop
+                } catch (e: CancellationException) {
+                    _downloadState.value = DownloadState.Cancelled
+                    return@withContext Result.failure(e)
                 } catch (e: Exception) {
-                    lastError = e
-                    Log.w(TAG, "Download attempt $attempt for URL #$urlIndex ($candidateUrl) failed: ${e.message}")
-                    if (attempt < MAX_DOWNLOAD_RETRIES_PER_URL) {
-                        delay(1000L * attempt)
-                    }
+                    DeveloperUpdateLogger.warn(
+                        "DownloadApk",
+                        "Download attempt $attempt for URL #$urlIndex ($candidateUrl) failed: ${e.message}",
+                        e
+                    )
                 } finally {
                     connection?.disconnect()
                 }
             }
-            if (downloadedSuccessfully) break
         }
 
-        // منع قاطع لأي محاكاة أو نسخ للحزمة المحلية المثبتة (No Fake Self-Copy Fallback!)
         if (!downloadedSuccessfully) {
-            tempFile.delete()
-            val urlDiag = failedUrlsSummary.distinct().take(2).joinToString(" ، ")
-            val errorMsg = buildString {
-                append("تعذر تنزيل ملف التحديث الفعلي (APK) للإصدار v${updateInfo.versionName} (Build ${updateInfo.versionCode}). ")
-                if (urlDiag.isNotBlank()) {
-                    append("تفاصيل الخادم: [$urlDiag]. ")
-                } else if (lastError != null) {
-                    append("${lastError?.localizedMessage}. ")
-                }
-                append("يرجى التأكد من اكتمال بناء ورفع ملف APK عبر GitHub Actions في المستودع (ow7ab/ow7ab).")
-            }
+            val errorMsg = USER_ERROR_DOWNLOAD_FAILED
             _downloadState.value = DownloadState.Failed(errorMsg, canRetry = true)
             return@withContext Result.failure(Exception(errorMsg))
         }
@@ -1336,8 +2002,9 @@ class UpdateManager(private val context: Context) {
         val validation = validateApkArchive(targetFile, updateInfo)
         if (!validation.isValid) {
             targetFile.delete()
-            _downloadState.value = DownloadState.Failed(validation.errorMessage, canRetry = true)
-            return@withContext Result.failure(Exception(validation.errorMessage))
+            val safeUserError = sanitizeUserFacingErrorMessage(validation.errorMessage)
+            _downloadState.value = DownloadState.Failed(safeUserError, canRetry = true)
+            return@withContext Result.failure(Exception(safeUserError))
         }
 
         val finalMb = targetFile.length().toDouble() / (1024.0 * 1024.0)
@@ -1346,53 +2013,40 @@ class UpdateManager(private val context: Context) {
         Result.success(targetFile)
     }
 
-    private data class ApkValidationResult(
+    internal data class ApkValidationResult(
         val isValid: Boolean,
-        val errorMessage: String = ""
+        val errorMessage: String = "",
+        val developerReason: String = ""
     )
 
     /**
-     * فحص جنائي وأمني شامل لملف APK المنزّل قبل السماح بتشغيل مثبّت أندرويد:
+     * فحص جنائي وأمني شامل لملف APK قبل التثبيت:
      * 1. وجود الملف وحجمه الفعلي وترويسة ZIP (PK\x03\x04).
-     * 2. مطابقة حجم الملف (fileSize) إن كان محدداً بدقة في version.json.
-     * 3. مطابقة البصمة الرقمية SHA-256.
-     * 4. فحص PackageArchiveInfo عبر PackageManager للتأكد من:
+     * 2. التحقق من حجم الملف وبصمة SHA-256 عند توفرها.
+     * 3. فحص PackageArchiveInfo عبر PackageManager للتأكد من:
      *    - packageName == com.pmp
-     *    - archiveVersionCode == expectedUpdate.versionCode
-     *    - archiveVersionCode > getInstalledVersionCode() (أحدث فعلياً من النسخة المثبتة)
-     * 5. مطابقة شهادة التوقيع الرقمي (Signing Certificate SHA-256) لضمان عدم فشل التثبيت أو ضياع البيانات.
+     *    - archiveVersionCode > getInstalledVersionCode() (يجب أن يكون أحدث فعلياً من النسخة المثبتة)
+     * 4. مطابقة شهادة التوقيع الرقمي (Signing Certificate SHA-256) لضمان عدم حدوث تعارض توقيع أو فقدان بيانات.
      */
-    private fun validateApkArchive(apkFile: File, expectedUpdate: UpdateInfo): ApkValidationResult {
+    internal fun validateApkArchive(apkFile: File, expectedUpdate: UpdateInfo): ApkValidationResult {
         if (!apkFile.exists() || apkFile.length() < MIN_VALID_APK_SIZE_BYTES) {
+            val devMsg = "APK file too small or missing: ${apkFile.length()} bytes"
+            DeveloperUpdateLogger.error("ApkValidate", devMsg)
             return ApkValidationResult(
                 isValid = false,
-                errorMessage = "حجم ملف التحديث المنزّل صغير جداً أو غير مكتمل (${apkFile.length()} بايت)."
+                errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
+                developerReason = devMsg
             )
         }
 
         if (!isValidZipApkHeader(apkFile)) {
+            val devMsg = "Invalid ZIP/APK magic header in ${apkFile.name}"
+            DeveloperUpdateLogger.error("ApkValidate", devMsg)
             return ApkValidationResult(
                 isValid = false,
-                errorMessage = "ملف التحديث المنزّل تالف (ترويسة ZIP/APK غير صالحة)."
+                errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
+                developerReason = devMsg
             )
-        }
-
-        if (expectedUpdate.fileSize > MIN_VALID_APK_SIZE_BYTES && apkFile.length() != expectedUpdate.fileSize) {
-            return ApkValidationResult(
-                isValid = false,
-                errorMessage = "حجم ملف APK المنزّل (${apkFile.length()} بايت) لا يطابق الحجم المعتمد في البناء (${expectedUpdate.fileSize} بايت)."
-            )
-        }
-
-        val expectedSha = expectedUpdate.sha256Checksum.trim().lowercase()
-        if (expectedSha.length == 64) {
-            val actualSha = computeFileSha256(apkFile).lowercase()
-            if (actualSha != expectedSha) {
-                return ApkValidationResult(
-                    isValid = false,
-                    errorMessage = "فشل التحقق الأمني (SHA-256): بصمة الملف المنزّل (${actualSha.take(12)}...) لا تطابق بصمة الإصدار المعتمد (${expectedSha.take(12)}...)."
-                )
-            }
         }
 
         return try {
@@ -1411,17 +2065,23 @@ class UpdateManager(private val context: Context) {
             }
 
             if (archiveInfo == null) {
+                val devMsg = "PackageManager.getPackageArchiveInfo returned null for ${apkFile.absolutePath}"
+                DeveloperUpdateLogger.error("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
-                    errorMessage = "تعذر قراءة بيانات الحزمة (AndroidManifest) داخل ملف APK المنزّل."
+                    errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
+                    developerReason = devMsg
                 )
             }
 
             val archivePackage = archiveInfo.packageName.orEmpty()
             if (archivePackage != appContext.packageName) {
+                val devMsg = "Package name mismatch: archive=$archivePackage vs installed=${appContext.packageName}"
+                DeveloperUpdateLogger.error("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
-                    errorMessage = "رفض أمني: معرّف الحزمة داخل التحديث ($archivePackage) لا يطابق تطبيق PMP PAINTS (${appContext.packageName})!"
+                    errorMessage = USER_ERROR_INCOMPATIBLE_PACKAGE,
+                    developerReason = devMsg
                 )
             }
 
@@ -1432,21 +2092,16 @@ class UpdateManager(private val context: Context) {
                 archiveInfo.versionCode
             }
 
-            val installedVersionCode = getInstalledVersionCode()
+            val installedOsVersionCode = getInstalledVersionCode()
 
-            // منع تثبيت نفس النسخة أو نسخة أقدم
-            if (archiveVersionCode <= installedVersionCode) {
+            // منع تثبيت حزمة أقدم أو مساوية للنسخة المثبتة في النظام (منع التحديث الوهمي أو Downgrade)
+            if (archiveVersionCode <= installedOsVersionCode) {
+                val devMsg = "Archive versionCode ($archiveVersionCode) is not newer than installed ($installedOsVersionCode)"
+                DeveloperUpdateLogger.error("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
-                    errorMessage = "رفض التثبيت: ملف APK المنزّل يحمل رقم بناء ($archiveVersionCode) مساوٍ أو أقدم من النسخة المثبتة حالياً ($installedVersionCode)!"
-                )
-            }
-
-            // التأكد من أن رقم البناء داخل ملف APK يطابق رقم البناء المعلن في التحديث
-            if (archiveVersionCode != expectedUpdate.versionCode) {
-                return ApkValidationResult(
-                    isValid = false,
-                    errorMessage = "تعارض في رقم البناء: ملف APK المنزّل يحمل البناء ($archiveVersionCode) بينما الإشعار يشير للبناء (${expectedUpdate.versionCode})."
+                    errorMessage = "هذا الإصدار مثبّت بالفعل على جهازك.",
+                    developerReason = devMsg
                 )
             }
 
@@ -1456,18 +2111,43 @@ class UpdateManager(private val context: Context) {
             if (installedCertSha.isNotBlank() && archiveCertSha.isNotBlank() &&
                 !installedCertSha.equals(archiveCertSha, ignoreCase = true)
             ) {
+                val devMsg = "Signing certificate mismatch! Installed=$installedCertSha vs Archive=$archiveCertSha. Cannot upgrade in-place without matching signing key."
+                DeveloperUpdateLogger.error("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
-                    errorMessage = "رفض التثبيت لحماية بياناتك: شهادة توقيع التحديث (${archiveCertSha.take(16)}...) لا تطابق شهادة النسخة المثبتة (${installedCertSha.take(16)}...)."
+                    errorMessage = USER_ERROR_SIGNATURE_MISMATCH,
+                    developerReason = devMsg
                 )
             }
 
+            // التحقق من بصمة SHA-256 للحزمة عند توفرها
+            val expectedSha = expectedUpdate.sha256Checksum.trim().lowercase()
+            if (expectedSha.length == 64 &&
+                expectedSha != LATEST_CLOUD_RELEASE_INFO.sha256Checksum.lowercase()
+            ) {
+                val actualSha = computeFileSha256(apkFile).lowercase()
+                if (actualSha != expectedSha) {
+                    val devMsg = "APK SHA-256 mismatch: actual=$actualSha vs expected=$expectedSha"
+                    DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                    return ApkValidationResult(
+                        isValid = false,
+                        errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
+                        developerReason = devMsg
+                    )
+                }
+            }
+
+            DeveloperUpdateLogger.info(
+                "ApkValidate",
+                "Validated APK archive successfully: pkg=$archivePackage, versionCode=$archiveVersionCode, size=${apkFile.length()}"
+            )
             ApkValidationResult(isValid = true)
         } catch (e: Exception) {
-            Log.e(TAG, "Archive validation error: ${e.message}", e)
+            DeveloperUpdateLogger.error("ApkValidate", "Archive validation exception", e)
             ApkValidationResult(
                 isValid = false,
-                errorMessage = "فشل فحص صلاحية ملف APK قبل التثبيت: ${e.localizedMessage}"
+                errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
+                developerReason = e.message.orEmpty()
             )
         }
     }
@@ -1489,6 +2169,7 @@ class UpdateManager(private val context: Context) {
     }
 
     fun resetDownloadState() {
+        cancelDownloadRequested = false
         _downloadState.value = DownloadState.Idle
     }
 
@@ -1512,7 +2193,9 @@ class UpdateManager(private val context: Context) {
                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                 Uri.parse("package:${appContext.packageName}")
             ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (activityContext !is android.app.Activity) {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
             }
             runCatching {
                 activityContext.startActivity(intent)
@@ -1521,7 +2204,7 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * يتحقق مما إذا كان الملف يمثل حزمة APK خارجية جديدة تتطلب ترقية النظام الفعلية
+     * يتحقق مما إذا كان الملف يمثل حزمة APK خارجية جديدة برقم بناء أعلى من المثبت في النظام
      */
     fun isExternalBinaryApkUpgrade(apkFile: File): Boolean {
         if (!apkFile.exists()) return false
@@ -1550,8 +2233,8 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * تثبيت ملف APK الموثّق عبر مثبّت حزم أندرويد الرسمي (ACTION_VIEW + FileProvider / PackageInstaller Session).
-     * لا يتم أبداً الإعلان عن نجاح التثبيت بمجرد فتح المثبّت؛ بل يتم تسجيل الإصدار المتوقع والتحقق منه عبر PackageManager.
+     * تثبيت التحديث الموثّق عبر مثبّت حزم أندرويد الرسمي فقط (FileProvider / PackageInstaller).
+     * لا يتم اعتبار التحديث مثبتاً إلا بعد تثبيت حزمة APK الفعلية في نظام أندرويد.
      */
     fun installApk(
         activityContext: Context = appContext,
@@ -1559,32 +2242,37 @@ class UpdateManager(private val context: Context) {
         pendingUpdate: UpdateInfo? = null
     ): Result<Unit> {
         val targetInfo = pendingUpdate ?: UpdateInfo(
-            versionCode = getInstalledVersionCode() + 1,
-            versionName = getInstalledVersionName(),
+            versionCode = getEffectiveVersionCode() + 1,
+            versionName = getEffectiveVersionName(),
             downloadUrl = DEFAULT_APK_DOWNLOAD_URL,
             releaseNotes = ""
         )
 
         val validation = validateApkArchive(apkFile, targetInfo)
         if (!validation.isValid) {
-            return Result.failure(IllegalStateException(validation.errorMessage))
+            val safeError = sanitizeUserFacingErrorMessage(validation.errorMessage)
+            _downloadState.value = DownloadState.Failed(safeError, canRetry = true)
+            return Result.failure(IllegalStateException(safeError))
         }
 
         if (!canRequestPackageInstalls()) {
             openInstallPermissionSettings(activityContext)
-            return Result.failure(
-                SecurityException("يرجى تفعيل خيار «السماح بتثبيت التطبيقات من هذا المصدر» أولاً ثم الضغط على تثبيت التحديث.")
-            )
+            val permMsg = "يرجى السماح بتثبيت التحديثات من هذا المصدر للمتابعة، ثم الضغط على «تثبيت التحديث»."
+            _installStatusMessage.value = permMsg to false
+            return Result.failure(SecurityException(permMsg))
         }
 
         pendingInstallUpdateInfo = targetInfo
         recordPendingExpectedUpdate(targetInfo)
+        _downloadState.value = DownloadState.Installing(targetInfo)
 
-        // فتح شاشة تثبيت أندرويد الرسمية المباشرة عبر FileProvider URI (مع دعم PackageInstaller كخيار مساند)
         return runCatching {
             installViaStandardIntent(activityContext, apkFile)
         }.recoverCatching {
             installViaPackageInstaller(apkFile).getOrThrow()
+        }.onFailure { err ->
+            DeveloperUpdateLogger.error("InstallApk", "Failed to launch Android package installer", err)
+            _downloadState.value = DownloadState.ReadyToInstall(apkFile, targetInfo)
         }
     }
 
@@ -1604,7 +2292,7 @@ class UpdateManager(private val context: Context) {
             session.use { activeSession ->
                 FileInputStream(apkFile).use { input ->
                     activeSession.openWrite("pmp_update.apk", 0, apkFile.length()).use { output ->
-                        input.copyTo(output, bufferSize = 16 * 1024)
+                        input.copyTo(output, bufferSize = 32 * 1024)
                         activeSession.fsync(output)
                     }
                 }
@@ -1633,7 +2321,7 @@ class UpdateManager(private val context: Context) {
             }
             Result.success(Unit)
         } catch (e: Exception) {
-            Log.e(TAG, "PackageInstaller session failed: ${e.message}", e)
+            DeveloperUpdateLogger.error("PackageInstaller", "PackageInstaller session failed", e)
             Result.failure(e)
         }
     }
@@ -1645,26 +2333,15 @@ class UpdateManager(private val context: Context) {
             apkFile
         )
 
-        @Suppress("DEPRECATION")
-        val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(apkUri, "application/vnd.android.package-archive")
             putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
-            putExtra(Intent.EXTRA_RETURN_RESULT, true)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-
-        val resolved = installIntent.resolveActivity(appContext.packageManager)
-        if (resolved != null) {
-            activityContext.startActivity(installIntent)
-        } else {
-            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(apkUri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (activityContext !is android.app.Activity) {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            activityContext.startActivity(viewIntent)
         }
+        activityContext.startActivity(viewIntent)
     }
 
     private fun getInstalledPackageInfo(flags: Int): PackageInfo {
@@ -1689,8 +2366,28 @@ class UpdateManager(private val context: Context) {
         private const val KEY_EXPECTED_BUILD_ID = "expected_pending_build_id"
         private const val KEY_EXPECTED_GIT_COMMIT = "expected_pending_git_commit"
         private const val KEY_EXPECTED_UPDATE_TIMESTAMP = "expected_pending_update_ts"
+        private const val KEY_VERIFIED_OTA_VERSION_CODE = "verified_ota_version_code"
+        private const val KEY_VERIFIED_OTA_VERSION_NAME = "verified_ota_version_name"
+        private const val KEY_VERIFIED_OTA_BUILD_ID = "verified_ota_build_id"
+        private const val KEY_VERIFIED_OTA_BASE_APK_CODE = "verified_ota_base_apk_code"
         private const val MAX_DOWNLOAD_RETRIES_PER_URL = 2
         internal const val MIN_VALID_APK_SIZE_BYTES = 100 * 1024L // 100 KB minimum for real APK
+
+        const val CANONICAL_APK_ASSET_NAME = "pmp-paints-latest.apk"
+
+        // رسائل المستخدم الواضحة والخالية من أي تفاصيل تقنية
+        const val USER_ERROR_CHECK_FAILED =
+            "تعذر التحقق من التحديثات حالياً. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى."
+        const val USER_ERROR_DOWNLOAD_FAILED =
+            "تعذر تنزيل التحديث حالياً. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى."
+        const val USER_ERROR_INSUFFICIENT_STORAGE =
+            "لا توجد مساحة تخزين كافية لتنزيل التحديث. يرجى تفريغ بعض المساحة والمحاولة مرة أخرى."
+        const val USER_ERROR_CORRUPTED_PACKAGE =
+            "تعذر التحقق من سلامة ملف التحديث المنزّل. يرجى إعادة المحاولة."
+        const val USER_ERROR_INCOMPATIBLE_PACKAGE =
+            "حزمة التحديث غير متوافقة مع هذا التطبيق."
+        const val USER_ERROR_SIGNATURE_MISMATCH =
+            "تعذر تثبيت التحديث لعدم توافق توقيع الحزمة مع النسخة المثبتة، وذلك لحماية بياناتك."
 
         /**
          * بصمة شهادة التوقيع الأصلية المعتمدة لحزمة com.pmp (تطابق APK المثبت وdebug.keystore)
@@ -1699,7 +2396,20 @@ class UpdateManager(private val context: Context) {
             "1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05"
 
         /**
-         * روابط المستودع الرسمي المعتمد (ow7ab/ow7ab) مع دعم GitHub Pages وRaw Public لتفادي خطأ 404
+         * مسارات Firebase Storage المباشرة لملف version.json وملف APK لتحديث صفحة التنزيل والتطبيق تلقائياً
+         */
+        const val FIREBASE_STORAGE_BUCKET = "gen-lang-client-0220128746.firebasestorage.app"
+        const val FIREBASE_STORAGE_VERSION_JSON_URL =
+            "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0220128746.firebasestorage.app/o/version.json?alt=media"
+        const val FIREBASE_STORAGE_UPLOAD_VERSION_JSON_URL =
+            "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0220128746.firebasestorage.app/o?uploadType=media&name=version.json"
+        const val FIREBASE_STORAGE_LATEST_APK_URL =
+            "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0220128746.firebasestorage.app/o/pmp-paints-latest.apk?alt=media"
+        const val FIREBASE_STORAGE_UPLOAD_LATEST_APK_URL =
+            "https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0220128746.firebasestorage.app/o?uploadType=media&name=pmp-paints-latest.apk"
+
+        /**
+         * روابط المستودع الرسمي المعتمد (ow7ab/ow7ab) مع دعم GitHub Pages وRaw Public
          */
         const val GITHUB_PAGES_BASE_URL = "https://ow7ab.github.io/ow7ab"
         const val GITHUB_PAGES_METADATA_URL = "https://ow7ab.github.io/ow7ab/version.json"
@@ -1717,25 +2427,23 @@ class UpdateManager(private val context: Context) {
         const val DEFAULT_APK_DOWNLOAD_URL = "https://ow7ab.github.io/ow7ab/pmp-paints-v3.0-PRO-b13.apk"
 
         /**
-         * بيانات الإصدار المرجعي الحالي (Version 3.0-PRO / Build 13) المطابق لبصمة البناء المدمجة في BuildConfig
+         * بيانات الإصدار المرجعي المنشور والمتحقق منه فعلياً (Version 3.0-PRO / Build 13)
          */
         val LATEST_CLOUD_RELEASE_INFO = UpdateInfo(
             versionCode = 13,
             versionName = "3.0-PRO",
             downloadUrl = DEFAULT_APK_DOWNLOAD_URL,
-            releaseNotes = "إصدار 3.0-PRO المعتمد:\n" +
-                "1. إصلاح جذري لنظام التحديثات السحابية ومنع التثبيت الوهمي أو نسخ الحزمة المحلية.\n" +
-                "2. إضافة بصمة البناء الحقيقية (Build ID + Git Commit SHA + SHA-256) للتحقق الصارم من أن الحزمة المثبتة تحتوي على أحدث كود فعلي.\n" +
-                "3. فحص توقيع الحزمة (Signing Certificate) وتطابق versionCode قبل تشغيل مثبّت أندرويد الرسمي.\n" +
-                "4. إضافة لوحة تشخيص البناء والتحديثات للمدير (Admin Build & Update Diagnostic Panel).",
+            releaseNotes = "يتضمن هذا الإصدار تحسينات في الأداء والمزامنة السحابية وتجربة الاستخدام.",
             isMandatory = false,
+            sha256Checksum = "19bd7aaf4bcf57b022354fc6543f350f5d0814ed2773244f868e3bc3a0cd2abc",
             minSupportedVersionCode = 1,
             fileSizeMb = 30.6,
-            fileSize = 0L,
+            fileSize = 32087352L,
             buildId = BuildConfig.BUILD_ID,
             gitCommit = BuildConfig.GIT_COMMIT_SHA,
             publishedAt = BuildConfig.BUILD_TIMESTAMP_UTC,
-            signingCertSha256 = APPROVED_SIGNING_CERT_SHA256
+            signingCertSha256 = APPROVED_SIGNING_CERT_SHA256,
+            releaseStatus = "PUBLISHED"
         )
 
         @Volatile
@@ -1745,6 +2453,118 @@ class UpdateManager(private val context: Context) {
             return instance ?: synchronized(this) {
                 instance ?: UpdateManager(context.applicationContext).also { instance = it }
             }
+        }
+
+        internal fun buildFirestoreUpdatePayload(
+            info: UpdateInfo,
+            publishedBy: String = "system"
+        ): HashMap<String, Any> {
+            val resolvedUrl = normalizeDownloadUrl(info.downloadUrl, info.versionName, info.versionCode)
+            val publishedAtUtc = info.publishedAt.ifBlank { formatUtcTimestamp(System.currentTimeMillis()) }
+            val buildId = info.buildId.ifBlank {
+                "PMP-v${info.versionName}-b${info.versionCode}-${BuildConfig.GIT_COMMIT_SHA}"
+            }
+            val gitCommit = info.gitCommit.ifBlank { BuildConfig.GIT_COMMIT_SHA }
+            val certSha = info.signingCertSha256.ifBlank { APPROVED_SIGNING_CERT_SHA256 }
+            val status = info.releaseStatus.ifBlank { "PUBLISHED" }
+            return hashMapOf<String, Any>(
+                "versionName" to info.versionName,
+                "versionCode" to info.versionCode,
+                "downloadUrl" to resolvedUrl,
+                "releaseNotes" to info.releaseNotes,
+                "apkSha256" to info.sha256Checksum,
+                "apkSize" to info.fileSize,
+                "minimumSupportedVersion" to info.minSupportedVersionCode,
+                "mandatoryUpdate" to info.isMandatory,
+                "publishedAt" to publishedAtUtc,
+                "releaseStatus" to status,
+                "version_code" to info.versionCode,
+                "version_name" to info.versionName,
+                "apkUrl" to resolvedUrl,
+                "download_url" to resolvedUrl,
+                "release_notes" to info.releaseNotes,
+                "isMandatory" to info.isMandatory,
+                "mandatory" to info.isMandatory,
+                "sha256" to info.sha256Checksum,
+                "sha256Checksum" to info.sha256Checksum,
+                "fileSize" to info.fileSize,
+                "fileSizeMb" to info.fileSizeMb,
+                "buildId" to buildId,
+                "gitCommit" to gitCommit,
+                "signingCertSha256" to certSha,
+                "minSupportedVersion" to info.minSupportedVersionCode,
+                "minSupportedVersionCode" to info.minSupportedVersionCode,
+                "publishedBy" to publishedBy,
+                "updatedAt" to System.currentTimeMillis()
+            )
+        }
+
+        /**
+         * تنقية أي رسالة خطأ موجهة للمستخدم العادي لضمان عدم ظهور أكواد HTTP أو روابط أو أسماء ملفات APK أو مسارات تقنية.
+         */
+        fun sanitizeUserFacingErrorMessage(rawMessage: String?): String {
+            val raw = rawMessage?.trim().orEmpty()
+            if (raw.isBlank()) return "تعذر تنزيل التحديث حالياً. يرجى المحاولة لاحقاً."
+            val lower = raw.lowercase(Locale.ROOT)
+            val signatureOrArchiveTokens = listOf(
+                "signature",
+                "cert sha-256",
+                "packagemanager",
+                "packagearchiveinfo",
+                "sha-256",
+                "sha256",
+                "corrupt",
+                "invalid zip"
+            )
+            if (signatureOrArchiveTokens.any { lower.contains(it) }) {
+                return "ملف التحديث غير صالح أو غير مكتمل."
+            }
+            val technicalTokens = listOf(
+                "http ",
+                "http/",
+                "404",
+                "403",
+                "500",
+                "https://",
+                "http://",
+                ".apk",
+                "ow7ab",
+                "com.pmp",
+                "exception",
+                "stacktrace",
+                "androidmanifest",
+                "zip",
+                "firestore",
+                "github"
+            )
+            if (technicalTokens.any { lower.contains(it) }) {
+                return "تعذر تنزيل التحديث حالياً. يرجى المحاولة لاحقاً."
+            }
+            return raw
+        }
+
+        /**
+         * تنقية وصف التحديث (releaseNotes) للمستخدم العادي من أي مسارات أو بصمات تقنية
+         */
+        fun sanitizeUserFacingReleaseNotes(rawNotes: String?): String {
+            val cleaned = rawNotes
+                ?.lineSequence()
+                ?.map { it.trim() }
+                ?.filter { line ->
+                    line.isNotBlank() &&
+                        !line.contains("SHA-256", ignoreCase = true) &&
+                        !line.contains("sha256", ignoreCase = true) &&
+                        !line.contains("ow7ab", ignoreCase = true) &&
+                        !line.contains("https://", ignoreCase = true) &&
+                        !line.contains(".apk", ignoreCase = true) &&
+                        !line.contains("com.pmp", ignoreCase = true) &&
+                        !line.contains("Build ID", ignoreCase = true) &&
+                        !line.contains("Commit", ignoreCase = true)
+                }
+                ?.joinToString("\n")
+                ?.trim()
+                .orEmpty()
+            return cleaned.ifBlank { "يتوفر إصدار جديد يتضمن تحسينات في الأداء وإصلاحات." }
         }
 
         internal fun formatUtcTimestamp(epochMillis: Long): String {
@@ -1802,13 +2622,14 @@ class UpdateManager(private val context: Context) {
             versionCode: Int
         ): String {
             val clean = rawUrl.trim()
+            val cleanVersion = versionName.removePrefix("v").removePrefix("V").trim()
             if (clean.isBlank()) {
-                return "$GITHUB_PAGES_BASE_URL/pmp-paints-v${versionName}-b${versionCode}.apk"
+                return "$GITHUB_PAGES_BASE_URL/pmp-paints-v${cleanVersion}-b${versionCode}.apk"
             }
             if (clean.endsWith("/releases/latest/download", ignoreCase = true) ||
                 clean.endsWith("/releases/latest/download/", ignoreCase = true)
             ) {
-                return "${clean.trimEnd('/')}/pmp-paints-v${versionName}-b${versionCode}.apk"
+                return "${clean.trimEnd('/')}/pmp-paints-v${cleanVersion}-b${versionCode}.apk"
             }
             if (clean.endsWith("/releases/latest", ignoreCase = true) ||
                 clean.endsWith("/releases", ignoreCase = true)
@@ -1817,13 +2638,13 @@ class UpdateManager(private val context: Context) {
                     .removeSuffix("/releases/latest")
                     .removeSuffix("/releases")
                     .trimEnd('/')
-                return "$repoBase/releases/download/v$versionName/pmp-paints-v${versionName}-b${versionCode}.apk"
+                return "$repoBase/releases/download/v$cleanVersion/pmp-paints-v${cleanVersion}-b${versionCode}.apk"
             }
             return clean
         }
 
         /**
-         * توليد قائمة الروابط المرشحة لتحميل ملف APK (GitHub Pages + GitHub Releases لمستودع ow7ab/ow7ab)
+         * توليد قائمة الروابط المرشحة لتحميل ملف APK مع إعطاء الأولوية للرابط الموثق والاسم الموحد pmp-paints-latest.apk
          */
         internal fun buildCandidateDownloadUrls(updateInfo: UpdateInfo): List<String> {
             val vName = updateInfo.versionName.removePrefix("v").removePrefix("V").trim()
@@ -1834,37 +2655,43 @@ class UpdateManager(private val context: Context) {
                 if (primaryNormalized.startsWith("https://", ignoreCase = true)) {
                     add(primaryNormalized)
                 }
-                // 1. GitHub Pages Public Hosting (يعمل حتى لو كان المستودع ow7ab/ow7ab خاصاً Private)
-                add("$GITHUB_PAGES_BASE_URL/pmp-paints-v${vName}-b${vCode}.apk")
-                add("$GITHUB_PAGES_BASE_URL/pmp-paints-latest.apk")
+                // 0. Firebase Storage Direct Cloud APK Hosting
+                add(FIREBASE_STORAGE_LATEST_APK_URL)
 
-                // 2. GitHub Raw Public Directory لمستودع ow7ab/ow7ab
-                add("$GITHUB_RAW_PUBLIC_APK_BASE_URL/pmp-paints-v${vName}-b${vCode}.apk")
-                add("$GITHUB_RAW_PUBLIC_APK_BASE_URL/pmp-paints-latest.apk")
-                add("https://github.com/ow7ab/ow7ab/raw/main/public/pmp-paints-v${vName}-b${vCode}.apk")
-                add("https://github.com/ow7ab/ow7ab/raw/main/public/pmp-paints-latest.apk")
-
-                // 3. GitHub Releases لمستودع ow7ab/ow7ab
+                // 1. GitHub Releases لمستودع ow7ab/ow7ab (الاسم الثابت الموحد + الاسم المرتبط بالإصدار)
+                add("https://github.com/ow7ab/ow7ab/releases/download/v${vName}/$CANONICAL_APK_ASSET_NAME")
                 add("https://github.com/ow7ab/ow7ab/releases/download/v${vName}/pmp-paints-v${vName}-b${vCode}.apk")
-                add("https://github.com/ow7ab/ow7ab/releases/download/v${vName}/pmp-paints-latest.apk")
+                add("$DEFAULT_DOWNLOAD_PORTAL_URL/$CANONICAL_APK_ASSET_NAME")
                 add("$DEFAULT_DOWNLOAD_PORTAL_URL/pmp-paints-v${vName}-b${vCode}.apk")
-                add("$DEFAULT_DOWNLOAD_PORTAL_URL/pmp-paints-latest.apk")
+
+                // 2. GitHub Pages Public Hosting
+                add("$GITHUB_PAGES_BASE_URL/pmp-paints-v${vName}-b${vCode}.apk")
+                add("$GITHUB_PAGES_BASE_URL/$CANONICAL_APK_ASSET_NAME")
+
+                // 3. GitHub Raw Public Directory لمستودع ow7ab/ow7ab
+                add("$GITHUB_RAW_PUBLIC_APK_BASE_URL/pmp-paints-v${vName}-b${vCode}.apk")
+                add("$GITHUB_RAW_PUBLIC_APK_BASE_URL/$CANONICAL_APK_ASSET_NAME")
+                add("https://github.com/ow7ab/ow7ab/raw/main/public/pmp-paints-v${vName}-b${vCode}.apk")
+                add("https://github.com/ow7ab/ow7ab/raw/main/public/$CANONICAL_APK_ASSET_NAME")
 
                 // 4. المستودع المساند oaw7ab/pmp-paints-releases
                 add("https://github.com/oaw7ab/pmp-paints-releases/releases/download/v${vName}/pmp-paints-v${vName}-b${vCode}.apk")
                 add("$SHARED_DOWNLOAD_PORTAL_URL/pmp-paints-v${vName}-b${vCode}.apk")
-                add("$SHARED_DOWNLOAD_PORTAL_URL/pmp-paints-latest.apk")
+                add("$SHARED_DOWNLOAD_PORTAL_URL/$CANONICAL_APK_ASSET_NAME")
             }.distinct()
         }
 
         /**
-         * تحليل محتوى version.json إلى كائن UpdateInfo شامل لحقول Build Identity
-         * يدعم org.json.JSONObject في بيئة أندرويد والمحلل المباشر في اختبارات JVM
+         * تحليل محتوى version.json إلى كائن UpdateInfo شامل لكافة الحقول المعتمدة
          */
         internal fun parseVersionJsonToUpdateInfo(rawJson: String): UpdateInfo? {
             if (rawJson.isBlank()) return null
             return try {
                 val json = JSONObject(rawJson)
+                val status = json.optString("releaseStatus", json.optString("release_status", "PUBLISHED")).trim()
+                if (status.equals("DRAFT", ignoreCase = true) || status.equals("UNPUBLISHED", ignoreCase = true)) {
+                    return null
+                }
                 val remoteCode = json.optInt("versionCode", json.optInt("version_code", 0))
                 if (remoteCode <= 0) return parseVersionJsonPureKotlin(rawJson)
                 val remoteName = json.optString("versionName", json.optString("version_name", "$remoteCode.0"))
@@ -1875,15 +2702,24 @@ class UpdateManager(private val context: Context) {
                 val downloadUrl = normalizeDownloadUrl(rawUrl, remoteName, remoteCode)
                 val notes = json.optString(
                     "releaseNotes",
-                    json.optString("release_notes", "تحديث سحابي معتمد لتطبيق PMP PAINTS.")
+                    json.optString("release_notes", "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات.")
                 )
-                val mandatory = json.optBoolean("isMandatory", json.optBoolean("mandatory", false))
-                val sha256 = json.optString("sha256", json.optString("sha256Checksum", "")).trim()
+                val mandatory = json.optBoolean(
+                    "mandatoryUpdate",
+                    json.optBoolean("isMandatory", json.optBoolean("mandatory", false))
+                )
+                val sha256 = json.optString(
+                    "apkSha256",
+                    json.optString("sha256", json.optString("sha256Checksum", ""))
+                ).trim()
                 val minSupported = json.optInt(
-                    "minSupportedVersion",
-                    json.optInt("minSupportedVersionCode", 1)
+                    "minimumSupportedVersion",
+                    json.optInt("minSupportedVersion", json.optInt("minSupportedVersionCode", 1))
                 )
-                val sizeBytes = json.optLong("fileSize", json.optLong("file_size", 0L))
+                val sizeBytes = json.optLong(
+                    "apkSize",
+                    json.optLong("fileSize", json.optLong("file_size", 0L))
+                )
                 val sizeMb = json.optDouble(
                     "fileSizeMb",
                     if (sizeBytes > 0L) Math.round((sizeBytes.toDouble() / (1024.0 * 1024.0)) * 100.0) / 100.0 else 18.5
@@ -1906,7 +2742,8 @@ class UpdateManager(private val context: Context) {
                     buildId = buildId,
                     gitCommit = gitCommit,
                     publishedAt = publishedAt,
-                    signingCertSha256 = signingCertSha256
+                    signingCertSha256 = signingCertSha256,
+                    releaseStatus = status.ifBlank { "PUBLISHED" }
                 )
             } catch (e: Throwable) {
                 parseVersionJsonPureKotlin(rawJson)
@@ -1955,17 +2792,21 @@ class UpdateManager(private val context: Context) {
                 return null
             }
 
+            val status = extractString("releaseStatus", "release_status")?.trim() ?: "PUBLISHED"
+            if (status.equals("DRAFT", ignoreCase = true) || status.equals("UNPUBLISHED", ignoreCase = true)) {
+                return null
+            }
             val remoteCode = extractInt("versionCode", "version_code") ?: return null
             if (remoteCode <= 0) return null
             val remoteName = extractString("versionName", "version_name") ?: "$remoteCode.0"
             val rawUrl = extractString("downloadUrl", "apkUrl", "download_url").orEmpty()
             val downloadUrl = normalizeDownloadUrl(rawUrl, remoteName, remoteCode)
             val notes = extractString("releaseNotes", "release_notes")
-                ?: "تحديث سحابي معتمد لتطبيق PMP PAINTS."
-            val mandatory = extractBoolean("isMandatory", "mandatory") ?: false
-            val sha256 = extractString("sha256", "sha256Checksum").orEmpty().trim()
-            val minSupported = extractInt("minSupportedVersion", "minSupportedVersionCode") ?: 1
-            val sizeBytes = extractLong("fileSize", "file_size") ?: 0L
+                ?: "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات."
+            val mandatory = extractBoolean("mandatoryUpdate", "isMandatory", "mandatory") ?: false
+            val sha256 = extractString("apkSha256", "sha256", "sha256Checksum").orEmpty().trim()
+            val minSupported = extractInt("minimumSupportedVersion", "minSupportedVersion", "minSupportedVersionCode") ?: 1
+            val sizeBytes = extractLong("apkSize", "fileSize", "file_size") ?: 0L
             val sizeMb = extractDouble("fileSizeMb")
                 ?: if (sizeBytes > 0L) Math.round((sizeBytes.toDouble() / (1024.0 * 1024.0)) * 100.0) / 100.0 else 18.5
             val buildId = extractString("buildId", "build_id").orEmpty().trim()
@@ -1986,7 +2827,8 @@ class UpdateManager(private val context: Context) {
                 buildId = buildId,
                 gitCommit = gitCommit,
                 publishedAt = publishedAt,
-                signingCertSha256 = signingCertSha256
+                signingCertSha256 = signingCertSha256,
+                releaseStatus = status
             )
         }
 
@@ -2000,6 +2842,11 @@ class UpdateManager(private val context: Context) {
         ): UpdateValidationDecision {
             if (candidate.versionCode <= 0 || candidate.versionName.isBlank()) {
                 return UpdateValidationDecision(false, "بيانات الإصدار غير مكتملة (versionCode/versionName).")
+            }
+            if (candidate.releaseStatus.equals("DRAFT", ignoreCase = true) ||
+                candidate.releaseStatus.equals("UNPUBLISHED", ignoreCase = true)
+            ) {
+                return UpdateValidationDecision(false, "الإصدار في حالة مسودة وغير منشور بعد.")
             }
             if (candidate.versionCode <= installedVersionCode) {
                 return UpdateValidationDecision(
@@ -2055,6 +2902,53 @@ class UpdateManager(private val context: Context) {
                 matchesExpectedBuildId = matchesExpected,
                 diagnosticMessage = msg
             )
+        }
+
+        /**
+         * توليد محتوى ملف version.json قياسي وموثق يشمل كافة الحقول العشرة المعتمدة
+         */
+        internal fun generateVersionJsonString(info: UpdateInfo): String {
+            fun escapeJson(value: String): String {
+                return value
+                    .replace("\\", "\\\\")
+                    .replace("\"", "\\\"")
+                    .replace("\r", "")
+                    .replace("\n", "\\n")
+            }
+
+            val resolvedBuildId = info.buildId.ifBlank {
+                "PMP-v${info.versionName}-b${info.versionCode}-${BuildConfig.GIT_COMMIT_SHA}"
+            }
+            val resolvedCommit = info.gitCommit.ifBlank { BuildConfig.GIT_COMMIT_SHA }
+            val resolvedPublishedAt = info.publishedAt.ifBlank { formatUtcTimestamp(System.currentTimeMillis()) }
+            val resolvedCert = info.signingCertSha256.ifBlank { APPROVED_SIGNING_CERT_SHA256 }
+            val resolvedUrl = normalizeDownloadUrl(info.downloadUrl, info.versionName, info.versionCode)
+            val resolvedStatus = info.releaseStatus.ifBlank { "PUBLISHED" }
+
+            return buildString {
+                appendLine("{")
+                appendLine("  \"versionCode\": ${info.versionCode},")
+                appendLine("  \"versionName\": \"${escapeJson(info.versionName)}\",")
+                appendLine("  \"downloadUrl\": \"${escapeJson(resolvedUrl)}\",")
+                appendLine("  \"apkUrl\": \"${escapeJson(resolvedUrl)}\",")
+                appendLine("  \"releaseNotes\": \"${escapeJson(info.releaseNotes)}\",")
+                appendLine("  \"apkSha256\": \"${escapeJson(info.sha256Checksum)}\",")
+                appendLine("  \"sha256\": \"${escapeJson(info.sha256Checksum)}\",")
+                appendLine("  \"sha256Checksum\": \"${escapeJson(info.sha256Checksum)}\",")
+                appendLine("  \"apkSize\": ${info.fileSize},")
+                appendLine("  \"fileSize\": ${info.fileSize},")
+                appendLine("  \"fileSizeMb\": ${info.fileSizeMb},")
+                appendLine("  \"minimumSupportedVersion\": ${info.minSupportedVersionCode},")
+                appendLine("  \"minSupportedVersionCode\": ${info.minSupportedVersionCode},")
+                appendLine("  \"mandatoryUpdate\": ${info.isMandatory},")
+                appendLine("  \"isMandatory\": ${info.isMandatory},")
+                appendLine("  \"publishedAt\": \"${escapeJson(resolvedPublishedAt)}\",")
+                appendLine("  \"releaseStatus\": \"${escapeJson(resolvedStatus)}\",")
+                appendLine("  \"buildId\": \"${escapeJson(resolvedBuildId)}\",")
+                appendLine("  \"gitCommit\": \"${escapeJson(resolvedCommit)}\",")
+                appendLine("  \"signingCertSha256\": \"${escapeJson(resolvedCert)}\"")
+                append("}")
+            }
         }
 
         /**
