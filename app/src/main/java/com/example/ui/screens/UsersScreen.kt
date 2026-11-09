@@ -419,13 +419,15 @@ fun UsersScreen(
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 15.sp
                                 )
-                                GlassButton(
-                                    text = "حساب جديد",
-                                    icon = Icons.Default.PersonAdd,
-                                    gradient = PmpBrandRedGradient,
-                                    onClick = { selectedTab = 1 },
-                                    modifier = Modifier.testTag("open_create_user_tab_button")
-                                )
+                                if (isSuperAdmin) {
+                                    GlassButton(
+                                        text = "حساب جديد",
+                                        icon = Icons.Default.PersonAdd,
+                                        gradient = PmpBrandRedGradient,
+                                        onClick = { selectedTab = 1 },
+                                        modifier = Modifier.testTag("open_create_user_tab_button")
+                                    )
+                                }
                             }
                         }
                     }
@@ -490,8 +492,8 @@ fun UsersScreen(
                 }
             }
 
-            1 -> {
-                // Create New User Account Form (Manager Only)
+            1 -> if (isSuperAdmin) {
+                // Create New User Account Form (Strictly Admin Only)
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(14.dp),

@@ -15,6 +15,14 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isOptionalString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
     function isReasonablePayload() {
       return request.resource == null || request.resource.data.keys().size() <= 120;
     }
@@ -23,7 +31,9 @@ service cloud.firestore {
       return resource == null ||
         !('versionCode' in resource.data) ||
         !('versionCode' in request.resource.data) ||
-        (request.resource.data.versionCode is number && request.resource.data.versionCode >= 1);
+        (request.resource.data.versionCode is number &&
+          request.resource.data.versionCode >= 1 &&
+          (!(resource.data.versionCode is number) || request.resource.data.versionCode >= resource.data.versionCode));
     }
 
     function isAllowedErpCollection(col) {
@@ -32,66 +42,138 @@ service cloud.firestore {
         'invoices', 'invoice_items', 'invoice_payments',
         'movements', 'transfers', 'daily_closings',
         'customers', 'products', 'stock_moves',
-        'warehouses', 'cashboxes',
+        'warehouses', 'cashboxes', 'inventory_weights',
         'factory_items', 'factory_machines', 'factory_moves',
         'halfa_invoices', 'poster_prices', 'audit_logs',
         'server_status', 'deleted_users',
-        'lab_formulations', 'formulations', 'paint_batches',
+        'lab_formulations', 'formulations', 'paint_batches', 'chemical_safety',
+        'purchase_orders', 'goods_receipts', 'production_orders', 'qc_inspections', 'fg_receipts', 'sales_deliveries',
         'deleted_records', 'system_metadata', 'system_config', 'app_updates',
         'config'
       ];
     }
 
-    // 3. Collection Rules: /linked_accounts, /deleted_accounts, /system_config, /app_updates, /deleted_records
+    // 3. Linked Employee Accounts (/linked_accounts/{accountCode})
+    //    Strictly enforces Firebase Authentication, ownerId/linkedUid isolation,
+    //    schema validation, and prevents employee privilege escalation.
+    match /linked_accounts/{accountCode} {
+      function isAccountOwner() {
+        return isSignedIn() && resource.data.ownerId == request.auth.uid;
+      }
+
+      function isLinkedEmployee() {
+        return isSignedIn() && resource.data.linkedUid == request.auth.uid;
+      }
+
+      function isValidLinkedAccountCreate(docId) {
+        let data = request.resource.data;
+        let allowedKeys = [
+          'userCode', 'ownerId', 'linkedUid', 'clusterCode', 'fullName', 'username',
+          'role', 'branch', 'permissions', 'serverSyncToken',
+          'active', 'createdAt', 'updatedAt'
+        ];
+        return isSignedIn() &&
+          isReasonablePayload() &&
+          data.keys().hasAll([
+            'userCode', 'ownerId', 'linkedUid', 'fullName', 'username',
+            'role', 'branch', 'permissions', 'serverSyncToken', 'active', 'createdAt', 'updatedAt'
+          ]) &&
+          data.keys().hasOnly(allowedKeys) &&
+          data.userCode == docId &&
+          data.ownerId == request.auth.uid &&
+          isNonEmptyString(data.linkedUid, 128) &&
+          isNonEmptyString(data.fullName, 120) &&
+          isNonEmptyString(data.username, 60) &&
+          isNonEmptyString(data.role, 80) &&
+          isNonEmptyString(data.branch, 100) &&
+          isOptionalString(data.permissions, 300) &&
+          isNonEmptyString(data.serverSyncToken, 120) &&
+          (!('clusterCode' in data) || isOptionalString(data.clusterCode, 80)) &&
+          data.active is bool &&
+          data.createdAt is timestamp &&
+          data.updatedAt is timestamp;
+      }
+
+      // Tier 1: Account Owner (Admin) updates employee permissions, role, branch, or active status
+      function isValidManagerUpdate() {
+        let data = request.resource.data;
+        return isAccountOwner() &&
+          isReasonablePayload() &&
+          data.userCode == resource.data.userCode &&
+          data.ownerId == resource.data.ownerId &&
+          data.createdAt == resource.data.createdAt &&
+          isNonEmptyString(data.linkedUid, 128) &&
+          isNonEmptyString(data.fullName, 120) &&
+          isNonEmptyString(data.username, 60) &&
+          isNonEmptyString(data.role, 80) &&
+          isNonEmptyString(data.branch, 100) &&
+          isOptionalString(data.permissions, 300) &&
+          isNonEmptyString(data.serverSyncToken, 120) &&
+          data.active is bool &&
+          data.updatedAt is timestamp;
+      }
+
+      // Tier 2: Linked Employee updates ONLY sync acknowledgment fields (blocks permissions/role escalation)
+      function isValidEmployeeSyncUpdate() {
+        let data = request.resource.data;
+        let changedKeys = data.diff(resource.data).affectedKeys();
+        return isLinkedEmployee() &&
+          isReasonablePayload() &&
+          changedKeys.hasOnly(['serverSyncToken', 'updatedAt']) &&
+          isNonEmptyString(data.serverSyncToken, 120) &&
+          data.updatedAt is timestamp;
+      }
+
+      allow get: if isAccountOwner() || isLinkedEmployee();
+      allow list: if isAccountOwner() || isLinkedEmployee();
+      allow create: if isValidId(accountCode) && isValidLinkedAccountCreate(accountCode);
+      allow update: if isValidId(accountCode) && (isValidManagerUpdate() || isValidEmployeeSyncUpdate());
+      allow delete: if isAccountOwner();
+    }
+
+    // 4. Collection Rules: /system_config, /app_updates, /deleted_records, /deleted_accounts
     match /system_config/{docId} {
-      allow read: if isValidId(docId) || isSignedIn();
-      allow create, update: if (isValidId(docId) || isSignedIn()) && isReasonablePayload() && isNotVersionDowngrade();
-      allow delete: if isValidId(docId) || isSignedIn();
+      allow read: if isValidId(docId);
+      allow create, update: if isValidId(docId) && isReasonablePayload() && isNotVersionDowngrade();
+      allow delete: if isSignedIn() && isValidId(docId);
     }
 
     match /app_updates/{docId} {
-      allow read: if isValidId(docId) || isSignedIn();
-      allow create, update: if (isValidId(docId) || isSignedIn()) && isReasonablePayload() && isNotVersionDowngrade();
-      allow delete: if isValidId(docId) || isSignedIn();
+      allow read: if isValidId(docId);
+      allow create, update: if isValidId(docId) && isReasonablePayload() && isNotVersionDowngrade();
+      allow delete: if isSignedIn() && isValidId(docId);
     }
 
     match /deleted_records/{docId} {
-      allow read: if isValidId(docId) || isSignedIn();
-      allow create, update: if (isValidId(docId) || isSignedIn()) && isReasonablePayload();
-      allow delete: if isValidId(docId) || isSignedIn();
-    }
-
-    match /linked_accounts/{accountCode} {
-      allow read: if isValidId(accountCode) || isSignedIn();
-      allow create, update: if (isValidId(accountCode) || isSignedIn()) && isReasonablePayload();
-      allow delete: if isValidId(accountCode) || isSignedIn();
+      allow read: if isValidId(docId);
+      allow create, update: if isValidId(docId) && isReasonablePayload();
+      allow delete: if isSignedIn() && isValidId(docId);
     }
 
     match /deleted_accounts/{accountCode} {
-      allow read: if isValidId(accountCode) || isSignedIn();
-      allow create, update: if (isValidId(accountCode) || isSignedIn()) && isReasonablePayload();
-      allow delete: if isValidId(accountCode) || isSignedIn();
+      allow read: if isValidId(accountCode);
+      allow create, update: if isValidId(accountCode) && isReasonablePayload();
+      allow delete: if isSignedIn() && isValidId(accountCode);
     }
 
-    // Chemical Formulations and Paint Batch Data
+    // 5. Chemical Formulations and Paint Batch Data
     match /lab_formulations/{formulaId} {
-      allow read: if isValidId(formulaId) || isSignedIn();
-      allow create, update: if (isValidId(formulaId) || isSignedIn()) && isReasonablePayload();
-      allow delete: if isValidId(formulaId) || isSignedIn();
+      allow read: if isValidId(formulaId);
+      allow create, update: if isValidId(formulaId) && isReasonablePayload();
+      allow delete: if isSignedIn() && isValidId(formulaId);
     }
 
     match /paint_batches/{batchId} {
-      allow read: if isValidId(batchId) || isSignedIn();
-      allow create, update: if (isValidId(batchId) || isSignedIn()) && isReasonablePayload();
-      allow delete: if isValidId(batchId) || isSignedIn();
+      allow read: if isValidId(batchId);
+      allow create, update: if isValidId(batchId) && isReasonablePayload();
+      allow delete: if isSignedIn() && isValidId(batchId);
     }
 
-    // 4. Hardened ERP Central Clusters Rules
-    // Enterprise ERP central cloud storage for phone, multi-user ERP credentials, and Windows clients
+    // 6. Hardened ERP Central Clusters Rules (/erp_clusters/{clusterCode})
     match /erp_clusters/{clusterCode} {
       allow get, list: if isValidId(clusterCode);
       allow create, update: if isValidId(clusterCode) && isReasonablePayload();
-      allow delete: if isValidId(clusterCode);
+      allow delete: if isSignedIn() && isValidId(clusterCode);
     }
 
     match /erp_clusters/{clusterCode}/{collectionName}/{docId} {

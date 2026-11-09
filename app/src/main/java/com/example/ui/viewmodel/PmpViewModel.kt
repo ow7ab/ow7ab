@@ -2633,7 +2633,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun regenerateUserSyncToken(user: UserAccountEntity) {
         viewModelScope.launch {
-            val res = repository.regenerateUserSyncToken(user, resolveUserActor("مدير النظام"))
+            if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
+                postMessage("عفواً، توليد أو تعديل رمز الربط السحابي متاح لحساب Admin فقط.", isError = true)
+                return@launch
+            }
+            val res = repository.regenerateUserSyncToken(user, resolveUserActor("Admin"))
             res.onSuccess { newToken ->
                 val updatedUser = user.copy(serverSyncToken = newToken, syncStatus = "READY_FOR_SYNC")
                 cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updatedUser)

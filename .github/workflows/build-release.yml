@@ -28,14 +28,16 @@ on:
     types: [publish-apk-release]
 
 permissions:
-  contents: write
-  pages: write
-  id-token: write
+  contents: read
 
 jobs:
   build-and-release:
     name: Build, Verify & Publish Signed APK
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
 
     steps:
       - name: Checkout Source Code
@@ -658,6 +660,7 @@ jobs:
           PYEOF
 
       - name: Publish Release to GitHub Releases
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.V_TAG }}
@@ -682,6 +685,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify Published Release Asset Download URL
+        if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
           echo "Verifying published GitHub Release asset reachability: ${GITHUB_RELEASE_URL}"
@@ -693,11 +697,13 @@ jobs:
           fi
 
       - name: Upload Public Artifacts for GitHub Pages Hosting
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
 
       - name: Deploy Public Release Endpoint to GitHub Pages
+        if: github.event_name != 'pull_request'
         id: deployment
         continue-on-error: true
         uses: actions/deploy-pages@v4

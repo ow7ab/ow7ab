@@ -1188,7 +1188,141 @@ class ExampleUnitTest {
       gradlePropsText.contains(androidOAuthClientId)
     )
   }
+
+  @Test
+  fun testSecurityAuditHardeningRbacAndFirestoreRules() {
+    // 1. Verify ONLY Admin may create accounts or change permissions; Manager must NOT inherit these capabilities
+    val adminAccount = com.example.data.local.UserAccountEntity(
+      id = 1L,
+      userCode = "USR-ADMIN",
+      fullName = "Admin - مدير النظام الأعلى",
+      username = "admin",
+      role = "مدير النظام",
+      branch = "كل الفروع",
+      permissions = "المستخدمين,الإعدادات",
+      serverSyncToken = "SYNC-ADMIN",
+      active = true
+    )
+    val managerAccount = com.example.data.local.UserAccountEntity(
+      id = 2L,
+      userCode = "USR-MGR-01",
+      fullName = "المدير العام",
+      username = "general_manager",
+      role = "مدير النظام",
+      branch = "كل الفروع",
+      permissions = "المستخدمين,الإعدادات,المبيعات,المخازن,المصنع,الخزن,المشتريات,التقارير",
+      serverSyncToken = "SYNC-MGR-01",
+      active = true
+    )
+    val accountantAccount = com.example.data.local.UserAccountEntity(
+      id = 3L,
+      userCode = "USR-ACC-01",
+      fullName = "محاسب الفرع",
+      username = "branch_accountant",
+      role = "المحاسب",
+      branch = "فرع السودان (SD-001)",
+      permissions = "الخزن,المبيعات,التقارير",
+      serverSyncToken = "SYNC-ACC-01",
+      active = true
+    )
+
+    assertTrue("Admin must be recognized as SuperAdmin", adminAccount.isSuperAdminAccount())
+    assertFalse("Manager must NOT be recognized as SuperAdmin", managerAccount.isSuperAdminAccount())
+    assertTrue("Manager is recognized as SystemManager for operational oversight", managerAccount.isSystemManager())
+    assertFalse("Accountant must NOT be SuperAdmin or SystemManager", accountantAccount.isSuperAdminAccount() || accountantAccount.isSystemManager())
+
+    assertTrue(
+      "Admin is authorized to create accounts and modify permissions",
+      com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(adminAccount)
+    )
+    assertFalse(
+      "Manager must NOT inherit account creation or permission modification capabilities",
+      com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(managerAccount)
+    )
+    assertFalse(
+      "Accountant must NOT have account creation or permission modification capabilities",
+      com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(accountantAccount)
+    )
+
+    // Granular permission checks on "المستخدمين" module for Manager vs Admin
+    for (restrictedAction in listOf(
+      com.example.util.ErpActionPermission.CREATE,
+      com.example.util.ErpActionPermission.EDIT,
+      com.example.util.ErpActionPermission.APPROVE,
+      com.example.util.ErpActionPermission.MANAGE_SETTINGS
+    )) {
+      assertTrue(
+        "Admin must have $restrictedAction on المستخدمين",
+        com.example.util.ErpLifecycleEngine.hasGranularPermission(adminAccount, "المستخدمين", restrictedAction)
+      )
+      assertFalse(
+        "Manager must be denied $restrictedAction on المستخدمين",
+        com.example.util.ErpLifecycleEngine.hasGranularPermission(managerAccount, "المستخدمين", restrictedAction)
+      )
+    }
+
+    // 2. Verify UsersScreen and PmpViewModel enforce Admin-only guards in source code
+    val usersScreenFile = listOf(
+      java.io.File("app/src/main/java/com/example/ui/screens/UsersScreen.kt"),
+      java.io.File("src/main/java/com/example/ui/screens/UsersScreen.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("UsersScreen.kt must exist", usersScreenFile)
+    val usersScreenSource = usersScreenFile!!.readText(Charsets.UTF_8)
+    assertTrue(
+      "UsersScreen must gate Create Account tab (1 -> if (isSuperAdmin)) strictly to SuperAdmin",
+      usersScreenSource.contains("1 -> if (isSuperAdmin)")
+    )
+    assertTrue(
+      "UsersScreen must set canManagePermissions = isSuperAdmin",
+      usersScreenSource.contains("canManagePermissions = isSuperAdmin")
+    )
+
+    // 3. Verify root .gitignore excludes debug.keystore and debug.keystore.base64 from public repository
+    val gitignoreFile = listOf(
+      java.io.File("../.gitignore"),
+      java.io.File(".gitignore")
+    ).firstOrNull { it.exists() && it.readText(Charsets.UTF_8).contains("local.properties") }
+    assertNotNull("Root .gitignore must exist", gitignoreFile)
+    val gitignoreContent = gitignoreFile!!.readText(Charsets.UTF_8)
+    assertTrue(".gitignore must exclude debug.keystore", gitignoreContent.contains("debug.keystore"))
+    assertTrue(".gitignore must exclude debug.keystore.base64", gitignoreContent.contains("debug.keystore.base64"))
+
+    // 4. Verify AndroidManifest.xml disables cleartext traffic and keeps FileProvider non-exported
+    val manifestFile = listOf(
+      java.io.File("app/src/main/AndroidManifest.xml"),
+      java.io.File("src/main/AndroidManifest.xml")
+    ).firstOrNull { it.exists() }
+    assertNotNull("AndroidManifest.xml must exist", manifestFile)
+    val manifestContent = manifestFile!!.readText(Charsets.UTF_8)
+    assertTrue(
+      "AndroidManifest.xml must set android:usesCleartextTraffic=\"false\"",
+      manifestContent.contains("android:usesCleartextTraffic=\"false\"")
+    )
+    assertTrue(
+      "FileProvider must have android:exported=\"false\" and android:grantUriPermissions=\"true\"",
+      manifestContent.contains("android:exported=\"false\"") && manifestContent.contains("android:grantUriPermissions=\"true\"")
+    )
+
+    // 5. Verify firestore.rules enforces strict authentication, ownership, and anti-escalation on /linked_accounts
+    val rulesFile = listOf(
+      java.io.File("firestore.rules"),
+      java.io.File("../firestore.rules")
+    ).firstOrNull { it.exists() }
+    assertNotNull("firestore.rules must exist", rulesFile)
+    val rulesContent = rulesFile!!.readText(Charsets.UTF_8)
+    assertTrue("firestore.rules must enforce default-deny", rulesContent.contains("allow read, write: if false;"))
+    assertTrue(
+      "firestore.rules must restrict /linked_accounts get/list to isAccountOwner() || isLinkedEmployee()",
+      rulesContent.contains("allow get: if isAccountOwner() || isLinkedEmployee();") &&
+        rulesContent.contains("allow list: if isAccountOwner() || isLinkedEmployee();")
+    )
+    assertTrue(
+      "firestore.rules must restrict employee updates to serverSyncToken and updatedAt only",
+      rulesContent.contains("changedKeys.hasOnly(['serverSyncToken', 'updatedAt'])")
+    )
+  }
 }
+
 
 
 

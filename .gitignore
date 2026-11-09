@@ -16,5 +16,9 @@
 local.properties
 .env
 debug.keystore
+debug.keystore.base64
+*.jks
+*.keystore
 .aistudio/
 *-debug.log
+
