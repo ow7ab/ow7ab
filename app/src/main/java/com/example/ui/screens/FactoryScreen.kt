@@ -949,7 +949,9 @@ fun FactoryScreen(
 
                             Spacer(modifier = Modifier.height(12.dp))
 
-                            // Presets Row
+                            val isSuperAdminUser = currentUser?.username.equals("admin", ignoreCase = true)
+
+                            // Presets Row (250g -> 48 cans, 900g -> 12 cans, 4000g -> 4 cans)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -965,7 +967,7 @@ fun FactoryScreen(
                                         val c = prodCartonsCount.toDoubleOrNull() ?: 1.0
                                         prodCansCount = (c * 48).toInt().toString()
                                     },
-                                    label = { Text("250 جم (48 علبة/كرتونة)", fontSize = 12.sp) }
+                                    label = { Text("250 جم (48 علبة/كرتونة)", fontSize = 12.sp, softWrap = false) }
                                 )
                                 FilterChip(
                                     selected = prodPreset == "900",
@@ -976,18 +978,31 @@ fun FactoryScreen(
                                         val c = prodCartonsCount.toDoubleOrNull() ?: 1.0
                                         prodCansCount = (c * 12).toInt().toString()
                                     },
-                                    label = { Text("900 جم (12 علبة/كرتونة)", fontSize = 12.sp) }
+                                    label = { Text("900 جم (12 علبة/كرتونة)", fontSize = 12.sp, softWrap = false) }
                                 )
                                 FilterChip(
-                                    selected = prodPreset == "CUSTOM",
-                                    onClick = { prodPreset = "CUSTOM" },
-                                    label = { Text("⚙ تعديل مخصص للوزن وعدد العلب", fontSize = 11.5.sp) }
+                                    selected = prodPreset == "4000",
+                                    onClick = {
+                                        prodPreset = "4000"
+                                        prodWeight = "4000"
+                                        prodCansPerCarton = "4"
+                                        val c = prodCartonsCount.toDoubleOrNull() ?: 1.0
+                                        prodCansCount = (c * 4).toInt().toString()
+                                    },
+                                    label = { Text("4000 جم (4 علب/كرتونة)", fontSize = 12.sp, softWrap = false) }
                                 )
+                                if (isSuperAdminUser) {
+                                    FilterChip(
+                                        selected = prodPreset == "CUSTOM",
+                                        onClick = { prodPreset = "CUSTOM" },
+                                        label = { Text("⚙ إعدادات التعبئة (Admin فقط)", fontSize = 11.5.sp, softWrap = false) }
+                                    )
+                                }
                             }
 
                             Spacer(modifier = Modifier.height(12.dp))
 
-                            // Weight and Cans per carton (editable!)
+                            // Weight and Cans per carton (centralized rules, editable only by Admin)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -995,24 +1010,30 @@ fun FactoryScreen(
                                 GlassTextField(
                                     value = prodWeight,
                                     onValueChange = {
-                                        prodWeight = it
-                                        prodPreset = "CUSTOM"
+                                        if (isSuperAdminUser) {
+                                            prodWeight = it
+                                            prodPreset = "CUSTOM"
+                                        }
                                     },
                                     label = "وزن العبوة (جم) *",
                                     isNumber = true,
+                                    readOnly = !isSuperAdminUser,
                                     modifier = Modifier.weight(1f)
                                 )
                                 GlassTextField(
                                     value = prodCansPerCarton,
                                     onValueChange = {
-                                        prodCansPerCarton = it
-                                        prodPreset = "CUSTOM"
-                                        val ratio = it.toDoubleOrNull() ?: 1.0
-                                        val cartons = prodCartonsCount.toDoubleOrNull() ?: 1.0
-                                        prodCansCount = (cartons * ratio).toInt().toString()
+                                        if (isSuperAdminUser) {
+                                            prodCansPerCarton = it
+                                            prodPreset = "CUSTOM"
+                                            val ratio = it.toDoubleOrNull() ?: 1.0
+                                            val cartons = prodCartonsCount.toDoubleOrNull() ?: 1.0
+                                            prodCansCount = (cartons * ratio).toInt().toString()
+                                        }
                                     },
                                     label = "عدد العلب في الكرتونة *",
                                     isNumber = true,
+                                    readOnly = !isSuperAdminUser,
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -1382,40 +1403,62 @@ fun FactoryScreen(
                         }
 
                         GlassCard(modifier = Modifier.fillMaxWidth()) {
-                            Row(
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(14.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        GlassBadge(text = kindDisplay, color = kindColor)
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = fm.itemName,
-                                            color = TextWhite,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 13.5.sp
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    GlassBadge(text = kindDisplay, color = kindColor)
+                                    Text(
+                                        text = fm.moveDate,
+                                        color = TextMuted,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                                Text(
+                                    text = fm.itemName,
+                                    color = TextWhite,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    maxLines = 2,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Text(
                                         text = "الكمية: ${format.format(fm.qty)}" + if (fm.counterparty.isNotBlank()) " • الجهة: ${fm.counterparty}" else "",
                                         color = TextMuted,
-                                        fontSize = 12.sp
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.weight(1f)
                                     )
-                                    if (fm.note.isNotBlank()) {
-                                        Text(text = fm.note, color = TextSubtle, fontSize = 11.sp)
+                                    if (fm.actor.isNotBlank()) {
+                                        Text(
+                                            text = fm.actor,
+                                            color = PmpCyan,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1
+                                        )
                                     }
                                 }
-
-                                Column(horizontalAlignment = Alignment.End) {
-                                    Text(text = fm.moveDate, color = TextMuted, fontSize = 11.sp)
-                                    if (fm.actor.isNotBlank()) {
-                                        Text(text = fm.actor, color = PmpCyan, fontSize = 10.sp)
-                                    }
+                                if (fm.note.isNotBlank()) {
+                                    Text(
+                                        text = fm.note,
+                                        color = TextSubtle,
+                                        fontSize = 11.5.sp,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
                                 }
                             }
                         }

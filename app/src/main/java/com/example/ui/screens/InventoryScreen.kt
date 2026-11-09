@@ -16,6 +16,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.LayoutDirection
 import com.example.data.local.ProductEntity
 import com.example.data.local.WarehouseEntity
 import com.example.data.local.getEffectiveSalePrice
@@ -26,6 +32,8 @@ import com.example.isSystemManager
 import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.PmpViewModel
+import com.example.util.InventoryWeightManager
+import com.example.util.PackageWeightSpec
 import java.text.NumberFormat
 import java.util.Locale
 
@@ -39,6 +47,9 @@ fun InventoryScreen(
     val stockMoves by viewModel.stockMoves.collectAsState()
     val stockBalances by viewModel.productStockBalances.collectAsState()
     val availablePaintColors by viewModel.availablePaintColors.collectAsState()
+    val packageWeights by viewModel.packageWeights.collectAsState()
+    val activePackageWeights by viewModel.activePackageWeights.collectAsState()
+    val selectedInventoryWeight by viewModel.selectedInventoryWeight.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
     val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
     val dataLoadError by viewModel.dataLoadError.collectAsState()
@@ -102,6 +113,28 @@ fun InventoryScreen(
 
     // Tab 3: Stock Moves State
     var showAllStockMoves by remember { mutableStateOf(false) }
+
+    // Weight Selector & Weight Management States (Tab 0)
+    var weightDropdownExpanded by remember { mutableStateOf(false) }
+    var showManageWeightsDialog by remember { mutableStateOf(false) }
+    var newWeightInput by remember { mutableStateOf("") }
+    var newWeightSetDefault by remember { mutableStateOf(false) }
+    var editingWeightSpec by remember { mutableStateOf<PackageWeightSpec?>(null) }
+    var editingWeightNewValue by remember { mutableStateOf("") }
+
+    // Per-(Color, Weight) Stock Adjustment Dialog State
+    var adjustingColorRow by remember { mutableStateOf<String?>(null) }
+    var adjustOperationMode by remember { mutableStateOf("IN") } // "IN", "OUT", "SET"
+    var adjustQtyInput by remember { mutableStateOf("") }
+    var adjustNoteInput by remember { mutableStateOf("") }
+    var adjustWarehouseName by remember(allowedWarehouses, selectedWarehouseFilter) {
+        val initialWh = if (selectedWarehouseFilter != "كل المخازن") {
+            selectedWarehouseFilter
+        } else {
+            allowedWarehouses.firstOrNull()?.name ?: warehouses.firstOrNull()?.name ?: "مخزن المصنع الرئيسي"
+        }
+        mutableStateOf(initialWh)
+    }
 
     val tabs = listOf("أرصدة المخزون", "إضافة صنف وتوريد للمخزن", "الأصناف والمخازن", "سجل الحركات")
 
@@ -270,119 +303,383 @@ fun InventoryScreen(
                     )
                 }
 
-                // Table Header
-                item {
-                    GlassCard(
-                        modifier = Modifier.fillMaxWidth(),
-                        backgroundColor = PmpNavySurface
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "اللون والوزن",
-                                color = PmpCyan,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                modifier = Modifier.weight(1.2f)
-                            )
-                            Text(
-                                text = "سعر ($displayCurrency)",
-                                color = PmpCyan,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                modifier = Modifier.weight(1.0f)
-                            )
-                            Text(
-                                text = "الرصيد",
-                                color = PmpCyan,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                modifier = Modifier.weight(0.9f)
-                            )
-                            Text(
-                                text = "إجمالي ($displayCurrency)",
-                                color = PmpCyan,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                modifier = Modifier.weight(1.1f)
-                            )
-                        }
+                val selectedWeightNorm = InventoryWeightManager.normalizeWeightValue(selectedInventoryWeight)
+                    .ifBlank { "250" }
+                val selectedWeightLabel = InventoryWeightManager.formatWeightLabel(selectedWeightNorm)
+
+                // Build unified color list from catalog + products so every registered color appears for the selected weight
+                val combinedColors = (availablePaintColors + products.map { it.paintColor.trim() })
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                val allRegisteredColors = if (searchQuery.isBlank()) {
+                    combinedColors
+                } else {
+                    combinedColors.filter { color ->
+                        color.contains(searchQuery, ignoreCase = true) ||
+                            selectedWeightLabel.contains(searchQuery, ignoreCase = true)
                     }
                 }
 
-                if (filteredProducts.isEmpty()) {
-                    item {
-                        GlassCard(modifier = Modifier.fillMaxWidth()) {
-                            Box(modifier = Modifier.padding(28.dp), contentAlignment = Alignment.Center) {
+                // Calculate independent balance for each color at the currently selected weight ONLY
+                val weightSpecificRows = allRegisteredColors.map { colorName ->
+                    val matchingProducts = products.filter { prod ->
+                        prod.paintColor.trim().equals(colorName, ignoreCase = true) &&
+                            InventoryWeightManager.normalizeWeightValue(prod.packageWeight) == selectedWeightNorm
+                    }
+                    val qtyForSelectedWeight = matchingProducts.sumOf { prod ->
+                        effectiveBalances[prod.id] ?: 0.0
+                    }
+                    Triple(colorName, selectedWeightLabel, qtyForSelectedWeight)
+                }
+
+                val selectedWeightTotalCount = weightSpecificRows.sumOf { it.third }
+
+                // 1. Weight Selector Dropdown Above the Inventory Table (الوزن: 250 جم ▼)
+                item(key = "inventory_weight_selector_section") {
+                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                        GlassCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            backgroundColor = PmpNavySurface
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box {
+                                        Surface(
+                                            modifier = Modifier
+                                                .testTag("inventory_weight_selector_button")
+                                                .clickable { weightDropdownExpanded = true },
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = PmpCyan.copy(alpha = 0.14f),
+                                            border = BorderStroke(1.5.dp, PmpCyan)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Scale,
+                                                    contentDescription = "اختيار الوزن",
+                                                    tint = PmpCyan,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Text(
+                                                    text = "الوزن: $selectedWeightLabel ▼",
+                                                    color = TextWhite,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    fontSize = 15.sp
+                                                )
+                                            }
+                                        }
+
+                                        DropdownMenu(
+                                            expanded = weightDropdownExpanded,
+                                            onDismissRequest = { weightDropdownExpanded = false },
+                                            modifier = Modifier
+                                                .background(PmpNavySurface)
+                                                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                                        ) {
+                                            val dropdownWeights = activePackageWeights.ifEmpty { packageWeights }
+                                            dropdownWeights.forEach { spec ->
+                                                val isSelected = spec.value == selectedWeightNorm
+                                                DropdownMenuItem(
+                                                    text = {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Text(
+                                                                text = spec.displayLabel(),
+                                                                color = if (isSelected) PmpCyan else TextWhite,
+                                                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                                                fontSize = 14.sp
+                                                            )
+                                                            if (spec.isDefault) {
+                                                                Text(
+                                                                    text = "افتراضي",
+                                                                    color = PmpGold,
+                                                                    fontSize = 11.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    modifier = Modifier.padding(start = 8.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                    },
+                                                    onClick = {
+                                                        viewModel.selectInventoryWeight(spec.value)
+                                                        weightDropdownExpanded = false
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text(
+                                            text = "إجمالي عبوات ($selectedWeightLabel)",
+                                            color = TextMuted,
+                                            fontSize = 11.sp
+                                        )
+                                        Text(
+                                            text = "${format.format(selectedWeightTotalCount.toInt())} عبوة",
+                                            color = PmpGold,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontSize = 14.sp
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = if (searchQuery.isBlank()) "لا توجد أصناف مسجلة في المخزن" else "لا توجد نتائج مطابقة للبحث",
+                                    text = "اضغط على أي صف في الجدول لتوريد أو صرف أو تعديل رصيد اللون في وزن ($selectedWeightLabel) بشكل مستقل.",
                                     color = TextMuted,
-                                    fontSize = 13.sp
+                                    fontSize = 11.sp
                                 )
                             }
                         }
                     }
-                } else {
-                    items(filteredProducts, key = { "stock_p_${it.id}" }) { p ->
-                        val balance = effectiveBalances[p.id] ?: 0.0
-                        val isOut = balance <= 0.0
-                        val unitPrice = p.getEffectiveSalePrice(displayCurrency)
-                        val lineTotal = balance * unitPrice
+                }
 
-                        GlassCard(modifier = Modifier.fillMaxWidth()) {
-                            Row(
+                // 2. Three-Column RTL Inventory Table (اللون | الوزن | العدد)
+                item(key = "inventory_three_column_table_card") {
+                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                        val tableBorderColor = PmpCyan.copy(alpha = 0.35f)
+                        val rowDividerColor = GlassBorder
+
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("inventory_three_column_table"),
+                            shape = RoundedCornerShape(16.dp),
+                            color = PmpNavySurface,
+                            border = BorderStroke(1.5.dp, tableBorderColor)
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                // Table Header Row: اللون | الوزن | العدد (RTL: Right to Left)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(IntrinsicSize.Min)
+                                        .background(PmpCyan.copy(alpha = 0.16f)),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "اللون",
+                                        color = PmpCyan,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 14.sp,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier
+                                            .weight(1.15f)
+                                            .padding(vertical = 12.dp, horizontal = 8.dp)
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .width(1.dp)
+                                            .fillMaxHeight()
+                                            .background(tableBorderColor)
+                                    )
+                                    Text(
+                                        text = "الوزن",
+                                        color = PmpCyan,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 14.sp,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier
+                                            .weight(1.0f)
+                                            .padding(vertical = 12.dp, horizontal = 8.dp)
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .width(1.dp)
+                                            .fillMaxHeight()
+                                            .background(tableBorderColor)
+                                    )
+                                    Text(
+                                        text = "العدد",
+                                        color = PmpCyan,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 14.sp,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier
+                                            .weight(0.95f)
+                                            .padding(vertical = 12.dp, horizontal = 8.dp)
+                                    )
+                                }
+
+                                HorizontalDivider(thickness = 1.5.dp, color = tableBorderColor)
+
+                                if (weightSpecificRows.isEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(28.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (searchQuery.isBlank()) "لا توجد ألوان مسجلة في المخزن" else "لا توجد نتائج مطابقة للبحث",
+                                            color = TextMuted,
+                                            fontSize = 13.sp
+                                        )
+                                    }
+                                } else {
+                                    weightSpecificRows.forEachIndexed { index, (colorName, weightLabel, countValue) ->
+                                        val intCount = countValue.toInt()
+                                        val isPositive = countValue > 0.0
+                                        val rowBg = if (index % 2 == 0) Color.Transparent else Color.White.copy(alpha = 0.03f)
+
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(IntrinsicSize.Min)
+                                                .background(rowBg)
+                                                .clickable {
+                                                    adjustingColorRow = colorName
+                                                    adjustOperationMode = "IN"
+                                                    adjustQtyInput = ""
+                                                    adjustNoteInput = ""
+                                                },
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            // Column 1 (Right in RTL): اللون
+                                            Text(
+                                                text = colorName,
+                                                color = TextWhite,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 14.sp,
+                                                textAlign = TextAlign.Center,
+                                                modifier = Modifier
+                                                    .weight(1.15f)
+                                                    .padding(vertical = 13.dp, horizontal = 8.dp)
+                                            )
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(1.dp)
+                                                    .fillMaxHeight()
+                                                    .background(rowDividerColor)
+                                            )
+
+                                            // Column 2 (Center in RTL): الوزن
+                                            Text(
+                                                text = weightLabel,
+                                                color = PmpGold,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 13.5.sp,
+                                                textAlign = TextAlign.Center,
+                                                modifier = Modifier
+                                                    .weight(1.0f)
+                                                    .padding(vertical = 13.dp, horizontal = 8.dp)
+                                            )
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(1.dp)
+                                                    .fillMaxHeight()
+                                                    .background(rowDividerColor)
+                                            )
+
+                                            // Column 3 (Left in RTL): العدد
+                                            Row(
+                                                modifier = Modifier
+                                                    .weight(0.95f)
+                                                    .padding(vertical = 13.dp, horizontal = 8.dp),
+                                                horizontalArrangement = Arrangement.Center,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = format.format(intCount),
+                                                    color = if (isPositive) PmpGreenLight else PmpRedLight,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    fontSize = 14.5.sp,
+                                                    textAlign = TextAlign.Center
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Icon(
+                                                    imageVector = Icons.Default.Edit,
+                                                    contentDescription = "تعديل رصيد $colorName",
+                                                    tint = TextMuted.copy(alpha = 0.7f),
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                        }
+
+                                        if (index < weightSpecificRows.lastIndex) {
+                                            HorizontalDivider(thickness = 1.dp, color = rowDividerColor)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Manage Weights Button Directly Below the Table (الأوزان ▼ / إدارة الأوزان)
+                item(key = "inventory_manage_weights_button_section") {
+                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Surface(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                                    .testTag("manage_weights_button")
+                                    .clickable { showManageWeightsDialog = true },
+                                shape = RoundedCornerShape(14.dp),
+                                color = PmpNavySurface,
+                                border = BorderStroke(1.5.dp, PmpGold)
                             ) {
-                                Column(modifier = Modifier.weight(1.2f)) {
-                                    Text(
-                                        text = p.paintColor,
-                                        color = TextWhite,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 13.sp
-                                    )
-                                    Text(
-                                        text = "${p.packageWeight} جم",
-                                        color = PmpCyan,
-                                        fontSize = 11.sp
-                                    )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 18.dp, vertical = 13.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Tune,
+                                            contentDescription = "إدارة الأوزان",
+                                            tint = PmpGold,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Column {
+                                            Text(
+                                                text = "الأوزان ▼  (إدارة الأوزان)",
+                                                color = PmpGold,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 15.sp
+                                            )
+                                            Text(
+                                                text = "إضافة وزن جديد • تعديل • تفعيل/تعطيل • تعيين الوزن الافتراضي",
+                                                color = TextMuted,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = PmpGold.copy(alpha = 0.15f)
+                                    ) {
+                                        Text(
+                                            text = "${activePackageWeights.size} وزن نشط",
+                                            color = PmpGold,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.5.sp,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                        )
+                                    }
                                 }
-
-                                Text(
-                                    text = "${format.format(unitPrice)} $displayCurrency",
-                                    color = TextWhite,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    modifier = Modifier.weight(1.0f)
-                                )
-
-                                Column(modifier = Modifier.weight(0.9f)) {
-                                    Text(
-                                        text = "${format.format(balance)} كرتونة",
-                                        color = if (isOut) PmpRedLight else PmpGreenLight,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 12.sp
-                                    )
-                                    Text(
-                                        text = if (isOut) "منتهي" else "متوفر",
-                                        color = if (isOut) PmpRedLight else TextMuted,
-                                        fontSize = 10.sp
-                                    )
-                                }
-
-                                Text(
-                                    text = "${format.format(lineTotal)} $displayCurrency",
-                                    color = PmpGold,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.weight(1.1f)
-                                )
                             }
                         }
                     }
@@ -392,7 +689,10 @@ fun InventoryScreen(
             1 -> {
                 // Unified Intake & Add Product (إضافة صنف وتوريد للمخزن)
                 item {
-                    val weightsList = listOf("250", "900", "4000")
+                    val weightsList = remember(activePackageWeights) {
+                        val activeVals = activePackageWeights.map { it.value }
+                        (activeVals + listOf("250", "900", "4000")).distinct()
+                    }
                     val warehouseOptions = warehouses.map { it.name }.ifEmpty { listOf("مخزن المصنع الرئيسي", "مخزن عطبرة", "مخزن حلفا") }
 
                     GlassCard(modifier = Modifier.fillMaxWidth()) {
@@ -991,7 +1291,7 @@ fun InventoryScreen(
                         )
                         GlassDropdown(
                             label = "الوزن",
-                            options = listOf("900", "250", "جالون", "ربع"),
+                            options = (activePackageWeights.map { it.value } + listOf("900", "250", "جالون", "ربع")).distinct(),
                             selectedOption = newProdWeight,
                             onOptionSelected = { newProdWeight = it },
                             modifier = Modifier.weight(1f)
@@ -1113,6 +1413,431 @@ fun InventoryScreen(
             },
             dismissButton = {
                 GlassButton(text = "إلغاء", onClick = { productToDelete = null })
+            },
+            containerColor = PmpNavySurface
+        )
+    }
+
+    // Modal: Adjust Stock for Specific (Color, Weight) Row
+    adjustingColorRow?.let { targetColor ->
+        val currentWeightNorm = InventoryWeightManager.normalizeWeightValue(selectedInventoryWeight).ifBlank { "250" }
+        val currentWeightLabel = InventoryWeightManager.formatWeightLabel(currentWeightNorm)
+        val matchingProds = products.filter {
+            it.paintColor.trim().equals(targetColor, ignoreCase = true) &&
+                InventoryWeightManager.normalizeWeightValue(it.packageWeight) == currentWeightNorm
+        }
+        val currentQty = matchingProds.sumOf { stockBalances[it.id] ?: 0.0 }.toInt()
+        val warehouseChoices = warehouses.map { it.name }.ifEmpty { listOf("مخزن المصنع الرئيسي", "مخزن عطبرة", "مخزن حلفا") }
+
+        AlertDialog(
+            onDismissRequest = { adjustingColorRow = null },
+            title = {
+                Column {
+                    Text(
+                        text = "تحديث كمية المخزون",
+                        color = PmpCyan,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 17.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "اللون: $targetColor  |  الوزن: $currentWeightLabel  |  الرصيد الحالي: $currentQty",
+                        color = PmpGold,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+            },
+            text = {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FilterChip(
+                                selected = adjustOperationMode == "IN",
+                                onClick = { adjustOperationMode = "IN" },
+                                label = { Text("＋ إضافة (وارد)", fontSize = 11.5.sp, fontWeight = FontWeight.Bold) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = PmpGreen,
+                                    selectedLabelColor = Color.White
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = adjustOperationMode == "OUT",
+                                onClick = { adjustOperationMode = "OUT" },
+                                label = { Text("－ صرف (صادر)", fontSize = 11.5.sp, fontWeight = FontWeight.Bold) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = PmpBrandRed,
+                                    selectedLabelColor = Color.White
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = adjustOperationMode == "SET",
+                                onClick = {
+                                    adjustOperationMode = "SET"
+                                    if (adjustQtyInput.isBlank()) adjustQtyInput = currentQty.toString()
+                                },
+                                label = { Text("تعيين الرصيد", fontSize = 11.5.sp, fontWeight = FontWeight.Bold) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFF1E40AF),
+                                    selectedLabelColor = Color.White
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        GlassDropdown(
+                            label = "المخزن المستهدف",
+                            options = warehouseChoices,
+                            selectedOption = adjustWarehouseName,
+                            onOptionSelected = { adjustWarehouseName = it }
+                        )
+
+                        GlassTextField(
+                            value = adjustQtyInput,
+                            onValueChange = { adjustQtyInput = it },
+                            label = when (adjustOperationMode) {
+                                "IN" -> "الكمية المراد إضافتها (عدد العبوات/الكراتين) *"
+                                "OUT" -> "الكمية المراد صرفها (عدد العبوات/الكراتين) *"
+                                else -> "الرصيد الفعلي الجديد لهذا الوزن *"
+                            },
+                            isNumber = true
+                        )
+
+                        GlassTextField(
+                            value = adjustNoteInput,
+                            onValueChange = { adjustNoteInput = it },
+                            label = "ملاحظة الحركة (اختياري)"
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "حفظ وتحديث الرصيد",
+                    gradient = GlassAccentBlueGradient,
+                    onClick = {
+                        val qty = adjustQtyInput.trim().toDoubleOrNull()
+                        if (qty != null) {
+                            viewModel.adjustColorWeightStock(
+                                color = targetColor,
+                                weight = currentWeightNorm,
+                                warehouseName = adjustWarehouseName,
+                                quantityInput = qty,
+                                operationMode = adjustOperationMode,
+                                note = adjustNoteInput
+                            )
+                            adjustingColorRow = null
+                        } else {
+                            viewModel.postMessage("يرجى إدخال رقم صحيح للكمية", isError = true)
+                        }
+                    }
+                )
+            },
+            dismissButton = {
+                GlassButton(text = "إلغاء", onClick = { adjustingColorRow = null })
+            },
+            containerColor = PmpNavySurface
+        )
+    }
+
+    // Modal: Weight Management Dialog (إدارة الأوزان)
+    if (showManageWeightsDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showManageWeightsDialog = false
+                editingWeightSpec = null
+            },
+            title = {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "إدارة الأوزان المسجلة",
+                                color = PmpGold,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 18.sp
+                            )
+                            Text(
+                                text = "إضافة • تعديل • تعطيل/تفعيل • اختيار الوزن الافتراضي",
+                                color = TextMuted,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.Scale,
+                            contentDescription = null,
+                            tint = PmpGold,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+            },
+            text = {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        // 1. Add New Weight Section
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = PmpNavyCard,
+                            border = BorderStroke(1.dp, PmpCyan.copy(alpha = 0.35f))
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = "إضافة وزن جديد (مثال: 400 جم)",
+                                    color = PmpCyan,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    GlassTextField(
+                                        value = newWeightInput,
+                                        onValueChange = { newWeightInput = it },
+                                        label = "",
+                                        placeholder = "أدخل الوزن بالجرام (مثال: 400)",
+                                        isNumber = true,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("new_weight_input_field")
+                                    )
+                                    GlassButton(
+                                        text = "إضافة",
+                                        gradient = GlassAccentBlueGradient,
+                                        onClick = {
+                                            if (newWeightInput.isNotBlank()) {
+                                                viewModel.addInventoryWeight(
+                                                    rawWeight = newWeightInput,
+                                                    setAsDefault = newWeightSetDefault
+                                                )
+                                                newWeightInput = ""
+                                                newWeightSetDefault = false
+                                            } else {
+                                                viewModel.postMessage("يرجى كتابة الوزن المراد إضافته", isError = true)
+                                            }
+                                        },
+                                        modifier = Modifier.testTag("confirm_add_weight_button")
+                                    )
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.clickable { newWeightSetDefault = !newWeightSetDefault }
+                                ) {
+                                    Checkbox(
+                                        checked = newWeightSetDefault,
+                                        onCheckedChange = { newWeightSetDefault = it }
+                                    )
+                                    Text(
+                                        text = "تعيين كوزن افتراضي عند الإضافة",
+                                        color = TextWhite,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        }
+
+                        // 2. Edit Registered Weight Inline Box (if user clicked Edit on a weight)
+                        editingWeightSpec?.let { targetSpec ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = PmpGold.copy(alpha = 0.12f),
+                                border = BorderStroke(1.dp, PmpGold)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text(
+                                        text = "تعديل الوزن المسجل (${targetSpec.displayLabel()}) دون حذف الأرصدة:",
+                                        color = PmpGold,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.5.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        GlassTextField(
+                                            value = editingWeightNewValue,
+                                            onValueChange = { editingWeightNewValue = it },
+                                            label = "",
+                                            placeholder = "الوزن الجديد بالجرام",
+                                            isNumber = true,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        GlassButton(
+                                            text = "حفظ التعديل",
+                                            gradient = GlassAccentGoldGradient,
+                                            onClick = {
+                                                viewModel.editInventoryWeight(
+                                                    oldWeight = targetSpec.value,
+                                                    newRawWeight = editingWeightNewValue
+                                                )
+                                                editingWeightSpec = null
+                                                editingWeightNewValue = ""
+                                            }
+                                        )
+                                        IconButton(onClick = { editingWeightSpec = null }) {
+                                            Icon(Icons.Default.Close, contentDescription = "إلغاء", tint = TextMuted)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = "جميع الأوزان المسجلة في النظام (${packageWeights.size}):",
+                            color = TextWhite,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+
+                        // 3. Scrollable List of All Registered Weights (Active & Disabled)
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 260.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(packageWeights, key = { "weight_mgr_${it.value}" }) { spec ->
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (spec.active) PmpNavyCard else PmpNavyCard.copy(alpha = 0.45f),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        when {
+                                            spec.isDefault -> PmpGold
+                                            spec.active -> GlassBorder
+                                            else -> PmpRedLight.copy(alpha = 0.35f)
+                                        }
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = spec.displayLabel(),
+                                                    color = if (spec.active) TextWhite else TextMuted,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    fontSize = 14.sp
+                                                )
+                                                if (spec.isDefault) {
+                                                    Surface(
+                                                        shape = RoundedCornerShape(6.dp),
+                                                        color = PmpGold.copy(alpha = 0.2f)
+                                                    ) {
+                                                        Text(
+                                                            text = "افتراضي ★",
+                                                            color = PmpGold,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                }
+                                                if (!spec.active) {
+                                                    Surface(
+                                                        shape = RoundedCornerShape(6.dp),
+                                                        color = PmpBrandRed.copy(alpha = 0.2f)
+                                                    ) {
+                                                        Text(
+                                                            text = "معطل",
+                                                            color = PmpRedLight,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            // Set Default Weight Button
+                                            IconButton(
+                                                onClick = { viewModel.setDefaultInventoryWeight(spec.value) },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (spec.isDefault) Icons.Default.Star else Icons.Default.StarBorder,
+                                                    contentDescription = "تعيين كوزن افتراضي",
+                                                    tint = if (spec.isDefault) PmpGold else TextMuted,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+
+                                            // Edit Registered Weight Button
+                                            IconButton(
+                                                onClick = {
+                                                    editingWeightSpec = spec
+                                                    editingWeightNewValue = spec.value
+                                                },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Edit,
+                                                    contentDescription = "تعديل الوزن",
+                                                    tint = PmpCyan,
+                                                    modifier = Modifier.size(17.dp)
+                                                )
+                                            }
+
+                                            // Disable / Re-enable Weight Button
+                                            IconButton(
+                                                onClick = {
+                                                    viewModel.toggleInventoryWeightActive(spec.value, !spec.active)
+                                                },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (spec.active) Icons.Default.VisibilityOff else Icons.Default.CheckCircle,
+                                                    contentDescription = if (spec.active) "تعطيل الوزن" else "إعادة تفعيل الوزن",
+                                                    tint = if (spec.active) PmpRedLight else PmpGreenLight,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "إغلاق",
+                    onClick = {
+                        showManageWeightsDialog = false
+                        editingWeightSpec = null
+                    }
+                )
             },
             containerColor = PmpNavySurface
         )

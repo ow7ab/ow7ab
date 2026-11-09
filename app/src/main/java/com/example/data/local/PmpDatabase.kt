@@ -329,6 +329,12 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+            }
+        }
+
         private val dbCallbackMutex = Mutex()
         private val dbCallbackScope = CoroutineScope(
             SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
@@ -357,9 +363,9 @@ abstract class PmpDatabase : RoomDatabase() {
                         MIGRATION_6_7,
                         MIGRATION_7_8,
                         MIGRATION_8_9,
-                        MIGRATION_9_10
+                        MIGRATION_9_10,
+                        MIGRATION_10_11
                     )
-                    .fallbackToDestructiveMigration()
                     .addCallback(DatabaseCallback(appContext))
                     .build()
                 INSTANCE = instance
@@ -393,6 +399,9 @@ abstract class PmpDatabase : RoomDatabase() {
 
         override fun onOpen(db: SupportSQLiteDatabase) {
             super.onOpen(db)
+            runCatching {
+                repairSchemaForRoomValidation(db)
+            }
             dbCallbackScope.launch {
                 dbCallbackMutex.withLock {
                     try {

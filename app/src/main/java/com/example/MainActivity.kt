@@ -737,7 +737,7 @@ fun PmpAppContent(
                     // Resolving effectiveCurrentScreen BEFORE Crossfade prevents two Crossfade branches from ever mapping to the same SaveableStateProvider key ("dashboard") simultaneously.
                     Crossfade(
                         targetState = effectiveCurrentScreen,
-                        animationSpec = tween(durationMillis = 120),
+                        animationSpec = tween(durationMillis = 90),
                         label = "ScreenTransition"
                     ) { screen ->
                         saveableStateHolder.SaveableStateProvider(screen.route) {
@@ -938,11 +938,20 @@ fun GlassBottomNavigationBar(
 ) {
     val listState = rememberLazyListState()
 
-    // Auto-scroll to selected item if needed
-    LaunchedEffect(currentScreen, allowedScreens) {
-        val index = allowedScreens.indexOf(currentScreen)
+    val distinctScreens = remember(allowedScreens) { allowedScreens.distinctBy { it.route } }
+
+    // Auto-scroll to selected item only if it is outside the currently visible viewport
+    LaunchedEffect(currentScreen, distinctScreens) {
+        val index = distinctScreens.indexOf(currentScreen)
         if (index >= 0) {
-            listState.animateScrollToItem(index)
+            val layoutInfo = listState.layoutInfo
+            val itemInfo = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+            val isFullyVisible = itemInfo != null &&
+                itemInfo.offset >= layoutInfo.viewportStartOffset &&
+                (itemInfo.offset + itemInfo.size) <= layoutInfo.viewportEndOffset
+            if (!isFullyVisible) {
+                listState.animateScrollToItem(index)
+            }
         }
     }
 
@@ -955,7 +964,6 @@ fun GlassBottomNavigationBar(
             .padding(vertical = 4.dp)
     ) {
         val totalWidth = if (maxWidth != androidx.compose.ui.unit.Dp.Infinity && maxWidth.value.isFinite() && maxWidth > 0.dp) maxWidth else 360.dp
-        val distinctScreens = remember(allowedScreens) { allowedScreens.distinctBy { it.route } }
         val visibleColumns = distinctScreens.size.coerceIn(1, 5)
         val itemWidth = (totalWidth / visibleColumns.toFloat()).coerceAtLeast(64.dp)
 
@@ -965,7 +973,11 @@ fun GlassBottomNavigationBar(
             contentPadding = PaddingValues(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-                items(distinctScreens, key = { it.route }) { screen ->
+                items(
+                    items = distinctScreens,
+                    key = { it.route },
+                    contentType = { "nav_tab_item" }
+                ) { screen ->
                     val selected = currentScreen == screen
                     val color = if (selected) PmpBrandRed else TextSubtle
 

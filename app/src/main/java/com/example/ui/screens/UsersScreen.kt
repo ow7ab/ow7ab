@@ -48,10 +48,10 @@ fun UsersScreen(
     val isSuperAdmin = currentUser.isSuperAdminAccount()
 
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = if (isManager) {
-        listOf("حسابات المستخدمين", "+ إنشاء حساب", "الأرشيف")
-    } else {
-        listOf("حسابي الحالي")
+    val tabs = when {
+        isSuperAdmin -> listOf("حسابات المستخدمين", "+ إنشاء حساب", "الأرشيف")
+        isManager -> listOf("حسابات المستخدمين (إشراف)")
+        else -> listOf("حسابي الحالي")
     }
 
     // Form state for creating a new user account
@@ -61,6 +61,14 @@ fun UsersScreen(
     var pinOrPassword by remember { mutableStateOf("1234") }
 
     val roleOptions = listOf(
+        "المدير",
+        "مسؤول المشتريات",
+        "أمين مخزن الخام",
+        "مهندس الإنتاج",
+        "مسؤول الجودة",
+        "أمين مخزن المنتج التام",
+        "مسؤول المبيعات",
+        "المحاسب",
         "مدير النظام",
         "محاسب خزنة ومبيعات",
         "مسؤول مبيعات وفواتير",
@@ -434,14 +442,14 @@ fun UsersScreen(
                         UserAccountCard(
                             account = account,
                             isCurrent = currentUser?.id == account.id,
-                            canManagePermissions = isManager,
+                            canManagePermissions = isSuperAdmin,
                             isSuperAdmin = isSuperAdmin,
                             onSwitchRequest = {
                                 userPendingSwitch = account
                                 switchPinInput = account.pinOrPassword
                             },
                             onEditPermissionsRequest = {
-                                if (isManager) {
+                                if (isSuperAdmin) {
                                     userPendingPermEdit = account
                                     if (account.role in roleOptions && account.role != "مسمى وظيفي آخر (كتابة يدوية)...") {
                                         editRoleState = account.role
@@ -462,7 +470,7 @@ fun UsersScreen(
                                         existingPerms
                                     }
                                 } else {
-                                    viewModel.postMessage("عفواً، تعديل الصلاحيات متاح فقط من حساب مدير النظام", isError = true)
+                                    viewModel.postMessage("عفواً، حساب Admin هو الوحيد الذي يملك صلاحية إدارة وتعديل صلاحيات المستخدمين.", isError = true)
                                 }
                             },
                             onToggleActive = {

@@ -721,6 +721,114 @@ class PmpRepository(
         return id
     }
 
+    suspend fun ensureProductForColorAndWeight(
+        color: String,
+        weight: String,
+        purchasePrice: Double = 0.0,
+        salePrice: Double = 0.0,
+        user: String = "المدير"
+    ): ProductEntity {
+        val cleanColor = color.trim().ifBlank { "أبيض" }
+        val cleanWeight = com.example.util.InventoryWeightManager.normalizeWeightValue(weight).ifBlank { weight.trim() }
+        val allProducts = dao.getProductsDirect()
+        val existing = allProducts.firstOrNull {
+            it.paintColor.trim().equals(cleanColor, ignoreCase = true) &&
+                com.example.util.InventoryWeightManager.normalizeWeightValue(it.packageWeight) == cleanWeight
+        }
+        if (existing != null) return existing
+
+        // Derive reasonable default prices from sibling weights of the same color if not explicitly provided
+        val sibling = allProducts.firstOrNull { it.paintColor.trim().equals(cleanColor, ignoreCase = true) }
+        val effectivePurchase = if (purchasePrice > 0.0) purchasePrice else (sibling?.purchasePrice ?: 320000.0)
+        val effectiveSale = if (salePrice > 0.0) salePrice else (sibling?.salePrice ?: 385000.0)
+        val prodName = "بوهية $cleanColor $cleanWeight جم"
+        val newId = addProduct(
+            name = prodName,
+            color = cleanColor,
+            weight = cleanWeight,
+            purchasePrice = effectivePurchase,
+            salePrice = effectiveSale,
+            minimumStock = sibling?.minimumStock ?: 10.0,
+            user = user
+        )
+        return dao.getProductsDirect().firstOrNull { it.id == newId } ?: ProductEntity(
+            id = newId,
+            sku = "PMP-$newId",
+            name = prodName,
+            paintColor = cleanColor,
+            packageWeight = cleanWeight,
+            purchasePrice = effectivePurchase,
+            salePrice = effectiveSale,
+            salePriceEgp = (effectiveSale / 200.0).coerceAtLeast(1.0),
+            minimumStock = sibling?.minimumStock ?: 10.0
+        )
+    }
+
+    suspend fun renamePackageWeightSafely(
+        oldWeight: String,
+        newWeight: String,
+        user: String
+    ): Result<Int> {
+        val normOld = com.example.util.InventoryWeightManager.normalizeWeightValue(oldWeight)
+        val normNew = com.example.util.InventoryWeightManager.normalizeWeightValue(newWeight)
+        if (normOld.isBlank() || normNew.isBlank()) {
+            return Result.failure(IllegalArgumentException("قيمة الوزن غير صالحة"))
+        }
+        if (normOld == normNew) return Result.success(0)
+
+        val allProducts = dao.getProductsDirect()
+        val matchingProducts = allProducts.filter {
+            com.example.util.InventoryWeightManager.normalizeWeightValue(it.packageWeight) == normOld
+        }
+        var updatedCount = 0
+        for (prod in matchingProducts) {
+            val conflictExists = allProducts.any {
+                it.id != prod.id &&
+                    it.paintColor.trim().equals(prod.paintColor.trim(), ignoreCase = true) &&
+                    com.example.util.InventoryWeightManager.normalizeWeightValue(it.packageWeight) == normNew
+            }
+            if (!conflictExists) {
+                val updatedName = if (prod.name.contains(normOld)) {
+                    prod.name.replace(normOld, normNew)
+                } else {
+                    "بوهية ${prod.paintColor.trim()} $normNew جم"
+                }
+                dao.updateProduct(
+                    prod.copy(
+                        packageWeight = normNew,
+                        name = updatedName
+                    )
+                )
+                updatedCount++
+            }
+        }
+
+        // Also keep poster_prices aligned without deleting existing records
+        val allPosterPrices = dao.getPosterPricesDirect()
+        val matchingPosters = allPosterPrices.filter {
+            com.example.util.InventoryWeightManager.normalizeWeightValue(it.weight) == normOld
+        }
+        if (matchingPosters.isNotEmpty()) {
+            val newPosters = matchingPosters.map { pp ->
+                val isEgp = pp.currency.equals("EGP", ignoreCase = true) || pp.id.endsWith("_EGP")
+                pp.copy(
+                    id = if (isEgp) "${normNew}_${pp.kind}_EGP" else "${normNew}_${pp.kind}",
+                    weight = normNew
+                )
+            }
+            dao.insertPosterPrices(newPosters)
+        }
+
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = user,
+                action = "UPDATE_PACKAGE_WEIGHT",
+                detail = "تعديل الوزن من ($normOld جم) إلى ($normNew جم) مع الحفاظ على جميع الأرصدة والحركات ($updatedCount صنف)"
+            )
+        )
+        return Result.success(updatedCount)
+    }
+
     suspend fun deleteProduct(id: Long, productName: String, user: String): Result<Unit> {
         dao.deleteProduct(id)
         dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_PRODUCT", detail = "حذف صنف من النظام: $productName (#$id)"))

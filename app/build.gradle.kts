@@ -11,19 +11,21 @@ plugins {
 }
 
 val resolvedVersionCode: Int =
-    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 13
+    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 14
 val resolvedVersionName: String =
-    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "3.0-PRO"
+    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "v3.1"
 val resolvedGitCommit: String =
     (project.findProperty("gitCommit")?.toString()?.trim()?.takeIf { it.isNotBlank() })
         ?: System.getenv("GITHUB_SHA")?.take(8)?.takeIf { it.isNotBlank() }
-        ?: "8f4d2c1a"
+        ?: "9a8b7c6d"
 val resolvedBuildTimestampUtc: String =
     (project.findProperty("buildTimestampUtc")?.toString()?.trim()?.takeIf { it.isNotBlank() })
-        ?: "2026-11-07T08:00:00Z"
+        ?: "2026-11-09T09:00:00Z"
+val cleanVersionNameForBuildId: String =
+    resolvedVersionName.removePrefix("v").removePrefix("V").trim()
 val resolvedBuildId: String =
     (project.findProperty("buildId")?.toString()?.trim()?.takeIf { it.isNotBlank() })
-        ?: "PMP-v${resolvedVersionName}-b${resolvedVersionCode}-${resolvedGitCommit}"
+        ?: "PMP-v${cleanVersionNameForBuildId}-b${resolvedVersionCode}-${resolvedGitCommit}"
 
 android {
   namespace = "com.example"

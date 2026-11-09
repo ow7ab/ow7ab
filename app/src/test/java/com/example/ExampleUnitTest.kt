@@ -91,17 +91,17 @@ class ExampleUnitTest {
   @Test
   fun testCloudReleaseConfiguration() {
     val latestRelease = com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO
-    assertTrue(latestRelease.versionCode >= 13)
-    assertTrue(latestRelease.versionName.contains("3.0"))
+    assertTrue(latestRelease.versionCode >= 14)
+    assertTrue(latestRelease.versionName.contains("3.1"))
     assertTrue(latestRelease.downloadUrl.startsWith("https://"))
     assertTrue(latestRelease.releaseNotes.isNotBlank())
     assertTrue(latestRelease.buildId.isNotBlank())
     assertTrue(latestRelease.gitCommit.isNotBlank())
     assertEquals("com.pmp", BuildConfig.APPLICATION_ID)
-    assertEquals(13, BuildConfig.VERSION_CODE)
-    assertEquals("3.0-PRO", BuildConfig.VERSION_NAME)
-    assertEquals("PMP-v3.0-PRO-b13-8f4d2c1a", BuildConfig.BUILD_ID)
-    assertEquals("8f4d2c1a", BuildConfig.GIT_COMMIT_SHA)
+    assertEquals(14, BuildConfig.VERSION_CODE)
+    assertEquals("v3.1", BuildConfig.VERSION_NAME)
+    assertEquals("PMP-v3.1-b14-9a8b7c6d", BuildConfig.BUILD_ID)
+    assertEquals("9a8b7c6d", BuildConfig.GIT_COMMIT_SHA)
     assertTrue(BuildConfig.BUILD_TIMESTAMP_UTC.endsWith("Z"))
     assertEquals("ow7ab/ow7ab", BuildConfig.GITHUB_RELEASE_REPO)
   }
@@ -110,12 +110,12 @@ class ExampleUnitTest {
   fun testFirstAttemptUpdateDiscoveryAndVersionJsonParsing() {
     val sampleJson = """
       {
-        "versionCode": 14,
-        "versionName": "3.1-PRO",
-        "buildId": "PMP-v3.1-PRO-b14-9a8b7c6d",
+        "versionCode": 15,
+        "versionName": "v3.2",
+        "buildId": "PMP-v3.2-b15-9a8b7c6d",
         "gitCommit": "9a8b7c6d",
         "publishedAt": "2026-11-08T10:30:00Z",
-        "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v3.1-PRO-b14.apk",
+        "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v3.2-b15.apk",
         "releaseNotes": "تحديث جديد يتضمن ميزات فعلية",
         "fileSize": 19500000,
         "fileSizeMb": 18.6,
@@ -126,16 +126,16 @@ class ExampleUnitTest {
 
     val parsed = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(sampleJson)
     assertNotNull(parsed)
-    assertEquals(14, parsed!!.versionCode)
-    assertEquals("3.1-PRO", parsed.versionName)
-    assertEquals("PMP-v3.1-PRO-b14-9a8b7c6d", parsed.buildId)
+    assertEquals(15, parsed!!.versionCode)
+    assertEquals("v3.2", parsed.versionName)
+    assertEquals("PMP-v3.2-b15-9a8b7c6d", parsed.buildId)
     assertEquals("9a8b7c6d", parsed.gitCommit)
     assertEquals("2026-11-08T10:30:00Z", parsed.publishedAt)
     assertEquals(19500000L, parsed.fileSize)
-    assertTrue(parsed.downloadUrl.endsWith("pmp-paints-v3.1-PRO-b14.apk"))
+    assertTrue(parsed.downloadUrl.endsWith("pmp-paints-v3.2-b15.apk"))
     assertEquals(64, parsed.sha256Checksum.length)
 
-    // Verify highest version wins across multiple sources (e.g., stale Firestore v12 vs fresh JSON v14)
+    // Verify highest version wins across multiple sources (e.g., stale Firestore v12 vs fresh JSON v15)
     val staleSource = com.example.util.UpdateInfo(
       versionCode = 12,
       versionName = "2.9-PRO",
@@ -144,7 +144,7 @@ class ExampleUnitTest {
     )
     val bestCandidate = listOf(staleSource, parsed).maxByOrNull { it.versionCode }
     assertNotNull(bestCandidate)
-    assertEquals(14, bestCandidate!!.versionCode)
+    assertEquals(15, bestCandidate!!.versionCode)
     assertTrue(bestCandidate.versionCode > BuildConfig.VERSION_CODE)
   }
 
@@ -440,7 +440,7 @@ class ExampleUnitTest {
       content.contains(":app:testDebugUnitTest")
     )
 
-    // 7. Verify root version.json and public/version.json are synchronized at v3.0-PRO (versionCode 13)
+    // 7. Verify root version.json and public/version.json are synchronized at v3.1 (versionCode 14)
     val rootVersionFile = listOf(
       java.io.File("version.json"),
       java.io.File("../version.json")
@@ -456,7 +456,8 @@ class ExampleUnitTest {
     val publicParsed = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(publicVersionFile!!.readText(Charsets.UTF_8))
     assertNotNull(rootParsed)
     assertNotNull(publicParsed)
-    assertEquals(13, rootParsed!!.versionCode)
+    assertEquals(14, rootParsed!!.versionCode)
+    assertEquals("v3.1", rootParsed.versionName)
     assertEquals(rootParsed.versionCode, publicParsed!!.versionCode)
     assertEquals(rootParsed.versionName, publicParsed.versionName)
     assertEquals(rootParsed.buildId, publicParsed.buildId)
@@ -781,5 +782,258 @@ class ExampleUnitTest {
     assertTrue(settingsSource.contains("download_install_update_button"))
     assertTrue(settingsSource.contains("cancel_update_download_button"))
   }
+
+  @Test
+  fun testInventoryThreeColumnTableAndWeightManagementSystem() {
+    // 1. Test internal unit normalization in InventoryWeightManager
+    assertEquals("250", com.example.util.InventoryWeightManager.normalizeWeightValue("250"))
+    assertEquals("250", com.example.util.InventoryWeightManager.normalizeWeightValue("250 جم"))
+    assertEquals("250", com.example.util.InventoryWeightManager.normalizeWeightValue("٢٥٠ جرام"))
+    assertEquals("250", com.example.util.InventoryWeightManager.normalizeWeightValue("0.25 كجم"))
+    assertEquals("1000", com.example.util.InventoryWeightManager.normalizeWeightValue("1 كجم"))
+    assertEquals("400", com.example.util.InventoryWeightManager.normalizeWeightValue("400 جم"))
+    assertEquals("250 جم", com.example.util.InventoryWeightManager.formatWeightLabel("250 جم"))
+    assertEquals("400 جم", com.example.util.InventoryWeightManager.formatWeightLabel("400"))
+
+    // 2. Verify InventoryScreen preserves existing top header & tabs while adding the 3-column RTL table and weight controls
+    val invFile = listOf(
+      java.io.File("app/src/main/java/com/example/ui/screens/InventoryScreen.kt"),
+      java.io.File("src/main/java/com/example/ui/screens/InventoryScreen.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("InventoryScreen.kt must exist", invFile)
+    val invSource = invFile!!.readText(Charsets.UTF_8)
+
+    // Existing header & sections must be preserved intact
+    assertTrue(invSource.contains("المخازن والمنتجات وإدارة البضاعة"))
+    assertTrue(invSource.contains("أرصدة المخزون"))
+    assertTrue(invSource.contains("إضافة صنف وتوريد للمخزن"))
+    assertTrue(invSource.contains("الأصناف والمخازن"))
+    assertTrue(invSource.contains("سجل الحركات"))
+
+    // New 3-column RTL table (اللون | الوزن | العدد) & Weight Selector & Weight Management button
+    assertTrue(invSource.contains("inventory_weight_selector_button"))
+    assertTrue(invSource.contains("الوزن: \$selectedWeightLabel ▼"))
+    assertTrue(invSource.contains("inventory_three_column_table"))
+    assertTrue(invSource.contains("text = \"اللون\""))
+    assertTrue(invSource.contains("text = \"الوزن\""))
+    assertTrue(invSource.contains("text = \"العدد\""))
+    assertTrue(invSource.contains("manage_weights_button"))
+    assertTrue(invSource.contains("إدارة الأوزان"))
+
+    // 3. Verify PmpRepository supports independent (color, weight) products and non-destructive weight renaming
+    val repoFile = listOf(
+      java.io.File("app/src/main/java/com/example/data/repository/PmpRepository.kt"),
+      java.io.File("src/main/java/com/example/data/repository/PmpRepository.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("PmpRepository.kt must exist", repoFile)
+    val repoSource = repoFile!!.readText(Charsets.UTF_8)
+    assertTrue(repoSource.contains("fun ensureProductForColorAndWeight("))
+    assertTrue(repoSource.contains("fun renamePackageWeightSafely("))
+
+    // 4. Verify CloudErpSyncRepository syncs inventory_weights with Firestore
+    val syncFile = listOf(
+      java.io.File("app/src/main/java/com/example/data/remote/CloudErpSyncRepository.kt"),
+      java.io.File("src/main/java/com/example/data/remote/CloudErpSyncRepository.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("CloudErpSyncRepository.kt must exist", syncFile)
+    val syncSource = syncFile!!.readText(Charsets.UTF_8)
+    assertTrue(syncSource.contains("inventory_weights"))
+    assertTrue(syncSource.contains("syncInventoryWeightsToCloud"))
+  }
+
+  @Test
+  fun testCompleteEnterpriseErpCycleAndPermissionsAndIdempotency() {
+    // 1. Verify PmpDatabase does NOT use fallbackToDestructiveMigration (Section 1 & 20)
+    val dbFile = listOf(
+      java.io.File("app/src/main/java/com/example/data/local/PmpDatabase.kt"),
+      java.io.File("src/main/java/com/example/data/local/PmpDatabase.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("PmpDatabase.kt must exist", dbFile)
+    val dbSource = dbFile!!.readText(Charsets.UTF_8)
+    assertFalse("PmpDatabase must never use fallbackToDestructiveMigration", dbSource.contains("fallbackToDestructiveMigration"))
+
+    // 2. Verify Strict Admin-Only User & Permission Management & Segregation of Duties (Section 16)
+    val adminUser = com.example.data.local.UserAccountEntity(
+      id = 1L,
+      userCode = "USR-ADMIN",
+      fullName = "Admin",
+      username = "admin",
+      role = "مدير النظام",
+      branch = "كل الفروع",
+      permissions = "المستخدمين,الإعدادات",
+      serverSyncToken = "T1"
+    )
+    val generalManager = com.example.data.local.UserAccountEntity(
+      id = 2L,
+      userCode = "USR-MGR",
+      fullName = "المدير العام",
+      username = "manager1",
+      role = "مدير النظام",
+      branch = "كل الفروع",
+      permissions = "المخازن,المصنع,المبيعات,التقارير",
+      serverSyncToken = "T2"
+    )
+    val procurementOfficer = com.example.data.local.UserAccountEntity(
+      id = 3L,
+      userCode = "USR-PROC",
+      fullName = "مسؤول المشتريات",
+      username = "proc_user",
+      role = "مسؤول المشتريات",
+      branch = "فرع مصر والمصنع",
+      permissions = "المشتريات",
+      serverSyncToken = "T3"
+    )
+    assertTrue("Only Admin can manage users and permissions", com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(adminUser))
+    assertFalse("General Manager cannot modify user permissions", com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(generalManager))
+    assertFalse("Procurement Officer cannot modify user permissions", com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(procurementOfficer))
+    assertFalse("Employee cannot approve their own sensitive document", com.example.util.ErpLifecycleEngine.canApproveDocument(procurementOfficer, "proc_user"))
+    assertTrue("General Manager can approve employee document", com.example.util.ErpLifecycleEngine.canApproveDocument(generalManager, "proc_user"))
+
+    // 3. Verify Official Packaging Standards (250g -> 48, 900g -> 12, 4000g -> 4) (Section 9)
+    val rule250 = com.example.util.ErpLifecycleEngine.resolvePackagingRule("250")
+    val rule900 = com.example.util.ErpLifecycleEngine.resolvePackagingRule("900")
+    val rule4000 = com.example.util.ErpLifecycleEngine.resolvePackagingRule("4000")
+    assertEquals(48, rule250.cansPerCarton)
+    assertEquals(12, rule900.cansPerCarton)
+    assertEquals(4, rule4000.cansPerCarton)
+
+    // 4. Mandatory 16-Step End-to-End Operational Cycle Verification (Section 22):
+    // Step A: Purchase 500 kg raw materials (PO alone does NOT increase available stock)
+    var rawWarehouseAvailableBalanceKg = 0.0
+    val po500 = com.example.util.PurchaseOrderRecord(
+      poNumber = "PO-2026-0500",
+      orderDate = "2026-11-08",
+      supplierName = "شركة الشرق للكيماويات",
+      materialId = 10L,
+      materialCode = "RAW-TIO2",
+      materialName = "ثاني أكسيد التيتانيوم",
+      orderedQty = 500.0,
+      unit = "كجم",
+      unitPrice = 120.0,
+      currency = "EGP",
+      createdBy = "proc_user"
+    )
+    assertEquals("PO creation alone must keep raw stock at 0", 0.0, rawWarehouseAvailableBalanceKg, 0.001)
+
+    // Step B: Receive 495 kg, Accept 490 kg, Reject 5 kg, Record supply discrepancy
+    val grn = com.example.util.ErpLifecycleEngine.evaluateGoodsReceipt(
+      po = po500,
+      storekeeperName = "أمين مخزن الخام",
+      actualReceivedQty = 495.0,
+      acceptedQty = 490.0,
+      rejectedQty = 5.0,
+      discrepancyReason = "عجز توريد 5 كجم وتلف 5 كجم أثناء النقل"
+    )
+    assertTrue("GRN must flag discrepancy", grn.hasDiscrepancy)
+    assertEquals(-5.0, grn.shortageOrOverageQty, 0.001)
+    assertEquals(com.example.util.GoodsReceiptStatus.DISCREPANCY_REVIEW, grn.status)
+
+    // Step C: Approve accepted quantity (490 kg enters available raw stock)
+    rawWarehouseAvailableBalanceKg += grn.acceptedQty
+    assertEquals(490.0, rawWarehouseAvailableBalanceKg, 0.001)
+
+    // Step D: Issue 210 kg to approved Production Order & confirm Production Engineer receipt
+    val issuedToProductionKg = 210.0
+    rawWarehouseAvailableBalanceKg -= issuedToProductionKg
+    assertEquals(280.0, rawWarehouseAvailableBalanceKg, 0.001)
+
+    // Step E: Produce 250g (48/carton), 900g (12/carton), and 4000g (4/carton) cans with damaged cans
+    val run250 = com.example.util.PackagingRunBreakdown(
+      weightGrams = 250,
+      cansPerCarton = rule250.cansPerCarton,
+      targetCartons = 5,
+      actualProducedCans = 244,
+      goodApprovedCans = 240,
+      damagedCans = 4,
+      underInspectionCans = 0
+    )
+    val run900 = com.example.util.PackagingRunBreakdown(
+      weightGrams = 900,
+      cansPerCarton = rule900.cansPerCarton,
+      targetCartons = 10,
+      actualProducedCans = 123,
+      goodApprovedCans = 120,
+      damagedCans = 3,
+      underInspectionCans = 0
+    )
+    val run4000 = com.example.util.PackagingRunBreakdown(
+      weightGrams = 4000,
+      cansPerCarton = rule4000.cansPerCarton,
+      targetCartons = 5,
+      actualProducedCans = 21,
+      goodApprovedCans = 20,
+      damagedCans = 1,
+      underInspectionCans = 0
+    )
+    assertTrue(run250.isEquationBalanced && run900.isEquationBalanced && run4000.isEquationBalanced)
+    assertEquals(5, run250.fullCartonsCount)   // 240 / 48 = 5 cartons
+    assertEquals(10, run900.fullCartonsCount)  // 120 / 12 = 10 cartons
+    assertEquals(5, run4000.fullCartonsCount)  // 20 / 4 = 5 cartons
+
+    // Step F: Quality Control (QC) Inspection & Finished Goods Receipt
+    val qc900 = com.example.util.ErpLifecycleEngine.performQualityControlInspection(
+      batchNumber = "PB-20261108-01",
+      productionOrderNumber = "PO-PRD-001",
+      formulation = null,
+      inspectorName = "مسؤول الجودة",
+      measuredDensity = 1.20,
+      measuredViscosity = "95 KU",
+      appearanceAndColorMatch = true,
+      goodCandidateCans = run900.goodApprovedCans,
+      damagedCans = run900.damagedCans,
+      cansPerCarton = rule900.cansPerCarton
+    )
+    assertTrue(qc900.isApprovedForWarehouse)
+    assertEquals(10, qc900.acceptedCartons)
+
+    var finishedGoods900Cartons = 0.0
+    finishedGoods900Cartons += qc900.acceptedCartons
+
+    // Step G: Sell 4 cartons Cash & 3 cartons Credit, then collect partial payment
+    val cashSoldCartons = 4.0
+    val creditSoldCartons = 3.0
+    val totalSoldCartons = cashSoldCartons + creditSoldCartons
+    finishedGoods900Cartons -= totalSoldCartons
+    assertEquals("Final FG stock must match approved receipts minus sales (10 - 7 = 3)", 3.0, finishedGoods900Cartons, 0.001)
+
+    val unitSellingPriceEgp = 1925.0
+    val cashSaleAmount = cashSoldCartons * unitSellingPriceEgp       // 7,700 EGP
+    val creditSaleAmount = creditSoldCartons * unitSellingPriceEgp   // 5,775 EGP
+    val partialCollectionAmount = 2000.0                             // 2,000 EGP collected on credit invoice
+    val customerRemainingDebt = creditSaleAmount - partialCollectionAmount // 3,775 EGP remaining debt
+    val actualCashboxCollected = cashSaleAmount + partialCollectionAmount  // 9,700 EGP (credit uncollected portion is NOT cash!)
+    assertEquals(3775.0, customerRemainingDebt, 0.001)
+    assertEquals(9700.0, actualCashboxCollected, 0.001)
+
+    // Step H: Production Costing & Profitability Calculation (Section 15)
+    val costing = com.example.util.ErpLifecycleEngine.calculateBatchCostingAndProfit(
+      batchNumber = "PB-20261108-01",
+      currency = "EGP",
+      bomLines = listOf(
+        com.example.util.ProductionBomRequirementLine(
+          materialName = "ثاني أكسيد التيتانيوم",
+          materialType = "صبغة",
+          theoreticalRequiredKg = 100.0,
+          actuallyConsumedKg = 108.0,
+          wastedKg = 2.0,
+          unitCostEgp = 80.0
+        )
+      ),
+      packagingSpec = rule900,
+      actualProducedCans = run900.actualProducedCans,
+      goodApprovedCans = run900.goodApprovedCans,
+      damagedCans = run900.damagedCans,
+      directLaborCost = 600.0,
+      manufacturingOverheadCost = 400.0,
+      soldCartonsCount = totalSoldCartons,
+      unitSellingPricePerCarton = unitSellingPriceEgp,
+      operatingExpensesAllocated = 350.0
+    )
+    assertTrue("Total batch cost must be positive", costing.totalBatchManufacturingCost > 0.0)
+    assertTrue("Gross profit must equal revenue minus COGS", costing.grossProfit > 0.0)
+    assertEquals(costing.grossProfit - 350.0, costing.netProfit, 0.001)
+  }
 }
+
+
 

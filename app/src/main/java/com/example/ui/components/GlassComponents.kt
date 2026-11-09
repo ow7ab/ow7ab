@@ -64,6 +64,11 @@ private val DisabledButtonBrush: Brush
         Brush.linearGradient(listOf(Color(0xFFE2EAF2), Color(0xFFD6E2EE)))
     }
 
+private val SharedBadgeShape = RoundedCornerShape(8.dp)
+private val SharedButtonShape = RoundedCornerShape(14.dp)
+private val SharedTabPillShape = RoundedCornerShape(12.dp)
+private val SharedInputShape = RoundedCornerShape(14.dp)
+
 @Composable
 fun GlassCard(
     modifier: Modifier = Modifier,
@@ -282,9 +287,9 @@ fun GlassBadge(
 ) {
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(SharedBadgeShape)
             .background(color.copy(alpha = 0.12f))
-            .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+            .border(1.dp, color.copy(alpha = 0.35f), SharedBadgeShape)
             .padding(horizontal = 8.dp, vertical = 4.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -311,13 +316,12 @@ fun GlassButton(
     enabled: Boolean = true,
     contentPadding: PaddingValues = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
 ) {
-    val shape = RoundedCornerShape(14.dp)
     Box(
         modifier = modifier
             .heightIn(min = 44.dp)
-            .clip(shape)
+            .clip(SharedButtonShape)
             .background(if (enabled) gradient else DisabledButtonBrush)
-            .border(1.dp, Color.White.copy(alpha = if (enabled) 0.50f else 0.2f), shape)
+            .border(1.dp, Color.White.copy(alpha = if (enabled) 0.50f else 0.2f), SharedButtonShape)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(contentPadding),
         contentAlignment = Alignment.Center
@@ -360,7 +364,7 @@ fun GlassTabRow(
     val scrollState = rememberScrollState()
 
     // Smoothly bring selected tab into view
-    LaunchedEffect(selectedIndex) {
+    LaunchedEffect(selectedIndex, tabs.size) {
         if (selectedIndex in tabs.indices && scrollState.maxValue > 0) {
             val step = scrollState.maxValue.toFloat() / (tabs.size - 1).coerceAtLeast(1)
             val targetScroll = (selectedIndex * step).toInt().coerceIn(0, scrollState.maxValue)
@@ -371,7 +375,8 @@ fun GlassTabRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .horizontalScroll(scrollState),
+            .horizontalScroll(scrollState)
+            .padding(horizontal = 4.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -380,7 +385,7 @@ fun GlassTabRow(
                 text = tabName,
                 selected = selectedIndex == index,
                 onClick = { onTabSelected(index) },
-                modifier = Modifier.wrapContentWidth()
+                modifier = Modifier.wrapContentWidth(unbounded = true)
             )
         }
     }
@@ -393,22 +398,21 @@ private fun GlassTabPill(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val shape = RoundedCornerShape(12.dp)
     Box(
         modifier = modifier
-            .defaultMinSize(minWidth = 76.dp)
-            .heightIn(min = 40.dp)
-            .clip(shape)
+            .defaultMinSize(minWidth = 84.dp)
+            .heightIn(min = 42.dp)
+            .clip(SharedTabPillShape)
             .background(if (selected) GlassAccentBlueGradient else GlassCardGradient)
             .border(
                 width = if (selected) 1.5.dp else 1.dp,
-                color = if (selected) PmpCyan.copy(alpha = 0.7f) else GlassBorder,
-                shape = shape
+                color = if (selected) PmpCyan.copy(alpha = 0.75f) else GlassBorder,
+                shape = SharedTabPillShape
             )
             .clickable(onClick = onClick)
             .padding(
-                horizontal = 14.dp,
-                vertical = 8.dp
+                horizontal = 16.dp,
+                vertical = 9.dp
             ),
         contentAlignment = Alignment.Center
     ) {
@@ -416,10 +420,10 @@ private fun GlassTabPill(
             text = text,
             color = if (selected) TextPureWhite else TextDark,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
-            fontSize = 12.5.sp,
+            fontSize = 13.sp,
             maxLines = 1,
             softWrap = false,
-            overflow = TextOverflow.Ellipsis,
+            overflow = TextOverflow.Visible,
             textAlign = TextAlign.Center
         )
     }
@@ -607,22 +611,24 @@ fun OneUiPullDownContainer(
         animatedOffsetPx.snapTo(0f)
     }
 
-    val pullRevealBgBrush = if (isDark) {
-        Brush.verticalGradient(
-            colors = listOf(
-                Color(0xFF060911),
-                Color(0xFF0B1120),
-                Color(0xFF0F172A)
+    val pullRevealBgBrush = remember(isDark) {
+        if (isDark) {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color(0xFF060911),
+                    Color(0xFF0B1120),
+                    Color(0xFF0F172A)
+                )
             )
-        )
-    } else {
-        Brush.verticalGradient(
-            colors = listOf(
-                Color(0xFFE2E8F0),
-                Color(0xFFEDF2F7),
-                Color(0xFFF8FAFC)
+        } else {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color(0xFFE2E8F0),
+                    Color(0xFFEDF2F7),
+                    Color(0xFFF8FAFC)
+                )
             )
-        )
+        }
     }
 
     BoxWithConstraints(
@@ -741,11 +747,18 @@ fun OneUiPullDownContainer(
             }
         }
 
-        val currentOffsetPx = animatedOffsetPx.value
-        val pullProgress = (currentOffsetPx / (maxElasticTranslationPx * 0.55f)).coerceIn(0f, 1f)
+        val isPulledDown by remember {
+            derivedStateOf { animatedOffsetPx.value > 1f }
+        }
+        val titleRevealThresholdPx = remember(density) { with(density) { 56.dp.toPx() } }
+        val showPulledTitle by remember(titleRevealThresholdPx) {
+            derivedStateOf { animatedOffsetPx.value > titleRevealThresholdPx }
+        }
 
         // Revealed Empty One UI Background Area at the Top of the Screen
-        if (currentOffsetPx > 1f) {
+        if (isPulledDown) {
+            val currentOffsetPx = animatedOffsetPx.value
+            val pullProgress = (currentOffsetPx / (maxElasticTranslationPx * 0.55f)).coerceIn(0f, 1f)
             val revealedHeightDp = with(density) { currentOffsetPx.toDp() }
             Box(
                 modifier = Modifier
@@ -765,7 +778,7 @@ fun OneUiPullDownContainer(
                         }
                         .padding(horizontal = 24.dp)
                 ) {
-                    if (pageTitle.isNotBlank() && currentOffsetPx > with(density) { 56.dp.toPx() }) {
+                    if (pageTitle.isNotBlank() && showPulledTitle) {
                         Text(
                             text = pageTitle,
                             color = PmpBrandNavy.copy(alpha = 0.85f),
@@ -789,15 +802,12 @@ fun OneUiPullDownContainer(
             }
         }
 
-        val dynamicTopCornerDp = with(density) {
-            (pullProgress * 26f).dp
+        val activePullShape = remember {
+            RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomStart = 0.dp, bottomEnd = 0.dp)
         }
-        val pullShape = RoundedCornerShape(
-            topStart = dynamicTopCornerDp,
-            topEnd = dynamicTopCornerDp,
-            bottomStart = 0.dp,
-            bottomEnd = 0.dp
-        )
+        val flatPullShape = remember {
+            RoundedCornerShape(0.dp)
+        }
 
         // Unified Page Unit Moving Together in Real Time
         Box(
@@ -846,10 +856,12 @@ fun OneUiPullDownContainer(
                     }
                 }
                 .graphicsLayer {
-                    translationY = currentOffsetPx
-                    shape = pullShape
-                    clip = currentOffsetPx > 1f
-                    shadowElevation = if (currentOffsetPx > 2f) (pullProgress * 14f) else 0f
+                    val liveOffsetPx = animatedOffsetPx.value
+                    val liveProgress = (liveOffsetPx / (maxElasticTranslationPx * 0.55f)).coerceIn(0f, 1f)
+                    translationY = liveOffsetPx
+                    shape = if (liveOffsetPx > 1f) activePullShape else flatPullShape
+                    clip = liveOffsetPx > 1f
+                    shadowElevation = if (liveOffsetPx > 2f) (liveProgress * 14f) else 0f
                 }
                 .background(GlassBackgroundBrush)
         ) {

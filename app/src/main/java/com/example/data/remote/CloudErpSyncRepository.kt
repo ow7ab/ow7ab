@@ -1094,6 +1094,20 @@ class CloudErpSyncRepository(
                 }
             }
 
+            // 5c. Sync Registered Package Weights (InventoryWeightManager)
+            runCatching {
+                val appCtx = firestore.app.applicationContext
+                val weightMgr = com.example.util.InventoryWeightManager.getInstance(appCtx)
+                val payload = weightMgr.exportForCloudSync().toMutableMap()
+                payload["updatedBy"] = actor
+                payload["serverUpdatedAt"] = FieldValue.serverTimestamp()
+                cRef.collection("config").document("inventory_weights").set(
+                    payload,
+                    SetOptions.merge()
+                ).await()
+                syncedCount++
+            }
+
             // 6. Cashboxes & Warehouses (Batched)
             val cashboxes = dao.getCashboxesDirect()
                 .filter { cb ->
@@ -1679,6 +1693,22 @@ class CloudErpSyncRepository(
                     dao.insertPosterPrices(restoredPosterPrices)
                     restoredCount += restoredPosterPrices.size
                 }
+            }
+
+            // 5c. Fetch Registered Package Weights from Server
+            runCatching {
+                val appCtx = firestore.app.applicationContext
+                val weightMgr = com.example.util.InventoryWeightManager.getInstance(appCtx)
+                val weightsDoc = cRef.collection("config").document("inventory_weights").get().await()
+                if (weightsDoc.exists()) {
+                    @Suppress("UNCHECKED_CAST")
+                    val rawWeights = weightsDoc.get("weights") as? List<Map<String, Any?>>
+                    val weightsJson = weightsDoc.getString("weightsJson")
+                    val defaultWeight = weightsDoc.getString("defaultWeight")
+                    weightMgr.mergeCloudWeightsFromFirestoreDoc(weightsJson, rawWeights, defaultWeight)
+                }
+                val currentProdWeights = dao.getProductsDirect().map { it.packageWeight }
+                weightMgr.syncDiscoveredProductWeights(currentProdWeights)
             }
 
             // 6. Fetch Warehouses and Cashboxes
@@ -2391,16 +2421,40 @@ class CloudErpSyncRepository(
                                         unit = doc.safeString("unit") ?: "كرتونة",
                                         purchasePrice = doc.safeDouble("purchasePrice") ?: 0.0,
                                         salePrice = doc.safeDouble("salePrice") ?: 0.0,
+                                        salePriceEgp = doc.safeDouble("salePriceEgp") ?: 0.0,
                                         minimumStock = doc.safeDouble("minimumStock") ?: 10.0,
                                         paintColor = doc.safeString("paintColor") ?: "أبيض",
                                         packageWeight = doc.safeString("packageWeight") ?: "900",
                                         active = doc.safeBoolean("active") ?: true
                                     )
                                 }
-                                if (list.isNotEmpty()) dao.upsertProducts(list)
+                                if (list.isNotEmpty()) {
+                                    dao.upsertProducts(list)
+                                    com.example.util.InventoryWeightManager.getInstance(firestore.app.applicationContext)
+                                        .syncDiscoveredProductWeights(list.map { it.packageWeight })
+                                }
                             }
                         } catch (e: Throwable) {
                             Log.e(TAG, "Error syncing live products", e)
+                        }
+                    }
+                }
+            }
+
+        val weightsListener = cRef.collection("config").document("inventory_weights")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error == null && snapshot != null && snapshot.exists()) {
+                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                        try {
+                            @Suppress("UNCHECKED_CAST")
+                            val rawWeights = snapshot.get("weights") as? List<Map<String, Any?>>
+                            val weightsJson = snapshot.getString("weightsJson")
+                            val defaultWeight = snapshot.getString("defaultWeight")
+                            com.example.util.InventoryWeightManager.getInstance(firestore.app.applicationContext)
+                                .mergeCloudWeightsFromFirestoreDoc(weightsJson, rawWeights, defaultWeight)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "Error syncing live inventory_weights", e)
                         }
                     }
                 }
@@ -2509,8 +2563,30 @@ class CloudErpSyncRepository(
             movListener.remove()
             custListener.remove()
             prodListener.remove()
+            weightsListener.remove()
             fiListener.remove()
             cbListener.remove()
+        }
+    }
+
+    /**
+     * Immediately pushes registered inventory weights to Firestore so all devices receive updated weight options.
+     */
+    suspend fun syncInventoryWeightsToCloud(
+        clusterCode: String,
+        actor: String = "المدير"
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cRef = clusterRef(clusterCode)
+            val weightMgr = com.example.util.InventoryWeightManager.getInstance(firestore.app.applicationContext)
+            val payload = weightMgr.exportForCloudSync().toMutableMap()
+            payload["updatedBy"] = actor
+            payload["serverUpdatedAt"] = FieldValue.serverTimestamp()
+            cRef.collection("config").document("inventory_weights").set(
+                payload,
+                SetOptions.merge()
+            ).await()
+            Unit
         }
     }
 

@@ -11,15 +11,15 @@ on:
       version_code:
         description: "رقم البناء الجديد (versionCode) - يجب أن يكون أكبر من الإصدار السابق"
         required: true
-        default: "13"
+        default: "14"
       version_name:
-        description: "اسم الإصدار (versionName) مثل 3.0-PRO"
+        description: "اسم الإصدار (versionName) مثل v3.1"
         required: true
-        default: "3.0-PRO"
+        default: "v3.1"
       release_notes:
         description: "ملاحظات التحديث التي ستظهر للمستخدمين"
         required: false
-        default: "إصدار 3.0-PRO: إصلاح جذري لنظام التحديثات السحابية، التحقق من بصمة البناء (Build ID & SHA-256)، وتحسين الأداء والتقارير."
+        default: "إصدار v3.1: تحسينات إضافية شاملة على سلاسة التطبيق، دورة ERP المتكاملة، وتطوير نظام التحديثات السحابية."
       public_base_url:
         description: "رابط الاستضافة العامة الاختياري (يُستخدم GitHub Pages تلقائياً عند تركه فارغاً)"
         required: false
@@ -352,19 +352,19 @@ jobs:
           repo = os.environ.get("GITHUB_REPOSITORY", "ow7ab/ow7ab")
           owner, repo_name = (repo.split("/", 1) + ["ow7ab"])[:2]
           git_sha_full = os.environ.get("GITHUB_SHA", "")
-          git_commit = git_sha_full[:8] if git_sha_full else "8f4d2c1a"
+          git_commit = git_sha_full[:8] if git_sha_full else "9a8b7c6d"
           published_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-          existing_code = 13
-          existing_name = "3.0-PRO"
+          existing_code = 14
+          existing_name = "v3.1"
           if os.path.exists("version.json"):
               try:
                   with open("version.json", "r", encoding="utf-8") as f:
                       prev = json.load(f)
-                      existing_code = int(prev.get("versionCode", 13))
-                      existing_name = str(prev.get("versionName", "3.0-PRO")).strip()
+                      existing_code = int(prev.get("versionCode", 14))
+                      existing_name = str(prev.get("versionName", "v3.1")).strip()
               except Exception:
-                  existing_code = 13
+                  existing_code = 14
 
           v_code_str = os.environ.get("INPUT_VERSION_CODE", "").strip()
           v_name_str = os.environ.get("INPUT_VERSION_NAME", "").strip()
@@ -372,7 +372,7 @@ jobs:
           public_base = os.environ.get("INPUT_PUBLIC_BASE_URL", "").strip().rstrip("/")
 
           if not v_code_str:
-              v_code = max(existing_code, 13)
+              v_code = max(existing_code, 14)
           else:
               v_code = int(v_code_str)
 
@@ -380,19 +380,21 @@ jobs:
               raise SystemExit(f"Invalid versionCode: {v_code}")
 
           if not v_name_str:
-              v_name_str = existing_name if v_code == existing_code and existing_name else f"3.{v_code}-PRO"
+              v_name_str = existing_name if v_code == existing_code and existing_name else f"v3.{v_code - 13}"
+
+          v_clean = v_name_str.lstrip("vV").strip()
 
           if not notes_str:
-              notes_str = f"إصدار PMP PAINTS v{v_name_str} (بناء #{v_code} - Commit {git_commit})"
+              notes_str = f"إصدار PMP PAINTS v{v_clean} (بناء #{v_code} - Commit {git_commit})"
 
-          build_id = f"PMP-v{v_name_str}-b{v_code}-{git_commit}"
-          apk_filename = f"pmp-paints-v{v_name_str}-b{v_code}.apk"
+          build_id = f"PMP-v{v_clean}-b{v_code}-{git_commit}"
+          apk_filename = f"pmp-paints-v{v_clean}-b{v_code}.apk"
 
           if not public_base:
               public_base = f"https://{owner}.github.io/{repo_name}"
 
           primary_download_url = f"{public_base}/{apk_filename}"
-          github_release_url = f"https://github.com/{repo}/releases/download/v{v_name_str}/{apk_filename}"
+          github_release_url = f"https://github.com/{repo}/releases/download/v{v_clean}/{apk_filename}"
 
           env_path = os.environ["GITHUB_ENV"]
           with open(env_path, "a", encoding="utf-8") as env_file:

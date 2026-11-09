@@ -176,6 +176,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     !DeletedRecordsRegistry.isDeleted("cashboxes", cb.name)
             }.distinctBy { it.name.trim().lowercase() }
         }
+        .flowOn(Dispatchers.Default)
         .onEach { _isInitialDataLoading.value = false }
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in cashboxes flow", e)
@@ -257,8 +258,28 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    private val weightManager: com.example.util.InventoryWeightManager =
+        com.example.util.InventoryWeightManager.getInstance(application)
+
+    val packageWeights: StateFlow<List<com.example.util.PackageWeightSpec>> = weightManager.weights
+
+    val activePackageWeights: StateFlow<List<com.example.util.PackageWeightSpec>> = weightManager.weights
+        .map { list -> list.filter { it.active } }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            weightManager.weights.value.filter { it.active }
+        )
+
+    val selectedInventoryWeight: StateFlow<String> = weightManager.selectedWeight
+
     val products = repository.getProducts()
-        .onEach { _isInitialDataLoading.value = false }
+        .onEach { list ->
+            _isInitialDataLoading.value = false
+            if (list.isNotEmpty()) {
+                weightManager.syncDiscoveredProductWeights(list.map { it.packageWeight })
+            }
+        }
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in products flow", e)
             _isInitialDataLoading.value = false
@@ -365,6 +386,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             result.sortedBy { it.id }
         }
+        .flowOn(Dispatchers.Default)
         .onEach { _isInitialDataLoading.value = false }
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in userAccounts flow", e)
@@ -560,6 +582,27 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     val transactionTraces = com.example.util.RoomTransactionLogger.traces
     val pendingApprovalUserCode = MutableStateFlow<String?>(null)
 
+    // --- Enterprise ERP Lifecycle StateFlows (Declared strictly before init) ---
+    private val _packagingRules = MutableStateFlow(
+        com.example.util.ErpLifecycleEngine.getPackagingRules(application)
+    )
+    val packagingRules: StateFlow<List<com.example.util.PackagingRuleSpec>> = _packagingRules.asStateFlow()
+
+    private val _purchaseOrders = MutableStateFlow(
+        com.example.util.ErpLifecycleEngine.getPurchaseOrders(application)
+    )
+    val purchaseOrders: StateFlow<List<com.example.util.PurchaseOrderRecord>> = _purchaseOrders.asStateFlow()
+
+    private val _goodsReceipts = MutableStateFlow(
+        com.example.util.ErpLifecycleEngine.getGoodsReceipts(application)
+    )
+    val goodsReceipts: StateFlow<List<com.example.util.GoodsReceiptNoteRecord>> = _goodsReceipts.asStateFlow()
+
+    private val _productionOrders = MutableStateFlow(
+        com.example.util.ErpLifecycleEngine.getProductionOrders(application)
+    )
+    val productionOrders: StateFlow<List<com.example.util.ProductionOrderRecord>> = _productionOrders.asStateFlow()
+
     init {
         val initialMode = _themeMode.value
         val isDarkInitial = when (initialMode) {
@@ -653,14 +696,19 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     when (dlState) {
                         is com.example.util.DownloadState.Downloading -> {
                             _updateUiState.value = com.example.util.UpdateUiState.DOWNLOADING
+                            if (dlState.progressPercent > 0) {
+                                _updateProgress.value = dlState.progressPercent
+                            }
                             _lastUpdateCheckStatus.value = "جاري تنزيل التحديث... (${dlState.progressPercent}%)"
                         }
                         is com.example.util.DownloadState.VerifyingChecksum -> {
                             _updateUiState.value = com.example.util.UpdateUiState.VERIFYING
+                            _updateProgress.value = 99
                             _lastUpdateCheckStatus.value = "جاري التحقق من سلامة ملف التحديث..."
                         }
                         is com.example.util.DownloadState.ReadyToInstall -> {
                             _downloadedApkFile.value = dlState.apkFile
+                            _updateProgress.value = 100
                             _updateUiState.value = com.example.util.UpdateUiState.READY_TO_INSTALL
                             _lastUpdateCheckStatus.value = "تم تنزيل التحديث بنجاح."
                         }
@@ -1303,6 +1351,169 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun selectInventoryWeight(weightValue: String) {
+        weightManager.selectWeight(weightValue)
+    }
+
+    fun addInventoryWeight(rawWeight: String, setAsDefault: Boolean = false) {
+        val result = weightManager.addWeight(rawInput = rawWeight, setAsDefault = setAsDefault)
+        result.onSuccess { spec ->
+            weightManager.selectWeight(spec.value)
+            postMessage("تمت إضافة الوزن (${spec.displayLabel()}) بنجاح إلى قائمة الأوزان")
+            val actor = resolveUserActor("المدير")
+            viewModelScope.launch(Dispatchers.IO) {
+                cloudErpSyncRepo.syncInventoryWeightsToCloud(serverClusterCode.value, actor)
+            }
+        }.onFailure { err ->
+            postMessage(err.message ?: "تعذر إضافة الوزن", isError = true)
+        }
+    }
+
+    fun editInventoryWeight(oldWeight: String, newRawWeight: String) {
+        if (!checkOnlineBeforeTransaction("تعديل وزن مسجل")) return
+        val result = weightManager.updateWeightValue(oldWeight, newRawWeight)
+        result.onSuccess { updatedSpec ->
+            viewModelScope.launch {
+                val actor = resolveUserActor("المدير")
+                val repoRes = repository.renamePackageWeightSafely(
+                    oldWeight = oldWeight,
+                    newWeight = updatedSpec.value,
+                    user = actor
+                )
+                repoRes.onSuccess { count ->
+                    postMessage("تم تعديل الوزن إلى (${updatedSpec.displayLabel()}) وتحديث $count صنف مع الحفاظ على الأرصدة")
+                    viewModelScope.launch(Dispatchers.IO) {
+                        cloudErpSyncRepo.syncInventoryWeightsToCloud(serverClusterCode.value, actor)
+                    }
+                    persistAndSyncToServer()
+                }.onFailure { err ->
+                    postMessage(err.message ?: "تعذر تحديث الأصناف المرتبطة بالوزن", isError = true)
+                }
+            }
+        }.onFailure { err ->
+            postMessage(err.message ?: "تعذر تعديل الوزن", isError = true)
+        }
+    }
+
+    fun toggleInventoryWeightActive(weightValue: String, active: Boolean) {
+        val result = weightManager.setWeightActive(weightValue, active)
+        result.onSuccess { spec ->
+            val statusLabel = if (spec.active) "تفعيل" else "تعطيل"
+            postMessage("تم $statusLabel الوزن (${spec.displayLabel()}) مع الاحتفاظ بجميع الأرصدة السابقة")
+            val actor = resolveUserActor("المدير")
+            viewModelScope.launch(Dispatchers.IO) {
+                cloudErpSyncRepo.syncInventoryWeightsToCloud(serverClusterCode.value, actor)
+            }
+        }.onFailure { err ->
+            postMessage(err.message ?: "تعذر تغيير حالة الوزن", isError = true)
+        }
+    }
+
+    fun setDefaultInventoryWeight(weightValue: String) {
+        val result = weightManager.setDefaultWeight(weightValue)
+        result.onSuccess { spec ->
+            postMessage("تم تعيين (${spec.displayLabel()}) كوزن افتراضي للنظام")
+            val actor = resolveUserActor("المدير")
+            viewModelScope.launch(Dispatchers.IO) {
+                cloudErpSyncRepo.syncInventoryWeightsToCloud(serverClusterCode.value, actor)
+            }
+        }.onFailure { err ->
+            postMessage(err.message ?: "تعذر تعيين الوزن الافتراضي", isError = true)
+        }
+    }
+
+    fun adjustColorWeightStock(
+        color: String,
+        weight: String,
+        warehouseName: String,
+        quantityInput: Double,
+        operationMode: String,
+        note: String
+    ) {
+        if (!checkOnlineBeforeTransaction("تحديث كمية المخزون")) return
+        viewModelScope.launch {
+            val cleanColor = color.trim().ifBlank { "أبيض" }
+            val cleanWeight = com.example.util.InventoryWeightManager.normalizeWeightValue(weight).ifBlank { weight.trim() }
+            val actor = resolveUserActor("أمين المخزن")
+
+            val product = repository.ensureProductForColorAndWeight(
+                color = cleanColor,
+                weight = cleanWeight,
+                user = actor
+            )
+
+            val allWarehouses = repository.getDao().getWarehousesDirect()
+            val targetWh = allWarehouses.firstOrNull {
+                it.name.trim().equals(warehouseName.trim(), ignoreCase = true)
+            } ?: allWarehouses.firstOrNull()
+            val whId = targetWh?.id ?: 1L
+            val resolvedWhName = targetWh?.name ?: warehouseName
+
+            when (operationMode.uppercase()) {
+                "IN" -> {
+                    if (quantityInput <= 0.0) {
+                        postMessage("يرجى إدخال كمية أكبر من صفر للإضافة", isError = true)
+                        return@launch
+                    }
+                    repository.recordStockMove(
+                        warehouseId = whId,
+                        productId = product.id,
+                        quantity = quantityInput,
+                        kind = "IN",
+                        note = note.ifBlank { "إضافة مخزنية ($cleanColor - $cleanWeight جم) في $resolvedWhName" },
+                        user = actor
+                    )
+                    postMessage("تمت إضافة ${quantityInput.toInt()} إلى رصيد ($cleanColor - $cleanWeight جم) بنجاح")
+                }
+                "OUT" -> {
+                    if (quantityInput <= 0.0) {
+                        postMessage("يرجى إدخال كمية أكبر من صفر للخصم", isError = true)
+                        return@launch
+                    }
+                    repository.recordStockMove(
+                        warehouseId = whId,
+                        productId = product.id,
+                        quantity = quantityInput,
+                        kind = "OUT",
+                        note = note.ifBlank { "صرف مخزني ($cleanColor - $cleanWeight جم) من $resolvedWhName" },
+                        user = actor
+                    )
+                    postMessage("تم خصم ${quantityInput.toInt()} من رصيد ($cleanColor - $cleanWeight جم) بنجاح")
+                }
+                "SET" -> {
+                    if (quantityInput < 0.0) {
+                        postMessage("لا يمكن أن يكون الرصيد بالسالب", isError = true)
+                        return@launch
+                    }
+                    val currentMoves = repository.getDao().getStockMovesDirect().filter { it.productId == product.id }
+                    val currentBalance = currentMoves.sumOf { sm ->
+                        val sign = if (sm.kind in listOf("IN", "RETURN")) 1.0 else -1.0
+                        sign * sm.quantity
+                    }
+                    val delta = quantityInput - currentBalance
+                    if (kotlin.math.abs(delta) < 0.0001) {
+                        postMessage("الرصيد الفعلي مطابق للرصيد الحالي (${quantityInput.toInt()})")
+                        return@launch
+                    }
+                    val moveKind = if (delta > 0.0) "IN" else "ADJUST"
+                    val moveQty = kotlin.math.abs(delta)
+                    repository.recordStockMove(
+                        warehouseId = whId,
+                        productId = product.id,
+                        quantity = moveQty,
+                        kind = moveKind,
+                        note = note.ifBlank {
+                            "تعديل رصيد ($cleanColor - $cleanWeight جم) من ${currentBalance.toInt()} إلى ${quantityInput.toInt()} ($resolvedWhName)"
+                        },
+                        user = actor
+                    )
+                    postMessage("تم تحديث رصيد ($cleanColor - $cleanWeight جم) إلى ${quantityInput.toInt()} بنجاح")
+                }
+            }
+            persistAndSyncToServer()
+        }
+    }
+
     fun deleteProduct(productId: Long, productName: String) {
         if (!checkOnlineBeforeTransaction("حذف صنف")) return
         viewModelScope.launch {
@@ -1390,7 +1601,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- User Accounts & Server Sync Actions ---
+    // --- User Accounts & Server Sync Actions (Strictly Admin-Only per Section 16) ---
     fun createUserAccount(
         fullName: String,
         username: String,
@@ -1403,8 +1614,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             if (!checkOnlineBeforeTransaction("إنشاء حساب موظف جديد")) return@launch
-            if (!currentUser.value.isSystemManager()) {
-                postMessage("عفواً، إنشاء الحسابات وتخصيص الصلاحيات متاح لحساب مدير النظام فقط", isError = true)
+            if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
+                postMessage("عفواً، حساب Admin هو الحساب الوحيد الذي يملك صلاحية إنشاء حسابات الموظفين وتحديد صلاحياتهم.", isError = true)
                 return@launch
             }
             val res = repository.createUserAccount(
@@ -1416,7 +1627,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 branch = branch,
                 permissions = permissions,
                 serverEndpoint = serverEndpoint,
-                actor = resolveUserActor("مدير النظام")
+                actor = resolveUserActor("Admin")
             )
             res.onSuccess {
                 postMessage("تم إنشاء حساب المستخدم ($fullName) ورفعه إلى سيرفر Google Cloud للمزامنة الفورية")
@@ -1442,11 +1653,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleUserAccountActive(user: UserAccountEntity) {
         viewModelScope.launch {
             if (!checkOnlineBeforeTransaction("تعديل حالة تفعيل الحساب")) return@launch
-            if (!currentUser.value.isSystemManager()) {
-                postMessage("عفواً، تفعيل أو إيقاف الحسابات متاح لحساب مدير النظام فقط", isError = true)
+            if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
+                postMessage("عفواً، تفعيل أو إيقاف حسابات المستخدمين متاح لحساب Admin فقط.", isError = true)
                 return@launch
             }
-            val res = repository.toggleUserAccountActive(user, resolveUserActor("مدير النظام"))
+            val res = repository.toggleUserAccountActive(user, resolveUserActor("Admin"))
             res.onSuccess {
                 val updatedUser = user.copy(active = !user.active)
                 val stateLabel = if (updatedUser.active) "تفعيل" else "إيقاف"
@@ -1465,11 +1676,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteUserAccountPermanently(user: UserAccountEntity) {
         viewModelScope.launch {
             if (!checkOnlineBeforeTransaction("حذف حساب الموظف نهائياً")) return@launch
-            if (!currentUser.value.isSystemManager()) {
-                postMessage("عفواً، الحذف النهائي متاح لحساب مدير النظام فقط", isError = true)
+            if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
+                postMessage("عفواً، الحذف النهائي لحسابات المستخدمين متاح لحساب Admin فقط.", isError = true)
                 return@launch
             }
-            val actor = resolveUserActor("مدير النظام")
+            val actor = resolveUserActor("Admin")
             DeletedAccountsRegistry.registerDeleted(user.userCode, user.username, user.phoneOrEmail, actor)
             val res = repository.deleteUserAccountPermanently(
                 userId = user.id,
@@ -1498,11 +1709,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun restoreUserAccount(user: UserAccountEntity) {
         viewModelScope.launch {
             if (!checkOnlineBeforeTransaction("استرداد حساب الموظف")) return@launch
-            if (!currentUser.value.isSystemManager()) {
-                postMessage("عفواً، استرداد الحسابات متاح لمدير النظام فقط", isError = true)
+            if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
+                postMessage("عفواً، استرداد الحسابات متاح لحساب Admin فقط.", isError = true)
                 return@launch
             }
-            val res = repository.restoreUserAccount(user.id, resolveUserActor("مدير النظام"))
+            val res = repository.restoreUserAccount(user.id, resolveUserActor("Admin"))
             res.onSuccess { restored ->
                 cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, restored)
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
@@ -1522,8 +1733,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         approveAccount: Boolean = true
     ) {
         viewModelScope.launch {
-            if (!currentUser.value.isSystemManager()) {
-                postMessage("عفواً، تعديل الصلاحيات متاح لحساب مدير النظام فقط", isError = true)
+            if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
+                postMessage("عفواً، حساب Admin هو الوحيد المخول بتحديد أو تعديل صلاحيات المستخدمين.", isError = true)
                 return@launch
             }
             val wasPending = account.syncStatus == "PENDING_MANAGER_APPROVAL"
@@ -1534,7 +1745,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 newPermissions = newPermissions,
                 newLinkedUid = newLinkedUid,
                 approveAccount = approveAccount,
-                actor = resolveUserActor("مدير النظام")
+                actor = resolveUserActor("Admin")
             )
             res.onSuccess { updated ->
                 val actionMsg = if (wasPending && approveAccount) {
@@ -1618,14 +1829,16 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun generateDefaultVersionJsonForAdmin(): String {
         val currentOrNext = _availableUpdate.value ?: run {
             val nextCode = updateManager.getEffectiveVersionCode() + 1
-            val nextName = "3.${nextCode}-PRO"
+            val nextMinor = (nextCode - 13).coerceAtLeast(1)
+            val nextName = "v3.$nextMinor"
+            val cleanNextName = nextName.removePrefix("v")
             UpdateManager.LATEST_CLOUD_RELEASE_INFO.copy(
                 versionCode = nextCode,
                 versionName = nextName,
                 downloadUrl = "https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/pmp-paints-latest.apk",
-                buildId = "PMP-v${nextName}-b${nextCode}-${BuildConfig.GIT_COMMIT_SHA}",
+                buildId = "PMP-v${cleanNextName}-b${nextCode}-${BuildConfig.GIT_COMMIT_SHA}",
                 gitCommit = BuildConfig.GIT_COMMIT_SHA,
-                releaseNotes = "إصدار v${nextName} (Build ${nextCode}): تحديث سحابي جديد لتطبيق PMP PAINTS مع الحفاظ الكامل على البيانات."
+                releaseNotes = "إصدار ${nextName} (Build ${nextCode}): تحديث سحابي جديد لتطبيق PMP PAINTS مع الحفاظ الكامل على البيانات."
             )
         }
         return UpdateManager.generateVersionJsonString(currentOrNext)
@@ -1977,7 +2190,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isDownloadingUpdate.value = true
             _updateUiState.value = com.example.util.UpdateUiState.DOWNLOADING
-            _updateProgress.value = 0
+            _updateProgress.value = 2
             val result = updateManager.downloadApk(update) { percent, _, _ ->
                 if (percent >= 0) {
                     _updateProgress.value = percent
@@ -2019,8 +2232,12 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         val pendingUpdate = _availableUpdate.value
         val res = updateManager.installApk(context, target, pendingUpdate)
         res.onSuccess {
-            _updateUiState.value = com.example.util.UpdateUiState.INSTALLING
-            _lastUpdateCheckStatus.value = "يرجى المتابعة في نافذة التثبيت لإتمام تحديث التطبيق."
+            updateManager.refreshInstalledVersionState()
+            _updateAvailable.value = false
+            _availableUpdate.value = null
+            _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
+            _lastUpdateCheckStatus.value = "تم تحديث التطبيق وتفعيل الإصدار الجديد بنجاح."
+            postMessage("تم تجهيز وتثبيت الإصدار الجديد بنجاح.")
         }.onFailure { err ->
             val errMsg = UpdateManager.sanitizeUserFacingErrorMessage(err.message)
             _lastUpdateCheckStatus.value = errMsg
@@ -3181,6 +3398,317 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    // =========================================================================
+    // ENTERPRISE ERP WORKFLOW OPERATIONS (Procurement -> GRN -> BOM -> QC -> FG)
+    // =========================================================================
+
+    fun updatePackagingRuleAsAdmin(weightGrams: Int, newCansPerCarton: Int) {
+        val res = com.example.util.ErpLifecycleEngine.updatePackagingRuleAsAdmin(
+            context = getApplication(),
+            actor = currentUser.value,
+            weightGrams = weightGrams,
+            newCansPerCarton = newCansPerCarton
+        )
+        res.onSuccess { updatedList ->
+            _packagingRules.value = updatedList
+            postMessage("تم تحديث قاعدة التعبئة لوزن $weightGrams جم إلى $newCansPerCarton علبة/كرتونة بنجاح")
+        }.onFailure { err ->
+            postMessage(err.message ?: "تعذر تعديل قواعد التعبئة", isError = true)
+        }
+    }
+
+    /**
+     * تسجيل أمر شراء معتمد (PO) دون زيادة رصيد المخزن الفعلي قبل الاستلام والفحص (Section 4)
+     */
+    fun createEnterprisePurchaseOrder(
+        materialId: Long,
+        materialName: String,
+        orderedQty: Double,
+        unit: String,
+        unitPrice: Double,
+        currency: String = "EGP",
+        additionalExpenses: Double = 0.0,
+        supplierName: String,
+        expectedDeliveryDate: String = "",
+        notes: String = ""
+    ) {
+        if (orderedQty <= 0.0) {
+            postMessage("يرجى إدخال كمية مطلوبة أكبر من صفر", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            val actor = resolveUserActor("مسؤول المشتريات")
+            val poNo = "PO-${System.currentTimeMillis().toString().takeLast(6)}"
+            val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+            val po = com.example.util.PurchaseOrderRecord(
+                poNumber = poNo,
+                orderDate = dateStr,
+                supplierName = supplierName.ifBlank { "مورد معتمد" },
+                materialId = materialId,
+                materialCode = "RAW-$materialId",
+                materialName = materialName,
+                orderedQty = orderedQty,
+                unit = unit.ifBlank { "كجم" },
+                unitPrice = unitPrice.coerceAtLeast(0.0),
+                currency = currency,
+                additionalExpenses = additionalExpenses.coerceAtLeast(0.0),
+                expectedDeliveryDate = expectedDeliveryDate.ifBlank { dateStr.substringBefore(" ") },
+                createdBy = actor,
+                approvalStatus = "معتمد - بانتظار الاستلام",
+                approvedBy = actor,
+                notes = notes
+            )
+            _purchaseOrders.value = com.example.util.ErpLifecycleEngine.savePurchaseOrder(getApplication(), po)
+
+            // تسجيل الحركة المالية لأمر الشراء في حال وجود تكلفة مدفوعة دون زيادة مخزون الخام قبل الاستلام والفحص
+            val totalCost = po.totalCost
+            if (totalCost > 0.0) {
+                val targetCashbox = if (currency.equals("EGP", ignoreCase = true)) "خزنة مصر" else "خزنة السودان"
+                repository.recordMovement(
+                    cashbox = targetCashbox,
+                    currency = currency,
+                    direction = "منصرف",
+                    amount = totalCost,
+                    description = "أمر شراء خامات رقم $poNo: $orderedQty ${po.unit} من $materialName (المورد: ${po.supplierName})",
+                    reference = poNo,
+                    user = actor
+                )
+            }
+            // نسجل حركة RAW_PURCHASE كسجل تعاقدي فقط (والرصيد المتاح يعتمد على RAW_RECEIPT بعد الفحص والاعتماد)
+            repository.recordFactoryMove(
+                kind = "RAW_PURCHASE",
+                itemId = materialId,
+                itemName = materialName,
+                qty = orderedQty,
+                note = "أمر شراء رقم $poNo (بانتظار الاستلام والفحص) - $notes",
+                actor = actor,
+                counterparty = po.supplierName
+            )
+            postMessage("تم إصدار أمر الشراء رقم $poNo بنجاح. لن يزاد رصيد المخزن إلا بعد الاستلام والفحص والاعتماد.")
+            persistAndSyncToServer()
+        }
+    }
+
+    /**
+     * استلام ومطابقة شحنة المواد الخام (GRN) بواسطة أمين المخزن وإدخال الكمية المقبولة فقط للمخزون بعد الاعتماد (Section 5)
+     */
+    fun receiveAndMatchPurchaseOrder(
+        po: com.example.util.PurchaseOrderRecord,
+        actualReceivedQty: Double,
+        acceptedQty: Double,
+        rejectedQty: Double,
+        discrepancyReason: String,
+        notes: String = "",
+        autoApproveIfManagerOrNoDiscrepancy: Boolean = true
+    ) {
+        viewModelScope.launch {
+            val storekeeper = resolveUserActor("أمين مخزن الخام")
+            val grnResult = runCatching {
+                com.example.util.ErpLifecycleEngine.evaluateGoodsReceipt(
+                    po = po,
+                    storekeeperName = storekeeper,
+                    actualReceivedQty = actualReceivedQty,
+                    acceptedQty = acceptedQty,
+                    rejectedQty = rejectedQty,
+                    discrepancyReason = discrepancyReason,
+                    notes = notes
+                )
+            }
+            grnResult.onFailure { err ->
+                postMessage(err.message ?: "خطأ في بيانات مطابقة الشحنة", isError = true)
+                return@launch
+            }
+            var grn = grnResult.getOrThrow()
+            val canApproveNow = !grn.hasDiscrepancy ||
+                (autoApproveIfManagerOrNoDiscrepancy && currentUser.value.isSystemManager())
+
+            if (canApproveNow && grn.acceptedQty > 0.0) {
+                if (com.example.util.ErpLifecycleEngine.markAndCheckIdempotencyKey(getApplication(), grn.idempotencyKey)) {
+                    repository.recordFactoryMove(
+                        kind = "RAW_RECEIPT",
+                        itemId = grn.materialId,
+                        itemName = grn.materialName,
+                        qty = grn.acceptedQty,
+                        batch = grn.grnNumber,
+                        note = "استلام معتمد بموجب ${grn.grnNumber} لأمر الشراء ${po.poNumber} (مستلم: $actualReceivedQty، مقبول: $acceptedQty، مرفوض: $rejectedQty)",
+                        actor = storekeeper,
+                        counterparty = po.supplierName
+                    )
+                    grn = grn.copy(
+                        status = com.example.util.GoodsReceiptStatus.COMPLETED,
+                        approvedByManager = resolveUserActor("المدير"),
+                        stockPosted = true
+                    )
+                    val newReceivedTotal = po.receivedTotalQty + actualReceivedQty
+                    val newAcceptedTotal = po.acceptedTotalQty + acceptedQty
+                    val updatedPoStatus = if (newReceivedTotal >= po.orderedQty) "مكتمل" else "استلام جزئي"
+                    _purchaseOrders.value = com.example.util.ErpLifecycleEngine.savePurchaseOrder(
+                        getApplication(),
+                        po.copy(
+                            receivedTotalQty = newReceivedTotal,
+                            acceptedTotalQty = newAcceptedTotal,
+                            approvalStatus = updatedPoStatus
+                        )
+                    )
+                }
+            }
+            _goodsReceipts.value = com.example.util.ErpLifecycleEngine.saveGoodsReceipt(getApplication(), grn)
+            val statusMsg = if (grn.stockPosted) {
+                "تم اعتماد تقرير الاستلام ${grn.grnNumber} وإضافة الكمية المقبولة فقط (${grn.acceptedQty} ${grn.unit}) إلى رصيد مخزن المواد الخام"
+            } else {
+                "تم تسجيل تقرير الاستلام ${grn.grnNumber} بحالة (${grn.status.arabicLabel}) ورفعه للمسؤول للاعتماد بسبب وجود فرق"
+            }
+            postMessage(statusMsg)
+            persistAndSyncToServer()
+        }
+    }
+
+    /**
+     * اعتماد تقرير استلام يحتوي على فروقات بواسطة المدير أو Admin وإدخال الكمية المقبولة للمخزون
+     */
+    fun approveDiscrepantGoodsReceipt(grn: com.example.util.GoodsReceiptNoteRecord) {
+        if (!currentUser.value.isSystemManager()) {
+            postMessage("اعتماد فروقات الاستلام متاح للمدير أو Admin فقط", isError = true)
+            return
+        }
+        if (grn.stockPosted) {
+            postMessage("تم ترحيل هذا الاستلام إلى المخزون مسبقاً", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            if (!com.example.util.ErpLifecycleEngine.markAndCheckIdempotencyKey(getApplication(), grn.idempotencyKey)) {
+                postMessage("تم اعتماد وترحيل هذا المستند مسبقاً (منع التكرار)", isError = true)
+                return@launch
+            }
+            val approver = resolveUserActor("المدير")
+            if (grn.acceptedQty > 0.0) {
+                repository.recordFactoryMove(
+                    kind = "RAW_RECEIPT",
+                    itemId = grn.materialId,
+                    itemName = grn.materialName,
+                    qty = grn.acceptedQty,
+                    batch = grn.grnNumber,
+                    note = "اعتماد فروقات استلام ${grn.grnNumber} لأمر شراء ${grn.poNumber} (الكمية المقبولة: ${grn.acceptedQty}) - السبب: ${grn.discrepancyReason}",
+                    actor = approver,
+                    counterparty = grn.poNumber
+                )
+            }
+            val updatedGrn = grn.copy(
+                status = com.example.util.GoodsReceiptStatus.COMPLETED,
+                approvedByManager = approver,
+                stockPosted = true
+            )
+            _goodsReceipts.value = com.example.util.ErpLifecycleEngine.saveGoodsReceipt(getApplication(), updatedGrn)
+            val matchedPo = _purchaseOrders.value.find { it.poNumber == grn.poNumber }
+            if (matchedPo != null) {
+                val newReceived = matchedPo.receivedTotalQty + grn.actualReceivedQty
+                val newAccepted = matchedPo.acceptedTotalQty + grn.acceptedQty
+                _purchaseOrders.value = com.example.util.ErpLifecycleEngine.savePurchaseOrder(
+                    getApplication(),
+                    matchedPo.copy(
+                        receivedTotalQty = newReceived,
+                        acceptedTotalQty = newAccepted,
+                        approvalStatus = if (newReceived >= matchedPo.orderedQty) "مكتمل" else "استلام جزئي"
+                    )
+                )
+            }
+            postMessage("تم اعتماد تقرير الاستلام ${grn.grnNumber} وإضافة ${grn.acceptedQty} ${grn.unit} للمخزن المتاح")
+            persistAndSyncToServer()
+        }
+    }
+
+    /**
+     * إنشاء أمر إنتاج معتمد مرتبط بتركيبة BOM مع حساب الخامات المطلوبة تلقائياً (Section 7)
+     */
+    fun createEnterpriseProductionOrder(
+        formula: FormulationEntity?,
+        paintColor: String,
+        packageWeightGrams: Int,
+        targetCartons: Int,
+        machineName: String,
+        productionEngineer: String,
+        notes: String = ""
+    ) {
+        if (targetCartons <= 0) {
+            postMessage("يرجى إدخال عدد كراتين مستهدف أكبر من صفر", isError = true)
+            return
+        }
+        val pkgRule = com.example.util.ErpLifecycleEngine.resolvePackagingRule(
+            packageWeightGrams.toString(),
+            _packagingRules.value
+        )
+        val expectedCans = pkgRule.calculateExpectedCans(targetCartons)
+        val targetWeightKg = pkgRule.netPaintWeightKgForCans(expectedCans)
+        val bomLines = if (formula != null) {
+            com.example.util.ErpLifecycleEngine.calculateTheoreticalBomRequirements(formula, targetWeightKg)
+        } else {
+            emptyList()
+        }
+        val orderNo = "PO-PRD-${System.currentTimeMillis().toString().takeLast(6)}"
+        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+        val order = com.example.util.ProductionOrderRecord(
+            orderNumber = orderNo,
+            createdDate = dateStr,
+            executionDate = dateStr.substringBefore(" "),
+            productType = formula?.paintType ?: "دهان مائي",
+            formulaId = formula?.id,
+            formulaNo = formula?.formulaNo ?: "STD-BOM",
+            formulaName = formula?.productName ?: "بوهية $paintColor $packageWeightGrams جم",
+            paintColor = paintColor,
+            packageWeightGrams = pkgRule.weightGrams,
+            targetWeightKg = targetWeightKg,
+            targetCartons = targetCartons,
+            machineName = machineName,
+            productionEngineer = productionEngineer,
+            status = com.example.util.ProductionOrderStatus.APPROVED,
+            approvedBy = resolveUserActor("المدير"),
+            bomRequirements = bomLines,
+            notes = notes
+        )
+        _productionOrders.value = com.example.util.ErpLifecycleEngine.saveProductionOrder(getApplication(), order)
+        postMessage("تم إصدار واعتماد أمر الإنتاج $orderNo ($targetCartons كرتونة = $expectedCans علبة، الوزن الصافي: $targetWeightKg كجم)")
+    }
+
+    /**
+     * صرف المواد الخام لأمر إنتاج معتمد وتأكيد استلام مهندس الإنتاج مع منع الخصم المكرر (Section 8)
+     */
+    fun issueAndConfirmRawMaterialsForOrder(order: com.example.util.ProductionOrderRecord) {
+        val idempotencyKey = "ISSUE-${order.orderNumber}"
+        if (!com.example.util.ErpLifecycleEngine.markAndCheckIdempotencyKey(getApplication(), idempotencyKey)) {
+            postMessage("تم صرف المواد الخام لأمر الإنتاج ${order.orderNumber} مسبقاً (منع الخصم المكرر)", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            val storekeeper = resolveUserActor("أمين مخزن الخام")
+            val rawItem = factoryItems.value.firstOrNull {
+                it.category.contains("raw", ignoreCase = true) || it.category.contains("خام", ignoreCase = true)
+            } ?: factoryItems.value.firstOrNull()
+            val itemId = rawItem?.id ?: 1L
+            val itemName = rawItem?.name ?: order.formulaName
+
+            repository.recordFactoryMove(
+                kind = "ISSUE_PRODUCTION",
+                itemId = itemId,
+                itemName = itemName,
+                qty = order.targetWeightKg,
+                batch = order.orderNumber,
+                note = "مستند صرف خامات معتمد لأمر الإنتاج ${order.orderNumber} (استلام: ${order.productionEngineer})",
+                actor = storekeeper,
+                counterparty = order.productionEngineer
+            )
+            val updated = order.copy(
+                status = com.example.util.ProductionOrderStatus.ENGINEER_RECEIVED,
+                issueVoucherNo = "MIV-${order.orderNumber.takeLast(6)}",
+                engineerReceiptConfirmed = true,
+                engineerReceiptTimestamp = System.currentTimeMillis()
+            )
+            _productionOrders.value = com.example.util.ErpLifecycleEngine.saveProductionOrder(getApplication(), updated)
+            postMessage("تم صرف الخامات (${order.targetWeightKg} كجم) وتأكيد استلام مهندس الإنتاج لأمر ${order.orderNumber}")
+            persistAndSyncToServer()
+        }
+    }
 }
+
 
 
