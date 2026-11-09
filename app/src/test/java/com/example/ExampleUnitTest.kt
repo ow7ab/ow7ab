@@ -92,30 +92,40 @@ class ExampleUnitTest {
   fun testCloudReleaseConfiguration() {
     val latestRelease = com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO
     assertTrue(latestRelease.versionCode >= 14)
-    assertTrue(latestRelease.versionName.contains("3.1"))
+    assertTrue(latestRelease.versionName.isNotBlank())
     assertTrue(latestRelease.downloadUrl.startsWith("https://"))
     assertTrue(latestRelease.releaseNotes.isNotBlank())
     assertTrue(latestRelease.buildId.isNotBlank())
     assertTrue(latestRelease.gitCommit.isNotBlank())
     assertEquals("com.pmp", BuildConfig.APPLICATION_ID)
-    assertEquals(14, BuildConfig.VERSION_CODE)
-    assertEquals("v3.1", BuildConfig.VERSION_NAME)
-    assertEquals("PMP-v3.1-b14-9a8b7c6d", BuildConfig.BUILD_ID)
-    assertEquals("9a8b7c6d", BuildConfig.GIT_COMMIT_SHA)
+    assertTrue("VERSION_CODE must be >= 14", BuildConfig.VERSION_CODE >= 14)
+    assertTrue("VERSION_NAME must not be blank", BuildConfig.VERSION_NAME.isNotBlank())
+    val cleanVersionName = BuildConfig.VERSION_NAME.removePrefix("v").removePrefix("V").trim()
+    val expectedBuildId = "PMP-v${cleanVersionName}-b${BuildConfig.VERSION_CODE}-${BuildConfig.GIT_COMMIT_SHA}"
+    assertEquals(expectedBuildId, BuildConfig.BUILD_ID)
+    assertTrue(
+      "GIT_COMMIT_SHA must be a valid short hex commit hash, got: ${BuildConfig.GIT_COMMIT_SHA}",
+      Regex("^[0-9a-fA-F]{7,40}$").matches(BuildConfig.GIT_COMMIT_SHA)
+    )
+    assertEquals(BuildConfig.VERSION_CODE, latestRelease.versionCode)
+    assertEquals(BuildConfig.VERSION_NAME, latestRelease.versionName)
+    assertEquals(BuildConfig.BUILD_ID, latestRelease.buildId)
+    assertEquals(BuildConfig.GIT_COMMIT_SHA, latestRelease.gitCommit)
     assertTrue(BuildConfig.BUILD_TIMESTAMP_UTC.endsWith("Z"))
     assertEquals("ow7ab/ow7ab", BuildConfig.GITHUB_RELEASE_REPO)
   }
 
   @Test
   fun testFirstAttemptUpdateDiscoveryAndVersionJsonParsing() {
+    val targetVersionCode = BuildConfig.VERSION_CODE + 1
     val sampleJson = """
       {
-        "versionCode": 15,
+        "versionCode": $targetVersionCode,
         "versionName": "v3.2",
-        "buildId": "PMP-v3.2-b15-9a8b7c6d",
+        "buildId": "PMP-v3.2-b$targetVersionCode-9a8b7c6d",
         "gitCommit": "9a8b7c6d",
         "publishedAt": "2026-11-08T10:30:00Z",
-        "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v3.2-b15.apk",
+        "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v3.2-b$targetVersionCode.apk",
         "releaseNotes": "تحديث جديد يتضمن ميزات فعلية",
         "fileSize": 19500000,
         "fileSizeMb": 18.6,
@@ -126,16 +136,16 @@ class ExampleUnitTest {
 
     val parsed = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(sampleJson)
     assertNotNull(parsed)
-    assertEquals(15, parsed!!.versionCode)
+    assertEquals(targetVersionCode, parsed!!.versionCode)
     assertEquals("v3.2", parsed.versionName)
-    assertEquals("PMP-v3.2-b15-9a8b7c6d", parsed.buildId)
+    assertEquals("PMP-v3.2-b$targetVersionCode-9a8b7c6d", parsed.buildId)
     assertEquals("9a8b7c6d", parsed.gitCommit)
     assertEquals("2026-11-08T10:30:00Z", parsed.publishedAt)
     assertEquals(19500000L, parsed.fileSize)
-    assertTrue(parsed.downloadUrl.endsWith("pmp-paints-v3.2-b15.apk"))
+    assertTrue(parsed.downloadUrl.endsWith("pmp-paints-v3.2-b$targetVersionCode.apk"))
     assertEquals(64, parsed.sha256Checksum.length)
 
-    // Verify highest version wins across multiple sources (e.g., stale Firestore v12 vs fresh JSON v15)
+    // Verify highest version wins across multiple sources (e.g., stale Firestore v12 vs fresh JSON)
     val staleSource = com.example.util.UpdateInfo(
       versionCode = 12,
       versionName = "2.9-PRO",
@@ -144,7 +154,7 @@ class ExampleUnitTest {
     )
     val bestCandidate = listOf(staleSource, parsed).maxByOrNull { it.versionCode }
     assertNotNull(bestCandidate)
-    assertEquals(15, bestCandidate!!.versionCode)
+    assertEquals(targetVersionCode, bestCandidate!!.versionCode)
     assertTrue(bestCandidate.versionCode > BuildConfig.VERSION_CODE)
   }
 

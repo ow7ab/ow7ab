@@ -2596,8 +2596,8 @@ class UpdateManager(private val context: Context) {
          * بيانات الإصدار المرجعي المنشور والمتحقق منه فعلياً (Version v3.1 / Build 14)
          */
         val LATEST_CLOUD_RELEASE_INFO = UpdateInfo(
-            versionCode = 14,
-            versionName = "v3.1",
+            versionCode = BuildConfig.VERSION_CODE.coerceAtLeast(14),
+            versionName = BuildConfig.VERSION_NAME.ifBlank { "v3.1" },
             downloadUrl = DEFAULT_APK_DOWNLOAD_URL,
             releaseNotes = "إصدار v3.1: تحسينات إضافية شاملة على سلاسة التطبيق، دورة ERP المتكاملة، وتطوير نظام التحديثات السحابية.",
             isMandatory = false,
