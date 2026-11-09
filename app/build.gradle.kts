@@ -50,7 +50,8 @@ val googleServicesProvidesWebClientId: Boolean =
 android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
-
+buildFeatures {
+        resValues = true
   defaultConfig {
     applicationId = "com.pmp"
     minSdk = 24
