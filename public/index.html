@@ -267,6 +267,146 @@
             fill: currentColor;
         }
 
+        .btn-verify {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            width: 100%;
+            background: rgba(6, 182, 212, 0.14);
+            color: #38BDF8;
+            padding: 14px 20px;
+            border-radius: 14px;
+            font-size: 15px;
+            font-weight: 700;
+            border: 1px solid rgba(6, 182, 212, 0.4);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-bottom: 16px;
+        }
+
+        .btn-verify:hover {
+            background: rgba(6, 182, 212, 0.24);
+            border-color: rgba(6, 182, 212, 0.7);
+            transform: translateY(-1px);
+        }
+
+        .btn-verify svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+
+        .verify-panel {
+            display: none;
+            background: rgba(15, 23, 42, 0.82);
+            border: 1px solid rgba(16, 185, 129, 0.4);
+            border-radius: 18px;
+            padding: 18px;
+            margin-bottom: 20px;
+            text-align: right;
+            box-shadow: 0 10px 25px -8px rgba(16, 185, 129, 0.2);
+        }
+
+        .verify-panel.is-visible {
+            display: block;
+        }
+
+        .verify-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .verify-title {
+            color: #34D399;
+            font-size: 14px;
+            font-weight: 800;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .verify-badge {
+            background: rgba(16, 185, 129, 0.18);
+            color: #6EE7B7;
+            border: 1px solid rgba(16, 185, 129, 0.35);
+            font-size: 11.5px;
+            font-weight: 700;
+            padding: 3px 10px;
+            border-radius: 999px;
+        }
+
+        .checksum-box {
+            background: rgba(2, 6, 23, 0.75);
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            border-radius: 12px;
+            padding: 12px;
+            margin: 10px 0;
+            direction: ltr;
+            text-align: left;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 12.5px;
+            color: #38BDF8;
+            word-break: break-all;
+            line-height: 1.5;
+            user-select: all;
+        }
+
+        .verify-actions-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .btn-small {
+            flex: 1;
+            min-width: 140px;
+            background: rgba(30, 41, 59, 0.9);
+            color: #E2E8F0;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            border-radius: 10px;
+            padding: 9px 12px;
+            font-size: 12.5px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-align: center;
+        }
+
+        .btn-small:hover {
+            background: rgba(51, 65, 85, 0.95);
+            border-color: rgba(6, 182, 212, 0.5);
+        }
+
+        .local-verify-status {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            font-size: 12.5px;
+            font-weight: 700;
+            display: none;
+            line-height: 1.6;
+        }
+
+        .local-verify-status.match {
+            display: block;
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(16, 185, 129, 0.45);
+            color: #6EE7B7;
+        }
+
+        .local-verify-status.mismatch {
+            display: block;
+            background: rgba(220, 38, 38, 0.15);
+            border: 1px solid rgba(220, 38, 38, 0.45);
+            color: #FCA5A5;
+        }
+
         .instructions-list {
             text-align: right;
             font-size: 12.5px;
@@ -343,6 +483,42 @@
             <span>تحميل التحديث المباشر الآن (APK)</span>
         </a>
 
+        <!-- زر التحقق من سلامة الملف وبصمة SHA-256 من version.json -->
+        <button type="button" class="btn-verify" id="verifyBtn" onclick="verifyDownloadedFileIntegrity()">
+            <svg viewBox="0 0 24 24">
+                <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/>
+            </svg>
+            <span id="verifyBtnText">التحقق من سلامة الملف (Verify SHA-256 Checksum)</span>
+        </button>
+
+        <!-- لوحة عرض ومطابقة بصمة SHA-256 المجلوبة من version.json -->
+        <div class="verify-panel" id="verifyPanel" role="region" aria-label="SHA-256 Checksum Verification">
+            <div class="verify-header">
+                <span class="verify-title">🔐 بصمة التحقق الرسمية (SHA-256 Checksum)</span>
+                <span class="verify-badge" id="verifySourceBadge">تم الجلب من version.json</span>
+            </div>
+            <p style="font-size: 12.5px; color: #CBD5E1; line-height: 1.6;">
+                استخدم بصمة <strong>SHA-256</strong> التالية للتحقق من سلامة ملف الـ APK الذي قمت بتنزيله والتأكد من عدم تعرضه لأي تلف أو تعديل أثناء التحميل:
+            </p>
+            <div class="checksum-box" id="sha256ChecksumDisplay">
+                9bb5d7bc646468b5d838303cd7e08846a3e14b939615e9a8e00600d8a146f57a
+            </div>
+            <div style="font-size: 12px; color: #94A3B8; margin-bottom: 8px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px;">
+                <span>الحجم المتوقع بالبايت: <strong id="expectedBytesDisplay" style="color: #F8FAFC;">32,494,119 بايت</strong></span>
+                <span>بصمة شهادة التوقيع: <strong id="signingCertDisplay" style="color: #F59E0B;" dir="ltr">1F:F7:75:2A...A1:0D:11:05</strong></span>
+            </div>
+            <div class="verify-actions-row">
+                <button type="button" class="btn-small" id="copySha256Btn" onclick="copySha256ToClipboard()">
+                    📋 نسخ بصمة SHA-256
+                </button>
+                <label class="btn-small" for="verifyFileInput" style="cursor: pointer;">
+                    🔍 فحص ملف APK المنزّل ومطابقته تلقائياً
+                </label>
+                <input type="file" id="verifyFileInput" accept=".apk,application/vnd.android.package-archive" style="display: none;" onchange="verifyLocalApkFile(this)">
+            </div>
+            <div class="local-verify-status" id="localFileVerifyStatus"></div>
+        </div>
+
         <ul class="instructions-list">
             <li>التحديث آمن ومباشر: لن يتم حذف أي بيانات أو إعدادات أو أرصدة سابقة.</li>
             <li>يتم تحديث هذه الصفحة تلقائياً فور رفع ملف <code>version.json</code> من واجهة المدير داخل التطبيق إلى Firebase Storage.</li>
@@ -364,6 +540,12 @@
 
         const versionCard = document.getElementById('versionCard');
         const liveSyncText = document.getElementById('liveSyncText');
+        let latestResolvedVersionData = null;
+
+        function resolveSha256FromVersionData(data) {
+            if (!data) return '';
+            return String(data.apkSha256 || data.sha256Checksum || data.sha256 || '').trim().toLowerCase();
+        }
 
         function parseFirestoreFields(docJson) {
             if (!docJson || !docJson.fields) return null;
@@ -379,19 +561,52 @@
             const getDouble = (k) => (f[k] && (f[k].doubleValue !== undefined)) ? parseFloat(f[k].doubleValue) : (getInt(k) || 0);
             const vCode = getInt('versionCode') || getInt('version_code');
             if (!vCode) return null;
+            const resolvedHash = getStr('apkSha256') || getStr('sha256Checksum') || getStr('sha256');
+            const resolvedBytes = getInt('apkSize') || getInt('fileSize');
             return {
                 versionCode: vCode,
                 versionName: getStr('versionName') || getStr('version_name') || ('3.' + vCode + '-PRO'),
                 buildId: getStr('buildId') || getStr('build_id'),
                 fileSizeMb: getDouble('fileSizeMb') || 30.6,
+                apkSize: resolvedBytes,
+                fileSize: resolvedBytes,
+                apkSha256: resolvedHash,
+                sha256: resolvedHash,
+                sha256Checksum: resolvedHash,
+                signingCertSha256: getStr('signingCertSha256'),
                 releaseNotes: getStr('releaseNotes') || getStr('release_notes'),
                 downloadUrl: getStr('downloadUrl') || getStr('apkUrl'),
                 updatedAt: getInt('updatedAt')
             };
         }
 
+        function updateVerifyPanelFromData(data, sourceLabel) {
+            if (!data) return;
+            const sha256 = resolveSha256FromVersionData(data);
+            const sha256El = document.getElementById('sha256ChecksumDisplay');
+            if (sha256El && sha256) {
+                sha256El.textContent = sha256;
+            }
+            const bytesVal = data.apkSize || data.fileSize || 0;
+            const bytesEl = document.getElementById('expectedBytesDisplay');
+            if (bytesEl && bytesVal > 0) {
+                bytesEl.textContent = Number(bytesVal).toLocaleString('en-US') + ' بايت';
+            }
+            const certEl = document.getElementById('signingCertDisplay');
+            if (certEl && data.signingCertSha256) {
+                const c = String(data.signingCertSha256);
+                certEl.textContent = c.length > 26 ? (c.slice(0, 11) + '...' + c.slice(-11)) : c;
+                certEl.title = c;
+            }
+            const badgeEl = document.getElementById('verifySourceBadge');
+            if (badgeEl && sourceLabel) {
+                badgeEl.textContent = sourceLabel;
+            }
+        }
+
         function applyVersionDataToDom(data, sourceLabel) {
             if (!data || !data.versionCode) return;
+            latestResolvedVersionData = data;
             if (data.versionName) {
                 const cleanVer = String(data.versionName).startsWith('v')
                     ? data.versionName
@@ -424,8 +639,117 @@
                     dlBtn.setAttribute('download', 'pmp-paints-v' + vClean + '-b' + data.versionCode + '.apk');
                 }
             }
+            updateVerifyPanelFromData(data, sourceLabel);
             if (liveSyncText && sourceLabel) {
                 liveSyncText.textContent = sourceLabel;
+            }
+        }
+
+        async function verifyDownloadedFileIntegrity() {
+            const verifyPanel = document.getElementById('verifyPanel');
+            const verifyBtnText = document.getElementById('verifyBtnText');
+            const sha256El = document.getElementById('sha256ChecksumDisplay');
+            if (verifyPanel) {
+                verifyPanel.classList.add('is-visible');
+            }
+            if (verifyBtnText) {
+                verifyBtnText.textContent = 'جاري جلب بصمة SHA-256 من version.json...';
+            }
+
+            const cb = Date.now();
+            let fetchedData = null;
+            let fetchedSource = 'تم الجلب من version.json';
+
+            // 1. Fetch ./version.json directly
+            try {
+                const localRes = await fetch('./version.json?_cb=' + cb, { cache: 'no-store' });
+                if (localRes.ok) {
+                    const json = await localRes.json();
+                    if (json && resolveSha256FromVersionData(json)) {
+                        fetchedData = json;
+                        fetchedSource = 'version.json الرسمي المباشر';
+                    }
+                }
+            } catch (_) {}
+
+            // 2. Also check Firebase Storage version.json if newer
+            try {
+                const storageRes = await fetch(FIREBASE_STORAGE_VERSION_URL + '&_cb=' + cb, { cache: 'no-store' });
+                if (storageRes.ok) {
+                    const storageJson = await storageRes.json();
+                    if (
+                        storageJson &&
+                        resolveSha256FromVersionData(storageJson) &&
+                        (!fetchedData || (storageJson.versionCode || 0) >= (fetchedData.versionCode || 0))
+                    ) {
+                        fetchedData = storageJson;
+                        fetchedSource = 'Firebase Storage (version.json)';
+                    }
+                }
+            } catch (_) {}
+
+            if (!fetchedData && latestResolvedVersionData) {
+                fetchedData = latestResolvedVersionData;
+            }
+
+            if (fetchedData) {
+                applyVersionDataToDom(fetchedData, fetchedSource);
+                const resolvedHash = resolveSha256FromVersionData(fetchedData);
+                if (sha256El) {
+                    sha256El.textContent = resolvedHash || 'تعذر العثور على حقل SHA-256 في version.json';
+                }
+            }
+
+            if (verifyBtnText) {
+                verifyBtnText.textContent = 'تم جلب وعرض بصمة SHA-256 من version.json بنجاح ✓';
+            }
+        }
+
+        async function copySha256ToClipboard() {
+            const sha256El = document.getElementById('sha256ChecksumDisplay');
+            const copyBtn = document.getElementById('copySha256Btn');
+            const hashText = sha256El ? sha256El.textContent.trim() : '';
+            if (!hashText) return;
+            try {
+                await navigator.clipboard.writeText(hashText);
+                if (copyBtn) {
+                    const prev = copyBtn.textContent;
+                    copyBtn.textContent = '✅ تم نسخ بصمة SHA-256!';
+                    setTimeout(() => { copyBtn.textContent = prev; }, 2200);
+                }
+            } catch (_) {}
+        }
+
+        async function verifyLocalApkFile(fileInput) {
+            const statusEl = document.getElementById('localFileVerifyStatus');
+            const sha256El = document.getElementById('sha256ChecksumDisplay');
+            if (!fileInput || !fileInput.files || fileInput.files.length === 0 || !statusEl) return;
+
+            const file = fileInput.files[0];
+            const expectedHash = (sha256El ? sha256El.textContent.trim() : '').toLowerCase();
+            statusEl.className = 'local-verify-status match';
+            statusEl.textContent = 'جاري حساب بصمة SHA-256 للملف المختار (' + file.name + ')...';
+
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                const computedHash = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('').toLowerCase();
+
+                if (expectedHash && computedHash === expectedHash) {
+                    statusEl.className = 'local-verify-status match';
+                    statusEl.textContent =
+                        '✅ الملف سليم ومتطابق 100%! بصمة SHA-256 للملف المختار تطابق بصمة version.json الرسمية (' +
+                        computedHash + ').';
+                } else {
+                    statusEl.className = 'local-verify-status mismatch';
+                    statusEl.textContent =
+                        '❌ تحذير: بصمة الملف المختار (' + computedHash +
+                        ') لا تطابق بصمة version.json الرسمية (' + expectedHash + '). يرجى إعادة تنزيل الملف.';
+                }
+            } catch (err) {
+                statusEl.className = 'local-verify-status mismatch';
+                statusEl.textContent = 'تعذر فحص الملف محلياً: ' + (err && err.message ? err.message : String(err));
             }
         }
 

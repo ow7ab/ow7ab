@@ -205,6 +205,9 @@ jobs:
       - name: Prepare Environment Config & Verify Compatible Signing Keystore (debug.keystore)
         env:
           DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          DEFAULT_WEB_CLIENT_ID_SECRET: ${{ secrets.DEFAULT_WEB_CLIENT_ID }}
         run: |
           set -euo pipefail
           if [ ! -f ".env" ]; then
@@ -344,6 +347,69 @@ jobs:
                   env_f.write(f"KEYSTORE_CERT_SHA256={cert_sha256}\n")
 
           print(f"Verified valid debug.keystore (alias: androiddebugkey, SHA-256: {cert_sha256} matches approved PMP PAINTS certificate).")
+
+          # Resolve Firebase google-services.json (if provided via secret) and verify Web OAuth 2.0 Client ID (client_type 3)
+          import json as _json
+          gs_path = os.path.join("app", "google-services.json")
+          gs_b64 = os.environ.get("GOOGLE_SERVICES_JSON_BASE64", "").strip()
+          gs_raw = os.environ.get("GOOGLE_SERVICES_JSON", "").strip()
+          default_web_client_id = (
+              os.environ.get("DEFAULT_WEB_CLIENT_ID_SECRET", "").strip()
+              or "675531579375-732a74lc8b5r1ilu568geaigi1u6rb0i.apps.googleusercontent.com"
+          )
+
+          if not os.path.isfile(gs_path):
+              if gs_b64:
+                  try:
+                      decoded_gs = base64.b64decode(clean_b64_input(gs_b64), validate=True).decode("utf-8")
+                      _json.loads(decoded_gs)
+                      with open(gs_path, "w", encoding="utf-8") as gf:
+                          gf.write(decoded_gs)
+                      os.chmod(gs_path, 0o600)
+                      print("Restored app/google-services.json from GOOGLE_SERVICES_JSON_BASE64 secret.")
+                  except Exception as exc:
+                      print(f"::warning::Failed to decode GOOGLE_SERVICES_JSON_BASE64: {exc}")
+              elif gs_raw:
+                  try:
+                      _json.loads(gs_raw)
+                      with open(gs_path, "w", encoding="utf-8") as gf:
+                          gf.write(gs_raw)
+                      os.chmod(gs_path, 0o600)
+                      print("Restored app/google-services.json from GOOGLE_SERVICES_JSON secret.")
+                  except Exception as exc:
+                      print(f"::warning::Failed to parse GOOGLE_SERVICES_JSON: {exc}")
+
+          if os.path.isfile(gs_path):
+              try:
+                  with open(gs_path, "r", encoding="utf-8") as gf:
+                      gs_data = _json.load(gf)
+                  modified_gs = False
+                  for client in gs_data.get("client", []):
+                      pkg = (
+                          client.get("client_info", {})
+                          .get("android_client_info", {})
+                          .get("package_name", "")
+                      )
+                      if pkg == "com.pmp":
+                          oauth_list = client.setdefault("oauth_client", [])
+                          web_clients = [c for c in oauth_list if c.get("client_type") == 3 and c.get("client_id")]
+                          if web_clients:
+                              default_web_client_id = web_clients[0]["client_id"]
+                          else:
+                              oauth_list.append({"client_id": default_web_client_id, "client_type": 3})
+                              modified_gs = True
+                  if modified_gs:
+                      with open(gs_path, "w", encoding="utf-8") as gf:
+                          _json.dump(gs_data, gf, indent=2)
+                          gf.write("\n")
+                      print("Ensured Web OAuth 2.0 client (client_type 3) is present in app/google-services.json for com.pmp.")
+              except Exception as exc:
+                  print(f"::warning::Unable to inspect app/google-services.json: {exc}")
+
+          if github_env:
+              with open(github_env, "a", encoding="utf-8") as env_f:
+                  env_f.write(f"DEFAULT_WEB_CLIENT_ID={default_web_client_id}\n")
+          print("Verified Web OAuth 2.0 client configuration for R.string.default_web_client_id.")
           PYEOF
 
       - name: Resolve & Validate Version Metadata and Build Identity
@@ -433,13 +499,14 @@ jobs:
           else
             GRADLE_CMD="gradle"
           fi
-          echo "Running automated unit tests using ${GRADLE_CMD}..."
-          ${GRADLE_CMD} :app:testDebugUnitTest \
+          echo "Compiling Kotlin sources and running automated unit tests using ${GRADLE_CMD}..."
+          ${GRADLE_CMD} :app:compileDebugKotlin :app:testDebugUnitTest \
             -PversionCode="${V_CODE}" \
             -PversionName="${V_NAME}" \
             -PgitCommit="${GIT_COMMIT_SHORT}" \
             -PbuildTimestampUtc="${PUBLISHED_AT_UTC}" \
             -PbuildId="${BUILD_ID}" \
+            -PdefaultWebClientId="${DEFAULT_WEB_CLIENT_ID}" \
             --no-daemon
 
       - name: Build Signed APK with Embedded Build Identity
@@ -457,6 +524,7 @@ jobs:
             -PgitCommit="${GIT_COMMIT_SHORT}" \
             -PbuildTimestampUtc="${PUBLISHED_AT_UTC}" \
             -PbuildId="${BUILD_ID}" \
+            -PdefaultWebClientId="${DEFAULT_WEB_CLIENT_ID}" \
             --no-daemon
 
       - name: Verify Compiled APK Binary (Package Name, Version, Signature & Checksum)

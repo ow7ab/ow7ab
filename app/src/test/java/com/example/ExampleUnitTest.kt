@@ -1132,7 +1132,54 @@ class ExampleUnitTest {
     assertTrue("PmpViewModel must wire getAggregatedProductStockBalances on Dispatchers.IO", vmSource.contains("repository.getAggregatedProductStockBalances()"))
     assertTrue("PmpViewModel must wire getAggregatedCashboxBalances on Dispatchers.IO", vmSource.contains("repository.getAggregatedCashboxBalances()"))
   }
+
+  @Test
+  fun testDownloadPageSha256VerifyAndWebClientIdConfig() {
+    // 1. Verify public/index.html has SHA-256 checksum verification UI and version.json fetch logic
+    val indexHtmlFile = listOf(
+      java.io.File("public/index.html"),
+      java.io.File("../public/index.html")
+    ).firstOrNull { it.exists() }
+    assertNotNull("public/index.html must exist", indexHtmlFile)
+    val indexHtml = indexHtmlFile!!.readText(Charsets.UTF_8)
+    assertTrue("Download page must include verify button (#verifyBtn)", indexHtml.contains("id=\"verifyBtn\""))
+    assertTrue("Download page must include verifyDownloadedFileIntegrity() function", indexHtml.contains("function verifyDownloadedFileIntegrity()"))
+    assertTrue("Download page must display SHA-256 checksum (#sha256ChecksumDisplay)", indexHtml.contains("id=\"sha256ChecksumDisplay\""))
+    assertTrue("Download page must resolve apkSha256 / sha256Checksum / sha256 from version.json", indexHtml.contains("resolveSha256FromVersionData"))
+    assertTrue("Download page must support local APK SHA-256 verification via crypto.subtle.digest('SHA-256'", indexHtml.contains("crypto.subtle.digest('SHA-256'"))
+
+    // 2. Verify app/build.gradle.kts and gradle.properties configure R.string.default_web_client_id
+    //    using the Web OAuth 2.0 Client ID (client_type 3), never the Android OAuth Client ID (client_type 1)
+    val buildGradleFile = listOf(
+      java.io.File("app/build.gradle.kts"),
+      java.io.File("build.gradle.kts")
+    ).firstOrNull { it.exists() && it.readText(Charsets.UTF_8).contains("applicationId = \"com.pmp\"") }
+    assertNotNull("app/build.gradle.kts must exist", buildGradleFile)
+    val buildGradleText = buildGradleFile!!.readText(Charsets.UTF_8)
+    assertTrue(
+      "app/build.gradle.kts must provide resValue fallback for default_web_client_id when google-services.json is absent in CI",
+      buildGradleText.contains("resValue(\"string\", \"default_web_client_id\", resolvedDefaultWebClientId)")
+    )
+
+    val gradlePropsFile = listOf(
+      java.io.File("gradle.properties"),
+      java.io.File("../gradle.properties")
+    ).firstOrNull { it.exists() }
+    assertNotNull("gradle.properties must exist", gradlePropsFile)
+    val gradlePropsText = gradlePropsFile!!.readText(Charsets.UTF_8)
+    val expectedWebClientId = "675531579375-732a74lc8b5r1ilu568geaigi1u6rb0i.apps.googleusercontent.com"
+    val androidOAuthClientId = "675531579375-udut6cpbt7laqhbnfap3deenjj4ehb41.apps.googleusercontent.com"
+    assertTrue(
+      "gradle.properties must configure actual Web OAuth 2.0 Client ID (client_type 3)",
+      gradlePropsText.contains("PMP_FIREBASE_WEB_CLIENT_ID=$expectedWebClientId")
+    )
+    assertFalse(
+      "gradle.properties must NOT use Android OAuth Client ID (client_type 1) for default_web_client_id",
+      gradlePropsText.contains(androidOAuthClientId)
+    )
+  }
 }
+
 
 
 

@@ -71,9 +71,13 @@ fun onGoogleSignInClicked(
     onAuthCancelled: () -> Unit = {}
 ) {
     val clientId = try {
-        context.getString(R.string.default_web_client_id)
+        context.getString(R.string.default_web_client_id).trim()
     } catch (e: Exception) {
         onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
+        return
+    }
+    if (clientId.isBlank()) {
+        onAuthError("Google Sign-In configuration missing: default_web_client_id is empty")
         return
     }
 

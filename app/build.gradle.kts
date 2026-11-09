@@ -27,6 +27,26 @@ val resolvedBuildId: String =
     (project.findProperty("buildId")?.toString()?.trim()?.takeIf { it.isNotBlank() })
         ?: "PMP-v${cleanVersionNameForBuildId}-b${resolvedVersionCode}-${resolvedGitCommit}"
 
+val resolvedDefaultWebClientId: String =
+    (project.findProperty("defaultWebClientId")?.toString()?.trim()?.takeIf { it.isNotBlank() })
+        ?: (project.findProperty("DEFAULT_WEB_CLIENT_ID")?.toString()?.trim()?.takeIf { it.isNotBlank() })
+        ?: System.getenv("DEFAULT_WEB_CLIENT_ID")?.trim()?.takeIf { it.isNotBlank() }
+        ?: System.getenv("GOOGLE_WEB_CLIENT_ID")?.trim()?.takeIf { it.isNotBlank() }
+        ?: (project.findProperty("PMP_FIREBASE_WEB_CLIENT_ID")?.toString()?.trim()?.takeIf { it.isNotBlank() })
+        ?: ""
+
+val googleServicesJsonFile = file("google-services.json")
+val hasGoogleServicesJson: Boolean =
+    googleServicesJsonFile.isFile && googleServicesJsonFile.length() > 0L
+val googleServicesProvidesWebClientId: Boolean =
+    if (hasGoogleServicesJson) {
+      val gsRaw = runCatching { googleServicesJsonFile.readText() }.getOrDefault("")
+      gsRaw.contains("\"package_name\": \"com.pmp\"") &&
+          Regex("\"client_type\"\\s*:\\s*3").containsMatchIn(gsRaw)
+    } else {
+      false
+    }
+
 android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
@@ -42,6 +62,23 @@ android {
     buildConfigField("String", "BUILD_ID", "\"$resolvedBuildId\"")
     buildConfigField("String", "BUILD_TIMESTAMP_UTC", "\"$resolvedBuildTimestampUtc\"")
     buildConfigField("String", "GITHUB_RELEASE_REPO", "\"ow7ab/ow7ab\"")
+
+    // When google-services.json is absent in CI (or lacks a client_type=3 Web OAuth client),
+    // generate R.string.default_web_client_id from the configured Web OAuth 2.0 Client ID
+    // so Google Sign-In in LoginScreen.kt always compiles and resolves cleanly.
+    if (!googleServicesProvidesWebClientId && resolvedDefaultWebClientId.isNotBlank()) {
+      resValue("string", "default_web_client_id", resolvedDefaultWebClientId)
+    }
+    if (!hasGoogleServicesJson) {
+      resValue("string", "project_id", "gen-lang-client-0220128746")
+      resValue("string", "gcm_defaultSenderId", "675531579375")
+      resValue("string", "google_storage_bucket", "gen-lang-client-0220128746.firebasestorage.app")
+      resValue("string", "google_app_id", "1:675531579375:android:799a5323c0fcd1bf3ee01a")
+      val envFirebaseApiKey = System.getenv("FIREBASE_API_KEY")?.trim().orEmpty()
+      if (envFirebaseApiKey.isNotBlank()) {
+        resValue("string", "google_api_key", envFirebaseApiKey)
+      }
+    }
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
