@@ -61,6 +61,12 @@ interface PmpDao {
     @Update
     suspend fun updateCustomer(customer: CustomerEntity)
 
+    @Query("SELECT * FROM customers WHERE id = :id LIMIT 1")
+    suspend fun getCustomerByIdDirect(id: Long): CustomerEntity?
+
+    @Query("SELECT COUNT(*) FROM invoices WHERE customerId = :customerId")
+    suspend fun getCustomerInvoiceCountDirect(customerId: Long): Int
+
     @Query("DELETE FROM customers WHERE id = :id")
     suspend fun deleteCustomer(id: Long)
 
@@ -98,6 +104,9 @@ interface PmpDao {
     @Query("SELECT * FROM invoice_items WHERE invoiceId = :invoiceId")
     fun getInvoiceItems(invoiceId: Long): Flow<List<InvoiceItemEntity>>
 
+    @Query("SELECT * FROM invoice_items WHERE invoiceId = :invoiceId ORDER BY id ASC")
+    suspend fun getInvoiceItemsByInvoiceIdDirect(invoiceId: Long): List<InvoiceItemEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertInvoiceItems(items: List<InvoiceItemEntity>)
 
@@ -107,6 +116,9 @@ interface PmpDao {
 
     @Query("SELECT * FROM invoice_payments WHERE invoiceId = :invoiceId")
     fun getInvoicePayments(invoiceId: Long): Flow<List<InvoicePaymentEntity>>
+
+    @Query("SELECT * FROM invoice_payments WHERE invoiceId = :invoiceId ORDER BY id ASC")
+    suspend fun getInvoicePaymentsByInvoiceIdDirect(invoiceId: Long): List<InvoicePaymentEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertInvoicePayment(payment: InvoicePaymentEntity): Long
@@ -432,6 +444,54 @@ interface PmpDao {
 
     @Query("DELETE FROM audit_log")
     suspend fun clearAllAuditLogs()
+
+    // --- High-Performance SQL Aggregations (SUM / GROUP BY) ---
+    @Query(
+        """
+        SELECT productId,
+               COALESCE(SUM(CASE WHEN kind IN ('IN', 'RETURN', 'RETURN_IN', 'CANCEL', 'وارد', 'مرتجع') THEN quantity ELSE -quantity END), 0.0) AS netBalance
+        FROM stock_moves
+        GROUP BY productId
+        """
+    )
+    fun getAggregatedProductStockBalances(): Flow<List<ProductStockBalanceTuple>>
+
+    @Query(
+        """
+        SELECT TRIM(cashbox) AS cashbox,
+               TRIM(currency) AS currency,
+               COALESCE(SUM(CASE WHEN direction = 'وارد' THEN amount ELSE -amount END), 0.0) AS netBalance
+        FROM movements
+        GROUP BY TRIM(cashbox), TRIM(currency)
+        """
+    )
+    fun getAggregatedCashboxBalances(): Flow<List<CashboxBalanceTuple>>
+
+    @Query(
+        """
+        SELECT TRIM(currency) AS currency,
+               COALESCE(SUM(CASE WHEN direction = 'وارد' THEN amount ELSE -amount END), 0.0) AS netBalance
+        FROM movements
+        GROUP BY TRIM(currency)
+        """
+    )
+    fun getAggregatedCurrencyBalances(): Flow<List<CurrencyBalanceTuple>>
 }
+
+data class ProductStockBalanceTuple(
+    val productId: Long,
+    val netBalance: Double
+)
+
+data class CashboxBalanceTuple(
+    val cashbox: String,
+    val currency: String,
+    val netBalance: Double
+)
+
+data class CurrencyBalanceTuple(
+    val currency: String,
+    val netBalance: Double
+)
 
 

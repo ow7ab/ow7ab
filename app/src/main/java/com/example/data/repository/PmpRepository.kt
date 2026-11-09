@@ -43,6 +43,35 @@ class PmpRepository(
             val digest = MessageDigest.getInstance("SHA-256").digest(salted.toByteArray(Charsets.UTF_8))
             return digest.joinToString("") { "%02x".format(it) }
         }
+
+        /**
+         * حساب السعر التناسبي للكرتونة بناءً على معايير التعبئة المعتمدة (PackagingRuleSpec: وزن العبوة × عدد العبوات في الكرتونة)
+         * بدلاً من نسخ سعر عبوة أصغر أو أكبر بشكل أعمى عند اشتقاق وزن جديد لنفس اللون.
+         */
+        fun calculateWeightAdjustedCartonPrice(
+            targetWeight: String,
+            referenceWeight: String,
+            referenceCartonPrice: Double
+        ): Double {
+            if (referenceCartonPrice <= 0.0) return 0.0
+            val cleanTarget = com.example.util.InventoryWeightManager.normalizeWeightValue(targetWeight).ifBlank { targetWeight.trim() }
+            val cleanRef = com.example.util.InventoryWeightManager.normalizeWeightValue(referenceWeight).ifBlank { referenceWeight.trim() }
+            if (cleanTarget == cleanRef) return referenceCartonPrice
+
+            val targetSpec = com.example.util.ErpLifecycleEngine.resolvePackagingRule(cleanTarget)
+            val refSpec = com.example.util.ErpLifecycleEngine.resolvePackagingRule(cleanRef)
+
+            val targetCartonGrams = (targetSpec.weightGrams * targetSpec.cansPerCarton).coerceAtLeast(250).toDouble()
+            val refCartonGrams = (refSpec.weightGrams * refSpec.cansPerCarton).coerceAtLeast(250).toDouble()
+
+            val ratio = targetCartonGrams / refCartonGrams
+            val rawScaled = referenceCartonPrice * ratio
+            return if (rawScaled >= 1000.0) {
+                (Math.round(rawScaled / 500.0) * 500.0).coerceAtLeast(500.0)
+            } else {
+                (Math.round(rawScaled * 100.0) / 100.0).coerceAtLeast(1.0)
+            }
+        }
     }
 
     private fun currentDateString(): String {
@@ -54,6 +83,9 @@ class PmpRepository(
     fun getMovements(): Flow<List<MovementEntity>> = dao.getAllMovements()
     fun getTransfers(): Flow<List<TransferEntity>> = dao.getAllTransfers()
     fun getDailyClosings(): Flow<List<DailyClosingEntity>> = dao.getAllDailyClosings()
+    fun getAggregatedCashboxBalances(): Flow<List<CashboxBalanceTuple>> = dao.getAggregatedCashboxBalances()
+    fun getAggregatedCurrencyBalances(): Flow<List<CurrencyBalanceTuple>> = dao.getAggregatedCurrencyBalances()
+    fun getAggregatedProductStockBalances(): Flow<List<ProductStockBalanceTuple>> = dao.getAggregatedProductStockBalances()
 
     suspend fun addCashbox(name: String, user: String): Long {
         val trimmed = name.trim()
@@ -446,21 +478,72 @@ class PmpRepository(
         return id
     }
 
-    suspend fun deleteCustomer(id: Long, customerName: String, user: String): Result<Unit> {
-        dao.deleteCustomerPayments(id)
-        dao.deleteCustomerInvoiceItems(id)
-        dao.deleteCustomerInvoices(id)
+    suspend fun deleteCustomer(id: Long, customerName: String, user: String): Result<Unit> = runInTransaction(
+        operationName = "DELETE_CUSTOMER_SAFE",
+        entityType = "customers",
+        details = "محاولة حذف العميل: $customerName (#$id)"
+    ) {
+        val invoiceCount = dao.getCustomerInvoiceCountDirect(id)
+        if (invoiceCount > 0) {
+            return@runInTransaction Result.failure(
+                IllegalStateException(
+                    "يُمنع حذف العميل ($customerName) لوجود ($invoiceCount) فواتير ومعاملات مالية مسجلة باسمه في الدفاتر المحاسبية. يرجى استخدام تسوية الحساب أو إلغاء الفواتير بقيد عكسي للحفاظ على سلامة السجلات المالية."
+                )
+            )
+        }
         dao.deleteCustomer(id)
-        dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_CUSTOMER", detail = "حذف العميل وحساباته: $customerName (#$id)"))
-        return Result.success(Unit)
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = user,
+                action = "DELETE_CUSTOMER",
+                detail = "حذف العميل غير المرتبط بمعاملات مالية: $customerName (#$id)"
+            )
+        )
+        Result.success(Unit)
     }
 
-    suspend fun clearCustomerBalance(customerId: Long, customerName: String, user: String): Result<Unit> {
-        dao.deleteCustomerPayments(customerId)
-        dao.deleteCustomerInvoiceItems(customerId)
-        dao.deleteCustomerInvoices(customerId)
-        dao.insertAuditLog(AuditLogEntity(username = user, action = "ZERO_CUSTOMER_BALANCE", detail = "تصفير وحذف المبالغ المسجلة على العميل: $customerName (#$customerId)"))
-        return Result.success(Unit)
+    suspend fun clearCustomerBalance(customerId: Long, customerName: String, user: String): Result<Unit> = runInTransaction(
+        operationName = "SETTLE_CUSTOMER_BALANCE",
+        entityType = "invoice_payments",
+        details = "تسوية وإقفال المديونية المسجلة على العميل: $customerName (#$customerId)"
+    ) {
+        val activeInvoices = dao.getInvoicesDirect().filter { it.customerId == customerId && it.status == "active" }
+        val allPayments = dao.getInvoicePaymentsDirect()
+        val settlementDate = currentDateString()
+        var settledInvoicesCount = 0
+        var totalSettledAmount = 0.0
+
+        for (inv in activeInvoices) {
+            val paidOnInv = allPayments
+                .filter { it.invoiceId == inv.id && it.status == "active" }
+                .sumOf { it.amount }
+            val remaining = (inv.total - paidOnInv).coerceAtLeast(0.0)
+            if (remaining > 0.001) {
+                val cleanCurrency = inv.currency.trim().uppercase().ifBlank { "SDG" }
+                dao.insertInvoicePayment(
+                    InvoicePaymentEntity(
+                        invoiceId = inv.id,
+                        payDate = settlementDate,
+                        cashbox = "تسوية إدارية معتمدة",
+                        amount = remaining,
+                        note = "قيد تسوية وإقفال مديونية معتمد إدارياً للفاتورة ${inv.invoiceNo} [$cleanCurrency]",
+                        createdBy = user,
+                        status = "active"
+                    )
+                )
+                settledInvoicesCount++
+                totalSettledAmount += remaining
+            }
+        }
+
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = user,
+                action = "SETTLE_CUSTOMER_BALANCE",
+                detail = "تسوية وإقفال رصيد العميل ($customerName #$customerId) بقيد تسوية معتمد لعدد ($settledInvoicesCount) فواتير بإجمالي ($totalSettledAmount) دون حذف أي سجل مالي تاريخي"
+            )
+        )
+        Result.success(Unit)
     }
 
     // --- Invoices ---
@@ -617,22 +700,81 @@ class PmpRepository(
         Result.success(payId)
     }
 
-    suspend fun cancelInvoice(invoiceId: Long, reason: String, user: String): Result<Unit> = runInTransaction {
+    suspend fun cancelInvoice(invoiceId: Long, reason: String, user: String): Result<Unit> = runInTransaction(
+        operationName = "CANCEL_INVOICE_COMPENSATING",
+        entityType = "invoices",
+        details = "إلغاء الفاتورة #$invoiceId بقيد عكسي مخزني ومالي: $reason"
+    ) {
         val invoice = dao.getInvoiceById(invoiceId) ?: return@runInTransaction Result.failure(Exception("الفاتورة غير موجودة"))
         if (invoice.status == "cancelled") return@runInTransaction Result.failure(Exception("الفاتورة ملغاة مسبقاً"))
 
+        val cleanReason = reason.trim().ifBlank { "إلغاء فاتورة معتمد" }
+        val reversalDate = currentDateString()
+
+        // 1. تحديث حالة الفاتورة إلى ملغاة مع حفظ سبب الإلغاء
         dao.updateInvoice(
             invoice.copy(
                 status = "cancelled",
-                cancelReason = reason
+                cancelReason = cleanReason
             )
         )
+
+        // 2. القيود العكسية للمخزون (Compensating Stock Moves): إرجاع كافة الأصناف المباعة في الفاتورة إلى مخازنها الأصلية
+        val invoiceItems = dao.getInvoiceItemsByInvoiceIdDirect(invoiceId)
+        var restoredItemsCount = 0
+        for (item in invoiceItems) {
+            val pid = item.productId
+            val wid = item.warehouseId
+            if (pid != null && wid != null && item.quantity > 0.0) {
+                dao.insertStockMove(
+                    StockMoveEntity(
+                        warehouseId = wid,
+                        productId = pid,
+                        quantity = item.quantity,
+                        kind = "RETURN_IN",
+                        invoiceId = invoiceId,
+                        note = "قيد عكسي لإرجاع مخزون فاتورة ملغاة ${invoice.invoiceNo}: $cleanReason",
+                        createdBy = user
+                    )
+                )
+                restoredItemsCount++
+            }
+        }
+
+        // 3. القيود العكسية للخزينة والمدفوعات (Compensating Financial Movements): عكس أي دفعات مسجلة على الفاتورة في الخزنة
+        val invoicePayments = dao.getInvoicePaymentsByInvoiceIdDirect(invoiceId)
+        var reversedPaymentsTotal = 0.0
+        for (payment in invoicePayments) {
+            if (payment.status == "active" && payment.amount > 0.0) {
+                dao.updateInvoicePayment(
+                    payment.copy(
+                        status = "cancelled",
+                        note = "${payment.note} | ملغاة بقيد عكسي لإلغاء الفاتورة ${invoice.invoiceNo}: $cleanReason"
+                    )
+                )
+                if (payment.cashbox.isNotBlank() && !payment.cashbox.contains("تسوية إدارية")) {
+                    dao.insertMovement(
+                        MovementEntity(
+                            txDate = reversalDate,
+                            cashbox = payment.cashbox,
+                            currency = invoice.currency.ifBlank { "SDG" },
+                            direction = "منصرف",
+                            amount = payment.amount,
+                            description = "قيد عكسي لاسترداد دفعة فاتورة ملغاة ${invoice.invoiceNo} - ${invoice.customerName}: $cleanReason",
+                            reference = "REV:${invoice.invoiceNo}:P${payment.id}",
+                            createdBy = user
+                        )
+                    )
+                }
+                reversedPaymentsTotal += payment.amount
+            }
+        }
 
         dao.insertAuditLog(
             AuditLogEntity(
                 username = user,
                 action = "CANCEL_INVOICE",
-                detail = "إلغاء الفاتورة ${invoice.invoiceNo}: $reason"
+                detail = "إلغاء الفاتورة ${invoice.invoiceNo} بقيد عكسي شامل (استرجاع $restoredItemsCount بنود مخزنية وعكس مدفوعات بقيمة $reversedPaymentsTotal ${invoice.currency}): $cleanReason"
             )
         )
         Result.success(Unit)
@@ -737,10 +879,39 @@ class PmpRepository(
         }
         if (existing != null) return existing
 
-        // Derive reasonable default prices from sibling weights of the same color if not explicitly provided
+        // حساب السعر المرجعي تناسبياً بناءً على معادلة الوزن وعدد العبوات في الكرتونة (PackagingRuleSpec) بدلاً من النسخ الأعمى
         val sibling = allProducts.firstOrNull { it.paintColor.trim().equals(cleanColor, ignoreCase = true) }
-        val effectivePurchase = if (purchasePrice > 0.0) purchasePrice else (sibling?.purchasePrice ?: 320000.0)
-        val effectiveSale = if (salePrice > 0.0) salePrice else (sibling?.salePrice ?: 385000.0)
+        val default900Purchase = 320000.0
+        val default900Sale = 385000.0
+
+        val effectivePurchase = when {
+            purchasePrice > 0.0 -> purchasePrice
+            sibling != null -> calculateWeightAdjustedCartonPrice(
+                targetWeight = cleanWeight,
+                referenceWeight = sibling.packageWeight,
+                referenceCartonPrice = sibling.purchasePrice
+            )
+            else -> calculateWeightAdjustedCartonPrice(
+                targetWeight = cleanWeight,
+                referenceWeight = "900",
+                referenceCartonPrice = default900Purchase
+            )
+        }
+
+        val effectiveSale = when {
+            salePrice > 0.0 -> salePrice
+            sibling != null -> calculateWeightAdjustedCartonPrice(
+                targetWeight = cleanWeight,
+                referenceWeight = sibling.packageWeight,
+                referenceCartonPrice = sibling.salePrice
+            )
+            else -> calculateWeightAdjustedCartonPrice(
+                targetWeight = cleanWeight,
+                referenceWeight = "900",
+                referenceCartonPrice = default900Sale
+            )
+        }
+
         val prodName = "بوهية $cleanColor $cleanWeight جم"
         val newId = addProduct(
             name = prodName,

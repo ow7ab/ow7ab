@@ -349,8 +349,8 @@ fun ReportsScreen(
         // 2a. Commercial finished products in warehouses
         for (prod in products) {
             val prodMoves = stockMoves.filter { it.productId == prod.id }
-            val inQty = prodMoves.filter { it.kind in listOf("IN", "RETURN") }.sumOf { it.quantity }
-            val outQty = prodMoves.filter { it.kind !in listOf("IN", "RETURN") }.sumOf { it.quantity }
+            val inQty = prodMoves.filter { it.kind in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع") }.sumOf { it.quantity }
+            val outQty = prodMoves.filter { it.kind !in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع") }.sumOf { it.quantity }
 
             // Also check factory batches or dispatches matching product name
             val batchCartons = productionBatches
@@ -1046,7 +1046,7 @@ fun ReportsScreen(
 
                     // Returns recorded during the selected month range
                     val monthReturnsMoves = stockMoves.filter { sm ->
-                        sm.kind == "RETURN" &&
+                        sm.kind in listOf("RETURN", "RETURN_IN", "CANCEL") &&
                             isDateInMonthRange(SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(sm.createdAt)))
                     }
                     val prodPriceMap = products.associateBy { it.id }
@@ -1946,7 +1946,7 @@ fun ReportsScreen(
                                 }
                                 Text(
                                     text = "${format.format(sm.quantity)} كرتونة",
-                                    color = if (sm.kind in listOf("IN", "RETURN")) PmpGreen else PmpCyan,
+                                    color = if (sm.kind in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع")) PmpGreen else PmpCyan,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.5.sp,
                                     maxLines = 1,

@@ -201,8 +201,8 @@ fun InventoryScreen(
                     val whMoves = stockMoves.filter { it.warehouseId == selectedWh.id }
                     products.associate { prod ->
                         val prodMoves = whMoves.filter { it.productId == prod.id }
-                        val inQty = prodMoves.filter { it.kind in listOf("IN", "RETURN", "وارد", "مرتجع") }.sumOf { it.quantity }
-                        val outQty = prodMoves.filter { it.kind in listOf("OUT", "SALE", "صرف", "مبيعات") }.sumOf { it.quantity }
+                        val inQty = prodMoves.filter { it.kind in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع") }.sumOf { it.quantity }
+                        val outQty = prodMoves.filter { it.kind in listOf("OUT", "SALE", "ADJUST", "صرف", "مبيعات") }.sumOf { it.quantity }
                         prod.id to (inQty - outQty).coerceAtLeast(0.0)
                     }
                 } else {

@@ -39,7 +39,7 @@ import kotlinx.coroutines.sync.withLock
         ChemicalSafetyEntity::class,
         ProductionBatchEntity::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {

@@ -564,15 +564,16 @@ class ExampleUnitTest {
       mainContent.contains("installDefensiveUncaughtExceptionHandler()")
     )
 
-    // 2. Verify PmpDatabase is upgraded to version 10 with MIGRATION_9_10 schema repair
+    // 2. Verify PmpDatabase is upgraded to version 11 with MIGRATION_9_10 and MIGRATION_10_11 schema repair
     val dbFile = listOf(
       java.io.File("app/src/main/java/com/example/data/local/PmpDatabase.kt"),
       java.io.File("src/main/java/com/example/data/local/PmpDatabase.kt")
     ).firstOrNull { it.exists() }
     assertNotNull("PmpDatabase.kt must exist", dbFile)
     val dbContent = dbFile!!.readText(Charsets.UTF_8)
-    assertTrue("PmpDatabase must be at version = 10", dbContent.contains("version = 10"))
+    assertTrue("PmpDatabase must be at version = 11", dbContent.contains("version = 11"))
     assertTrue("PmpDatabase must register MIGRATION_9_10", dbContent.contains("MIGRATION_9_10"))
+    assertTrue("PmpDatabase must register MIGRATION_10_11", dbContent.contains("MIGRATION_10_11"))
 
     // 3. Verify PmpDao has no bare @Insert annotations that could throw SQLiteConstraintException
     val daoFile = listOf(
@@ -1032,6 +1033,104 @@ class ExampleUnitTest {
     assertTrue("Total batch cost must be positive", costing.totalBatchManufacturingCost > 0.0)
     assertTrue("Gross profit must equal revenue minus COGS", costing.grossProfit > 0.0)
     assertEquals(costing.grossProfit - 350.0, costing.netProfit, 0.001)
+  }
+
+  @Test
+  fun testFinancialIntegrityUpdateSafetyRoomV11AndWeightPricing() {
+    // 1. Task 1: Verify UpdateManager has NO local sourceDir fallback in downloadApk or reachability checks,
+    // enforces strict archiveVersionCode <= installedOsVersionCode rejection, and uses 15s/30s timeouts
+    val umFile = listOf(
+      java.io.File("app/src/main/java/com/example/util/UpdateManager.kt"),
+      java.io.File("src/main/java/com/example/util/UpdateManager.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("UpdateManager.kt must exist", umFile)
+    val umSource = umFile!!.readText(Charsets.UTF_8)
+    assertFalse(
+      "UpdateManager must never stream baseInstalledArchive or signedPackageArchive from sourceDir when download fails",
+      umSource.contains("baseInstalledArchive") || umSource.contains("signedPackageArchive")
+    )
+    assertTrue(
+      "UpdateManager must strictly reject archiveVersionCode <= installedOsVersionCode",
+      umSource.contains("if (archiveVersionCode <= installedOsVersionCode)")
+    )
+    assertTrue(
+      "UpdateManager must strictly verify archivePackage == \"com.pmp\"",
+      umSource.contains("archivePackage != \"com.pmp\"")
+    )
+    assertTrue(
+      "UpdateManager must use connectTimeout = 15_000 and readTimeout = 30_000",
+      umSource.contains("connectTimeout = 15_000") && umSource.contains("readTimeout = 30_000")
+    )
+
+    // 2. Task 2: Verify cancelInvoice reverses stock moves (RETURN_IN) and cashbox payments (منصرف),
+    // and deleteCustomer / clearCustomerBalance never hard-delete customer invoices or payments
+    val repoFile = listOf(
+      java.io.File("app/src/main/java/com/example/data/repository/PmpRepository.kt"),
+      java.io.File("src/main/java/com/example/data/repository/PmpRepository.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("PmpRepository.kt must exist", repoFile)
+    val repoSource = repoFile!!.readText(Charsets.UTF_8)
+    assertTrue(
+      "cancelInvoice must fetch invoice items and insert compensating RETURN_IN StockMoveEntity",
+      repoSource.contains("getInvoiceItemsByInvoiceIdDirect(invoiceId)") &&
+        repoSource.contains("kind = \"RETURN_IN\"")
+    )
+    assertTrue(
+      "cancelInvoice must fetch invoice payments and insert reversing outgoing MovementEntity",
+      repoSource.contains("getInvoicePaymentsByInvoiceIdDirect(invoiceId)") &&
+        repoSource.contains("REV:\${invoice.invoiceNo}:P\${payment.id}")
+    )
+    assertTrue(
+      "deleteCustomer must check getCustomerInvoiceCountDirect and block hard deletion if invoices exist",
+      repoSource.contains("dao.getCustomerInvoiceCountDirect(id)")
+    )
+    assertFalse(
+      "PmpRepository must never call dao.deleteCustomerInvoices in deleteCustomer or clearCustomerBalance",
+      repoSource.contains("dao.deleteCustomerInvoices(")
+    )
+    assertFalse(
+      "PmpRepository must never call dao.deleteCustomerPayments in deleteCustomer or clearCustomerBalance",
+      repoSource.contains("dao.deleteCustomerPayments(")
+    )
+
+    // 3. Task 3: Verify weight-adjusted carton pricing scales accurately using PackagingRuleSpec
+    val price900 = com.example.data.repository.PmpRepository.calculateWeightAdjustedCartonPrice(
+      targetWeight = "900",
+      referenceWeight = "900",
+      referenceCartonPrice = 385000.0
+    )
+    val price250From900 = com.example.data.repository.PmpRepository.calculateWeightAdjustedCartonPrice(
+      targetWeight = "250",
+      referenceWeight = "900",
+      referenceCartonPrice = 385000.0
+    )
+    val price4000From250 = com.example.data.repository.PmpRepository.calculateWeightAdjustedCartonPrice(
+      targetWeight = "4000",
+      referenceWeight = "250",
+      referenceCartonPrice = price250From900
+    )
+    assertEquals(385000.0, price900, 0.01)
+    assertTrue("250g carton (48x250g=12kg) must be priced higher than 900g carton (12x900g=10.8kg)", price250From900 > price900)
+    assertTrue("4000g carton (4x4000g=16kg) must be priced higher than 250g carton (12kg)", price4000From250 > price250From900)
+
+    // 4. Task 4 & Task 5: Verify Room DB version 11 and SQL SUM/GROUP BY aggregations in PmpDao & PmpViewModel
+    val daoFile = listOf(
+      java.io.File("app/src/main/java/com/example/data/local/PmpDao.kt"),
+      java.io.File("src/main/java/com/example/data/local/PmpDao.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("PmpDao.kt must exist", daoFile)
+    val daoSource = daoFile!!.readText(Charsets.UTF_8)
+    assertTrue("PmpDao must define getAggregatedProductStockBalances with SUM and GROUP BY", daoSource.contains("fun getAggregatedProductStockBalances()") && daoSource.contains("GROUP BY productId"))
+    assertTrue("PmpDao must define getAggregatedCashboxBalances with SUM and GROUP BY", daoSource.contains("fun getAggregatedCashboxBalances()") && daoSource.contains("GROUP BY TRIM(cashbox), TRIM(currency)"))
+
+    val vmFile = listOf(
+      java.io.File("app/src/main/java/com/example/ui/viewmodel/PmpViewModel.kt"),
+      java.io.File("src/main/java/com/example/ui/viewmodel/PmpViewModel.kt")
+    ).firstOrNull { it.exists() }
+    assertNotNull("PmpViewModel.kt must exist", vmFile)
+    val vmSource = vmFile!!.readText(Charsets.UTF_8)
+    assertTrue("PmpViewModel must wire getAggregatedProductStockBalances on Dispatchers.IO", vmSource.contains("repository.getAggregatedProductStockBalances()"))
+    assertTrue("PmpViewModel must wire getAggregatedCashboxBalances on Dispatchers.IO", vmSource.contains("repository.getAggregatedCashboxBalances()"))
   }
 }
 

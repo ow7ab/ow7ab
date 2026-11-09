@@ -472,44 +472,43 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         _uiMessage.value = UiMessage(msg, isError)
     }
 
-    // --- Derived Calculated States ---
-    val currencyBalances: StateFlow<Map<String, Double>> = movements.map { list ->
-        val balances = mutableMapOf<String, Double>()
-        for (m in list) {
-            val sign = if (m.direction == "وارد") 1.0 else -1.0
-            val current = balances.getOrDefault(m.currency, 0.0)
-            balances[m.currency] = current + (sign * m.amount)
+    // --- Derived Calculated States via SQL Aggregations (SUM / GROUP BY on Dispatchers.IO) ---
+    val currencyBalances: StateFlow<Map<String, Double>> = repository.getAggregatedCurrencyBalances()
+        .map { rows ->
+            val balances = LinkedHashMap<String, Double>(rows.size)
+            for (row in rows) {
+                balances[row.currency] = row.netBalance
+            }
+            balances as Map<String, Double>
         }
-        balances
-    }
-        .flowOn(Dispatchers.Default)
+        .flowOn(Dispatchers.IO)
+        .catch { emit(emptyMap()) }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
-    val cashboxBalances: StateFlow<Map<Pair<String, String>, Double>> = movements.map { list ->
-        val map = mutableMapOf<Pair<String, String>, Double>()
-        for (m in list) {
-            val key = Pair(m.cashbox.trim(), m.currency.trim())
-            val sign = if (m.direction == "وارد") 1.0 else -1.0
-            val current = map.getOrDefault(key, 0.0)
-            map[key] = current + (sign * m.amount)
+    val cashboxBalances: StateFlow<Map<Pair<String, String>, Double>> = repository.getAggregatedCashboxBalances()
+        .map { rows ->
+            val map = LinkedHashMap<Pair<String, String>, Double>(rows.size)
+            for (row in rows) {
+                map[Pair(row.cashbox.trim(), row.currency.trim())] = row.netBalance
+            }
+            map as Map<Pair<String, String>, Double>
         }
-        map
-    }
-        .flowOn(Dispatchers.Default)
+        .flowOn(Dispatchers.IO)
+        .catch { emit(emptyMap()) }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
-    val productStockBalances: StateFlow<Map<Long, Double>> = stockMoves.map { list ->
-        val map = mutableMapOf<Long, Double>()
-        for (sm in list) {
-            val sign = if (sm.kind in listOf("IN", "RETURN")) 1.0 else -1.0
-            val current = map.getOrDefault(sm.productId, 0.0)
-            map[sm.productId] = current + (sign * sm.quantity)
+    val productStockBalances: StateFlow<Map<Long, Double>> = repository.getAggregatedProductStockBalances()
+        .map { rows ->
+            val map = LinkedHashMap<Long, Double>(rows.size)
+            for (row in rows) {
+                map[row.productId] = row.netBalance
+            }
+            map as Map<Long, Double>
         }
-        map
-    }
-        .flowOn(Dispatchers.Default)
+        .flowOn(Dispatchers.IO)
+        .catch { emit(emptyMap()) }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
@@ -769,31 +768,38 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 try {
                     updateManager.observeCloudUpdatesRealtime(serverClusterCode.value) { liveUpdate ->
-                        val installedCode = updateManager.getEffectiveVersionCode()
-                        if (liveUpdate.versionCode > installedCode) {
-                            _availableUpdate.value = liveUpdate
-                            _updateAvailable.value = true
-                            if (_updateUiState.value != com.example.util.UpdateUiState.DOWNLOADING &&
-                                _updateUiState.value != com.example.util.UpdateUiState.READY_TO_INSTALL &&
-                                _updateUiState.value != com.example.util.UpdateUiState.INSTALLING
-                            ) {
-                                _updateUiState.value = com.example.util.UpdateUiState.AVAILABLE
-                                _lastUpdateCheckStatus.value = "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات."
+                        viewModelScope.launch {
+                            val installedCode = updateManager.getEffectiveVersionCode()
+                            val verifiedReachable = if (liveUpdate.versionCode > installedCode) {
+                                updateManager.verifyCandidateApkReachability(liveUpdate)
+                            } else {
+                                null
                             }
-                            com.example.util.UpdateNotificationHelper.notifyNewUpdateAvailableIfNeeded(
-                                context = application,
-                                updateInfo = liveUpdate,
-                                installedVersionCode = installedCode
-                            )
-                        } else {
-                            _availableUpdate.value = null
-                            _updateAvailable.value = false
-                            if (!_isDownloadingUpdate.value) {
-                                _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
-                                _lastUpdateCheckStatus.value = "أنت تستخدم أحدث إصدار من PMP PAINTS."
+                            if (verifiedReachable != null && verifiedReachable.versionCode > installedCode) {
+                                _availableUpdate.value = verifiedReachable
+                                _updateAvailable.value = true
+                                if (_updateUiState.value != com.example.util.UpdateUiState.DOWNLOADING &&
+                                    _updateUiState.value != com.example.util.UpdateUiState.READY_TO_INSTALL &&
+                                    _updateUiState.value != com.example.util.UpdateUiState.INSTALLING
+                                ) {
+                                    _updateUiState.value = com.example.util.UpdateUiState.AVAILABLE
+                                    _lastUpdateCheckStatus.value = "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات."
+                                }
+                                com.example.util.UpdateNotificationHelper.notifyNewUpdateAvailableIfNeeded(
+                                    context = application,
+                                    updateInfo = verifiedReachable,
+                                    installedVersionCode = installedCode
+                                )
+                            } else {
+                                _availableUpdate.value = null
+                                _updateAvailable.value = false
+                                if (!_isDownloadingUpdate.value) {
+                                    _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
+                                    _lastUpdateCheckStatus.value = "أنت تستخدم أحدث إصدار من PMP PAINTS."
+                                }
                             }
+                            refreshBuildIdentityReport()
                         }
-                        refreshBuildIdentityReport()
                     }
                     checkForAppUpdates(manual = false)
                 } catch (e: Exception) {
@@ -1064,10 +1070,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             val res = repository.clearCustomerBalance(customerId, customerName, resolveUserActor("المدير"))
             res.onSuccess {
-                postMessage("تم تصفير وحذف المبالغ المسجلة على العميل ($customerName) بنجاح")
+                postMessage("تمت تسوية وإقفال المديونية المسجلة على العميل ($customerName) بقيد تسوية معتمد مع الحفاظ على سجل الدفاتر")
                 persistAndSyncToServer()
             }.onFailure {
-                postMessage(it.message ?: "تعذر تصفير حساب العميل", isError = true)
+                postMessage(it.message ?: "تعذر تسوية حساب العميل", isError = true)
             }
         }
     }
@@ -1487,7 +1493,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     val currentMoves = repository.getDao().getStockMovesDirect().filter { it.productId == product.id }
                     val currentBalance = currentMoves.sumOf { sm ->
-                        val sign = if (sm.kind in listOf("IN", "RETURN")) 1.0 else -1.0
+                        val sign = if (sm.kind in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع")) 1.0 else -1.0
                         sign * sm.quantity
                     }
                     val delta = quantityInput - currentBalance

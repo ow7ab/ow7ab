@@ -659,41 +659,19 @@ class UpdateManager(private val context: Context) {
                 )
             }
         }
-
-        // في حال نشر المدير إصداراً سحابياً موثقاً لتجربة نظام التحديثات قبل اكتمال رفع GitHub Pages (مع استثناء النسخة المعطوبة القديمة 22)
-        if (candidate.versionCode != 22 && candidate.releaseStatus.equals("PUBLISHED", ignoreCase = true)) {
-            val localSignedApk = runCatching { File(appContext.applicationInfo.sourceDir) }.getOrNull()
-            if (localSignedApk != null && localSignedApk.exists() && isValidZipApkHeader(localSignedApk)) {
-                val resolvedSize = if (candidate.fileSize > 0L) candidate.fileSize else localSignedApk.length()
-                val resolvedSizeMb = if (resolvedSize > 0L) {
-                    Math.round((resolvedSize.toDouble() / (1024.0 * 1024.0)) * 100.0) / 100.0
-                } else {
-                    candidate.fileSizeMb
-                }
-                val fallbackUrl = normalizeDownloadUrl(
-                    candidate.downloadUrl.ifBlank { "$GITHUB_PAGES_BASE_URL/$CANONICAL_APK_ASSET_NAME" },
-                    candidate.versionName,
-                    candidate.versionCode
-                )
-                return@withContext candidate.copy(
-                    downloadUrl = fallbackUrl,
-                    fileSize = resolvedSize,
-                    fileSizeMb = resolvedSizeMb,
-                    releaseStatus = "PUBLISHED"
-                )
-            }
-        }
         null
     }
 
     /**
      * إصلاح تلقائي لبيانات Firestore إذا كانت تشير إلى إصدار غير منشور (مثل v3.22-PRO Build 22 المسبب لـ HTTP 404)
+     * يتم تنفيذه فقط في حال امتلاك الجلسة الحالية صلاحية المدير العام لمنع أخطاء PERMISSION_DENIED.
      */
     private suspend fun repairStaleFirestoreMetadataIfNeeded(
         staleCandidate: UpdateInfo,
         validPublishedBaseline: UpdateInfo = LATEST_CLOUD_RELEASE_INFO,
         clusterCode: String = "PMP-MAIN-01"
     ) {
+        if (!adminBroadcastGuardEnabled) return
         runCatching {
             val firestore = getFirestore()
             val normalizedCluster = clusterCode.trim().uppercase().ifBlank { "PMP-MAIN-01" }
@@ -922,28 +900,16 @@ class UpdateManager(private val context: Context) {
             }
 
             if (verifiedWorkingUrl == null) {
-                val localSignedApk = runCatching { File(appContext.applicationInfo.sourceDir) }.getOrNull()
-                if (resolvedCandidate.versionCode != 22 && localSignedApk != null && localSignedApk.exists() && isValidZipApkHeader(localSignedApk)) {
-                    verifiedWorkingUrl = normalizeDownloadUrl(
-                        resolvedCandidate.downloadUrl.ifBlank { "$GITHUB_PAGES_BASE_URL/$CANONICAL_APK_ASSET_NAME" },
-                        resolvedCandidate.versionName,
-                        resolvedCandidate.versionCode
+                val details = probeStatuses.take(3).joinToString(" | ")
+                DeveloperUpdateLogger.warn(
+                    "ReleaseVerify",
+                    "Blocked publishing v${resolvedCandidate.versionName} (b${resolvedCandidate.versionCode}): APK unreachable ($details)"
+                )
+                return@withContext Result.failure(
+                    Exception(
+                        "تم إيقاف النشر لحماية المستخدمين: ملف التحديث للإصدار v${resolvedCandidate.versionName.removePrefix("v")} غير متاح بعد على خادم الإصدارات. يرجى التأكد من اكتمال بناء ورفع الإصدار أولاً."
                     )
-                    if (verifiedContentLength <= 0L) {
-                        verifiedContentLength = localSignedApk.length()
-                    }
-                } else {
-                    val details = probeStatuses.take(3).joinToString(" | ")
-                    DeveloperUpdateLogger.warn(
-                        "ReleaseVerify",
-                        "Blocked publishing v${resolvedCandidate.versionName} (b${resolvedCandidate.versionCode}): APK unreachable ($details)"
-                    )
-                    return@withContext Result.failure(
-                        Exception(
-                            "تم إيقاف النشر لحماية المستخدمين: ملف التحديث للإصدار v${resolvedCandidate.versionName.removePrefix("v")} غير متاح بعد على خادم الإصدارات. يرجى التأكد من اكتمال بناء ورفع الإصدار أولاً."
-                        )
-                    )
-                }
+                )
             }
 
             val cleanVName = resolvedCandidate.versionName.removePrefix("v").removePrefix("V").trim()
@@ -995,8 +961,8 @@ class UpdateManager(private val context: Context) {
             val bustedUrl = buildCacheBustedUrl(apkUrl)
             conn = (URL(bustedUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 9_000
-                readTimeout = 9_000
+                connectTimeout = 15_000
+                readTimeout = 30_000
                 useCaches = false
                 instanceFollowRedirects = true
                 setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -1050,8 +1016,8 @@ class UpdateManager(private val context: Context) {
             val url = URL(bustedUrl)
             connection = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 9_000
-                readTimeout = 9_000
+                connectTimeout = 15_000
+                readTimeout = 30_000
                 useCaches = false
                 defaultUseCaches = false
                 instanceFollowRedirects = true
@@ -1081,8 +1047,8 @@ class UpdateManager(private val context: Context) {
             val url = URL(bustedUrl)
             connection = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 9_000
-                readTimeout = 9_000
+                connectTimeout = 15_000
+                readTimeout = 30_000
                 useCaches = false
                 defaultUseCaches = false
                 instanceFollowRedirects = true
@@ -2053,8 +2019,8 @@ class UpdateManager(private val context: Context) {
                 val url = URL(downloadUrlWithCacheBuster)
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
-                    connectTimeout = 4_500
-                    readTimeout = 8_000
+                    connectTimeout = 15_000
+                    readTimeout = 30_000
                     useCaches = false
                     defaultUseCaches = false
                     instanceFollowRedirects = true
@@ -2159,57 +2125,8 @@ class UpdateManager(private val context: Context) {
             }
         }
 
-        // إذا لم تكن الروابط الخارجية (GitHub Releases / Storage) متاحة بعد، نقوم بتدفق حزمة البناء الموقّعة المعتمدة
-        // تدريجياً مع شريط تقدم فعلي حتى يكتمل التنزيل والتثبيت بسلاسة دون توقف عند 0% أو فشل اتصال.
         if (!downloadedSuccessfully) {
-            val baseInstalledArchive = runCatching { File(appContext.applicationInfo.sourceDir) }.getOrNull()
-            if (baseInstalledArchive != null && baseInstalledArchive.exists() && baseInstalledArchive.length() >= MIN_VALID_APK_SIZE_BYTES) {
-                runCatching {
-                    val totalBytes = baseInstalledArchive.length()
-                    val totalMb = (totalBytes.toDouble() / (1024.0 * 1024.0)).coerceAtLeast(1.0)
-                    var streamedBytes = 0L
-                    var lastReportedPct = 15
-                    FileInputStream(baseInstalledArchive).use { input ->
-                        FileOutputStream(tempFile, false).use { output ->
-                            val buffer = ByteArray(64 * 1024)
-                            var read: Int
-                            while (input.read(buffer).also { read = it } != -1) {
-                                if (cancelDownloadRequested) {
-                                    output.flush()
-                                    _downloadState.value = DownloadState.Cancelled
-                                    return@withContext Result.failure(CancellationException("تم إيقاف تنزيل التحديث."))
-                                }
-                                output.write(buffer, 0, read)
-                                streamedBytes += read
-                                val pct = (15 + ((streamedBytes * 84L) / totalBytes).toInt()).coerceIn(15, 99)
-                                if (pct >= lastReportedPct + 4 || pct == 99) {
-                                    lastReportedPct = pct
-                                    val curMb = streamedBytes.toDouble() / (1024.0 * 1024.0)
-                                    onProgress(pct, curMb, totalMb)
-                                    _downloadState.value = DownloadState.Downloading(
-                                        progressPercent = pct,
-                                        downloadedMb = curMb,
-                                        totalMb = totalMb,
-                                        attempt = 1
-                                    )
-                                    kotlinx.coroutines.delay(18)
-                                }
-                            }
-                            output.flush()
-                        }
-                    }
-                    if (tempFile.exists() && isValidZipApkHeader(tempFile)) {
-                        downloadedSuccessfully = true
-                        DeveloperUpdateLogger.info(
-                            "DownloadApk",
-                            "Prepared verified signed APK package stream (${tempFile.length()} bytes) for v${updateInfo.versionName}"
-                        )
-                    }
-                }
-            }
-        }
-
-        if (!downloadedSuccessfully) {
+            if (tempFile.exists()) tempFile.delete()
             val errorMsg = USER_ERROR_DOWNLOAD_FAILED
             _downloadState.value = DownloadState.Failed(errorMsg, canRetry = true)
             return@withContext Result.failure(Exception(errorMsg))
@@ -2298,7 +2215,7 @@ class UpdateManager(private val context: Context) {
             }
 
             val archivePackage = archiveInfo.packageName.orEmpty()
-            if (archivePackage != appContext.packageName) {
+            if (archivePackage != "com.pmp" || archivePackage != appContext.packageName) {
                 val devMsg = "Package name mismatch: archive=$archivePackage vs installed=${appContext.packageName}"
                 DeveloperUpdateLogger.error("ApkValidate", devMsg)
                 return ApkValidationResult(
@@ -2317,13 +2234,35 @@ class UpdateManager(private val context: Context) {
 
             val installedOsVersionCode = getInstalledVersionCode()
 
-            // منع تثبيت حزمة أقدم من النسخة المثبتة في النظام (منع Downgrade)
-            if (archiveVersionCode < installedOsVersionCode) {
-                val devMsg = "Archive versionCode ($archiveVersionCode) is older than installed ($installedOsVersionCode)"
+            // إلزامي: يجب أن يكون versionCode داخل الحزمة المنزلّة أكبر فعلياً من النسخة المثبّتة حالياً لمنع التثبيت الوهمي أو التراجع (Downgrade)
+            if (archiveVersionCode <= installedOsVersionCode) {
+                val devMsg = "Archive versionCode ($archiveVersionCode) is not strictly greater than installed ($installedOsVersionCode)"
                 DeveloperUpdateLogger.error("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
-                    errorMessage = "هذا الإصدار أقدم من النسخة المثبّتة حالياً على جهازك.",
+                    errorMessage = "حزمة التحديث المنزّلة (بناء $archiveVersionCode) ليست أحدث من النسخة المثبّتة حالياً (بناء $installedOsVersionCode).",
+                    developerReason = devMsg
+                )
+            }
+
+            // التحقق من أن رقم إصدار الحزمة يطابق أو يفوق الإصدار المتوقع
+            if (expectedUpdate.versionCode > 0 && archiveVersionCode < expectedUpdate.versionCode) {
+                val devMsg = "Archive versionCode ($archiveVersionCode) is less than expectedUpdate.versionCode (${expectedUpdate.versionCode})"
+                DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                return ApkValidationResult(
+                    isValid = false,
+                    errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
+                    developerReason = devMsg
+                )
+            }
+
+            // التحقق من تطابق حجم الملف مع الحجم المتوقع في بيانات الإصدار عند توفره
+            if (expectedUpdate.fileSize > MIN_VALID_APK_SIZE_BYTES && apkFile.length() != expectedUpdate.fileSize) {
+                val devMsg = "APK file size mismatch: actual=${apkFile.length()} vs expected=${expectedUpdate.fileSize}"
+                DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                return ApkValidationResult(
+                    isValid = false,
+                    errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
                     developerReason = devMsg
                 )
             }
@@ -2343,15 +2282,11 @@ class UpdateManager(private val context: Context) {
                 )
             }
 
-            // التحقق من بصمة SHA-256 للحزمة عند توفرها
+            // التحقق الصارم من بصمة SHA-256 للحزمة عند توفرها
             val expectedSha = expectedUpdate.sha256Checksum.trim().lowercase()
-            val installedBaseSha = getInstalledBaseApkSha256().trim().lowercase()
-            if (expectedSha.length == 64 &&
-                expectedSha != LATEST_CLOUD_RELEASE_INFO.sha256Checksum.lowercase() &&
-                expectedSha != installedBaseSha
-            ) {
+            if (expectedSha.length == 64) {
                 val actualSha = computeFileSha256(apkFile).lowercase()
-                if (actualSha != expectedSha && actualSha != installedBaseSha) {
+                if (actualSha != expectedSha) {
                     val devMsg = "APK SHA-256 mismatch: actual=$actualSha vs expected=$expectedSha"
                     DeveloperUpdateLogger.error("ApkValidate", devMsg)
                     return ApkValidationResult(
@@ -2458,8 +2393,8 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * تثبيت التحديث الموثّق عبر مثبّت حزم أندرويد الرسمي فقط (FileProvider / PackageInstaller).
-     * لا يتم اعتبار التحديث مثبتاً إلا بعد تثبيت حزمة APK الفعلية في نظام أندرويد.
+     * تثبيت التحديث الموثّق عبر مثبّت حزم أندرويد الرسمي فقط (FileProvider / PackageInstaller)
+     * بعد اجتياز الفحص الجنائي الصارم للحزمة عبر PackageManager.getPackageArchiveInfo.
      */
     fun installApk(
         activityContext: Context = appContext,
@@ -2478,6 +2413,12 @@ class UpdateManager(private val context: Context) {
             val safeError = sanitizeUserFacingErrorMessage(validation.errorMessage)
             _downloadState.value = DownloadState.Failed(safeError, canRetry = true)
             return Result.failure(IllegalStateException(safeError))
+        }
+
+        if (!isExternalBinaryApkUpgrade(apkFile)) {
+            val rejectMsg = sanitizeUserFacingErrorMessage(USER_ERROR_CORRUPTED_PACKAGE)
+            _downloadState.value = DownloadState.Failed(rejectMsg, canRetry = true)
+            return Result.failure(IllegalStateException(rejectMsg))
         }
 
         if (!canRequestPackageInstalls()) {
