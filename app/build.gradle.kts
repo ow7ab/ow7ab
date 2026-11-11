@@ -10,6 +10,24 @@ plugins {
   alias(libs.plugins.google.services)
 }
 
+// Suppress benign KSP in-process IntelliJ Core post-disposal callback on AWT-EventQueue-0
+// (BinaryFileTypeDecompilers -> FileDocumentManager.getInstance after ApplicationManager teardown)
+val previousUncaughtHandler = Thread.getDefaultUncaughtExceptionHandler()
+val kspAwtSafeHandler = Thread.UncaughtExceptionHandler { thread, throwable ->
+  val isKspAwtTeardownRace =
+      thread.name.startsWith("AWT-EventQueue") &&
+          throwable is NullPointerException &&
+          (throwable.message?.contains("ksp.com.intellij.openapi.application.Application") == true ||
+              throwable.stackTrace.any { it.className.startsWith("ksp.com.intellij.") })
+  if (!isKspAwtTeardownRace) {
+    previousUncaughtHandler?.uncaughtException(thread, throwable)
+  }
+}
+Thread.setDefaultUncaughtExceptionHandler(kspAwtSafeHandler)
+Thread.getAllStackTraces().keys
+    .filter { it.name.startsWith("AWT-EventQueue") }
+    .forEach { it.uncaughtExceptionHandler = kspAwtSafeHandler }
+
 val resolvedVersionCode: Int =
     (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 15
 val resolvedVersionName: String =
@@ -203,8 +221,9 @@ dependencies {
   androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
-  "ksp"(libs.androidx.room.compiler)
-  "ksp"(libs.moshi.kotlin.codegen)
+  "kspDebug"(libs.androidx.room.compiler)
+  "kspRelease"(libs.androidx.room.compiler)
+  // "ksp"(libs.moshi.kotlin.codegen)
 }
 
 tasks.withType<Test> {
