@@ -1,11 +1,11 @@
 {
-  "versionCode": 16,
-  "versionName": "v4.1",
-  "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v4.1-b16.apk",
-  "apkUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v4.1-b16.apk",
-  "githubReleaseUrl": "https://github.com/ow7ab/ow7ab/releases/download/v4.1/pmp-paints-v4.1-b16.apk",
+  "versionCode": 17,
+  "versionName": "v4.2",
+  "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v4.2-b17.apk",
+  "apkUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v4.2-b17.apk",
+  "githubReleaseUrl": "https://github.com/ow7ab/ow7ab/releases/download/v4.2/pmp-paints-v4.2-b17.apk",
   "rawPublicApkUrl": "https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/pmp-paints-latest.apk",
-  "releaseNotes": "• إصدار v4.1 (بناء 16): تحديث رسمي عبر مكتبة Google Play الشخصية (Google Play Personal Library) مع دعم التحديث السلس المباشر.\n• اعتماد الوضع المظلم الأسود الفائق (True Pitch Black Dark Mode) والبنية المعيارية الموحدة.\n• الحفاظ الكامل على الحسابات والصلاحيات والبيانات المالية والمخزنية.",
+  "releaseNotes": "• إصدار v4.2 (بناء 17): تفعيل ضغط وتعمية الكود عبر R8/ProGuard لتقليل حجم التطبيق وتعزيز الأمان، مع إضافة سجل تاريخ الإصدارات من Firestore على صفحة التحديثات الرسمية.\n• تحديث رسمي عبر مكتبة Google Play الشخصية (Google Play Personal Library) مع الحفاظ الكامل على البيانات.",
   "apkSha256": "115155cd57c7c17245fa8b3ce3e90b94a509ca2c2abcfbfcf82ba0193adf7620",
   "sha256": "115155cd57c7c17245fa8b3ce3e90b94a509ca2c2abcfbfcf82ba0193adf7620",
   "sha256Checksum": "115155cd57c7c17245fa8b3ce3e90b94a509ca2c2abcfbfcf82ba0193adf7620",
@@ -20,7 +20,7 @@
   "mandatory": false,
   "publishedAt": "2026-11-10T10:00:00Z",
   "releaseStatus": "PUBLISHED",
-  "buildId": "PMP-v4.1-b16-9a8b7c6d",
+  "buildId": "PMP-v4.2-b17-9a8b7c6d",
   "gitCommit": "9a8b7c6d",
   "signingCertSha256": "1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05"
 }

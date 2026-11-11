@@ -467,7 +467,7 @@ class ExampleUnitTest {
     assertNotNull(rootParsed)
     assertNotNull(publicParsed)
     assertEquals(BuildConfig.VERSION_CODE, rootParsed!!.versionCode)
-    assertEquals("v4.1", rootParsed.versionName)
+    assertEquals("v4.2", rootParsed.versionName)
     assertEquals(rootParsed.versionCode, publicParsed!!.versionCode)
     assertEquals(rootParsed.versionName, publicParsed.versionName)
     assertEquals(rootParsed.buildId, publicParsed.buildId)
@@ -1336,35 +1336,35 @@ class ExampleUnitTest {
 
   @Test
   fun testModularCrossPlatformArchitectureAndTrueBlackDarkMode() {
-    // 1. Verify unified v4.1 (versionCode 16) across PmpAppVersionContract, BuildConfig, UpdateManager, and version.json
+    // 1. Verify unified v4.2 (versionCode 17) across PmpAppVersionContract, BuildConfig, UpdateManager, and version.json
     assertEquals(BuildConfig.VERSION_CODE, com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE)
-    assertEquals("v4.1", com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME)
-    assertEquals(16, BuildConfig.VERSION_CODE)
-    assertEquals("v4.1", BuildConfig.VERSION_NAME)
+    assertEquals("v4.2", com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME)
+    assertEquals(17, BuildConfig.VERSION_CODE)
+    assertEquals("v4.2", BuildConfig.VERSION_NAME)
     assertEquals(BuildConfig.VERSION_CODE, com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionCode)
-    assertEquals("v4.1", com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionName)
+    assertEquals("v4.2", com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionName)
 
-    val parsedVersion = com.example.core.architecture.PmpAppVersionContract.parseSemanticVersion("v4.1")
+    val parsedVersion = com.example.core.architecture.PmpAppVersionContract.parseSemanticVersion("v4.2")
     assertEquals(4, parsedVersion.major)
-    assertEquals(1, parsedVersion.minor)
+    assertEquals(2, parsedVersion.minor)
     assertEquals(0, parsedVersion.patch)
 
     assertTrue(
-      "Remote version v4.2 (code 17) must be detected as newer than v4.1 (code 16)",
+      "Remote version v4.3 (code 18) must be detected as newer than v4.2 (code 17)",
       com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(
-        installedVersionCode = 16,
-        installedVersionName = "v4.1",
-        remoteVersionCode = 17,
-        remoteVersionName = "v4.2"
+        installedVersionCode = 17,
+        installedVersionName = "v4.2",
+        remoteVersionCode = 18,
+        remoteVersionName = "v4.3"
       )
     )
     assertFalse(
-      "Same version v4.1 (code 16) must not trigger a redundant update",
+      "Same version v4.2 (code 17) must not trigger a redundant update",
       com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(
-        installedVersionCode = 16,
-        installedVersionName = "v4.1",
-        remoteVersionCode = 16,
-        remoteVersionName = "v4.1"
+        installedVersionCode = 17,
+        installedVersionName = "v4.2",
+        remoteVersionCode = 17,
+        remoteVersionName = "v4.2"
       )
     )
 

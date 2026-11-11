@@ -29,9 +29,9 @@ Thread.getAllStackTraces().keys
     .forEach { it.uncaughtExceptionHandler = kspAwtSafeHandler }
 
 val resolvedVersionCode: Int =
-    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 16
+    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 17
 val resolvedVersionName: String =
-    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "v4.1"
+    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "v4.2"
 val resolvedGitCommit: String =
     (project.findProperty("gitCommit")?.toString()?.trim()?.takeIf { it.isNotBlank() })
         ?: System.getenv("GITHUB_SHA")?.take(8)?.takeIf { it.isNotBlank() }
@@ -75,8 +75,8 @@ buildFeatures {
     applicationId = "com.aistudio.pmppaints.erp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 16
-    versionName = "v4.1"
+    versionCode = 17
+    versionName = "v4.2"
     project.findProperty("versionCode")?.toString()?.toIntOrNull()?.let { versionCode = it }
     project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }?.let { versionName = it }
 

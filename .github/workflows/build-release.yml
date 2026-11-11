@@ -11,15 +11,15 @@ on:
       version_code:
         description: "رقم البناء الجديد (versionCode) - يجب أن يكون أكبر من الإصدار السابق"
         required: true
-        default: "16"
+        default: "17"
       version_name:
-        description: "اسم الإصدار (versionName) مثل v4.1"
+        description: "اسم الإصدار (versionName) مثل v4.2"
         required: true
-        default: "v4.1"
+        default: "v4.2"
       release_notes:
         description: "ملاحظات التحديث التي ستظهر للمستخدمين"
         required: false
-        default: "إصدار v4.1: تحديث رسمي عبر مكتبة Google Play الشخصية، بنية معيارية متطورة جاهزة للتوسع، والوضع المظلم الأسود الفائق."
+        default: "إصدار v4.2: تفعيل R8/ProGuard لتقليل حجم التطبيق وتعزيز الأمان، وإضافة سجل تاريخ الإصدارات من Firestore."
       public_base_url:
         description: "رابط الاستضافة العامة الاختياري (يُستخدم GitHub Pages تلقائياً عند تركه فارغاً)"
         required: false
