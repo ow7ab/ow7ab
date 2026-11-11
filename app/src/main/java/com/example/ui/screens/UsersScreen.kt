@@ -645,7 +645,7 @@ fun UsersScreen(
                                                         .clip(RoundedCornerShape(10.dp))
                                                         .background(
                                                             if (isSelected) PmpBrandRed.copy(alpha = 0.14f)
-                                                            else Color(0xFFF1F5F9)
+                                                            else PmpSubtleSurface
                                                         )
                                                         .border(
                                                             1.dp,
@@ -713,7 +713,7 @@ fun UsersScreen(
                                                         .clip(RoundedCornerShape(10.dp))
                                                         .background(
                                                             if (isSelected) PmpBrandNavy.copy(alpha = 0.14f)
-                                                            else Color(0xFFF1F5F9)
+                                                            else PmpSubtleSurface
                                                         )
                                                         .border(
                                                             1.dp,
@@ -801,7 +801,7 @@ fun UsersScreen(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .background(Color(0xFFFEF2F2))
+                                    .background(PmpDangerSoftSurface)
                                     .padding(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
@@ -868,7 +868,7 @@ fun UsersScreen(
     userPendingSwitch?.let { targetUser ->
         AlertDialog(
             onDismissRequest = { userPendingSwitch = null },
-            containerColor = Color.White,
+            containerColor = PmpWhiteCard,
             title = {
                 Text(
                     text = "تبديل الحساب النشط",
@@ -928,7 +928,7 @@ fun UsersScreen(
             modifier = Modifier
                 .fillMaxWidth(0.95f)
                 .heightIn(max = 680.dp),
-            containerColor = Color.White,
+            containerColor = PmpWhiteCard,
             title = {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1038,7 +1038,7 @@ fun UsersScreen(
                                             .clip(RoundedCornerShape(10.dp))
                                             .background(
                                                 if (isSelected) PmpBrandRed.copy(alpha = 0.14f)
-                                                else Color(0xFFF1F5F9)
+                                                else PmpSubtleSurface
                                             )
                                             .border(
                                                 1.dp,
@@ -1107,7 +1107,7 @@ fun UsersScreen(
                                             .clip(RoundedCornerShape(10.dp))
                                             .background(
                                                 if (isSelected) PmpBrandNavy.copy(alpha = 0.14f)
-                                                else Color(0xFFF1F5F9)
+                                                else PmpSubtleSurface
                                             )
                                             .border(
                                                 1.dp,
@@ -1347,7 +1347,7 @@ private fun UserAccountCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFFF8FAFC))
+                    .background(PmpContainerBarSurface)
                     .border(0.5.dp, GlassBorder, RoundedCornerShape(10.dp))
                     .padding(horizontal = 10.dp, vertical = 7.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1510,7 +1510,7 @@ private fun UserAccountCard(
                             modifier = Modifier
                                 .height(36.dp)
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFFF1F5F9))
+                                .background(PmpSubtleSurface)
                                 .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
                                 .clickable { onRegenerateToken() }
                                 .padding(horizontal = 8.dp),
@@ -1643,7 +1643,7 @@ private fun ArchivedUserAccountCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFFF8FAFC))
+                        .background(PmpContainerBarSurface)
                         .border(0.5.dp, GlassBorder, RoundedCornerShape(10.dp))
                         .padding(horizontal = 10.dp, vertical = 7.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,

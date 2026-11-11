@@ -28,6 +28,7 @@ import com.example.data.local.FactoryMachineEntity
 import com.example.data.local.FormulationEntity
 import com.example.data.local.FormulationIngredient
 import com.example.data.local.ProductionBatchEntity
+import com.example.ui.theme.*
 import com.example.util.PvcEngine
 import java.text.DecimalFormat
 import java.text.SimpleDateFormat
@@ -141,7 +142,7 @@ fun DailyProductionBatchModal(
                 .fillMaxHeight(0.92f)
                 .testTag("daily_production_batch_modal"),
             shape = RoundedCornerShape(20.dp),
-            color = Color(0xFFF8FAFC),
+            color = PmpWhiteBg,
             tonalElevation = 8.dp,
             shadowElevation = 16.dp
         ) {
@@ -178,12 +179,12 @@ fun DailyProductionBatchModal(
                                 text = "تسجيل تشغيلة إنتاج يومية (Firestore Sync)",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 16.sp,
-                                color = Color(0xFF0F172A)
+                                color = TextDark
                             )
                             Text(
                                 text = "ربط التشغيلة بالتركيبة الكيميائية وحساب استهلاك الخامات في السحابة",
                                 fontSize = 11.sp,
-                                color = Color(0xFF64748B)
+                                color = TextMuted
                             )
                         }
                     }
@@ -195,12 +196,12 @@ fun DailyProductionBatchModal(
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "إغلاق",
-                            tint = Color(0xFF64748B)
+                            tint = TextMuted
                         )
                     }
                 }
 
-                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color(0xFFE2E8F0))
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = GlassBorder)
 
                 // Scrollable Content
                 Column(
@@ -211,7 +212,7 @@ fun DailyProductionBatchModal(
                 ) {
                     // SECTION 1: Linked Chemical Formulation
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
                         shape = RoundedCornerShape(14.dp),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
@@ -230,7 +231,7 @@ fun DailyProductionBatchModal(
                                     text = "1. اختيار التركيبة المعملية المعتمدة (Formulation)",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.sp,
-                                    color = Color(0xFF1E293B)
+                                    color = TextDark
                                 )
                             }
 
@@ -257,7 +258,7 @@ fun DailyProductionBatchModal(
                                                     ?: "اختر التركيبة الكيميائية",
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.SemiBold,
-                                                color = Color(0xFF0F172A)
+                                                color = TextDark
                                             )
                                             Icon(Icons.Default.ArrowDropDown, contentDescription = null)
                                         }
@@ -273,7 +274,7 @@ fun DailyProductionBatchModal(
                                                 text = {
                                                     Column {
                                                         Text("[${form.formulaNo}] ${form.productName}", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                                        Text("النوع: ${form.paintType} | PVC: ${form.calculatedPvc}% | الكثافة: ${form.calculatedDensity} kg/L", fontSize = 10.sp, color = Color(0xFF64748B))
+                                                        Text("النوع: ${form.paintType} | PVC: ${form.calculatedPvc}% | الكثافة: ${form.calculatedDensity} kg/L", fontSize = 10.sp, color = TextMuted)
                                                     }
                                                 },
                                                 onClick = {
@@ -293,7 +294,7 @@ fun DailyProductionBatchModal(
                                     Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .background(Color(0xFFF1F5F9), RoundedCornerShape(10.dp))
+                                            .background(PmpSubtleSurface, RoundedCornerShape(10.dp))
                                             .padding(12.dp),
                                         verticalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
@@ -302,30 +303,30 @@ fun DailyProductionBatchModal(
                                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                                         ) {
                                             Column(modifier = Modifier.weight(1f)) {
-                                                Text("تركيز الصبغة بالحجم (PVC)", fontSize = 11.sp, color = Color(0xFF64748B))
+                                                Text("تركيز الصبغة بالحجم (PVC)", fontSize = 11.sp, color = TextMuted)
                                                 Spacer(modifier = Modifier.height(2.dp))
-                                                Text("${form.calculatedPvc}%", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF1E40AF))
+                                                Text("${form.calculatedPvc}%", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = PmpBlueLight)
                                             }
                                             Column(modifier = Modifier.weight(1f)) {
-                                                Text("الصلابة بالحجم", fontSize = 11.sp, color = Color(0xFF64748B))
+                                                Text("الصلابة بالحجم", fontSize = 11.sp, color = TextMuted)
                                                 Spacer(modifier = Modifier.height(2.dp))
-                                                Text("${form.totalSolidsVolume}%", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
+                                                Text("${form.totalSolidsVolume}%", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = TextDark)
                                             }
                                         }
 
-                                        HorizontalDivider(color = Color(0xFFE2E8F0), thickness = 0.8.dp)
+                                        HorizontalDivider(color = GlassBorder, thickness = 0.8.dp)
 
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                                         ) {
                                             Column(modifier = Modifier.weight(1f)) {
-                                                Text("الكثافة التصميمية", fontSize = 11.sp, color = Color(0xFF64748B))
+                                                Text("الكثافة التصميمية", fontSize = 11.sp, color = TextMuted)
                                                 Spacer(modifier = Modifier.height(2.dp))
                                                 Text("${form.calculatedDensity} kg/L", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF059669))
                                             }
                                             Column(modifier = Modifier.weight(1f)) {
-                                                Text("تكلفة الكيلو", fontSize = 11.sp, color = Color(0xFF64748B))
+                                                Text("تكلفة الكيلو", fontSize = 11.sp, color = TextMuted)
                                                 Spacer(modifier = Modifier.height(2.dp))
                                                 Text("${form.costPerKg} ج.م", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFFD97706))
                                             }
@@ -338,7 +339,7 @@ fun DailyProductionBatchModal(
 
                     // SECTION 2: Production Parameters & Machine
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
                         shape = RoundedCornerShape(14.dp),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
@@ -357,7 +358,7 @@ fun DailyProductionBatchModal(
                                     text = "2. بيانات التشغيلة وخط الإنتاج",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.sp,
-                                    color = Color(0xFF1E293B)
+                                    color = TextDark
                                 )
                             }
 
@@ -487,7 +488,7 @@ fun DailyProductionBatchModal(
 
                     // SECTION 3: Dynamic Scaled Raw Materials Consumption Breakdown
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
                         shape = RoundedCornerShape(14.dp),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
@@ -511,14 +512,14 @@ fun DailyProductionBatchModal(
                                         text = "3. استهلاك المواد الخام المحسوب للتشغيلة (${scaledIngredients.size} مادة)",
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 13.sp,
-                                        color = Color(0xFF1E293B)
+                                        color = TextDark
                                     )
                                 }
                                 Text(
                                     text = "مضروب التوسعة: x${df.format(scaleMultiplier)}",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF2563EB)
+                                    color = PmpBlueLight
                                 )
                             }
 
@@ -526,13 +527,13 @@ fun DailyProductionBatchModal(
                                 Text(
                                     text = "لم يتم تحديد مواد خام في التركيبة المختارة.",
                                     fontSize = 11.sp,
-                                    color = Color(0xFF94A3B8)
+                                    color = TextMuted
                                 )
                             } else {
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .background(Color(0xFFF8FAFC), RoundedCornerShape(8.dp))
+                                        .background(PmpContainerBarSurface, RoundedCornerShape(8.dp))
                                         .padding(8.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
@@ -540,8 +541,8 @@ fun DailyProductionBatchModal(
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .background(Color.White, RoundedCornerShape(6.dp))
-                                                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(6.dp))
+                                                .background(PmpWhiteCard, RoundedCornerShape(6.dp))
+                                                .border(1.dp, GlassBorder, RoundedCornerShape(6.dp))
                                                 .padding(horizontal = 10.dp, vertical = 6.dp),
                                             horizontalArrangement = Arrangement.SpaceBetween,
                                             verticalAlignment = Alignment.CenterVertically
@@ -553,14 +554,14 @@ fun DailyProductionBatchModal(
                                                 Box(
                                                     modifier = Modifier
                                                         .size(20.dp)
-                                                        .background(Color(0xFFE0E7FF), RoundedCornerShape(4.dp)),
+                                                        .background(PmpInfoSoftSurface, RoundedCornerShape(4.dp)),
                                                     contentAlignment = Alignment.Center
                                                 ) {
-                                                    Text("${idx + 1}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1E40AF))
+                                                    Text("${idx + 1}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = PmpBlueLight)
                                                 }
                                                 Column {
-                                                    Text(ing.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF0F172A))
-                                                    Text(ing.type, fontSize = 10.sp, color = Color(0xFF64748B))
+                                                    Text(ing.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = TextDark)
+                                                    Text(ing.type, fontSize = 10.sp, color = TextMuted)
                                                 }
                                             }
 
@@ -569,7 +570,7 @@ fun DailyProductionBatchModal(
                                                     text = "${df.format(ing.weight)} كجم",
                                                     fontSize = 12.sp,
                                                     fontWeight = FontWeight.Bold,
-                                                    color = Color(0xFF0F172A)
+                                                    color = TextDark
                                                 )
                                                 if (ing.unitCost > 0) {
                                                     Text(
@@ -588,7 +589,7 @@ fun DailyProductionBatchModal(
 
                     // SECTION 4: Quality Control (QC) & Testing
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
                         shape = RoundedCornerShape(14.dp),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
@@ -607,7 +608,7 @@ fun DailyProductionBatchModal(
                                     text = "4. الفحص المخبري واعتماد الجودة (QC)",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.sp,
-                                    color = Color(0xFF1E293B)
+                                    color = TextDark
                                 )
                             }
 
@@ -673,7 +674,7 @@ fun DailyProductionBatchModal(
 
                     // SECTION 5: Shift, Supervisor & Notes
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
                         shape = RoundedCornerShape(14.dp),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
@@ -738,7 +739,7 @@ fun DailyProductionBatchModal(
                     }
                 }
 
-                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color(0xFFE2E8F0))
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = GlassBorder)
 
                 // Actions Bar
                 Row(

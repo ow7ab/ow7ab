@@ -1446,7 +1446,7 @@ fun ReportsScreen(
                                     Box(
                                         modifier = Modifier
                                             .clip(chipShape)
-                                            .background(if (isSelected) PmpCyan.copy(alpha = 0.2f) else Color(0xFFF1F5F9))
+                                            .background(if (isSelected) PmpCyan.copy(alpha = 0.2f) else PmpSubtleSurface)
                                             .border(
                                                 width = 1.dp,
                                                 color = if (isSelected) PmpCyan else GlassBorder,
@@ -2080,7 +2080,7 @@ fun ReportsScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFF8FAFC))
+                            .background(PmpContainerBarSurface)
                             .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -2124,7 +2124,7 @@ fun ReportsScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(Color(0xFFF1F5F9))
+                                    .background(PmpSubtleSurface)
                                     .padding(horizontal = 10.dp, vertical = 8.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
@@ -2163,7 +2163,7 @@ fun ReportsScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFFEF2F2))
+                            .background(PmpDangerSoftSurface)
                             .border(1.dp, PmpBrandRed.copy(alpha = 0.25f), RoundedCornerShape(12.dp))
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -2226,7 +2226,7 @@ fun ReportsScreen(
                     modifier = Modifier.testTag("close_invoice_detail_modal_btn")
                 )
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteCard
         )
     }
 }

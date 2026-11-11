@@ -1254,7 +1254,8 @@ fun PmpNavigationMenuModal(
         ) {
             // Enterprise Header Card
             Surface(
-                color = PmpBrandNavy,
+                color = if (PmpThemeController.isDarkModeActive) Color(0xFF121216) else Color(0xFF0F294A),
+                border = BorderStroke(1.dp, GlassBorder),
                 shape = RoundedCornerShape(16.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -1307,9 +1308,9 @@ fun PmpNavigationMenuModal(
 
             // Quick Status Pill: Warehouses & Currency Separation Notice
             Surface(
-                color = Color(0xFFEFF6FF),
+                color = PmpInfoSoftSurface,
                 shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, Color(0xFFBFDBFE)),
+                border = BorderStroke(1.dp, if (PmpThemeController.isDarkModeActive) Color(0xFF1E3A8A) else Color(0xFFBFDBFE)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -1317,10 +1318,15 @@ fun PmpNavigationMenuModal(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(Icons.Default.AccountBalance, contentDescription = null, tint = Color(0xFF1E40AF), modifier = Modifier.size(18.dp))
+                    Icon(
+                        Icons.Default.AccountBalance,
+                        contentDescription = null,
+                        tint = if (PmpThemeController.isDarkModeActive) Color(0xFF60A5FA) else Color(0xFF1E40AF),
+                        modifier = Modifier.size(18.dp)
+                    )
                     Text(
                         text = "نظام الفروع المنفصل: مخازن مبيعات السودان (SDG) • مخازن مصنع مصر (EGP)",
-                        color = Color(0xFF1E3A8A),
+                        color = if (PmpThemeController.isDarkModeActive) Color(0xFF93C5FD) else Color(0xFF1E3A8A),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -1467,11 +1473,11 @@ fun PmpNavigationMenuModal(
                             }
                         },
                         enabled = isAllowed,
-                        color = if (isCurrent) Color(0xFFEFF6FF) else Color.White,
+                        color = if (isCurrent) PmpInfoSoftSurface else PmpWhiteCard,
                         shape = RoundedCornerShape(12.dp),
                         border = BorderStroke(
                             1.dp,
-                            if (isCurrent) Color(0xFF3B82F6) else Color(0xFFE2E8F0)
+                            if (isCurrent) Color(0xFF3B82F6) else GlassBorder
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1493,13 +1499,13 @@ fun PmpNavigationMenuModal(
                                     modifier = Modifier
                                         .size(38.dp)
                                         .clip(RoundedCornerShape(10.dp))
-                                        .background(item.color.copy(alpha = if (isAllowed) 0.12f else 0.05f)),
+                                        .background(item.color.copy(alpha = if (isAllowed) 0.14f else 0.05f)),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
                                         imageVector = item.icon,
                                         contentDescription = item.label,
-                                        tint = if (isAllowed) item.color else Color.LightGray,
+                                        tint = if (isAllowed) item.color else TextSubtle,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
@@ -1509,7 +1515,15 @@ fun PmpNavigationMenuModal(
                                             text = item.label,
                                             fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
                                             fontSize = 13.sp,
-                                            color = if (isAllowed) (if (isCurrent) Color(0xFF1E40AF) else Color(0xFF0F172A)) else Color.Gray
+                                            color = if (isAllowed) {
+                                                if (isCurrent) {
+                                                    if (PmpThemeController.isDarkModeActive) Color(0xFF60A5FA) else Color(0xFF1E40AF)
+                                                } else {
+                                                    TextDark
+                                                }
+                                            } else {
+                                                TextSubtle
+                                            }
                                         )
                                         if (isCurrent) {
                                             Spacer(modifier = Modifier.width(6.dp))
@@ -1530,7 +1544,7 @@ fun PmpNavigationMenuModal(
                                     Text(
                                         text = item.desc,
                                         fontSize = 10.sp,
-                                        color = if (isAllowed) Color.Gray else Color.LightGray,
+                                        color = if (isAllowed) TextMuted else TextSubtle,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )

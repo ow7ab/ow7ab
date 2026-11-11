@@ -274,8 +274,8 @@ fun PurchasesScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFFF8FAFC))
-                                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(12.dp))
+                                .background(PmpContainerBarSurface)
+                                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
@@ -728,7 +728,7 @@ fun PurchasesScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFFEF2F2))
+                            .background(PmpDangerSoftSurface)
                             .border(1.dp, PmpBrandRed.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -761,7 +761,7 @@ fun PurchasesScreen(
                     onClick = { selectedPurchaseForDetail = null }
                 )
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteSurface
         )
     }
 
@@ -843,7 +843,7 @@ fun PurchasesScreen(
             dismissButton = {
                 GlassButton(text = "إلغاء", onClick = { showAddItemDialog = false })
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteSurface
         )
     }
 
@@ -958,7 +958,7 @@ fun PurchasesScreen(
             dismissButton = {
                 GlassButton(text = "إلغاء", onClick = { itemToEdit = null })
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteSurface
         )
     }
 
@@ -998,7 +998,7 @@ fun PurchasesScreen(
             dismissButton = {
                 GlassButton(text = "إلغاء", onClick = { itemToDelete = null })
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteSurface
         )
     }
 
@@ -1065,7 +1065,7 @@ fun PurchasesScreen(
             dismissButton = {
                 GlassButton(text = "إلغاء", onClick = { showRenameCategoryDialog = false })
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteSurface
         )
     }
 }

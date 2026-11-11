@@ -232,7 +232,7 @@ fun SalesScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFF8FAFC))
+                            .background(PmpContainerBarSurface)
                             .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -263,7 +263,7 @@ fun SalesScreen(
                                         custPayCashbox = viewModel.resolveCashboxForCurrency(cur)
                                     },
                                     shape = RoundedCornerShape(8.dp),
-                                    color = if (selected) PmpBrandRed else Color.White,
+                                    color = if (selected) PmpBrandRed else PmpSubtleSurface,
                                     border = androidx.compose.foundation.BorderStroke(
                                         1.dp,
                                         if (selected) PmpBrandRed else GlassBorder
@@ -1429,7 +1429,7 @@ fun SalesScreen(
                     .clip(RoundedCornerShape(24.dp))
                     .border(1.5.dp, GlassBorder, RoundedCornerShape(24.dp))
                     .testTag("full_invoice_details_dialog"),
-                color = Color.White
+                color = PmpWhiteSurface
             ) {
                 Column(
                     modifier = Modifier
@@ -1443,7 +1443,7 @@ fun SalesScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFFF8FAFC))
+                            .background(PmpContainerBarSurface)
                             .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
                             .padding(12.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1457,7 +1457,7 @@ fun SalesScreen(
                                 modifier = Modifier
                                     .size(width = 76.dp, height = 52.dp)
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(Color.White)
+                                    .background(PmpWhiteCard)
                                     .border(1.dp, PmpBrandRed.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
                                     .padding(4.dp),
                                 contentAlignment = Alignment.Center
@@ -1509,7 +1509,7 @@ fun SalesScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
-                            .background(Color(0xFFF1F5F9))
+                            .background(PmpSubtleSurface)
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
@@ -1584,7 +1584,7 @@ fun SalesScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .background(PmpBrandNavy)
+                                .background(if (PmpThemeController.isDarkModeActive) Color(0xFF18181D) else Color(0xFF0F294A))
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -1636,7 +1636,7 @@ fun SalesScreen(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .background(if (idx % 2 == 1) Color(0xFFF8FAFC) else Color.White)
+                                        .background(if (idx % 2 == 1) PmpSubtleSurface else PmpWhiteCard)
                                         .padding(horizontal = 10.dp, vertical = 8.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
@@ -1677,7 +1677,7 @@ fun SalesScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
-                            .background(Color(0xFFFEF2F2))
+                            .background(PmpDangerSoftSurface)
                             .border(1.dp, PmpBrandRed.copy(alpha = 0.25f), RoundedCornerShape(14.dp))
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -1754,7 +1754,7 @@ fun SalesScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(14.dp))
-                                .background(Color(0xFFF0FDF4))
+                                .background(PmpSuccessSoftSurface)
                                 .border(1.dp, PmpGreen.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
                                 .padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1817,7 +1817,7 @@ fun SalesScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFFFFFBEB))
+                                .background(PmpWarningSoftSurface)
                                 .border(1.dp, PmpGold, RoundedCornerShape(12.dp))
                                 .padding(10.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1825,13 +1825,13 @@ fun SalesScreen(
                             Icon(
                                 imageVector = Icons.Default.Lock,
                                 contentDescription = null,
-                                tint = Color(0xFFB45309),
+                                tint = PmpGold,
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "صلاحية (تصدير PDF) غير مخصصة لحسابك حالياً. يمكن لمدير النظام فقط تفعيلها لك.",
-                                color = Color(0xFF92400E),
+                                color = PmpGold,
                                 fontSize = 11.5.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
@@ -1905,7 +1905,7 @@ fun SalesScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFFEF2F2))
+                            .background(PmpDangerSoftSurface)
                             .border(1.dp, PmpBrandRed.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1937,7 +1937,7 @@ fun SalesScreen(
                     onClick = { selectedPaymentForDetail = null }
                 )
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteSurface
         )
     }
 

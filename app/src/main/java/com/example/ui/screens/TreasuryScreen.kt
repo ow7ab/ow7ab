@@ -225,7 +225,7 @@ fun TreasuryScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFF8FAFC))
+                            .background(PmpContainerBarSurface)
                             .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -252,7 +252,7 @@ fun TreasuryScreen(
                                         viewModel.setDefaultAccountCurrency(cur)
                                     },
                                     shape = RoundedCornerShape(8.dp),
-                                    color = if (selected) PmpBrandRed else Color.White,
+                                    color = if (selected) PmpBrandRed else PmpSubtleSurface,
                                     border = androidx.compose.foundation.BorderStroke(
                                         1.dp,
                                         if (selected) PmpBrandRed else GlassBorder
@@ -1599,7 +1599,7 @@ fun TreasuryScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFFEF2F2))
+                            .background(PmpDangerSoftSurface)
                             .border(1.dp, PmpBrandRed.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1676,7 +1676,7 @@ fun TreasuryScreen(
                     onClick = { selectedMovementForDetail = null }
                 )
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteSurface
         )
     }
 
@@ -1704,7 +1704,7 @@ fun TreasuryScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFFEF2F2))
+                            .background(PmpDangerSoftSurface)
                             .border(1.dp, PmpBrandRed.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1737,7 +1737,7 @@ fun TreasuryScreen(
                     onClick = { selectedTransferForDetail = null }
                 )
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteSurface
         )
     }
 
@@ -1759,7 +1759,7 @@ fun TreasuryScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFFEF2F2))
+                            .background(PmpDangerSoftSurface)
                             .border(1.dp, PmpBrandRed.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1791,7 +1791,7 @@ fun TreasuryScreen(
                     onClick = { selectedClosingForDetail = null }
                 )
             },
-            containerColor = Color.White
+            containerColor = PmpWhiteSurface
         )
     }
 }

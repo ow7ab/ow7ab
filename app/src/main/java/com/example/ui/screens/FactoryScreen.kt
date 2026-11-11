@@ -579,7 +579,7 @@ fun FactoryScreen(
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color.White)
+                            colors = CardDefaults.cardColors(containerColor = PmpWhiteCard)
                         ) {
                             Column(
                                 modifier = Modifier
@@ -591,7 +591,7 @@ fun FactoryScreen(
                                 Icon(
                                     imageVector = Icons.Default.PrecisionManufacturing,
                                     contentDescription = null,
-                                    tint = Color(0xFF94A3B8),
+                                    tint = TextSubtle,
                                     modifier = Modifier.size(48.dp)
                                 )
                                 Text(
@@ -602,7 +602,7 @@ fun FactoryScreen(
                                     },
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF64748B),
+                                    color = TextMuted,
                                     textAlign = TextAlign.Center
                                 )
                                 Button(
@@ -629,9 +629,9 @@ fun FactoryScreen(
                             else -> Color(0xFFDC2626)
                         }
                         val statusBg = when (batch.qualityStatus) {
-                            "معتمد ومطابق" -> Color(0xFFECFDF5)
-                            "تحت الفحص المخبري" -> Color(0xFFFEF3C7)
-                            else -> Color(0xFFFEF2F2)
+                            "معتمد ومطابق" -> PmpSuccessSoftSurface
+                            "تحت الفحص المخبري" -> PmpWarningSoftSurface
+                            else -> PmpDangerSoftSurface
                         }
 
                         Card(
@@ -639,7 +639,7 @@ fun FactoryScreen(
                                 .fillMaxWidth()
                                 .testTag("batch_card_${batch.id}"),
                             shape = RoundedCornerShape(14.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color.White),
+                            colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
                             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                         ) {
                             Column(
@@ -690,8 +690,8 @@ fun FactoryScreen(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Icon(Icons.Default.CalendarToday, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(13.dp))
-                                        Text(batch.productionDate, fontSize = 11.sp, color = Color(0xFF64748B))
+                                        Icon(Icons.Default.CalendarToday, contentDescription = null, tint = TextMuted, modifier = Modifier.size(13.dp))
+                                        Text(batch.productionDate, fontSize = 11.sp, color = TextMuted)
                                     }
                                 }
 
@@ -701,7 +701,7 @@ fun FactoryScreen(
                                         text = batch.productName,
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 15.sp,
-                                        color = Color(0xFF0F172A)
+                                        color = TextDark
                                     )
 
                                     Row(
@@ -710,13 +710,13 @@ fun FactoryScreen(
                                     ) {
                                         Surface(
                                             shape = RoundedCornerShape(6.dp),
-                                            color = Color(0xFFF1F5F9)
+                                            color = PmpSubtleSurface
                                         ) {
                                             Text(
                                                 text = "التركيبة: ${batch.formulaNo}",
                                                 fontSize = 10.5.sp,
                                                 fontWeight = FontWeight.SemiBold,
-                                                color = Color(0xFF2563EB),
+                                                color = PmpBlueLight,
                                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                             )
                                         }
@@ -724,13 +724,13 @@ fun FactoryScreen(
                                         if (batch.targetPvc > 0) {
                                             Surface(
                                                 shape = RoundedCornerShape(6.dp),
-                                                color = Color(0xFFEFF6FF)
+                                                color = PmpInfoSoftSurface
                                             ) {
                                                 Text(
                                                     text = "PVC: ${batch.targetPvc}%",
                                                     fontSize = 10.5.sp,
                                                     fontWeight = FontWeight.SemiBold,
-                                                    color = Color(0xFF1D4ED8),
+                                                    color = PmpBlueLight,
                                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                                 )
                                             }
@@ -739,19 +739,19 @@ fun FactoryScreen(
                                         Text(
                                             text = "نوع الدهان: ${batch.paintType}",
                                             fontSize = 10.5.sp,
-                                            color = Color(0xFF64748B)
+                                            color = TextMuted
                                         )
                                     }
                                 }
 
-                                HorizontalDivider(color = Color(0xFFF1F5F9))
+                                HorizontalDivider(color = GlassBorder)
 
                                 // Batch Operational Numbers - 2x2 Grid preventing overlapping text
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .background(Color(0xFFF8FAFC), RoundedCornerShape(10.dp))
-                                        .border(0.8.dp, Color(0xFFE2E8F0), RoundedCornerShape(10.dp))
+                                        .background(PmpContainerBarSurface, RoundedCornerShape(10.dp))
+                                        .border(0.8.dp, GlassBorder, RoundedCornerShape(10.dp))
                                         .padding(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
@@ -760,31 +760,31 @@ fun FactoryScreen(
                                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
-                                            Text("الوزن الإجمالي", fontSize = 10.5.sp, color = Color(0xFF64748B))
+                                            Text("الوزن الإجمالي", fontSize = 10.5.sp, color = TextMuted)
                                             val w = if (batch.actualWeightKg > 0) batch.actualWeightKg else batch.targetWeightKg
-                                            Text("${format.format(w)} كجم", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                                            Text("${format.format(w)} كجم", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDark)
                                         }
 
                                         Column(modifier = Modifier.weight(1f)) {
-                                            Text("التعبئة والتغليف", fontSize = 10.5.sp, color = Color(0xFF64748B))
-                                            Text("${batch.cartonsCount} ${batch.packageUnit}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                                            Text("التعبئة والتغليف", fontSize = 10.5.sp, color = TextMuted)
+                                            Text("${batch.cartonsCount} ${batch.packageUnit}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDark)
                                         }
                                     }
 
-                                    HorizontalDivider(color = Color(0xFFE2E8F0), thickness = 0.6.dp)
+                                    HorizontalDivider(color = GlassBorder, thickness = 0.6.dp)
 
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
-                                            Text("الحجم التقريبي", fontSize = 10.5.sp, color = Color(0xFF64748B))
-                                            Text("${format.format(batch.targetVolumeLiters)} لتر", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                                            Text("الحجم التقريبي", fontSize = 10.5.sp, color = TextMuted)
+                                            Text("${format.format(batch.targetVolumeLiters)} لتر", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextDark)
                                         }
 
                                         Column(modifier = Modifier.weight(1f)) {
-                                            Text("الماكينة / الخلاط", fontSize = 10.5.sp, color = Color(0xFF64748B))
-                                            Text(batch.machineName.ifBlank { "الديزولفر الرئيسي" }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF1E40AF), maxLines = 1)
+                                            Text("الماكينة / الخلاط", fontSize = 10.5.sp, color = TextMuted)
+                                            Text(batch.machineName.ifBlank { "الديزولفر الرئيسي" }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = PmpBlueLight, maxLines = 1)
                                         }
                                     }
                                 }
@@ -803,7 +803,7 @@ fun FactoryScreen(
                                             Text(
                                                 text = "الكثافة: ${batch.measuredDensity} g/cm³",
                                                 fontSize = 11.sp,
-                                                color = Color(0xFF334155),
+                                                color = TextMuted,
                                                 fontWeight = FontWeight.Medium
                                             )
                                         }
@@ -811,7 +811,7 @@ fun FactoryScreen(
                                             Text(
                                                 text = "اللزوجة: ${batch.measuredViscosity}",
                                                 fontSize = 11.sp,
-                                                color = Color(0xFF334155),
+                                                color = TextMuted,
                                                 fontWeight = FontWeight.Medium
                                             )
                                         }
@@ -821,8 +821,8 @@ fun FactoryScreen(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
-                                        Icon(Icons.Default.Verified, contentDescription = null, tint = Color(0xFF2563EB), modifier = Modifier.size(14.dp))
-                                        Text("موثق", fontSize = 10.sp, color = Color(0xFF2563EB), fontWeight = FontWeight.Bold)
+                                        Icon(Icons.Default.Verified, contentDescription = null, tint = PmpBlueLight, modifier = Modifier.size(14.dp))
+                                        Text("موثق", fontSize = 10.sp, color = PmpBlueLight, fontWeight = FontWeight.Bold)
                                     }
                                 }
 
@@ -847,14 +847,14 @@ fun FactoryScreen(
                                             Icon(
                                                 imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                                                 contentDescription = null,
-                                                tint = Color(0xFF1E40AF),
+                                                tint = PmpBlueLight,
                                                 modifier = Modifier.size(18.dp)
                                             )
                                             Text(
                                                 text = if (isExpanded) "إخفاء بيان المواد الخام المستهلكة" else "عرض بيان استهلاك المواد الخام (${scaledIngs.size} مادة)",
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.SemiBold,
-                                                color = Color(0xFF1E40AF)
+                                                color = PmpBlueLight
                                             )
                                         }
 
@@ -875,7 +875,7 @@ fun FactoryScreen(
                                         Column(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .background(Color(0xFFF1F5F9), RoundedCornerShape(8.dp))
+                                                .background(PmpSubtleSurface, RoundedCornerShape(8.dp))
                                                 .padding(10.dp),
                                             verticalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
@@ -883,18 +883,18 @@ fun FactoryScreen(
                                                 text = "المشرف: ${batch.supervisorOrEngineer} | الوردية: ${batch.shift}",
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = Color(0xFF334155)
+                                                color = TextDark
                                             )
 
                                             if (batch.notes.isNotBlank()) {
                                                 Text(
                                                     text = "ملاحظات: ${batch.notes}",
                                                     fontSize = 11.sp,
-                                                    color = Color(0xFF64748B)
+                                                    color = TextMuted
                                                 )
                                             }
 
-                                            HorizontalDivider(color = Color(0xFFE2E8F0))
+                                            HorizontalDivider(color = GlassBorder)
 
                                             scaledIngs.forEachIndexed { i, ing ->
                                                 Row(

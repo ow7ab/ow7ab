@@ -11,16 +11,16 @@ plugins {
 }
 
 val resolvedVersionCode: Int =
-    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 14
+    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 15
 val resolvedVersionName: String =
-    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "v3.1"
+    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "v4.0"
 val resolvedGitCommit: String =
     (project.findProperty("gitCommit")?.toString()?.trim()?.takeIf { it.isNotBlank() })
         ?: System.getenv("GITHUB_SHA")?.take(8)?.takeIf { it.isNotBlank() }
         ?: "9a8b7c6d"
 val resolvedBuildTimestampUtc: String =
     (project.findProperty("buildTimestampUtc")?.toString()?.trim()?.takeIf { it.isNotBlank() })
-        ?: "2026-11-09T09:00:00Z"
+        ?: "2026-11-10T10:00:00Z"
 val cleanVersionNameForBuildId: String =
     resolvedVersionName.removePrefix("v").removePrefix("V").trim()
 val resolvedBuildId: String =

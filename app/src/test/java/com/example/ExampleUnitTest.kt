@@ -450,7 +450,7 @@ class ExampleUnitTest {
       content.contains(":app:testDebugUnitTest")
     )
 
-    // 7. Verify root version.json and public/version.json are synchronized at v3.1 (versionCode 14)
+    // 7. Verify root version.json and public/version.json are synchronized at v4.0 (versionCode 15)
     val rootVersionFile = listOf(
       java.io.File("version.json"),
       java.io.File("../version.json")
@@ -466,8 +466,8 @@ class ExampleUnitTest {
     val publicParsed = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(publicVersionFile!!.readText(Charsets.UTF_8))
     assertNotNull(rootParsed)
     assertNotNull(publicParsed)
-    assertEquals(14, rootParsed!!.versionCode)
-    assertEquals("v3.1", rootParsed.versionName)
+    assertEquals(15, rootParsed!!.versionCode)
+    assertEquals("v4.0", rootParsed.versionName)
     assertEquals(rootParsed.versionCode, publicParsed!!.versionCode)
     assertEquals(rootParsed.versionName, publicParsed.versionName)
     assertEquals(rootParsed.buildId, publicParsed.buildId)
@@ -1321,9 +1321,78 @@ class ExampleUnitTest {
       rulesContent.contains("changedKeys.hasOnly(['serverSyncToken', 'updatedAt'])")
     )
   }
+
+  @Test
+  fun testModularCrossPlatformArchitectureAndTrueBlackDarkMode() {
+    // 1. Verify unified v4.0 version across PmpAppVersionContract, BuildConfig, UpdateManager, and version.json
+    assertEquals(15, com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE)
+    assertEquals("v4.0", com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME)
+    assertEquals(15, BuildConfig.VERSION_CODE)
+    assertEquals("v4.0", BuildConfig.VERSION_NAME)
+    assertEquals(15, com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionCode)
+    assertEquals("v4.0", com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionName)
+
+    val parsedVersion = com.example.core.architecture.PmpAppVersionContract.parseSemanticVersion("v4.0")
+    assertEquals(4, parsedVersion.major)
+    assertEquals(0, parsedVersion.minor)
+    assertEquals(0, parsedVersion.patch)
+
+    assertTrue(
+      "Remote version v4.1 (code 16) must be detected as newer than v4.0 (code 15)",
+      com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(
+        installedVersionCode = 15,
+        installedVersionName = "v4.0",
+        remoteVersionCode = 16,
+        remoteVersionName = "v4.1"
+      )
+    )
+    assertFalse(
+      "Same version v4.0 (code 15) must not trigger a redundant update",
+      com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(
+        installedVersionCode = 15,
+        installedVersionName = "v4.0",
+        remoteVersionCode = 15,
+        remoteVersionName = "v4.0"
+      )
+    )
+
+    // 2. Verify modular cross-platform registry supports Android, iOS, and Web targets without dependency violations
+    assertTrue(
+      "Modular architecture dependency graph must be 100% valid",
+      com.example.core.architecture.PmpModuleRegistry.validateDependencyGraph()
+    )
+    val androidModules = com.example.core.architecture.PmpModuleRegistry.getModulesForPlatform(
+      com.example.core.architecture.PmpTargetPlatform.ANDROID
+    )
+    val iosModules = com.example.core.architecture.PmpModuleRegistry.getModulesForPlatform(
+      com.example.core.architecture.PmpTargetPlatform.IOS
+    )
+    val webModules = com.example.core.architecture.PmpModuleRegistry.getModulesForPlatform(
+      com.example.core.architecture.PmpTargetPlatform.WEB
+    )
+    assertTrue("All 14 ERP modules must support Android", androidModules.size >= 14)
+    assertEquals("All ERP modules must be portable to iOS", androidModules.size, iosModules.size)
+    assertEquals("All ERP modules must be portable to Web", androidModules.size, webModules.size)
+
+    // 3. Verify True Pitch Black Dark Mode ("الوضع المظلم الأسود") tokens and adaptive Compose theme state
+    val darkTokens = com.example.core.architecture.PmpThemeArchitectureContract.resolveTokens(isDark = true)
+    assertEquals(0xFF000000L, darkTokens.backgroundPrimaryHex)
+    assertEquals(0xFF0A0A0DL, darkTokens.surfacePrimaryHex)
+    assertEquals(0xFF121216L, darkTokens.surfaceCardHex)
+    assertEquals("الوضع المظلم الأسود", com.example.core.architecture.PmpThemeArchitectureContract.TRUE_BLACK_MODE_NAME_AR)
+
+    val previousMode = com.example.ui.theme.PmpThemeModeController.isDarkMode
+    try {
+      com.example.ui.theme.PmpThemeModeController.isDarkMode = true
+      assertEquals(androidx.compose.ui.graphics.Color(0xFF000000), com.example.ui.theme.PmpWhiteBg)
+      assertEquals(androidx.compose.ui.graphics.Color(0xFF121216), com.example.ui.theme.PmpWhiteCard)
+      assertEquals(androidx.compose.ui.graphics.Color(0xFF18181D), com.example.ui.theme.PmpSubtleSurface)
+
+      com.example.ui.theme.PmpThemeModeController.isDarkMode = false
+      assertEquals(androidx.compose.ui.graphics.Color(0xFFF0F4F8), com.example.ui.theme.PmpWhiteBg)
+      assertEquals(androidx.compose.ui.graphics.Color(0xFFF8FAFC), com.example.ui.theme.PmpWhiteCard)
+    } finally {
+      com.example.ui.theme.PmpThemeModeController.isDarkMode = previousMode
+    }
+  }
 }
-
-
-
-
-

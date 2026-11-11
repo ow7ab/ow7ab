@@ -52,14 +52,14 @@ private val TopHighlightBrush: Brush
     get() = Brush.horizontalGradient(
         colors = listOf(
             Color.Transparent,
-            if (PmpThemeController.isDarkModeActive) Color(0xFF64748B).copy(alpha = 0.55f) else Color.White.copy(alpha = 0.90f),
+            if (PmpThemeController.isDarkModeActive) Color(0xFF3F3F46).copy(alpha = 0.55f) else Color.White.copy(alpha = 0.90f),
             Color.Transparent
         )
     )
 
 private val DisabledButtonBrush: Brush
     get() = if (PmpThemeController.isDarkModeActive) {
-        Brush.linearGradient(listOf(Color(0xFF1E293B), Color(0xFF0F172A)))
+        Brush.linearGradient(listOf(Color(0xFF18181D), Color(0xFF0E0E12)))
     } else {
         Brush.linearGradient(listOf(Color(0xFFE2EAF2), Color(0xFFD6E2EE)))
     }
@@ -100,7 +100,7 @@ fun GlassCard(
 
     val cardBgBrush = remember(backgroundColor, glowAccentColor, isDark) {
         val effectiveBg = if (isDark && backgroundColor == Color.White) {
-            Color(0xFF1E293B)
+            Color(0xFF121216)
         } else {
             backgroundColor
         }
@@ -111,9 +111,9 @@ fun GlassCard(
             glowAccentColor != null -> if (isDark) {
                 Brush.linearGradient(
                     listOf(
-                        Color(0xFF1E293B).copy(alpha = 0.96f),
+                        Color(0xFF141418).copy(alpha = 0.98f),
                         glowAccentColor.copy(alpha = 0.14f),
-                        Color(0xFF0F172A).copy(alpha = 0.96f)
+                        Color(0xFF0A0A0D).copy(alpha = 0.98f)
                     )
                 )
             } else {
@@ -474,7 +474,7 @@ fun GlassTextField(
             textStyle = LocalTextStyle.current.copy(fontSize = 13.sp, fontWeight = FontWeight.Medium),
             shape = RoundedCornerShape(14.dp),
             colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = if (isDark) Color(0xFF1E293B) else Color.White,
+                focusedContainerColor = if (isDark) Color(0xFF141418) else Color.White,
                 unfocusedContainerColor = GlassInput,
                 focusedBorderColor = PmpBlue,
                 unfocusedBorderColor = GlassBorder,
@@ -615,9 +615,9 @@ fun OneUiPullDownContainer(
         if (isDark) {
             Brush.verticalGradient(
                 colors = listOf(
-                    Color(0xFF060911),
-                    Color(0xFF0B1120),
-                    Color(0xFF0F172A)
+                    Color(0xFF000000),
+                    Color(0xFF050507),
+                    Color(0xFF0A0A0D)
                 )
             )
         } else {

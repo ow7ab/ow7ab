@@ -11,15 +11,15 @@ on:
       version_code:
         description: "رقم البناء الجديد (versionCode) - يجب أن يكون أكبر من الإصدار السابق"
         required: true
-        default: "14"
+        default: "15"
       version_name:
-        description: "اسم الإصدار (versionName) مثل v3.1"
+        description: "اسم الإصدار (versionName) مثل v4.0"
         required: true
-        default: "v3.1"
+        default: "v4.0"
       release_notes:
         description: "ملاحظات التحديث التي ستظهر للمستخدمين"
         required: false
-        default: "إصدار v3.1: تحسينات إضافية شاملة على سلاسة التطبيق، دورة ERP المتكاملة، وتطوير نظام التحديثات السحابية."
+        default: "إصدار v4.0 الشامل: بنية معيارية متطورة جاهزة للتوسع، الوضع المظلم الأسود الفائق، وتطوير شامل لمنظومة التحديثات السحابية."
       public_base_url:
         description: "رابط الاستضافة العامة الاختياري (يُستخدم GitHub Pages تلقائياً عند تركه فارغاً)"
         required: false
@@ -434,16 +434,16 @@ jobs:
           git_commit = git_sha_full[:8] if git_sha_full else "9a8b7c6d"
           published_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-          existing_code = 14
-          existing_name = "v3.1"
+          existing_code = 15
+          existing_name = "v4.0"
           if os.path.exists("version.json"):
               try:
                   with open("version.json", "r", encoding="utf-8") as f:
                       prev = json.load(f)
-                      existing_code = int(prev.get("versionCode", 14))
-                      existing_name = str(prev.get("versionName", "v3.1")).strip()
+                      existing_code = int(prev.get("versionCode", 15))
+                      existing_name = str(prev.get("versionName", "v4.0")).strip()
               except Exception:
-                  existing_code = 14
+                  existing_code = 15
 
           v_code_str = os.environ.get("INPUT_VERSION_CODE", "").strip()
           v_name_str = os.environ.get("INPUT_VERSION_NAME", "").strip()
@@ -451,7 +451,7 @@ jobs:
           public_base = os.environ.get("INPUT_PUBLIC_BASE_URL", "").strip().rstrip("/")
 
           if not v_code_str:
-              v_code = max(existing_code, 14)
+              v_code = max(existing_code, 15)
           else:
               v_code = int(v_code_str)
 
@@ -459,7 +459,7 @@ jobs:
               raise SystemExit(f"Invalid versionCode: {v_code}")
 
           if not v_name_str:
-              v_name_str = existing_name if v_code == existing_code and existing_name else f"v3.{v_code - 13}"
+              v_name_str = existing_name if v_code == existing_code and existing_name else f"v4.{max(0, v_code - 15)}"
 
           v_clean = v_name_str.lstrip("vV").strip()
 

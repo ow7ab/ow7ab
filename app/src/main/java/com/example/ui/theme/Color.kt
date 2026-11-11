@@ -1,119 +1,255 @@
 package com.example.ui.theme
 
+import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-
-enum class PmpThemeMode(val storageKey: String, val arabicLabel: String) {
-    LIGHT("LIGHT", "فاتح (Light)"),
-    DARK("DARK", "مظلم احترافي (Dark Pro)"),
-    SYSTEM("SYSTEM", "تلقائي حسب النظام")
-}
+import com.example.core.architecture.PmpThemeArchitectureContract
 
 /**
- * متحكم عالمي تفاعلي بالوضع المظلم الاحترافي (Professional Dark Mode) في تطبيق PMP PAINTS
+ * أوضاع المظهر الاحترافي لتطبيق PMP PAINTS ERP:
+ * - LIGHT: الوضع النهاري الأبيض المؤسسي الفاتح
+ * - DARK: الوضع المظلم الأسود الفائق (True Pitch Black Dark Mode - AMOLED #000000)
+ * - SYSTEM: تلقائي يتبع إعدادات نظام أندرويد في الهاتف
  */
-object PmpThemeController {
-    var isDarkModeActive by mutableStateOf(false)
-        internal set
+enum class PmpThemeMode(val storageKey: String, val labelAr: String) {
+    LIGHT("LIGHT", PmpThemeArchitectureContract.LIGHT_MODE_NAME_AR),
+    DARK("DARK", "${PmpThemeArchitectureContract.TRUE_BLACK_MODE_NAME_AR} (True Black)"),
+    SYSTEM("SYSTEM", PmpThemeArchitectureContract.SYSTEM_MODE_NAME_AR);
 
-    var selectedThemeMode by mutableStateOf(PmpThemeMode.LIGHT)
-        internal set
+    val arabicLabel: String get() = labelAr
 
-    fun updateDarkModeState(isDark: Boolean, mode: PmpThemeMode = selectedThemeMode) {
-        isDarkModeActive = isDark
-        selectedThemeMode = mode
+    companion object {
+        fun fromKey(key: String?): PmpThemeMode {
+            return entries.firstOrNull { it.storageKey.equals(key, ignoreCase = true) } ?: LIGHT
+        }
     }
 }
 
-// PMP Brand Core Colors (Taken from Official Logo & Poster)
-val PmpBrandRed = Color(0xFFC4121A)      // Signature Paint Can Crimson Red
-val PmpBrandRedDark = Color(0xFF991B1E)
-val PmpBrandGreen = Color(0xFF16A34A)    // From the "P" in the PMP logo
-val PmpBrandOrange = Color(0xFFEA580C)   // From the "M" in the PMP logo
-val PmpBrandMagenta = Color(0xFFC026D3)  // From the second "P" & swoosh
-val PmpBrandNavy: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF93C5FD) else Color(0xFF0A1D56)
-val PmpBrandGold = Color(0xFFEAB308)     // Paint wheel yellow/gold accent
+/**
+ * محرك التحكم التفاعلي الفوري في الوضع المظلم الأسود (True Black Dark Mode Controller)
+ * يتيح التبديل اللحظي بين الوضع النهاري والوضع المظلم الأسود دون الحاجة لإعادة تشغيل التطبيق.
+ */
+object PmpThemeController {
+    private const val PREFS_NAME = "pmp_theme_preferences"
+    private const val KEY_THEME_MODE = "selected_theme_mode"
 
-// Compatibility mappings for ERP modules
-val PmpBlue: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF60A5FA) else Color(0xFF0A1D56)
-val PmpBlueLight = Color(0xFF3B82F6)
-val PmpCyan: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF38BDF8) else Color(0xFF0284C7)
-val PmpGold: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFFFB923C) else Color(0xFFEA580C)
-val PmpGoldLight = Color(0xFFF97316)
-val PmpGoldDark = Color(0xFFC2410C)
-val PmpGreen: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF22C55E) else Color(0xFF16A34A)
-val PmpGreenLight = Color(0xFF4ADE80)
-val PmpRed = Color(0xFFC4121A)           // Brand Crimson
-val PmpRedLight = Color(0xFFEF4444)
-val PmpPurple = Color(0xFFC026D3)        // Brand Magenta
+    var selectedThemeMode by mutableStateOf(PmpThemeMode.LIGHT)
+    var isDarkModeActive by mutableStateOf(false)
 
-// Modern Adaptive Surfaces (Light vs Professional Obsidian Dark)
+    var isDarkMode: Boolean
+        get() = isDarkModeActive
+        set(value) {
+            updateDarkModeState(value)
+        }
+
+    fun updateDarkModeState(
+        enabled: Boolean,
+        mode: PmpThemeMode = if (enabled) PmpThemeMode.DARK else PmpThemeMode.LIGHT
+    ) {
+        selectedThemeMode = mode
+        isDarkModeActive = enabled
+    }
+
+    fun arabicLabel(): String {
+        return if (isDarkModeActive) {
+            PmpThemeArchitectureContract.TRUE_BLACK_MODE_NAME_AR
+        } else {
+            PmpThemeArchitectureContract.LIGHT_MODE_NAME_AR
+        }
+    }
+
+    fun initialize(context: Context, isSystemInDarkTheme: Boolean) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedKey = prefs.getString(KEY_THEME_MODE, PmpThemeMode.LIGHT.storageKey)
+        val mode = PmpThemeMode.fromKey(savedKey)
+        selectedThemeMode = mode
+        isDarkModeActive = when (mode) {
+            PmpThemeMode.LIGHT -> false
+            PmpThemeMode.DARK -> true
+            PmpThemeMode.SYSTEM -> isSystemInDarkTheme
+        }
+    }
+
+    fun setThemeMode(context: Context, mode: PmpThemeMode, isSystemInDarkTheme: Boolean = false) {
+        selectedThemeMode = mode
+        isDarkModeActive = when (mode) {
+            PmpThemeMode.LIGHT -> false
+            PmpThemeMode.DARK -> true
+            PmpThemeMode.SYSTEM -> isSystemInDarkTheme
+        }
+        runCatching {
+            context.applicationContext
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_THEME_MODE, mode.storageKey)
+                .apply()
+        }
+    }
+
+    fun toggleDarkMode(context: Context) {
+        val nextMode = if (isDarkModeActive) PmpThemeMode.LIGHT else PmpThemeMode.DARK
+        setThemeMode(context, nextMode, isSystemInDarkTheme = nextMode == PmpThemeMode.DARK)
+    }
+}
+
+typealias PmpThemeModeController = PmpThemeController
+
+// ============================================================================
+// PMP PAINTS — True Pitch Black Dark Mode ("الوضع المظلم الأسود") & Daylight Adaptive Palette
+// ============================================================================
+
 val PmpWhiteBg: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0B1120) else Color(0xFFF8FAFC)
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF000000) else Color(0xFFF0F4F8)
+
 val PmpWhiteSurface: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF111827) else Color(0xFFFFFFFF)
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0A0A0D) else Color(0xFFFFFFFF)
+
 val PmpWhiteCard: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF1E293B) else Color(0xFFFFFFFF)
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF121216) else Color(0xFFF8FAFC)
+
 val PmpWhiteBorder: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF334155) else Color(0xFFE2E8F0)
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF27272A) else Color(0xFFDCE4EE)
 
-val PmpNavyDeep: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF090E1A) else Color(0xFFF8FAFC)
-val PmpNavySurface: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF1E293B) else Color(0xFFFFFFFF)
-val PmpNavyCard: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0F172A) else Color(0xFFF1F5F9)
-val PmpNavyBorder: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF334155) else Color(0xFFCBD5E1)
+/**
+ * سطح فرعي متكيف للتبويبات غير النشطة، الفلاتر، وشرائح العملات والصلاحيات
+ * يضمن عدم ظهور أي تبويب باللون الأبيض عند تفعيل الوضع المظلم الأسود
+ */
+val PmpSubtleSurface: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF18181D) else Color(0xFFF1F5F9)
 
-// Frosted Glass Tokens
+val PmpContainerBarSurface: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0E0E12) else Color(0xFFF8FAFC)
+
+val PmpDangerSoftSurface: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF281115) else Color(0xFFFEF2F2)
+
+val PmpSuccessSoftSurface: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0B241A) else Color(0xFFF0FDF4)
+
+val PmpWarningSoftSurface: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF271D0B) else Color(0xFFFFFBEB)
+
+val PmpInfoSoftSurface: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0F1D33) else Color(0xFFEFF6FF)
+
+// Primary Brand Colors — PMP Red, True Black / Navy, Gold, Blue, Green
+val PmpBrandRed = Color(0xFFDC2626)
+val PmpBrandRedLight = Color(0xFFEF4444)
+val PmpBrandRedSoft: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF2A1215) else Color(0xFFFEE2E2)
+
+val PmpBrandNavy: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFFF8FAFC) else Color(0xFF0F294A)
+
+val PmpBrandBlue = Color(0xFF1D4ED8)
+val PmpBrandBlueLight = Color(0xFF3B82F6)
+val PmpBrandBlueSoft: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF101F38) else Color(0xFFDBEAFE)
+
+val PmpBrandGold = Color(0xFFD97706)
+val PmpBrandGoldLight = Color(0xFFF59E0B)
+val PmpBrandGoldSoft: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF271E0B) else Color(0xFFFEF3C7)
+
+val PmpBrandGreen = Color(0xFF059669)
+val PmpBrandOrange = Color(0xFFEA580C)
+
+val PmpCyanGlow = Color(0xFF0891B2)
+val PmpBlueElectric = Color(0xFF2563EB)
+val PmpIndigoDeep = Color(0xFF4F46E5)
+
+// Status Colors
+val StatusSuccess = Color(0xFF16A34A)
+val StatusSuccessSoft: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0B261B) else Color(0xFFDCFCE7)
+
+val StatusWarning = Color(0xFFD97706)
+val StatusWarningSoft: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF291D0A) else Color(0xFFFEF3C7)
+
+val StatusDanger = Color(0xFFDC2626)
+val StatusDangerSoft: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF2B1115) else Color(0xFFFEE2E2)
+
+val StatusInfo = Color(0xFF0284C7)
+val StatusInfoSoft: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0C2236) else Color(0xFFE0F2FE)
+
+// Compatibility Aliases Across Existing Screens
+val PmpNavyDeep: Color get() = PmpWhiteBg
+val PmpNavySurface: Color get() = PmpWhiteSurface
+val PmpNavyCard: Color get() = PmpWhiteCard
+val PmpNavyBorder: Color get() = PmpWhiteBorder
+
+val PmpBlue = Color(0xFF1D4ED8)
+val PmpBlueLight = Color(0xFF2563EB)
+val PmpCyan = Color(0xFF0284C7)
+val PmpGold = Color(0xFFD97706)
+val PmpGreen = Color(0xFF059669)
+val PmpGreenLight = Color(0xFF10B981)
+val PmpRed = PmpBrandRed
+val PmpRedLight = Color(0xFFEF4444)
+val PmpPurple = Color(0xFF6D28D9)
+
+// Adaptive Glass & Surface Tokens (True Black in Dark Mode)
 val GlassSurface: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF1E293B).copy(alpha = 0.92f) else Color(0xFFFFFFFF).copy(alpha = 0.90f)
-val GlassSurfaceElevated: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF1E293B).copy(alpha = 0.98f) else Color(0xFFFFFFFF).copy(alpha = 0.98f)
-val GlassBorder: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF334155) else Color(0xFFE2E8F0)
-val GlassHighlight: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF475569) else Color(0xFFFFFFFF)
-val GlassInput: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0F172A) else Color(0xFFF8FAFC)
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF121216).copy(alpha = 0.96f) else Color(0xFFFFFFFF).copy(alpha = 0.94f)
 
-// Text Colors (High Contrast Adaptive Slate / Crisp White)
-val TextDark: Color
+val GlassSurfaceElevated: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF18181E) else Color(0xFFFFFFFF)
+
+val GlassBorder: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF27272A) else Color(0xFFD5E0EC)
+
+val GlassBorderHighlight: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF3F3F46) else Color(0xFFCBD5E1)
+
+val GlassShadowColor: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF000000).copy(alpha = 0.75f) else Color(0xFF0F172A).copy(alpha = 0.06f)
+
+val GlassInput: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF0D0D11) else Color(0xFFF3F7FB)
+
+// Adaptive Text Hierarchy
+val TextPrimary: Color
     get() = if (PmpThemeController.isDarkModeActive) Color(0xFFF8FAFC) else Color(0xFF0F172A)
+
+val TextSecondary: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFFA1A1AA) else Color(0xFF334155)
+
 val TextWhite: Color
     get() = if (PmpThemeController.isDarkModeActive) Color(0xFFF8FAFC) else Color(0xFF0F172A)
-val TextPureWhite = Color(0xFFFFFFFF)
-val TextMuted: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF94A3B8) else Color(0xFF475569)
-val TextSubtle: Color
-    get() = if (PmpThemeController.isDarkModeActive) Color(0xFFCBD5E1) else Color(0xFF64748B)
 
-// Brand Gradients (Adaptive for Light & Dark Pro)
+val TextMuted: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFFA1A1AA) else Color(0xFF334155)
+
+val TextSubtle: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFF71717A) else Color(0xFF64748B)
+
+val TextDark: Color
+    get() = if (PmpThemeController.isDarkModeActive) Color(0xFFF8FAFC) else Color(0xFF0F172A)
+
+val TextPureWhite = Color(0xFFFFFFFF)
+
+// Gradients — True Pitch Black Dark Mode / Daylight Light Mode
 val GlassBackgroundBrush: Brush
     get() = if (PmpThemeController.isDarkModeActive) {
         Brush.verticalGradient(
             colors = listOf(
-                Color(0xFF090E1A),
-                Color(0xFF0F172A),
-                Color(0xFF111C2D)
+                Color(0xFF000000),
+                Color(0xFF050507),
+                Color(0xFF000000)
             )
         )
     } else {
         Brush.verticalGradient(
             colors = listOf(
-                Color(0xFFFFFFFF),
-                Color(0xFFF8FAFC),
-                Color(0xFFF1F5F9)
+                Color(0xFFF4F7FB),
+                Color(0xFFEAF0F7),
+                Color(0xFFE2EAF4)
             )
         )
     }
@@ -122,22 +258,18 @@ val FrostedGlassGradient: Brush
     get() = if (PmpThemeController.isDarkModeActive) {
         Brush.linearGradient(
             colors = listOf(
-                Color(0xFF1E293B).copy(alpha = 0.95f),
-                Color(0xFF162032).copy(alpha = 0.92f),
-                Color(0xFF0F172A).copy(alpha = 0.95f)
-            ),
-            start = Offset(0f, 0f),
-            end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+                Color(0xFF141418).copy(alpha = 0.98f),
+                Color(0xFF0E0E12).copy(alpha = 0.96f),
+                Color(0xFF0A0A0D).copy(alpha = 0.96f)
+            )
         )
     } else {
         Brush.linearGradient(
             colors = listOf(
-                Color(0xFFFFFFFF).copy(alpha = 0.94f),
-                Color(0xFFF8FAFC).copy(alpha = 0.88f),
-                Color(0xFFF1F5F9).copy(alpha = 0.92f)
-            ),
-            start = Offset(0f, 0f),
-            end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+                Color.White.copy(alpha = 0.96f),
+                Color(0xFFF8FBFF).copy(alpha = 0.90f),
+                Color(0xFFF0F5FC).copy(alpha = 0.86f)
+            )
         )
     }
 
@@ -145,22 +277,18 @@ val FrostedGlassBorderBrush: Brush
     get() = if (PmpThemeController.isDarkModeActive) {
         Brush.linearGradient(
             colors = listOf(
-                Color(0xFF475569).copy(alpha = 0.75f),
-                Color(0xFF334155).copy(alpha = 0.60f),
-                Color(0xFF1E293B).copy(alpha = 0.80f)
-            ),
-            start = Offset(0f, 0f),
-            end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+                Color(0xFF27272A).copy(alpha = 0.85f),
+                Color(0xFF18181B).copy(alpha = 0.70f),
+                Color(0xFF27272A).copy(alpha = 0.80f)
+            )
         )
     } else {
         Brush.linearGradient(
             colors = listOf(
                 Color.White,
-                Color(0xFFE2E8F0),
-                Color(0xFFCBD5E1).copy(alpha = 0.8f)
-            ),
-            start = Offset(0f, 0f),
-            end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
+                Color(0xFFD0DCEB).copy(alpha = 0.75f),
+                Color(0xFFBFD0E4).copy(alpha = 0.55f)
+            )
         )
     }
 
@@ -168,56 +296,41 @@ val GlassCardGradient: Brush
     get() = if (PmpThemeController.isDarkModeActive) {
         Brush.linearGradient(
             colors = listOf(
-                Color(0xFF1E293B),
-                Color(0xFF0F172A)
+                Color(0xFF18181D),
+                Color(0xFF121216)
             )
         )
     } else {
+        FrostedGlassGradient
+    }
+
+val GlassAccentBlueGradient: Brush
+    get() = if (PmpThemeController.isDarkModeActive) {
         Brush.linearGradient(
-            colors = listOf(
-                Color(0xFFF1F5F9),
-                Color(0xFFE2E8F0)
-            )
+            colors = listOf(Color(0xFF2563EB), Color(0xFF1D4ED8))
+        )
+    } else {
+        Brush.linearGradient(
+            colors = listOf(Color(0xFF0F294A), Color(0xFF1E3A8A))
         )
     }
 
-// PMP Multi-Color Gradient matching the orbital swoosh & paint wheel
-val PmpLogoSwooshGradient = Brush.horizontalGradient(
-    colors = listOf(
-        Color(0xFFC026D3), // Magenta
-        Color(0xFFEA580C), // Orange
-        Color(0xFF16A34A), // Green
-        Color(0xFF0284C7)  // Blue
-    )
+val GlassAccentGreenGradient = Brush.linearGradient(
+    colors = listOf(Color(0xFF059669), Color(0xFF047857))
 )
 
-// PMP Red Can Gradient matching the brand poster
+val GlassAccentGoldGradient = Brush.linearGradient(
+    colors = listOf(Color(0xFFD97706), Color(0xFFB45309))
+)
+
 val PmpBrandRedGradient = Brush.linearGradient(
-    colors = listOf(
-        Color(0xFFD3151E),
-        Color(0xFFC4121A),
-        Color(0xFF8B0D13)
-    )
+    colors = listOf(Color(0xFFDC2626), Color(0xFF991B1B))
 )
 
-val GlassAccentBlueGradient = Brush.horizontalGradient(
-    colors = listOf(
-        Color(0xFF0A1D56),
-        Color(0xFF1E40AF)
-    )
-)
+val PmpRedGradient = PmpBrandRedGradient
 
-val GlassAccentGoldGradient = Brush.horizontalGradient(
-    colors = listOf(
-        Color(0xFFEA580C),
-        Color(0xFFF97316)
-    )
-)
+val PmpSuccessGradient = GlassAccentGreenGradient
 
-val GlassAccentGreenGradient = Brush.horizontalGradient(
-    colors = listOf(
-        Color(0xFF16A34A),
-        Color(0xFF22C55E)
-    )
+val PmpLogoSwooshGradient = Brush.horizontalGradient(
+    colors = listOf(Color(0xFFDC2626), Color(0xFFEA580C), Color(0xFFD97706))
 )
-

@@ -182,22 +182,22 @@ fun SettingsScreen(
                         ) {
                             Icon(
                                 imageVector = if (isDarkActive) Icons.Default.DarkMode else Icons.Default.LightMode,
-                                contentDescription = "الوضع المظلم الاحترافي",
+                                contentDescription = "الوضع المظلم الأسود",
                                 tint = if (isDarkActive) PmpGold else PmpCyan,
                                 modifier = Modifier.size(24.dp)
                             )
                             Column {
                                 Text(
-                                    text = "الوضع المظلم الاحترافي (Dark Mode Pro)",
+                                    text = "الوضع المظلم الأسود (True Black Dark Mode)",
                                     color = TextWhite,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 15.5.sp
                                 )
                                 Text(
                                     text = if (isDarkActive) {
-                                        "مفعّل حالياً • مظهر كحلي داكن مريح للعين وعالي التباين"
+                                        "مفعّل حالياً • مظهر أسود فائق (Pitch Black #000000) مريح للعين وعالي التباين"
                                     } else {
-                                        "الوضع الفاتح الكلاسيكي • يمكنك التبديل الفوري للوضع المظلم"
+                                        "الوضع الفاتح الكلاسيكي • يمكنك التبديل الفوري للوضع المظلم الأسود"
                                     },
                                     color = TextMuted,
                                     fontSize = 11.5.sp
@@ -213,7 +213,7 @@ fun SettingsScreen(
                                 checkedThumbColor = Color.White,
                                 checkedTrackColor = PmpCyan,
                                 uncheckedThumbColor = TextMuted,
-                                uncheckedTrackColor = PmpNavySurface
+                                uncheckedTrackColor = PmpSubtleSurface
                             ),
                             modifier = Modifier.testTag("dark_mode_toggle_switch")
                         )
@@ -224,8 +224,8 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         val modes = listOf(
-                            Triple(PmpThemeMode.LIGHT, "فاتح", Icons.Default.LightMode),
-                            Triple(PmpThemeMode.DARK, "مظلم احترافي", Icons.Default.DarkMode),
+                            Triple(PmpThemeMode.LIGHT, "النهاري الفاتح", Icons.Default.LightMode),
+                            Triple(PmpThemeMode.DARK, "المظلم الأسود", Icons.Default.DarkMode),
                             Triple(PmpThemeMode.SYSTEM, "تلقائي للنظام", Icons.Default.BrightnessAuto)
                         )
                         modes.forEach { (mode, label, icon) ->
@@ -233,7 +233,7 @@ fun SettingsScreen(
                             Surface(
                                 onClick = { viewModel.setThemeMode(mode) },
                                 shape = RoundedCornerShape(12.dp),
-                                color = if (selected) PmpBrandRed else PmpNavySurface,
+                                color = if (selected) PmpBrandRed else PmpSubtleSurface,
                                 border = androidx.compose.foundation.BorderStroke(
                                     1.dp,
                                     if (selected) PmpBrandRed else GlassBorder

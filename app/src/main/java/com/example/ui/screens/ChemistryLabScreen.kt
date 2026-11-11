@@ -73,7 +73,7 @@ fun ChemistryLabScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFFF8FAFC))
+            .background(PmpWhiteBg)
     ) {
         // Lab Header with PMP Royal Blue & Deep Navy Branding
         Box(
@@ -81,7 +81,11 @@ fun ChemistryLabScreen(
                 .fillMaxWidth()
                 .background(
                     Brush.verticalGradient(
-                        listOf(Color(0xFF0F172A), Color(0xFF1E293B))
+                        if (PmpThemeModeController.isDarkMode) {
+                            listOf(Color(0xFF0A0A0D), Color(0xFF121216))
+                        } else {
+                            listOf(Color(0xFF0F172A), Color(0xFF1E293B))
+                        }
                     )
                 )
                 .padding(horizontal = 16.dp, vertical = 14.dp)
@@ -139,7 +143,7 @@ fun ChemistryLabScreen(
         // Navigation Tabs (Mobile-First scrollable row with active indicators)
         TabRow(
             selectedTabIndex = selectedTab,
-            containerColor = Color(0xFF0F172A),
+            containerColor = if (PmpThemeModeController.isDarkMode) Color(0xFF0A0A0D) else Color(0xFF0F172A),
             contentColor = Color(0xFF38BDF8)
         ) {
             tabs.forEachIndexed { index, pair ->
@@ -259,7 +263,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
+                colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                 shape = RoundedCornerShape(16.dp)
             ) {
@@ -271,17 +275,17 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     ) {
                         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Icon(Icons.Default.Science, contentDescription = null, tint = Color(0xFF1E40AF), modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.Science, contentDescription = null, tint = PmpBlueLight, modifier = Modifier.size(14.dp))
                                 Text(
                                     text = "التركيبة قيد التجهيز:",
-                                    color = Color(0xFF64748B),
+                                    color = TextMuted,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Medium
                                 )
                             }
                             Text(
                                 text = productName,
-                                color = Color(0xFF0F172A),
+                                color = TextDark,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 15.5.sp,
                                 maxLines = 1,
@@ -298,10 +302,10 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                 shape = RoundedCornerShape(10.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFFEFF6FF),
-                                    contentColor = Color(0xFF1D4ED8)
+                                    containerColor = PmpInfoSoftSurface,
+                                    contentColor = PmpBlueLight
                                 ),
-                                border = BorderStroke(1.dp, Color(0xFFBFDBFE))
+                                border = BorderStroke(1.dp, GlassBorder)
                             ) {
                                 Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(15.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
@@ -482,10 +486,10 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Icon(Icons.Default.Analytics, contentDescription = null, tint = Color(0xFF1E40AF), modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Analytics, contentDescription = null, tint = PmpBlueLight, modifier = Modifier.size(18.dp))
                         Text(
                             text = "المؤشرات الهندسية وتكلفة الإنتاج",
-                            color = Color(0xFF0F172A),
+                            color = TextDark,
                             fontSize = 13.5.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -493,12 +497,12 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
 
                     Surface(
                         shape = RoundedCornerShape(8.dp),
-                        color = if (costCurrency == "EGP") Color(0xFFEFF6FF) else Color(0xFFFEF2F2),
-                        border = BorderStroke(1.dp, if (costCurrency == "EGP") Color(0xFFBFDBFE) else Color(0xFFFECACA))
+                        color = if (costCurrency == "EGP") PmpInfoSoftSurface else PmpDangerSoftSurface,
+                        border = BorderStroke(1.dp, GlassBorder)
                     ) {
                         Text(
                             text = if (costCurrency == "EGP") "عملة التكلفة: EGP" else "عملة التكلفة: SDG",
-                            color = if (costCurrency == "EGP") Color(0xFF1E40AF) else PmpBrandRed,
+                            color = if (costCurrency == "EGP") PmpBlueLight else PmpBrandRed,
                             fontSize = 10.5.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
@@ -511,7 +515,8 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFFE2E8F0))
+                        .background(PmpSubtleSurface)
+                        .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
                         .padding(3.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
@@ -531,7 +536,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                         ) {
                             Text(
                                 text = "🇪🇬 مصنع مصر (EGP)",
-                                color = if (costCurrency == "EGP") Color.White else Color(0xFF334155),
+                                color = if (costCurrency == "EGP") Color.White else TextDark,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 12.sp,
                                 maxLines = 1,
@@ -556,7 +561,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                         ) {
                             Text(
                                 text = "🇸🇩 السودان وحلفا (SDG)",
-                                color = if (costCurrency == "SDG") Color.White else Color(0xFF334155),
+                                color = if (costCurrency == "SDG") Color.White else TextDark,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 12.sp,
                                 maxLines = 1,
@@ -614,7 +619,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (calcResult.calculatedPvc > calcResult.cpvcEstimated) Color(0xFFFFFBEB) else Color(0xFFF0FDF4)
+                    containerColor = if (calcResult.calculatedPvc > calcResult.cpvcEstimated) PmpWarningSoftSurface else PmpSuccessSoftSurface
                 ),
                 shape = RoundedCornerShape(14.dp),
                 border = CardDefaults.outlinedCardBorder().copy(
@@ -639,7 +644,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                         )
                         Text(
                             text = calcResult.paintClassification,
-                            color = Color(0xFF0F172A),
+                            color = TextDark,
                             fontWeight = FontWeight.Bold,
                             fontSize = 13.sp
                         )
@@ -647,7 +652,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = calcResult.technicalAnalysisText,
-                        color = Color(0xFF334155),
+                        color = TextMuted,
                         fontSize = 11.5.sp,
                         lineHeight = 16.sp
                     )
@@ -674,10 +679,10 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(Icons.Default.Layers, contentDescription = null, tint = Color(0xFF1E40AF), modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Layers, contentDescription = null, tint = PmpBlueLight, modifier = Modifier.size(18.dp))
                     Text(
                         text = "مكونات الخلطة والمواد الخام (${ingredientsList.size})",
-                        color = Color(0xFF0F172A),
+                        color = TextDark,
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp
                     )
@@ -701,7 +706,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Column(
@@ -711,9 +716,9 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(Icons.Default.Science, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(36.dp))
-                        Text("الخلطة فارغة حالياً", color = Color(0xFF64748B), fontWeight = FontWeight.Bold)
-                        Text("اضغط على (إضافة خامة) لإدراج مكونات الدهان من المكتبة", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                        Icon(Icons.Default.Science, contentDescription = null, tint = TextSubtle, modifier = Modifier.size(36.dp))
+                        Text("الخلطة فارغة حالياً", color = TextMuted, fontWeight = FontWeight.Bold)
+                        Text("اضغط على (إضافة خامة) لإدراج مكونات الدهان من المكتبة", color = TextSubtle, fontSize = 12.sp)
                     }
                 }
             }
@@ -852,10 +857,10 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                             .weight(1f)
                             .height(46.dp),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = Color(0xFFFEF2F2),
+                            containerColor = PmpDangerSoftSurface,
                             contentColor = Color(0xFFDC2626)
                         ),
-                        border = BorderStroke(1.dp, Color(0xFFFECACA)),
+                        border = BorderStroke(1.dp, PmpBrandRed.copy(alpha = 0.4f)),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = Color(0xFFDC2626), modifier = Modifier.size(17.dp))
@@ -871,12 +876,13 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
     if (showLoadDialog) {
         AlertDialog(
             onDismissRequest = { showLoadDialog = false },
+            containerColor = PmpWhiteSurface,
             title = {
-                Text("سجل تركيبات المختبر المعتمدة", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                Text("سجل تركيبات المختبر المعتمدة", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp)
             },
             text = {
                 if (formulations.isEmpty()) {
-                    Text("لا توجد تركيبات محفوظة حتى الآن.")
+                    Text("لا توجد تركيبات محفوظة حتى الآن.", color = TextMuted)
                 } else {
                     LazyColumn(
                         modifier = Modifier
@@ -900,7 +906,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                                         ingredientsList = parsed
                                         showLoadDialog = false
                                     },
-                                colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
+                                colors = CardDefaults.cardColors(containerColor = PmpSubtleSurface),
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Row(
@@ -911,10 +917,10 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(text = form.productName, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                        Text(text = form.productName, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                                         Text(
                                             text = "${form.formulaNo} • PVC: ${form.calculatedPvc}% • ${form.paintType}",
-                                            color = Color(0xFF64748B),
+                                            color = TextMuted,
                                             fontSize = 11.sp
                                         )
                                     }
@@ -953,10 +959,11 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
     if (showProductionOrderDialog) {
         AlertDialog(
             onDismissRequest = { showProductionOrderDialog = false },
+            containerColor = PmpWhiteSurface,
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.PrecisionManufacturing, contentDescription = null, tint = Color(0xFF1E40AF))
-                    Text("إصدار أمر تشغيل وتوريد خامات للمصنع", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Icon(Icons.Default.PrecisionManufacturing, contentDescription = null, tint = PmpBlueLight)
+                    Text("إصدار أمر تشغيل وتوريد خامات للمصنع", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 }
             },
             text = {
@@ -964,14 +971,14 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     Text(
                         text = "سيقوم المختبر بتوليد أمر تشغيل رسمي لخلاطات المصنع وحجز كميات المواد الخام المطلوبة لصنع طبخة الدهان:",
                         fontSize = 12.sp,
-                        color = Color(0xFF334155)
+                        color = TextMuted
                     )
 
                     Text(
                         text = "المنتج: $productName ($formulaNo)\nPVC: ${calcResult.calculatedPvc}% • الكثافة: ${calcResult.calculatedDensity} kg/L",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF1E40AF)
+                        color = PmpBlueLight
                     )
 
                     OutlinedTextField(
@@ -992,7 +999,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                         text = "مخزن استلام الإنتاج التام وتوريد البضاعة:",
                         fontSize = 11.5.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF0F172A)
+                        color = TextDark
                     )
 
                     var expandedWhOrder by remember { mutableStateOf(false) }
@@ -1014,8 +1021,8 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(targetOrderWarehouse, fontSize = 12.sp, color = Color(0xFF1E293B))
-                                Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = Color(0xFF64748B))
+                                Text(targetOrderWarehouse, fontSize = 12.sp, color = TextDark)
+                                Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = TextMuted)
                             }
                         }
                         DropdownMenu(
@@ -1109,7 +1116,7 @@ fun KpiLabCard(
     Card(
         modifier = modifier,
         colors = CardDefaults.cardColors(
-            containerColor = if (isHighlight) Color(0xFFEFF6FF) else Color.White
+            containerColor = if (isHighlight) PmpInfoSoftSurface else PmpWhiteCard
         ),
         shape = RoundedCornerShape(14.dp),
         border = CardDefaults.outlinedCardBorder().copy(
@@ -1117,11 +1124,11 @@ fun KpiLabCard(
         )
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(text = title, color = Color(0xFF64748B), fontSize = 10.5.sp, maxLines = 1)
+            Text(text = title, color = TextMuted, fontSize = 10.5.sp, maxLines = 1)
             Spacer(modifier = Modifier.height(2.dp))
-            Text(text = value, color = accentColor, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            Text(text = value, color = if (PmpThemeController.isDarkModeActive && accentColor == Color(0xFF1E40AF)) Color(0xFF60A5FA) else accentColor, fontWeight = FontWeight.Bold, fontSize = 17.sp)
             Spacer(modifier = Modifier.height(2.dp))
-            Text(text = subtitle, color = Color(0xFF94A3B8), fontSize = 10.sp, maxLines = 1)
+            Text(text = subtitle, color = TextSubtle, fontSize = 10.sp, maxLines = 1)
         }
     }
 }
@@ -1135,7 +1142,7 @@ fun PvcSpectrumGauge(
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
@@ -1150,10 +1157,10 @@ fun PvcSpectrumGauge(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Icon(Icons.Default.Speed, contentDescription = null, tint = Color(0xFF1E40AF), modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Speed, contentDescription = null, tint = PmpBlueLight, modifier = Modifier.size(18.dp))
                     Text(
                         text = "طيف PVC ومؤشر التركيز الحرج CPVC",
-                        color = Color(0xFF0F172A),
+                        color = TextDark,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.5.sp,
                         maxLines = 1,
@@ -1162,12 +1169,12 @@ fun PvcSpectrumGauge(
                 }
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = if (calculatedPvc > cpvcEstimated) Color(0xFFFEE2E2) else Color(0xFFEFF6FF),
-                    border = BorderStroke(1.dp, if (calculatedPvc > cpvcEstimated) Color(0xFFFECACA) else Color(0xFFBFDBFE))
+                    color = if (calculatedPvc > cpvcEstimated) PmpDangerSoftSurface else PmpInfoSoftSurface,
+                    border = BorderStroke(1.dp, GlassBorder)
                 ) {
                     Text(
                         text = "PVC: $calculatedPvc%",
-                        color = if (calculatedPvc > cpvcEstimated) Color(0xFFDC2626) else Color(0xFF1E40AF),
+                        color = if (calculatedPvc > cpvcEstimated) Color(0xFFEF4444) else PmpBlueLight,
                         fontWeight = FontWeight.Bold,
                         fontSize = 11.sp,
                         softWrap = false,
@@ -1212,12 +1219,12 @@ fun PvcSpectrumGauge(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("0%", color = Color(0xFF94A3B8), fontSize = 10.sp)
-                Text("25% (Gloss)", color = Color(0xFF64748B), fontSize = 10.sp)
-                Text("35% (Semi)", color = Color(0xFF64748B), fontSize = 10.sp)
-                Text("45% (Satin)", color = Color(0xFF64748B), fontSize = 10.sp)
-                Text("52% (CPVC)", color = Color(0xFFDC2626), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                Text("70%", color = Color(0xFF94A3B8), fontSize = 10.sp)
+                Text("0%", color = TextSubtle, fontSize = 10.sp)
+                Text("25% (Gloss)", color = TextMuted, fontSize = 10.sp)
+                Text("35% (Semi)", color = TextMuted, fontSize = 10.sp)
+                Text("45% (Satin)", color = TextMuted, fontSize = 10.sp)
+                Text("52% (CPVC)", color = Color(0xFFEF4444), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text("70%", color = TextSubtle, fontSize = 10.sp)
             }
         }
     }
@@ -1234,7 +1241,7 @@ fun BatchScalingSection(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
@@ -1245,10 +1252,10 @@ fun BatchScalingSection(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(Icons.Default.Scale, contentDescription = null, tint = Color(0xFF1E40AF), modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Scale, contentDescription = null, tint = PmpBlueLight, modifier = Modifier.size(18.dp))
                     Text(
                         text = "محاكي التحجيم وحساب أوزان الطبخة (Batch Scaling)",
-                        color = Color(0xFF0F172A),
+                        color = TextDark,
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp
                     )
@@ -1277,7 +1284,9 @@ fun BatchScalingSection(
                         label = { Text(label, fontSize = 11.5.sp, fontWeight = FontWeight.Bold) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = Color(0xFF1E40AF),
-                            selectedLabelColor = Color.White
+                            selectedLabelColor = Color.White,
+                            containerColor = PmpSubtleSurface,
+                            labelColor = TextDark
                         )
                     )
                 }
@@ -1291,7 +1300,7 @@ fun BatchScalingSection(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFFF8FAFC))
+                    .background(PmpContainerBarSurface)
                     .padding(10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
@@ -1299,11 +1308,11 @@ fun BatchScalingSection(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("الخامة في الخلطة", color = Color(0xFF64748B), fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1.5f))
-                    Text("النسبة %", color = Color(0xFF64748B), fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(0.7f), textAlign = TextAlign.Center)
-                    Text("الوزن المطلوب ($selectedScaleKg kg)", color = Color(0xFF1E40AF), fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1.2f), textAlign = TextAlign.End)
+                    Text("الخامة في الخلطة", color = TextMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1.5f))
+                    Text("النسبة %", color = TextMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(0.7f), textAlign = TextAlign.Center)
+                    Text("الوزن المطلوب ($selectedScaleKg kg)", color = PmpBlueLight, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1.2f), textAlign = TextAlign.End)
                 }
-                HorizontalDivider(color = Color(0xFFE2E8F0))
+                HorizontalDivider(color = GlassBorder)
                 ingredients.forEach { ing ->
                     val scaledKg = ing.weight * multiplier
                     val percent = if (totalBatchWeight > 0) (ing.weight / totalBatchWeight) * 100.0 else 0.0
@@ -1312,9 +1321,9 @@ fun BatchScalingSection(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(ing.name, color = Color(0xFF0F172A), fontSize = 11.sp, modifier = Modifier.weight(1.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(String.format(Locale.US, "%.1f%%", percent), color = Color(0xFF64748B), fontSize = 11.sp, modifier = Modifier.weight(0.7f), textAlign = TextAlign.Center)
-                        Text(String.format(Locale.US, "%.2f كجم", scaledKg), color = Color(0xFF0F172A), fontWeight = FontWeight.Bold, fontSize = 11.5.sp, modifier = Modifier.weight(1.2f), textAlign = TextAlign.End)
+                        Text(ing.name, color = TextDark, fontSize = 11.sp, modifier = Modifier.weight(1.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(String.format(Locale.US, "%.1f%%", percent), color = TextMuted, fontSize = 11.sp, modifier = Modifier.weight(0.7f), textAlign = TextAlign.Center)
+                        Text(String.format(Locale.US, "%.2f كجم", scaledKg), color = TextDark, fontWeight = FontWeight.Bold, fontSize = 11.5.sp, modifier = Modifier.weight(1.2f), textAlign = TextAlign.End)
                     }
                 }
             }
@@ -1336,7 +1345,7 @@ fun IngredientCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
         shape = RoundedCornerShape(12.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
@@ -1366,7 +1375,7 @@ fun IngredientCard(
                         text = ingredient.name,
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp,
-                        color = Color(0xFF0F172A),
+                        color = TextDark,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1379,10 +1388,10 @@ fun IngredientCard(
                     Surface(
                         shape = RoundedCornerShape(6.dp),
                         color = when {
-                            ingredient.type.contains("صبغة") -> Color(0xFFDBEAFE)
-                            ingredient.type.contains("راتنج") -> Color(0xFFD1FAE5)
-                            ingredient.type.contains("مالئ") -> Color(0xFFFEF3C7)
-                            else -> Color(0xFFF1F5F9)
+                            ingredient.type.contains("صبغة") -> PmpInfoSoftSurface
+                            ingredient.type.contains("راتنج") -> PmpSuccessSoftSurface
+                            ingredient.type.contains("مالئ") -> PmpWarningSoftSurface
+                            else -> PmpSubtleSurface
                         }
                     ) {
                         Text(
@@ -1390,10 +1399,10 @@ fun IngredientCard(
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = when {
-                                ingredient.type.contains("صبغة") -> Color(0xFF1E40AF)
-                                ingredient.type.contains("راتنج") -> Color(0xFF065F46)
-                                ingredient.type.contains("مالئ") -> Color(0xFF92400E)
-                                else -> Color(0xFF475569)
+                                ingredient.type.contains("صبغة") -> PmpBlueLight
+                                ingredient.type.contains("راتنج") -> Color(0xFF10B981)
+                                ingredient.type.contains("مالئ") -> Color(0xFFF59E0B)
+                                else -> TextMuted
                             },
                             maxLines = 1,
                             softWrap = false,
@@ -1632,7 +1641,7 @@ fun PubChemTab(viewModel: PmpViewModel) {
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
+                colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
                 shape = RoundedCornerShape(16.dp),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
@@ -1641,11 +1650,11 @@ fun PubChemTab(viewModel: PmpViewModel) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFF1E40AF))
+                        Icon(Icons.Default.Search, contentDescription = null, tint = PmpBlueLight)
                         Text(
                             text = "البحث في قاعدة بيانات PubChem العالمية (NCBI)",
                             fontWeight = FontWeight.Bold,
-                            color = Color(0xFF0F172A),
+                            color = TextDark,
                             fontSize = 13.5.sp
                         )
                     }
@@ -1665,7 +1674,7 @@ fun PubChemTab(viewModel: PmpViewModel) {
                                 .weight(1f)
                                 .testTag("pubchem_search_input"),
                             singleLine = true,
-                            leadingIcon = { Icon(Icons.Default.Biotech, contentDescription = null, tint = Color(0xFF64748B)) }
+                            leadingIcon = { Icon(Icons.Default.Biotech, contentDescription = null, tint = TextMuted) }
                         )
 
                         Button(
@@ -1687,7 +1696,7 @@ fun PubChemTab(viewModel: PmpViewModel) {
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    Text("خامات الطلاء المقترحة للبحث السريع:", fontSize = 11.sp, color = Color(0xFF64748B))
+                    Text("خامات الطلاء المقترحة للبحث السريع:", fontSize = 11.sp, color = TextMuted)
 
                     LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1712,7 +1721,7 @@ fun PubChemTab(viewModel: PmpViewModel) {
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFEF2F2)),
+                    colors = CardDefaults.cardColors(containerColor = PmpDangerSoftSurface),
                     shape = RoundedCornerShape(10.dp)
                 ) {
                     Row(
@@ -1721,7 +1730,7 @@ fun PubChemTab(viewModel: PmpViewModel) {
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(Icons.Default.Info, contentDescription = null, tint = Color.Red, modifier = Modifier.size(20.dp))
-                        Text(text = errorMessage ?: "", color = Color(0xFF991B1B), fontSize = 12.sp)
+                        Text(text = errorMessage ?: "", color = PmpBrandRedLight, fontSize = 12.sp)
                     }
                 }
             }
@@ -1732,7 +1741,7 @@ fun PubChemTab(viewModel: PmpViewModel) {
             Text(
                 text = "نتائج البحث الكيميائي (${searchResults.size})",
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFF0F172A),
+                color = TextDark,
                 fontSize = 13.5.sp
             )
         }
@@ -1773,7 +1782,7 @@ fun PubChemCompoundCard(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
         shape = RoundedCornerShape(14.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
     ) {
@@ -1788,25 +1797,25 @@ fun PubChemCompoundCard(
                         text = compound.name,
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
-                        color = Color(0xFF0F172A)
+                        color = TextDark
                     )
                     Text(
                         text = compound.iupacName,
                         fontSize = 11.sp,
-                        color = Color(0xFF64748B)
+                        color = TextMuted
                     )
                 }
 
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFFEFF6FF))
-                        .border(1.dp, Color(0xFFBFDBFE), RoundedCornerShape(8.dp))
+                        .background(PmpInfoSoftSurface)
+                        .border(1.dp, GlassBorder, RoundedCornerShape(8.dp))
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Text(
                         text = compound.molecularFormula,
-                        color = Color(0xFF1E40AF),
+                        color = PmpBlueLight,
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp
                     )
@@ -1831,7 +1840,7 @@ fun PubChemCompoundCard(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = compound.description,
-                    color = Color(0xFF334155),
+                    color = TextMuted,
                     fontSize = 11.5.sp,
                     lineHeight = 16.sp
                 )
@@ -1874,12 +1883,12 @@ fun PropertyChip(label: String, value: String) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(Color(0xFFF1F5F9))
+            .background(PmpSubtleSurface)
             .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
         Column {
-            Text(text = label, fontSize = 9.sp, color = Color(0xFF64748B))
-            Text(text = value, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+            Text(text = label, fontSize = 9.sp, color = TextMuted)
+            Text(text = value, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextDark)
         }
     }
 }
@@ -1916,7 +1925,7 @@ fun GhsSafetyTab(viewModel: PmpViewModel) {
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                colors = CardDefaults.cardColors(containerColor = if (PmpThemeController.isDarkModeActive) Color(0xFF121216) else Color(0xFF0F172A)),
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
@@ -2027,7 +2036,7 @@ fun ChemicalSafetyCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = PmpWhiteCard),
         shape = RoundedCornerShape(14.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         border = CardDefaults.outlinedCardBorder().copy(
@@ -2047,24 +2056,24 @@ fun ChemicalSafetyCard(
                         text = item.chemicalName,
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
-                        color = Color(0xFF0F172A)
+                        color = TextDark
                     )
                     Text(
                         text = "${item.commonName} • CAS: ${item.casNumber} • ${item.molecularFormula}",
                         fontSize = 11.sp,
-                        color = Color(0xFF64748B)
+                        color = TextMuted
                     )
                 }
 
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (isDanger) Color(0xFFFEE2E2) else Color(0xFFFEF3C7))
+                        .background(if (isDanger) PmpDangerSoftSurface else PmpWarningSoftSurface)
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Text(
                         text = item.signalWord,
-                        color = if (isDanger) Color(0xFFDC2626) else Color(0xFFD97706),
+                        color = if (isDanger) Color(0xFFEF4444) else Color(0xFFF59E0B),
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp
                     )
@@ -2080,22 +2089,22 @@ fun ChemicalSafetyCard(
 
             // Hazard Statements
             if (item.hazardStatements.isNotBlank()) {
-                Text(text = "بيانات المخاطر (H-Statements):", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF991B1B))
-                Text(text = item.hazardStatements, fontSize = 11.sp, color = Color(0xFF334155), lineHeight = 15.sp)
+                Text(text = "بيانات المخاطر (H-Statements):", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFFEF4444))
+                Text(text = item.hazardStatements, fontSize = 11.sp, color = TextMuted, lineHeight = 15.sp)
                 Spacer(modifier = Modifier.height(6.dp))
             }
 
             // Precautionary Statements
             if (item.precautionaryStatements.isNotBlank()) {
-                Text(text = "إرشادات الوقاية والمناولة (P-Statements):", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF1E40AF))
-                Text(text = item.precautionaryStatements, fontSize = 11.sp, color = Color(0xFF334155), lineHeight = 15.sp)
+                Text(text = "إرشادات الوقاية والمناولة (P-Statements):", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = PmpBlueLight)
+                Text(text = item.precautionaryStatements, fontSize = 11.sp, color = TextMuted, lineHeight = 15.sp)
                 Spacer(modifier = Modifier.height(6.dp))
             }
 
             // Storage & First Aid
             if (item.storageConditions.isNotBlank()) {
-                Text(text = "ظروف التخزين الموصى بها:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF047857))
-                Text(text = item.storageConditions, fontSize = 11.sp, color = Color(0xFF334155), lineHeight = 15.sp)
+                Text(text = "ظروف التخزين الموصى بها:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF10B981))
+                Text(text = item.storageConditions, fontSize = 11.sp, color = TextMuted, lineHeight = 15.sp)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -2109,15 +2118,15 @@ fun ChemicalSafetyCard(
                 Text(
                     text = "المورد: ${item.sdsSupplierName}",
                     fontSize = 10.sp,
-                    color = Color(0xFF94A3B8)
+                    color = TextSubtle
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilledTonalButton(
                         onClick = onViewSds,
                         colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = Color(0xFFEFF6FF),
-                            contentColor = Color(0xFF1D4ED8)
+                            containerColor = PmpInfoSoftSurface,
+                            contentColor = PmpBlueLight
                         ),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                     ) {

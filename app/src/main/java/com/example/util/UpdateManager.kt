@@ -2590,16 +2590,16 @@ class UpdateManager(private val context: Context) {
 
         const val DEFAULT_DOWNLOAD_PORTAL_URL = "https://github.com/ow7ab/ow7ab/releases/latest/download"
         const val SHARED_DOWNLOAD_PORTAL_URL = "https://github.com/oaw7ab/pmp-paints-releases/releases/latest/download"
-        const val DEFAULT_APK_DOWNLOAD_URL = "https://ow7ab.github.io/ow7ab/pmp-paints-v3.1-b14.apk"
+        const val DEFAULT_APK_DOWNLOAD_URL = com.example.core.architecture.PmpAppVersionContract.DEFAULT_PAGES_APK_URL
 
         /**
-         * بيانات الإصدار المرجعي المنشور والمتحقق منه فعلياً (Version v3.1 / Build 14)
+         * بيانات الإصدار المرجعي المنشور والمتحقق منه فعلياً (Version v4.0 / Build 15)
          */
         val LATEST_CLOUD_RELEASE_INFO = UpdateInfo(
-            versionCode = BuildConfig.VERSION_CODE.coerceAtLeast(14),
-            versionName = BuildConfig.VERSION_NAME.ifBlank { "v3.1" },
+            versionCode = BuildConfig.VERSION_CODE.coerceAtLeast(com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE),
+            versionName = BuildConfig.VERSION_NAME.ifBlank { com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME },
             downloadUrl = DEFAULT_APK_DOWNLOAD_URL,
-            releaseNotes = "إصدار v3.1: تحسينات إضافية شاملة على سلاسة التطبيق، دورة ERP المتكاملة، وتطوير نظام التحديثات السحابية.",
+            releaseNotes = "إصدار v4.0 الشامل: بنية معيارية متطورة جاهزة للتوسع والتحويل لمنصات iOS والويب، الوضع المظلم الأسود الفائق، واستقرار شامل لمنظومة التحديثات السحابية.",
             isMandatory = false,
             sha256Checksum = "9bb5d7bc646468b5d838303cd7e08846a3e14b939615e9a8e00600d8a146f57a",
             minSupportedVersionCode = 1,
