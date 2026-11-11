@@ -11,15 +11,15 @@ on:
       version_code:
         description: "رقم البناء الجديد (versionCode) - يجب أن يكون أكبر من الإصدار السابق"
         required: true
-        default: "15"
+        default: "16"
       version_name:
-        description: "اسم الإصدار (versionName) مثل v4.0"
+        description: "اسم الإصدار (versionName) مثل v4.1"
         required: true
-        default: "v4.0"
+        default: "v4.1"
       release_notes:
         description: "ملاحظات التحديث التي ستظهر للمستخدمين"
         required: false
-        default: "إصدار v4.0 الشامل: بنية معيارية متطورة جاهزة للتوسع، الوضع المظلم الأسود الفائق، وتطوير شامل لمنظومة التحديثات السحابية."
+        default: "إصدار v4.1: تحديث رسمي عبر مكتبة Google Play الشخصية، بنية معيارية متطورة جاهزة للتوسع، والوضع المظلم الأسود الفائق."
       public_base_url:
         description: "رابط الاستضافة العامة الاختياري (يُستخدم GitHub Pages تلقائياً عند تركه فارغاً)"
         required: false

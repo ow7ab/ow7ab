@@ -29,9 +29,9 @@ Thread.getAllStackTraces().keys
     .forEach { it.uncaughtExceptionHandler = kspAwtSafeHandler }
 
 val resolvedVersionCode: Int =
-    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 15
+    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 16
 val resolvedVersionName: String =
-    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "v4.0"
+    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "v4.1"
 val resolvedGitCommit: String =
     (project.findProperty("gitCommit")?.toString()?.trim()?.takeIf { it.isNotBlank() })
         ?: System.getenv("GITHUB_SHA")?.take(8)?.takeIf { it.isNotBlank() }
@@ -59,7 +59,8 @@ val hasGoogleServicesJson: Boolean =
 val googleServicesProvidesWebClientId: Boolean =
     if (hasGoogleServicesJson) {
       val gsRaw = runCatching { googleServicesJsonFile.readText() }.getOrDefault("")
-      gsRaw.contains("\"package_name\": \"com.pmp\"") &&
+      (gsRaw.contains("\"package_name\": \"com.aistudio.pmppaints.erp\"") ||
+          gsRaw.contains("\"package_name\": \"com.pmp\"")) &&
           Regex("\"client_type\"\\s*:\\s*3").containsMatchIn(gsRaw)
     } else {
       false
@@ -71,11 +72,13 @@ android {
 buildFeatures {
         resValues = true }
   defaultConfig {
-    applicationId = "com.pmp"
+    applicationId = "com.aistudio.pmppaints.erp"
     minSdk = 24
     targetSdk = 36
-    versionCode = resolvedVersionCode
-    versionName = resolvedVersionName
+    versionCode = 16
+    versionName = "v4.1"
+    project.findProperty("versionCode")?.toString()?.toIntOrNull()?.let { versionCode = it }
+    project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }?.let { versionName = it }
 
     buildConfigField("String", "GIT_COMMIT_SHA", "\"$resolvedGitCommit\"")
     buildConfigField("String", "BUILD_ID", "\"$resolvedBuildId\"")
@@ -123,7 +126,8 @@ buildFeatures {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.

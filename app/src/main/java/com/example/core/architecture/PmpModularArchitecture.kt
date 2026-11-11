@@ -22,16 +22,17 @@ enum class PmpTargetPlatform(val id: String, val displayNameAr: String) {
  * Single Source of Truth for Application Release Identity & Update Compatibility (`v4.0`).
  */
 object PmpAppVersionContract {
-    const val APPLICATION_ID: String = "com.pmp"
-    const val CURRENT_VERSION_CODE: Int = 15
-    const val CURRENT_VERSION_NAME: String = "v4.0"
+    const val APPLICATION_ID: String = "com.aistudio.pmppaints.erp"
+    const val CURRENT_VERSION_CODE: Int = 16
+    const val CURRENT_VERSION_NAME: String = "v4.1"
     const val MINIMUM_SUPPORTED_VERSION_CODE: Int = 10
-    const val DEFAULT_RELEASE_BUILD_ID: String = "PMP-v4.0-b15-9a8b7c6d"
-    const val DEFAULT_APK_FILE_NAME: String = "pmp-paints-v4.0-b15.apk"
-    const val DEFAULT_PAGES_APK_URL: String = "https://ow7ab.github.io/ow7ab/pmp-paints-v4.0-b15.apk"
+    const val DEFAULT_RELEASE_BUILD_ID: String = "PMP-v4.1-b16-9a8b7c6d"
+    const val DEFAULT_APK_FILE_NAME: String = "pmp-paints-v4.1-b16.apk"
+    const val DEFAULT_PAGES_APK_URL: String = "https://ow7ab.github.io/ow7ab/pmp-paints-v4.1-b16.apk"
     const val DEFAULT_GITHUB_RELEASE_APK_URL: String =
-        "https://github.com/ow7ab/ow7ab/releases/download/v4.0/pmp-paints-v4.0-b15.apk"
+        "https://github.com/ow7ab/ow7ab/releases/download/v4.1/pmp-paints-v4.1-b16.apk"
     const val DEFAULT_VERSION_METADATA_URL: String = "https://ow7ab.github.io/ow7ab/version.json"
+    const val GOOGLE_PLAY_STORE_URL: String = "https://play.google.com/store/apps/details?id=com.aistudio.pmppaints.erp"
 
     data class SemanticVersion(
         val major: Int,
@@ -58,7 +59,7 @@ object PmpAppVersionContract {
         val parts = cleaned.split(".").mapNotNull { it.toIntOrNull() }
         return SemanticVersion(
             major = parts.getOrElse(0) { 4 },
-            minor = parts.getOrElse(1) { 0 },
+            minor = parts.getOrElse(1) { 1 },
             patch = parts.getOrElse(2) { 0 }
         )
     }

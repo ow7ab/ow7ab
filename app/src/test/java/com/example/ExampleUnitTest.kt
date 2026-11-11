@@ -97,7 +97,7 @@ class ExampleUnitTest {
     assertTrue(latestRelease.releaseNotes.isNotBlank())
     assertTrue(latestRelease.buildId.isNotBlank())
     assertTrue(latestRelease.gitCommit.isNotBlank())
-    assertEquals("com.pmp", BuildConfig.APPLICATION_ID)
+    assertEquals("com.aistudio.pmppaints.erp", BuildConfig.APPLICATION_ID)
     assertTrue("VERSION_CODE must be >= 14", BuildConfig.VERSION_CODE >= 14)
     assertTrue("VERSION_NAME must not be blank", BuildConfig.VERSION_NAME.isNotBlank())
     val cleanVersionName = BuildConfig.VERSION_NAME.removePrefix("v").removePrefix("V").trim()
@@ -450,7 +450,7 @@ class ExampleUnitTest {
       content.contains(":app:testDebugUnitTest")
     )
 
-    // 7. Verify root version.json and public/version.json are synchronized at v4.0 (versionCode 15)
+    // 7. Verify root version.json and public/version.json are synchronized at v4.0 (versionCode 17)
     val rootVersionFile = listOf(
       java.io.File("version.json"),
       java.io.File("../version.json")
@@ -466,8 +466,8 @@ class ExampleUnitTest {
     val publicParsed = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(publicVersionFile!!.readText(Charsets.UTF_8))
     assertNotNull(rootParsed)
     assertNotNull(publicParsed)
-    assertEquals(15, rootParsed!!.versionCode)
-    assertEquals("v4.0", rootParsed.versionName)
+    assertEquals(BuildConfig.VERSION_CODE, rootParsed!!.versionCode)
+    assertEquals("v4.1", rootParsed.versionName)
     assertEquals(rootParsed.versionCode, publicParsed!!.versionCode)
     assertEquals(rootParsed.versionName, publicParsed.versionName)
     assertEquals(rootParsed.buildId, publicParsed.buildId)
@@ -1064,8 +1064,8 @@ class ExampleUnitTest {
       umSource.contains("if (archiveVersionCode <= installedOsVersionCode)")
     )
     assertTrue(
-      "UpdateManager must strictly verify archivePackage == \"com.pmp\"",
-      umSource.contains("archivePackage != \"com.pmp\"")
+      "UpdateManager must strictly verify archivePackage matches installed packageName",
+      umSource.contains("archivePackage != appContext.packageName")
     )
     assertTrue(
       "UpdateManager must use connectTimeout = 15_000 and readTimeout = 30_000",
@@ -1157,18 +1157,30 @@ class ExampleUnitTest {
     assertTrue("Download page must display SHA-256 checksum (#sha256ChecksumDisplay)", indexHtml.contains("id=\"sha256ChecksumDisplay\""))
     assertTrue("Download page must resolve apkSha256 / sha256Checksum / sha256 from version.json", indexHtml.contains("resolveSha256FromVersionData"))
     assertTrue("Download page must support local APK SHA-256 verification via crypto.subtle.digest('SHA-256'", indexHtml.contains("crypto.subtle.digest('SHA-256'"))
+    assertTrue("Download page must include Firestore release history section (#releaseHistorySection)", indexHtml.contains("id=\"releaseHistorySection\""))
+    assertTrue("Download page must include release history list (#releaseHistoryList)", indexHtml.contains("id=\"releaseHistoryList\""))
+    assertTrue("Download page must fetch release notes history from Firestore app_updates collection", indexHtml.contains("FIRESTORE_APP_UPDATES_COLLECTION_URL") && indexHtml.contains("fetchAndRenderReleaseHistoryFromFirestore"))
 
     // 2. Verify app/build.gradle.kts and gradle.properties configure R.string.default_web_client_id
-    //    using the Web OAuth 2.0 Client ID (client_type 3), never the Android OAuth Client ID (client_type 1)
+    //    using the Web OAuth 2.0 Client ID (client_type 3), never the Android OAuth Client ID (client_type 1),
+    //    and enable R8/ProGuard code shrinking and obfuscation (isMinifyEnabled = true, isShrinkResources = true)
     val buildGradleFile = listOf(
       java.io.File("app/build.gradle.kts"),
       java.io.File("build.gradle.kts")
-    ).firstOrNull { it.exists() && it.readText(Charsets.UTF_8).contains("applicationId = \"com.pmp\"") }
+    ).firstOrNull { it.exists() && it.readText(Charsets.UTF_8).contains("applicationId = \"com.aistudio.pmppaints.erp\"") }
     assertNotNull("app/build.gradle.kts must exist", buildGradleFile)
     val buildGradleText = buildGradleFile!!.readText(Charsets.UTF_8)
     assertTrue(
       "app/build.gradle.kts must provide resValue fallback for default_web_client_id when google-services.json is absent in CI",
       buildGradleText.contains("resValue(\"string\", \"default_web_client_id\", resolvedDefaultWebClientId)")
+    )
+    assertTrue(
+      "app/build.gradle.kts must enable R8/ProGuard code shrinking and obfuscation (isMinifyEnabled = true) in release buildType",
+      buildGradleText.contains("isMinifyEnabled = true")
+    )
+    assertTrue(
+      "app/build.gradle.kts must enable resource shrinking (isShrinkResources = true) in release buildType",
+      buildGradleText.contains("isShrinkResources = true")
     )
 
     val gradlePropsFile = listOf(
@@ -1324,35 +1336,35 @@ class ExampleUnitTest {
 
   @Test
   fun testModularCrossPlatformArchitectureAndTrueBlackDarkMode() {
-    // 1. Verify unified v4.0 version across PmpAppVersionContract, BuildConfig, UpdateManager, and version.json
-    assertEquals(15, com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE)
-    assertEquals("v4.0", com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME)
-    assertEquals(15, BuildConfig.VERSION_CODE)
-    assertEquals("v4.0", BuildConfig.VERSION_NAME)
-    assertEquals(15, com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionCode)
-    assertEquals("v4.0", com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionName)
+    // 1. Verify unified v4.1 (versionCode 16) across PmpAppVersionContract, BuildConfig, UpdateManager, and version.json
+    assertEquals(BuildConfig.VERSION_CODE, com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE)
+    assertEquals("v4.1", com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME)
+    assertEquals(16, BuildConfig.VERSION_CODE)
+    assertEquals("v4.1", BuildConfig.VERSION_NAME)
+    assertEquals(BuildConfig.VERSION_CODE, com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionCode)
+    assertEquals("v4.1", com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionName)
 
-    val parsedVersion = com.example.core.architecture.PmpAppVersionContract.parseSemanticVersion("v4.0")
+    val parsedVersion = com.example.core.architecture.PmpAppVersionContract.parseSemanticVersion("v4.1")
     assertEquals(4, parsedVersion.major)
-    assertEquals(0, parsedVersion.minor)
+    assertEquals(1, parsedVersion.minor)
     assertEquals(0, parsedVersion.patch)
 
     assertTrue(
-      "Remote version v4.1 (code 16) must be detected as newer than v4.0 (code 15)",
+      "Remote version v4.2 (code 17) must be detected as newer than v4.1 (code 16)",
       com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(
-        installedVersionCode = 15,
-        installedVersionName = "v4.0",
-        remoteVersionCode = 16,
-        remoteVersionName = "v4.1"
+        installedVersionCode = 16,
+        installedVersionName = "v4.1",
+        remoteVersionCode = 17,
+        remoteVersionName = "v4.2"
       )
     )
     assertFalse(
-      "Same version v4.0 (code 15) must not trigger a redundant update",
+      "Same version v4.1 (code 16) must not trigger a redundant update",
       com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(
-        installedVersionCode = 15,
-        installedVersionName = "v4.0",
-        remoteVersionCode = 15,
-        remoteVersionName = "v4.0"
+        installedVersionCode = 16,
+        installedVersionName = "v4.1",
+        remoteVersionCode = 16,
+        remoteVersionName = "v4.1"
       )
     )
 

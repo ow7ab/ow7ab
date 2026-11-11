@@ -634,8 +634,22 @@ class UpdateManager(private val context: Context) {
 
         val candidateUrls = buildCandidateDownloadUrls(candidate)
         for (apkUrl in candidateUrls) {
+            val isUnversionedFallback = apkUrl.contains(CANONICAL_APK_ASSET_NAME, ignoreCase = true) &&
+                !apkUrl.contains("-b${candidate.versionCode}.apk", ignoreCase = true)
             val probe = probeRemoteApkBinaryUrl(apkUrl)
             if (probe.isReachableValidApk) {
+                if (isUnversionedFallback) {
+                    val hasMatchingExpectedSize = candidate.fileSize > MIN_VALID_APK_SIZE_BYTES &&
+                        probe.contentLengthBytes > MIN_VALID_APK_SIZE_BYTES &&
+                        probe.contentLengthBytes == candidate.fileSize
+                    if (!hasMatchingExpectedSize) {
+                        DeveloperUpdateLogger.warn(
+                            "ReachabilityCheck",
+                            "Skipped unversioned fallback $apkUrl for v${candidate.versionName} (code=${candidate.versionCode}): remote size (${probe.contentLengthBytes}) does not match expected size (${candidate.fileSize})"
+                        )
+                        continue
+                    }
+                }
                 val resolvedSize = if (probe.contentLengthBytes > 0L) probe.contentLengthBytes else candidate.fileSize
                 val resolvedSizeMb = if (resolvedSize > 0L) {
                     Math.round((resolvedSize.toDouble() / (1024.0 * 1024.0)) * 100.0) / 100.0
@@ -810,7 +824,7 @@ class UpdateManager(private val context: Context) {
                         "CheckForUpdates",
                         "Skipping candidate v${candidate.versionName} (code=${candidate.versionCode}) because APK binary returned 404/unreachable."
                     )
-                    if (candidate.versionCode == 22) {
+                    if (candidate.versionCode > currentVersionCode) {
                         repairStaleFirestoreMetadataIfNeeded(
                             staleCandidate = candidate,
                             validPublishedBaseline = LATEST_CLOUD_RELEASE_INFO,
@@ -1390,6 +1404,12 @@ class UpdateManager(private val context: Context) {
             }.onFailure { err ->
                 DeveloperUpdateLogger.warn("PublishFirestore", "app_updates/latest write note: ${err.message}")
             }
+            runCatching {
+                firestore.collection("app_updates")
+                    .document("release_b${verifiedInfo.versionCode}")
+                    .set(payload, SetOptions.merge())
+                    .await()
+            }
 
             onProgress(88, "جاري مزامنة التحديث مع الفرع الرئيسي ($sanitizedCluster)...")
             runCatching {
@@ -1575,6 +1595,12 @@ class UpdateManager(private val context: Context) {
                     .await()
             }.onFailure { err ->
                 DeveloperUpdateLogger.warn("BroadcastClusters", "app_updates/latest write note: ${err.message}")
+            }
+            runCatching {
+                firestore.collection("app_updates")
+                    .document("release_b${verifiedRelease.versionCode}")
+                    .set(payload, SetOptions.merge())
+                    .await()
             }
 
             onProgress(93, "جاري تعميم التحديث على جميع الفروع المسجلة...")
@@ -1801,6 +1827,12 @@ class UpdateManager(private val context: Context) {
             runCatching {
                 firestore.collection("app_updates")
                     .document("version_json")
+                    .set(payload, SetOptions.merge())
+                    .await()
+            }
+            runCatching {
+                firestore.collection("app_updates")
+                    .document("release_b${resolvedInfo.versionCode}")
                     .set(payload, SetOptions.merge())
                     .await()
             }
@@ -2106,10 +2138,20 @@ class UpdateManager(private val context: Context) {
                     continue
                 }
 
+                val candidateValidation = validateApkArchive(tempFile, updateInfo)
+                if (!candidateValidation.isValid) {
+                    tempFile.delete()
+                    DeveloperUpdateLogger.warn(
+                        "DownloadApk",
+                        "Rejected stale or mismatched APK from $candidateUrl: ${candidateValidation.developerReason}"
+                    )
+                    continue
+                }
+
                 downloadedSuccessfully = true
                 DeveloperUpdateLogger.info(
                     "DownloadApk",
-                    "Successfully downloaded APK (${tempFile.length()} bytes) from $candidateUrl"
+                    "Successfully downloaded and verified APK (${tempFile.length()} bytes) from $candidateUrl"
                 )
                 break@urlLoop
             } catch (e: CancellationException) {
@@ -2127,6 +2169,10 @@ class UpdateManager(private val context: Context) {
 
         if (!downloadedSuccessfully) {
             if (tempFile.exists()) tempFile.delete()
+            repairStaleFirestoreMetadataIfNeeded(
+                staleCandidate = updateInfo,
+                validPublishedBaseline = LATEST_CLOUD_RELEASE_INFO
+            )
             val errorMsg = USER_ERROR_DOWNLOAD_FAILED
             _downloadState.value = DownloadState.Failed(errorMsg, canRetry = true)
             return@withContext Result.failure(Exception(errorMsg))
@@ -2171,7 +2217,7 @@ class UpdateManager(private val context: Context) {
     internal fun validateApkArchive(apkFile: File, expectedUpdate: UpdateInfo): ApkValidationResult {
         if (!apkFile.exists() || apkFile.length() < MIN_VALID_APK_SIZE_BYTES) {
             val devMsg = "APK file too small or missing: ${apkFile.length()} bytes"
-            DeveloperUpdateLogger.error("ApkValidate", devMsg)
+            DeveloperUpdateLogger.warn("ApkValidate", devMsg)
             return ApkValidationResult(
                 isValid = false,
                 errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
@@ -2181,7 +2227,7 @@ class UpdateManager(private val context: Context) {
 
         if (!isValidZipApkHeader(apkFile)) {
             val devMsg = "Invalid ZIP/APK magic header in ${apkFile.name}"
-            DeveloperUpdateLogger.error("ApkValidate", devMsg)
+            DeveloperUpdateLogger.warn("ApkValidate", devMsg)
             return ApkValidationResult(
                 isValid = false,
                 errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
@@ -2206,7 +2252,7 @@ class UpdateManager(private val context: Context) {
 
             if (archiveInfo == null) {
                 val devMsg = "PackageManager.getPackageArchiveInfo returned null for ${apkFile.absolutePath}"
-                DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                DeveloperUpdateLogger.warn("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
                     errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
@@ -2215,9 +2261,10 @@ class UpdateManager(private val context: Context) {
             }
 
             val archivePackage = archiveInfo.packageName.orEmpty()
-            if (archivePackage != "com.pmp" || archivePackage != appContext.packageName) {
+            val isAllowedPmpPackage = archivePackage == "com.aistudio.pmppaints.erp" || archivePackage == "com.pmp"
+            if (!isAllowedPmpPackage || archivePackage != appContext.packageName) {
                 val devMsg = "Package name mismatch: archive=$archivePackage vs installed=${appContext.packageName}"
-                DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                DeveloperUpdateLogger.warn("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
                     errorMessage = USER_ERROR_INCOMPATIBLE_PACKAGE,
@@ -2236,8 +2283,8 @@ class UpdateManager(private val context: Context) {
 
             // إلزامي: يجب أن يكون versionCode داخل الحزمة المنزلّة أكبر فعلياً من النسخة المثبّتة حالياً لمنع التثبيت الوهمي أو التراجع (Downgrade)
             if (archiveVersionCode <= installedOsVersionCode) {
-                val devMsg = "Archive versionCode ($archiveVersionCode) is not strictly greater than installed ($installedOsVersionCode)"
-                DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                val devMsg = "Skipping stale remote APK archive (archiveVersionCode=$archiveVersionCode, installedVersionCode=$installedOsVersionCode)"
+                DeveloperUpdateLogger.warn("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
                     errorMessage = "حزمة التحديث المنزّلة (بناء $archiveVersionCode) ليست أحدث من النسخة المثبّتة حالياً (بناء $installedOsVersionCode).",
@@ -2248,7 +2295,7 @@ class UpdateManager(private val context: Context) {
             // التحقق من أن رقم إصدار الحزمة يطابق أو يفوق الإصدار المتوقع
             if (expectedUpdate.versionCode > 0 && archiveVersionCode < expectedUpdate.versionCode) {
                 val devMsg = "Archive versionCode ($archiveVersionCode) is less than expectedUpdate.versionCode (${expectedUpdate.versionCode})"
-                DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                DeveloperUpdateLogger.warn("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
                     errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
@@ -2259,7 +2306,7 @@ class UpdateManager(private val context: Context) {
             // التحقق من تطابق حجم الملف مع الحجم المتوقع في بيانات الإصدار عند توفره
             if (expectedUpdate.fileSize > MIN_VALID_APK_SIZE_BYTES && apkFile.length() != expectedUpdate.fileSize) {
                 val devMsg = "APK file size mismatch: actual=${apkFile.length()} vs expected=${expectedUpdate.fileSize}"
-                DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                DeveloperUpdateLogger.warn("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
                     errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
@@ -2274,7 +2321,7 @@ class UpdateManager(private val context: Context) {
                 !installedCertSha.equals(archiveCertSha, ignoreCase = true)
             ) {
                 val devMsg = "Signing certificate mismatch! Installed=$installedCertSha vs Archive=$archiveCertSha. Cannot upgrade in-place without matching signing key."
-                DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                DeveloperUpdateLogger.warn("ApkValidate", devMsg)
                 return ApkValidationResult(
                     isValid = false,
                     errorMessage = USER_ERROR_SIGNATURE_MISMATCH,
@@ -2288,7 +2335,7 @@ class UpdateManager(private val context: Context) {
                 val actualSha = computeFileSha256(apkFile).lowercase()
                 if (actualSha != expectedSha) {
                     val devMsg = "APK SHA-256 mismatch: actual=$actualSha vs expected=$expectedSha"
-                    DeveloperUpdateLogger.error("ApkValidate", devMsg)
+                    DeveloperUpdateLogger.warn("ApkValidate", devMsg)
                     return ApkValidationResult(
                         isValid = false,
                         errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
@@ -2303,7 +2350,7 @@ class UpdateManager(private val context: Context) {
             )
             ApkValidationResult(isValid = true)
         } catch (e: Exception) {
-            DeveloperUpdateLogger.error("ApkValidate", "Archive validation exception", e)
+            DeveloperUpdateLogger.warn("ApkValidate", "Archive validation exception", e)
             ApkValidationResult(
                 isValid = false,
                 errorMessage = USER_ERROR_CORRUPTED_PACKAGE,
@@ -2345,7 +2392,43 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * فتح شاشة إعدادات السماح بتثبيت التطبيقات غير المعروفة الخاصة بالتطبيق
+     * فتح صفحة التطبيق في متجر Google Play أو بوابة التحديث الرسمية عبر Intent.ACTION_VIEW بدون صلاحيات حساسة
+     */
+    fun openGooglePlayOrWebUpdatePage(
+        activityContext: Context = appContext,
+        fallbackWebUrl: String = DEFAULT_APK_DOWNLOAD_URL
+    ): Boolean {
+        val marketIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("market://details?id=${appContext.packageName}")
+        ).apply {
+            setPackage("com.android.vending")
+            if (activityContext !is android.app.Activity) {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        }
+        val launchedPlay = runCatching {
+            activityContext.startActivity(marketIntent)
+            true
+        }.getOrDefault(false)
+        if (launchedPlay) return true
+
+        val webIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse(fallbackWebUrl.ifBlank { com.example.core.architecture.PmpAppVersionContract.GOOGLE_PLAY_STORE_URL })
+        ).apply {
+            if (activityContext !is android.app.Activity) {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        }
+        return runCatching {
+            activityContext.startActivity(webIntent)
+            true
+        }.getOrDefault(false)
+    }
+
+    /**
+     * فتح شاشة إعدادات السماح بتثبيت التطبيقات غير المعروفة الخاصة بالتطبيق أو التوجيه لمتجر Google Play
      */
     fun openInstallPermissionSettings(activityContext: Context = appContext) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -2357,8 +2440,12 @@ class UpdateManager(private val context: Context) {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
             }
-            runCatching {
+            val openedSettings = runCatching {
                 activityContext.startActivity(intent)
+                true
+            }.getOrDefault(false)
+            if (!openedSettings) {
+                openGooglePlayOrWebUpdatePage(activityContext)
             }
         }
     }

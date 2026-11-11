@@ -58,7 +58,10 @@ object DeveloperUpdateLogger {
     }
 
     fun error(stage: String, detail: String, throwable: Throwable? = null) {
-        runCatching { Log.e(TAG, "[$stage] $detail", throwable) }
+        runCatching {
+            if (throwable != null) Log.w(TAG, "[$stage] $detail", throwable)
+            else Log.w(TAG, "[$stage] $detail")
+        }
         val combined = if (throwable != null) "$detail (${throwable.javaClass.simpleName}: ${throwable.message})" else detail
         appendEntry(stage, combined, isError = true)
     }
