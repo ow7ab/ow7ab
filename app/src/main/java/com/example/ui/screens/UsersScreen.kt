@@ -47,10 +47,16 @@ fun UsersScreen(
     val isManager = currentUser.isSystemManager()
     val isSuperAdmin = currentUser.isSuperAdminAccount()
 
+    val isAuthorizedRbacAdmin = remember(currentUser) {
+        com.example.util.EnterpriseRbacManager.canConfigureEmployeePermissions(currentUser)
+    }
+    val permissionChangeHistory by viewModel.permissionChangeHistory.collectAsState()
+    var showPermissionHistoryDialog by remember { mutableStateOf(false) }
+
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = when {
         isSuperAdmin -> listOf("حسابات المستخدمين", "+ إنشاء حساب", "الأرشيف")
-        isManager -> listOf("حسابات المستخدمين (إشراف)")
+        isManager || isAuthorizedRbacAdmin -> listOf("حسابات المستخدمين (إشراف)")
         else -> listOf("حسابي الحالي")
     }
 
@@ -70,6 +76,7 @@ fun UsersScreen(
         "مسؤول المبيعات",
         "المحاسب",
         "مدير النظام",
+        "مسؤول نظام مخصص",
         "محاسب خزنة ومبيعات",
         "مسؤول مبيعات وفواتير",
         "مهندس إنتاج - المصنع",
@@ -98,21 +105,34 @@ fun UsersScreen(
     var showFullDiagnosticDialog by remember { mutableStateOf(false) }
 
     val generalPermissions = listOf(
-        "المبيعات",
-        "المشتريات",
-        "الأسعار",
-        "تصدير PDF",
-        "الخزن",
-        "التحويلات",
-        "المخازن",
         "المصنع",
-        "المختبر الكيميائي",
+        "المخازن",
+        "الإنتاج",
         "مواد الإنتاج",
         "التعبئة والتغليف",
+        "المحاسبة",
+        "الخزن",
+        "المبيعات",
+        "التحويلات",
+        "العملاء",
+        "الموردين",
+        "المشتريات",
+        "المختبر الكيميائي",
+        "الأسعار",
         "تعديل نوع الصنف",
         "المستخدمين",
         "الإعدادات",
-        "صلاحية الحذف والتصفير"
+        "صلاحية العرض",
+        "صلاحية الإنشاء",
+        "صلاحية التعديل",
+        "صلاحية الحذف والتصفير",
+        "اعتماد المستندات",
+        "تصدير PDF",
+        "طباعة المستندات",
+        "العمليات المالية",
+        "عمليات المخزون",
+        "إدارة المستخدمين",
+        "الإعدادات الإدارية"
     )
     val reportSectionPermissions = listOf(
         "التقارير (كاملة)",
@@ -148,6 +168,9 @@ fun UsersScreen(
     var editCustomRoleText by remember { mutableStateOf("") }
     var editBranchState by remember { mutableStateOf("") }
     var editPermsState by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var editChangeReason by remember { mutableStateOf("تحديث الصلاحيات الدورية للموظف") }
+    var tempPermissionOption by remember { mutableStateOf("المخازن") }
+    var tempDurationHours by remember { mutableIntStateOf(24) }
     var userToDeletePermanently by remember { mutableStateOf<UserAccountEntity?>(null) }
 
     Column(
@@ -417,22 +440,37 @@ fun UsersScreen(
                                     text = "دليل حسابات المستخدمين واعتماد الصلاحيات",
                                     color = TextWhite,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.weight(1f)
                                 )
-                                if (isSuperAdmin) {
-                                    GlassButton(
-                                        text = "حساب جديد",
-                                        icon = Icons.Default.PersonAdd,
-                                        gradient = PmpBrandRedGradient,
-                                        onClick = { selectedTab = 1 },
-                                        modifier = Modifier.testTag("open_create_user_tab_button")
-                                    )
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    if (isSuperAdmin || isAuthorizedRbacAdmin) {
+                                        GlassButton(
+                                            text = "سجل الصلاحيات",
+                                            icon = Icons.Default.History,
+                                            gradient = GlassAccentBlueGradient,
+                                            onClick = {
+                                                viewModel.refreshPermissionChangeHistory()
+                                                showPermissionHistoryDialog = true
+                                            },
+                                            modifier = Modifier.testTag("open_permission_history_button")
+                                        )
+                                    }
+                                    if (isSuperAdmin) {
+                                        GlassButton(
+                                            text = "حساب جديد",
+                                            icon = Icons.Default.PersonAdd,
+                                            gradient = PmpBrandRedGradient,
+                                            onClick = { selectedTab = 1 },
+                                            modifier = Modifier.testTag("open_create_user_tab_button")
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
 
-                    val displayedAccounts = if (isManager) {
+                    val displayedAccounts = if (isManager || isAuthorizedRbacAdmin) {
                         // Show active accounts and pending approval accounts (suspended accounts are preserved in the Archive tab)
                         userAccounts.filter { it.active || it.syncStatus == "PENDING_MANAGER_APPROVAL" }
                             .sortedByDescending { it.syncStatus == "PENDING_MANAGER_APPROVAL" }
@@ -451,8 +489,9 @@ fun UsersScreen(
                                 switchPinInput = account.pinOrPassword
                             },
                             onEditPermissionsRequest = {
-                                if (isSuperAdmin) {
+                                if (isSuperAdmin || isAuthorizedRbacAdmin) {
                                     userPendingPermEdit = account
+                                    editChangeReason = "تحديث الصلاحيات الدورية للموظف"
                                     if (account.role in roleOptions && account.role != "مسمى وظيفي آخر (كتابة يدوية)...") {
                                         editRoleState = account.role
                                         editCustomRoleText = ""
@@ -472,7 +511,7 @@ fun UsersScreen(
                                         existingPerms
                                     }
                                 } else {
-                                    viewModel.postMessage("عفواً، حساب Admin هو الوحيد الذي يملك صلاحية إدارة وتعديل صلاحيات المستخدمين.", isError = true)
+                                    viewModel.postMessage("عفواً، حساب Admin أو المسؤول المفوض بإدارة المستخدمين هو الوحيد الذي يملك صلاحية تعديل صلاحيات المستخدمين.", isError = true)
                                 }
                             },
                             onToggleActive = {
@@ -1151,6 +1190,77 @@ fun UsersScreen(
                             }
                         }
                     }
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Optional Temporary Permission with Expiration Date section
+                    Text(
+                        text = "منح صلاحية مؤقتة بتاريخ انتهاء تلقائي (اختياري):",
+                        color = TextDark,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(modifier = Modifier.weight(1.3f)) {
+                            GlassDropdown(
+                                label = "الصلاحية المؤقتة",
+                                options = generalPermissions,
+                                selectedOption = tempPermissionOption,
+                                onOptionSelected = { tempPermissionOption = it }
+                            )
+                        }
+                        Box(modifier = Modifier.weight(0.9f)) {
+                            GlassDropdown(
+                                label = "المدة",
+                                options = listOf("24 ساعة", "72 ساعة", "168 ساعة (أسبوع)"),
+                                selectedOption = when (tempDurationHours) {
+                                    72 -> "72 ساعة"
+                                    168 -> "168 ساعة (أسبوع)"
+                                    else -> "24 ساعة"
+                                },
+                                onOptionSelected = { label ->
+                                    tempDurationHours = when {
+                                        label.startsWith("72") -> 72
+                                        label.startsWith("168") -> 168
+                                        else -> 24
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    GlassButton(
+                        text = "+ إضافة صلاحية مؤقتة ($tempPermissionOption لمدة $tempDurationHours ساعة)",
+                        icon = Icons.Default.Timer,
+                        gradient = GlassAccentBlueGradient,
+                        onClick = {
+                            val expiresAt = System.currentTimeMillis() + (tempDurationHours * 3600_000L)
+                            val tempToken = com.example.util.EnterpriseRbacManager.TemporaryPermissionGrant(
+                                targetUserCode = targetUser.userCode.ifBlank { targetUser.username },
+                                permissionToken = tempPermissionOption,
+                                grantedBy = currentUser?.username ?: "admin",
+                                expiresAtMillis = expiresAt,
+                                reason = editChangeReason
+                            ).toInlineToken()
+                            editPermsState = editPermsState + tempToken
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("add_temporary_permission_button")
+                    )
+
+                    GlassTextField(
+                        value = editChangeReason,
+                        onValueChange = { editChangeReason = it },
+                        label = "سبب تعديل الصلاحيات (يُحفظ في السجل الرقابي)",
+                        placeholder = "مثال: تفويض جرد مخزني أو تحديث دور وظيفي...",
+                        leadingIcon = Icons.Default.HistoryEdu,
+                        modifier = Modifier.testTag("permission_change_reason_input")
+                    )
                 }
             },
             confirmButton = {
@@ -1169,7 +1279,8 @@ fun UsersScreen(
                             newRole = resolvedRole,
                             newBranch = editBranchState,
                             newPermissions = editPermsState.joinToString(","),
-                            approveAccount = true
+                            approveAccount = true,
+                            changeReason = editChangeReason.ifBlank { "تحديث صلاحيات الموظف" }
                         )
                         userPendingPermEdit = null
                     },
@@ -1179,6 +1290,83 @@ fun UsersScreen(
             dismissButton = {
                 TextButton(onClick = { userPendingPermEdit = null }) {
                     Text("إلغاء", color = TextMuted)
+                }
+            }
+        )
+    }
+
+    if (showPermissionHistoryDialog) {
+        AlertDialog(
+            onDismissRequest = { showPermissionHistoryDialog = false },
+            containerColor = PmpWhiteCard,
+            title = {
+                Text(
+                    text = "سجل تغييرات الصلاحيات (RBAC Audit History)",
+                    color = TextDark,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (permissionChangeHistory.isEmpty()) {
+                        Text(
+                            text = "لا توجد تغييرات صلاحيات مسجلة في هذه الجلسة بعد.",
+                            color = TextMuted,
+                            fontSize = 12.5.sp
+                        )
+                    } else {
+                        permissionChangeHistory.take(30).forEach { entry ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(PmpSubtleSurface)
+                                    .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "${entry.targetFullName} (@${entry.targetUsername}) • ${entry.formattedTimestamp()}",
+                                    color = PmpBrandNavy,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                                Text(
+                                    text = "بواسطة: @${entry.actorUsername} (${entry.actorRole}) • السبب: ${entry.reason}",
+                                    color = TextDark,
+                                    fontSize = 11.sp
+                                )
+                                if (entry.addedPermissions.isNotEmpty()) {
+                                    Text(
+                                        text = "أُضيف: ${entry.addedPermissions.joinToString("، ")}",
+                                        color = PmpGreen,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                                if (entry.removedPermissions.isNotEmpty()) {
+                                    Text(
+                                        text = "أُزيل: ${entry.removedPermissions.joinToString("، ")}",
+                                        color = PmpRed,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPermissionHistoryDialog = false }) {
+                    Text("إغلاق", color = PmpBrandRed, fontWeight = FontWeight.Bold)
                 }
             }
         )
@@ -1393,13 +1581,16 @@ private fun UserAccountCard(
 
             // Permissions Summary Row (visible in UsersScreen for Manager)
             if (canManagePermissions) {
+                val formattedPerms = remember(account.permissions) {
+                    com.example.util.EnterpriseRbacManager.formatCleanPermissionsForDisplay(account.permissions)
+                }
                 Text(
-                    text = if (account.permissions.isBlank()) {
+                    text = if (formattedPerms.isBlank()) {
                         "الصلاحيات: لم يتم تحديد صلاحيات بعد"
                     } else {
-                        "الصلاحيات: ${account.permissions.replace(",", " • ")}"
+                        "الصلاحيات: $formattedPerms"
                     },
-                    color = if (account.permissions.isBlank()) Color(0xFFB45309) else PmpBrandNavy,
+                    color = if (formattedPerms.isBlank()) Color(0xFFB45309) else PmpBrandNavy,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 2,

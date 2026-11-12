@@ -21,6 +21,7 @@ enum class ErpActionPermission(val arabicLabel: String) {
     VIEW("عرض (View)"),
     CREATE("إنشاء (Create)"),
     EDIT("تعديل (Edit)"),
+    DELETE("حذف (Delete)"),
     SUBMIT("إرسال للاعتماد (Submit)"),
     APPROVE("اعتماد (Approve)"),
     REJECT("رفض (Reject)"),
@@ -28,7 +29,12 @@ enum class ErpActionPermission(val arabicLabel: String) {
     ISSUE("صرف مخزني (Issue)"),
     TRANSFER("تحويل مخزني (Transfer)"),
     EXPORT("تصدير تقارير (Export)"),
+    PRINT("طباعة (Print)"),
     REVERSE("عكس / تسوية مستند (Reverse)"),
+    FINANCIAL_OPERATIONS("العمليات المالية (Financial Operations)"),
+    INVENTORY_OPERATIONS("عمليات المخزون (Inventory Operations)"),
+    USER_MANAGEMENT("إدارة المستخدمين (User Management)"),
+    ADMINISTRATIVE_SETTINGS("الإعدادات الإدارية (Administrative Settings)"),
     MANAGE_SETTINGS("إدارة الإعدادات الحساسة (Manage Settings)")
 }
 
@@ -472,11 +478,14 @@ object ErpLifecycleEngine {
     }
 
     /**
-     * التحقق الصارم من أن حساب Admin فقط هو المخول بإدارة حسابات المستخدمين وتحديد أو تعديل صلاحياتهم
-     * أو تعديل قواعد التعبئة المركزية
+     * التحقق الصارم من أن حساب Admin أو المسؤول المفوض صراحةً بصلاحية (إدارة المستخدمين) فقط
+     * هو المخول بإدارة حسابات المستخدمين وتحديد أو تعديل صلاحياتهم
      */
-    fun canManageUsersAndPermissions(actor: UserAccountEntity?): Boolean {
-        return actor.isSuperAdminAccount()
+    fun canManageUsersAndPermissions(
+        actor: UserAccountEntity?,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        return EnterpriseRbacManager.canConfigureEmployeePermissions(actor, nowMillis)
     }
 
     fun canModifyCentralPackagingRules(actor: UserAccountEntity?): Boolean {
@@ -485,57 +494,15 @@ object ErpLifecycleEngine {
 
     /**
      * مصفوفة الصلاحيات الدقيقة حسب الدور والوحدة ونوع العملية مع الحفاظ على الصلاحيات الحالية
+     * ودعم الصلاحيات المؤقتة ذات تاريخ الانتهاء وعزل المسؤولين المخصصين
      */
     fun hasGranularPermission(
         user: UserAccountEntity?,
         module: String,
-        action: ErpActionPermission
+        action: ErpActionPermission,
+        nowMillis: Long = System.currentTimeMillis()
     ): Boolean {
-        if (user == null || !user.active) return false
-        if (user.isSuperAdminAccount()) return true
-
-        // المدير يملك الاطلاع والاعتماد والإشراف دون إدارة صلاحيات المستخدمين أو إعدادات Admin الحساسة
-        if (user.isSystemManager()) {
-            if (module == "المستخدمين" && action in listOf(
-                    ErpActionPermission.CREATE,
-                    ErpActionPermission.EDIT,
-                    ErpActionPermission.APPROVE,
-                    ErpActionPermission.MANAGE_SETTINGS
-                )
-            ) {
-                return false
-            }
-            if (action == ErpActionPermission.MANAGE_SETTINGS) {
-                return false
-            }
-            return true
-        }
-
-        val assignedPerms = user.parsedPermissionsSet()
-        val role = user.role
-
-        return when (action) {
-            ErpActionPermission.MANAGE_SETTINGS -> false
-            ErpActionPermission.EXPORT -> "تصدير PDF" in assignedPerms || "التقارير (كاملة)" in assignedPerms
-            ErpActionPermission.REVERSE -> "صلاحية الحذف والتصفير" in assignedPerms
-            ErpActionPermission.APPROVE, ErpActionPermission.REJECT -> {
-                role.contains("مدير") || role.contains("جودة") || "اعتماد المستندات" in assignedPerms
-            }
-            ErpActionPermission.RECEIVE -> {
-                role.contains("أمين مخزن") || "المخازن" in assignedPerms || "مواد الإنتاج" in assignedPerms
-            }
-            ErpActionPermission.ISSUE -> {
-                role.contains("أمين مخزن") || "المخازن" in assignedPerms || "مواد الإنتاج" in assignedPerms
-            }
-            ErpActionPermission.TRANSFER -> {
-                "التحويلات" in assignedPerms || "المخازن" in assignedPerms
-            }
-            ErpActionPermission.VIEW, ErpActionPermission.CREATE, ErpActionPermission.EDIT, ErpActionPermission.SUBMIT -> {
-                module in assignedPerms ||
-                    (module == "المشتريات" && ("المشتريات" in assignedPerms || "مواد الإنتاج" in assignedPerms)) ||
-                    (module == "المصنع" && ("المصنع" in assignedPerms || "التعبئة والتغليف" in assignedPerms || "مواد الإنتاج" in assignedPerms))
-            }
-        }
+        return EnterpriseRbacManager.hasGranularPermission(user, module, action, nowMillis)
     }
 
     /**

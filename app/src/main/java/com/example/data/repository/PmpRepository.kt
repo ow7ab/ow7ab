@@ -1793,6 +1793,20 @@ class PmpRepository(
         return Result.success(clean)
     }
 
+    fun validateBackendOperation(
+        actorAccount: UserAccountEntity?,
+        module: String,
+        action: com.example.util.ErpActionPermission,
+        nowMillis: Long = System.currentTimeMillis()
+    ): com.example.util.EnterpriseRbacManager.BackendAccessDecision {
+        return com.example.util.EnterpriseRbacManager.validateBackendRequest(
+            user = actorAccount,
+            module = module,
+            action = action,
+            nowMillis = nowMillis
+        )
+    }
+
     suspend fun updateEmployeePermissionsAndRole(
         account: UserAccountEntity,
         newRole: String,
@@ -1800,11 +1814,31 @@ class PmpRepository(
         newPermissions: String,
         newLinkedUid: String,
         approveAccount: Boolean = true,
-        actor: String
+        actor: String,
+        actorAccount: UserAccountEntity? = null,
+        reason: String = "تحديث صلاحيات الموظف"
     ): Result<UserAccountEntity> {
+        if (actorAccount != null) {
+            val decision = validateBackendOperation(
+                actorAccount = actorAccount,
+                module = "المستخدمين",
+                action = com.example.util.ErpActionPermission.USER_MANAGEMENT
+            )
+            if (!decision.allowed) {
+                return Result.failure(SecurityException(decision.message))
+            }
+        }
         val cleanPerms = newPermissions.trim()
+        val resolvedRole = newRole.trim().ifBlank { account.role }
+        val historyEntry = com.example.util.EnterpriseRbacManager.recordPermissionChange(
+            actor = actorAccount,
+            targetUser = account,
+            newRole = resolvedRole,
+            newPermissions = cleanPerms,
+            reason = reason
+        )
         val updated = account.copy(
-            role = newRole.trim().ifBlank { account.role },
+            role = resolvedRole,
             branch = newBranch.trim().ifBlank { account.branch },
             permissions = cleanPerms,
             remoteServerId = newLinkedUid.trim().ifBlank { account.remoteServerId },
@@ -1820,7 +1854,14 @@ class PmpRepository(
                 } else {
                     "UPDATE_EMPLOYEE_PERMISSIONS"
                 },
-                detail = "اعتماد/تحديث صلاحيات الحساب ${account.fullName} (${account.userCode}) -> [$cleanPerms]"
+                detail = "اعتماد/تحديث صلاحيات الحساب ${account.fullName} (${account.userCode}) -> [$cleanPerms] | السبب: ${historyEntry.reason}"
+            )
+        )
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = actor,
+                action = "PERMISSION_CHANGE_HISTORY",
+                detail = "[${historyEntry.entryId}] الموظف: ${account.username} | الدور: (${account.role} -> $resolvedRole) | أضيف: ${historyEntry.addedPermissions.joinToString(",")} | حُذف: ${historyEntry.removedPermissions.joinToString(",")}"
             )
         )
         return Result.success(updated)

@@ -167,10 +167,12 @@ enum class PmpScreen(val route: String, val title: String, val icon: ImageVector
 }
 
 /**
- * Checks whether the given user is a System Manager with full access to all modules.
+ * Checks whether the given user is a System Manager with operational oversight.
+ * Note: Scoped Administrators (مسؤول نظام مخصص / مقيد / فرع) do NOT receive automatic unrestricted manager access.
  */
 fun UserAccountEntity?.isSystemManager(): Boolean {
     if (this == null) return false
+    if (com.example.util.EnterpriseRbacManager.isScopedAdministrator(this)) return false
     return role.contains("مدير النظام") || username.equals("admin", ignoreCase = true)
 }
 
@@ -184,22 +186,29 @@ fun UserAccountEntity?.isSuperAdminAccount(): Boolean {
 }
 
 /**
- * Parses the comma-separated permissions assigned to this employee by the manager.
+ * Parses the comma-separated permissions assigned to this employee by the manager,
+ * automatically including active temporary permissions and excluding expired temporary permissions.
  */
-fun UserAccountEntity?.parsedPermissionsSet(): Set<String> {
-    if (this == null) return emptySet()
+fun UserAccountEntity?.parsedPermissionsSet(nowMillis: Long = System.currentTimeMillis()): Set<String> {
+    if (this == null || !active) return emptySet()
+    val explicitActive = com.example.util.EnterpriseRbacManager.extractActiveRawTokens(this, nowMillis)
     if (isSystemManager()) {
         return setOf(
             "المصنع",
+            "الإنتاج",
             "المختبر الكيميائي",
             "مواد الإنتاج",
             "التعبئة والتغليف",
             "المخازن",
+            "المحاسبة",
             "الخزن",
             "المشتريات",
+            "الموردين",
+            "العملاء",
             "التحويلات",
             "المبيعات",
             "تصدير PDF",
+            "طباعة المستندات",
             "الأسعار",
             "التقارير",
             "التقارير (كاملة)",
@@ -214,42 +223,36 @@ fun UserAccountEntity?.parsedPermissionsSet(): Set<String> {
             "الإعدادات",
             "تعديل نوع الصنف",
             "صلاحية الحذف والتصفير"
-        )
+        ) + explicitActive
     }
-    return permissions.split(",")
-        .map { it.trim() }
-        .filter { it.isNotEmpty() }
-        .toSet()
+    return explicitActive
 }
 
 /**
  * Enforces strict permission separation: an employee can only see and open modules
- * explicitly assigned to them by the manager.
+ * explicitly assigned to them (including non-expired temporary permissions).
  */
-fun UserAccountEntity?.hasModulePermission(moduleTitle: String): Boolean {
-    if (moduleTitle == "الرئيسية") return true
-    if (this == null) return false
-    if (isSystemManager()) return true
-    val perms = parsedPermissionsSet()
-    if (moduleTitle == "التقارير") {
-        return perms.contains("التقارير") ||
-            perms.contains("التقارير (كاملة)") ||
-            perms.any { it.startsWith("تقارير ") }
-    }
-    return moduleTitle in perms
+fun UserAccountEntity?.hasModulePermission(
+    moduleTitle: String,
+    nowMillis: Long = System.currentTimeMillis()
+): Boolean {
+    return com.example.util.EnterpriseRbacManager.hasModuleAccess(this, moduleTitle, nowMillis)
 }
 
 /**
  * Checks whether an employee has permission to view a specific report tab (e.g. Sales, Raw Materials, Inventory).
  */
-fun UserAccountEntity?.hasReportTabPermission(tabName: String): Boolean {
-    if (this == null) return false
+fun UserAccountEntity?.hasReportTabPermission(
+    tabName: String,
+    nowMillis: Long = System.currentTimeMillis()
+): Boolean {
+    if (this == null || !active) return false
     if (isSystemManager()) return true
-    val perms = parsedPermissionsSet()
-    if (perms.contains("التقارير (كاملة)")) return true
+    val perms = parsedPermissionsSet(nowMillis)
+    if (perms.contains("التقارير (كاملة)") || perms.contains("المحاسبة")) return true
     val specificKey = when (tabName) {
         "المبيعات", "مبيعات الشهر الحالي" -> "تقارير المبيعات"
-        "المديونيات" -> "تقارير المديونيات"
+        "المديونيات", "العملاء" -> "تقارير المديونيات"
         "حركة المخزون", "المنتج التام" -> "تقارير حركة المخزون"
         "حركات الخزن" -> "تقارير حركات الخزن"
         "تقارير المواد الخام", "المواد الخام في المخزن" -> "تقارير المواد الخام"
@@ -261,6 +264,41 @@ fun UserAccountEntity?.hasReportTabPermission(tabName: String): Boolean {
         return true
     }
     return false
+}
+
+/**
+ * Resolves the navigation tabs visible to the given user, ensuring unauthorized tabs remain hidden.
+ */
+fun UserAccountEntity?.resolveAllowedScreens(
+    nowMillis: Long = System.currentTimeMillis()
+): List<PmpScreen> {
+    if (this == null || !active) return listOf(PmpScreen.DASHBOARD)
+    return PmpScreen.entries.filter { screen ->
+        when (screen) {
+            PmpScreen.DASHBOARD -> true
+            PmpScreen.SETTINGS -> true
+            PmpScreen.TREASURY -> hasModulePermission("الخزن", nowMillis) ||
+                hasModulePermission("التحويلات", nowMillis) ||
+                hasModulePermission("المحاسبة", nowMillis)
+            PmpScreen.PURCHASES -> hasModulePermission("المشتريات", nowMillis) ||
+                hasModulePermission("الموردين", nowMillis) ||
+                hasModulePermission("مواد الإنتاج", nowMillis) ||
+                hasModulePermission("المصنع", nowMillis) ||
+                isSystemManager()
+            PmpScreen.SALES -> hasModulePermission("المبيعات", nowMillis) ||
+                hasModulePermission("العملاء", nowMillis) ||
+                hasModulePermission("المحاسبة", nowMillis)
+            PmpScreen.INVENTORY -> hasModulePermission("المخازن", nowMillis)
+            PmpScreen.FACTORY -> hasModulePermission("المصنع", nowMillis) ||
+                hasModulePermission("الإنتاج", nowMillis) ||
+                hasModulePermission("مواد الإنتاج", nowMillis) ||
+                hasModulePermission("التعبئة والتغليف", nowMillis)
+            PmpScreen.CHEMISTRY_LAB -> hasModulePermission("المختبر الكيميائي", nowMillis) ||
+                hasModulePermission("المصنع", nowMillis) ||
+                isSystemManager()
+            else -> hasModulePermission(screen.title, nowMillis)
+        }
+    }
 }
 
 @Composable
@@ -368,17 +406,7 @@ fun PmpAppContent(
 
     // Filter screens strictly based on the permissions assigned to the logged-in employee
     val allowedScreens = remember(currentUser) {
-        PmpScreen.entries.filter { screen ->
-            when (screen) {
-                PmpScreen.DASHBOARD -> true
-                PmpScreen.SETTINGS -> true // Allow all authenticated users to access personal profile, biometrics, and app updates
-                PmpScreen.TREASURY -> currentUser.hasModulePermission("الخزن") || currentUser.hasModulePermission("التحويلات")
-                PmpScreen.PURCHASES -> currentUser.hasModulePermission("المشتريات") || currentUser.hasModulePermission("مواد الإنتاج") || currentUser.hasModulePermission("المصنع") || currentUser.isSystemManager()
-                PmpScreen.FACTORY -> currentUser.hasModulePermission("المصنع") || currentUser.hasModulePermission("مواد الإنتاج") || currentUser.hasModulePermission("التعبئة والتغليف")
-                PmpScreen.CHEMISTRY_LAB -> currentUser.hasModulePermission("المختبر الكيميائي") || currentUser.hasModulePermission("المصنع") || currentUser.isSystemManager()
-                else -> currentUser.hasModulePermission(screen.title)
-            }
-        }
+        currentUser.resolveAllowedScreens()
     }
 
     val baseNavScreens = remember(allowedScreens) { allowedScreens.filter { it != PmpScreen.USERS } }

@@ -49,7 +49,7 @@ service cloud.firestore {
         'lab_formulations', 'formulations', 'paint_batches', 'chemical_safety',
         'purchase_orders', 'goods_receipts', 'production_orders', 'qc_inspections', 'fg_receipts', 'sales_deliveries',
         'deleted_records', 'system_metadata', 'system_config', 'app_updates',
-        'config'
+        'permission_audit_logs', 'config'
       ];
     }
 
@@ -86,7 +86,7 @@ service cloud.firestore {
           isNonEmptyString(data.username, 60) &&
           isNonEmptyString(data.role, 80) &&
           isNonEmptyString(data.branch, 100) &&
-          isOptionalString(data.permissions, 300) &&
+          isOptionalString(data.permissions, 2000) &&
           isNonEmptyString(data.serverSyncToken, 120) &&
           (!('clusterCode' in data) || isOptionalString(data.clusterCode, 80)) &&
           data.active is bool &&
@@ -107,7 +107,7 @@ service cloud.firestore {
           isNonEmptyString(data.username, 60) &&
           isNonEmptyString(data.role, 80) &&
           isNonEmptyString(data.branch, 100) &&
-          isOptionalString(data.permissions, 300) &&
+          isOptionalString(data.permissions, 2000) &&
           isNonEmptyString(data.serverSyncToken, 120) &&
           data.active is bool &&
           data.updatedAt is timestamp;
@@ -154,6 +154,12 @@ service cloud.firestore {
       allow read: if isValidId(accountCode);
       allow create, update: if isValidId(accountCode) && isReasonablePayload();
       allow delete: if isSignedIn() && isValidId(accountCode);
+    }
+
+    match /permission_audit_logs/{logId} {
+      allow read: if isSignedIn() && isValidId(logId);
+      allow create: if isSignedIn() && isValidId(logId) && isReasonablePayload();
+      allow update, delete: if false;
     }
 
     // 5. Chemical Formulations and Paint Batch Data

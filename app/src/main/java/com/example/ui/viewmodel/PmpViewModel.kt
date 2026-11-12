@@ -634,6 +634,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     )
     val sessionIdleTimeoutMinutes: StateFlow<Int> = _sessionIdleTimeoutMinutes.asStateFlow()
 
+    // --- Phase 03 Enterprise RBAC Permission Change History (Declared strictly before init) ---
+    private val _permissionChangeHistory = MutableStateFlow(
+        com.example.util.EnterpriseRbacManager.getPermissionChangeHistory(context = application)
+    )
+    val permissionChangeHistory: StateFlow<List<com.example.util.EnterpriseRbacManager.PermissionChangeAuditEntry>> =
+        _permissionChangeHistory.asStateFlow()
+
     init {
         val initialMode = _themeMode.value
         val isDarkInitial = when (initialMode) {
@@ -1764,17 +1771,55 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun refreshPermissionChangeHistory() {
+        _permissionChangeHistory.value = com.example.util.EnterpriseRbacManager.getPermissionChangeHistory(
+            context = getApplication()
+        )
+    }
+
+    fun validateBackendAction(
+        module: String,
+        action: com.example.util.ErpActionPermission,
+        operationLabel: String = action.arabicLabel
+    ): Boolean {
+        val decision = com.example.util.EnterpriseRbacManager.validateBackendRequest(
+            user = currentUser.value,
+            module = module,
+            action = action,
+            context = getApplication()
+        )
+        if (!decision.allowed) {
+            postMessage("تم رفض العملية ($operationLabel): ${decision.message}", isError = true)
+            return false
+        }
+        return true
+    }
+
     fun updateEmployeePermissionsAndRole(
         account: UserAccountEntity,
         newRole: String,
         newBranch: String,
         newPermissions: String,
         newLinkedUid: String = account.remoteServerId,
-        approveAccount: Boolean = true
+        approveAccount: Boolean = true,
+        changeReason: String = "تحديث صلاحيات الموظف من لوحة الصلاحيات"
     ) {
         viewModelScope.launch {
-            if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
-                postMessage("عفواً، حساب Admin هو الوحيد المخول بتحديد أو تعديل صلاحيات المستخدمين.", isError = true)
+            val actorUser = currentUser.value
+            if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(actorUser)) {
+                postMessage("عفواً، حساب Admin أو المسؤول المفوض بإدارة المستخدمين هو الوحيد المخول بتحديد أو تعديل صلاحيات المستخدمين.", isError = true)
+                return@launch
+            }
+            val configRes = com.example.util.EnterpriseRbacManager.configureEmployeePermissions(
+                actor = actorUser,
+                targetUser = account,
+                newRole = newRole,
+                newPermissions = newPermissions,
+                reason = changeReason,
+                context = getApplication()
+            )
+            if (configRes.isFailure) {
+                postMessage(configRes.exceptionOrNull()?.message ?: "تعذر التحقق من صلاحية تعديل الحساب", isError = true)
                 return@launch
             }
             val wasPending = account.syncStatus == "PENDING_MANAGER_APPROVAL"
@@ -1785,13 +1830,16 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 newPermissions = newPermissions,
                 newLinkedUid = newLinkedUid,
                 approveAccount = approveAccount,
-                actor = resolveUserActor("Admin")
+                actor = resolveUserActor("Admin"),
+                actorAccount = actorUser,
+                reason = changeReason
             )
             res.onSuccess { updated ->
+                refreshPermissionChangeHistory()
                 val actionMsg = if (wasPending && approveAccount) {
                     "تمت الموافقة على إنشاء حساب (${updated.fullName}) واعتماد صلاحياته للدخول"
                 } else {
-                    "تم تحديث صلاحيات ${updated.fullName} بنجاح"
+                    "تم تحديث صلاحيات ${updated.fullName} بنجاح وتسجيلها في سجل تدقيق الصلاحيات"
                 }
                 val clusterSync = cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updated)
                 if (Firebase.auth.currentUser != null) {
@@ -1812,6 +1860,47 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * منح صلاحية مؤقتة اختيارية للموظف مع تاريخ انتهاء تلقائي
+     */
+    fun grantTemporaryPermissionToEmployee(
+        account: UserAccountEntity,
+        permissionToken: String,
+        durationHours: Int,
+        reason: String = "تفويض مؤقت للعمل"
+    ) {
+        viewModelScope.launch {
+            val actorUser = currentUser.value
+            val expiresAt = System.currentTimeMillis() + (durationHours.coerceAtLeast(1) * 3600_000L)
+            val grantResult = com.example.util.EnterpriseRbacManager.grantTemporaryPermission(
+                actor = actorUser,
+                targetUser = account,
+                permissionToken = permissionToken,
+                expiresAtMillis = expiresAt,
+                reason = reason,
+                context = getApplication()
+            )
+            grantResult.onSuccess { updatedAccount ->
+                repository.updateEmployeePermissionsAndRole(
+                    account = account,
+                    newRole = updatedAccount.role,
+                    newBranch = updatedAccount.branch,
+                    newPermissions = updatedAccount.permissions,
+                    newLinkedUid = updatedAccount.remoteServerId,
+                    approveAccount = false,
+                    actor = resolveUserActor("Admin"),
+                    actorAccount = actorUser,
+                    reason = "منح صلاحية مؤقتة ($permissionToken) لمدة $durationHours ساعة: $reason"
+                )
+                refreshPermissionChangeHistory()
+                cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updatedAccount)
+                postMessage("تم منح صلاحية مؤقتة ($permissionToken) للموظف ${account.fullName} لمدة $durationHours ساعة")
+            }.onFailure { err ->
+                postMessage(err.message ?: "تعذر منح الصلاحية المؤقتة", isError = true)
+            }
+        }
+    }
+
+    /**
      * Direct one-click manager approval for employee account creation requests
      */
     fun approveUserAccount(
@@ -1827,7 +1916,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             newBranch = account.branch.ifBlank { "فرع السودان (SD-001)" },
             newPermissions = targetPerms,
             newLinkedUid = account.remoteServerId,
-            approveAccount = true
+            approveAccount = true,
+            changeReason = "اعتماد حساب جديد وتفعيل صلاحياته الافتراضية"
         )
     }
 

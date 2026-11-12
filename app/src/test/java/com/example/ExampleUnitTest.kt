@@ -1679,4 +1679,299 @@ class ExampleUnitTest {
     assertTrue("Login activities must be recorded", activities.isNotEmpty())
     assertTrue("Suspicious login alerts must be recorded on lockout/biometric mismatch", alerts.isNotEmpty())
   }
+
+  @Test
+  fun testPhase03EnterpriseRbacTemporaryPermissionsHistoryAndBackendEnforcement() {
+    com.example.util.EnterpriseRbacManager.resetMemoryStateForTests()
+    val baseNow = 1_765_000_000_000L
+
+    // 1. Define distinct employee accounts across the organization
+    val superAdmin = com.example.data.local.UserAccountEntity(
+      id = 1L,
+      userCode = "USR-ADMIN",
+      fullName = "المدير الأعلى للنظام",
+      username = "admin",
+      role = "مدير النظام",
+      branch = "كل الفروع (السودان ومصر)",
+      permissions = "المصنع,المخازن,الإنتاج,مواد الإنتاج,التعبئة والتغليف,المحاسبة,الخزن,المبيعات,العملاء,الموردين,المشتريات,التقارير,المستخدمين,الإعدادات",
+      serverSyncToken = "SYNC-ADMIN",
+      active = true
+    )
+
+    val generalManager = com.example.data.local.UserAccountEntity(
+      id = 2L,
+      userCode = "USR-GM-01",
+      fullName = "المدير العام للتشغيل",
+      username = "gm_user",
+      role = "مدير النظام",
+      branch = "كل الفروع (السودان ومصر)",
+      permissions = "المصنع,المخازن,الإنتاج,مواد الإنتاج,التعبئة والتغليف,المحاسبة,الخزن,المبيعات,العملاء,الموردين,المشتريات,التقارير,المستخدمين,الإعدادات",
+      serverSyncToken = "SYNC-GM-01",
+      active = true
+    )
+
+    // Scoped Administrator: Does NOT automatically receive unrestricted access!
+    // Only granted Users management + Warehouses + Suppliers
+    val scopedAdmin = com.example.data.local.UserAccountEntity(
+      id = 3L,
+      userCode = "USR-SCOPED-ADM",
+      fullName = "مسؤول نظام مخصص للمخازن والموارد البشرية",
+      username = "scoped_admin",
+      role = "مسؤول نظام مخصص",
+      branch = "فرع مصر والمصنع (EG-001)",
+      permissions = "المخازن,الموردين,المستخدمين,إدارة المستخدمين,عمليات المخزون,SCOPED_ADMIN",
+      serverSyncToken = "SYNC-SCOPED-01",
+      active = true
+    )
+
+    val accountant = com.example.data.local.UserAccountEntity(
+      id = 4L,
+      userCode = "USR-ACC-10",
+      fullName = "محاسب الفرع",
+      username = "acc_sudan",
+      role = "المحاسب",
+      branch = "فرع السودان (SD-001)",
+      permissions = "المحاسبة,الخزن,المبيعات,العملاء,التقارير,تصدير PDF,طباعة المستندات,العمليات المالية",
+      serverSyncToken = "SYNC-ACC-10",
+      active = true
+    )
+
+    val storekeeper = com.example.data.local.UserAccountEntity(
+      id = 5L,
+      userCode = "USR-STK-20",
+      fullName = "أمين مخزن الخام والمنتج",
+      username = "store_eg",
+      role = "أمين مخزن الخام",
+      branch = "فرع مصر والمصنع (EG-001)",
+      permissions = "المخازن,مواد الإنتاج,التعبئة والتغليف,عمليات المخزون",
+      serverSyncToken = "SYNC-STK-20",
+      active = true
+    )
+
+    val factoryEngineer = com.example.data.local.UserAccountEntity(
+      id = 6L,
+      userCode = "USR-ENG-30",
+      fullName = "مهندس الإنتاج بالمصنع",
+      username = "prod_eng",
+      role = "مهندس الإنتاج",
+      branch = "فرع مصر والمصنع (EG-001)",
+      permissions = "المصنع,الإنتاج,مواد الإنتاج,التعبئة والتغليف",
+      serverSyncToken = "SYNC-ENG-30",
+      active = true
+    )
+
+    // 2. Verify Scoped Administrator Policy:
+    // Not every administrator gets unrestricted access automatically!
+    assertTrue("SuperAdmin must be recognized as SuperAdmin", superAdmin.isSuperAdminAccount())
+    assertFalse("Scoped Admin must NOT be SuperAdmin", scopedAdmin.isSuperAdminAccount())
+    assertFalse("Scoped Admin must NOT be treated as unrestricted SystemManager", scopedAdmin.isSystemManager())
+    assertTrue("Scoped Admin must be detected as ScopedAdministrator", com.example.util.EnterpriseRbacManager.isScopedAdministrator(scopedAdmin))
+    assertTrue("Scoped Admin with explicit إدارة المستخدمين can configure employee permissions", com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(scopedAdmin, baseNow))
+    assertFalse("General Manager without explicit إدارة المستخدمين does NOT automatically get user management", com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(generalManager, baseNow))
+
+    // Scoped Admin only has Warehouses & Suppliers, NOT Accounting, Treasury, Factory, or Administrative Settings!
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(scopedAdmin, "المخازن", com.example.util.ErpActionPermission.VIEW, baseNow))
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(scopedAdmin, "المخازن", com.example.util.ErpActionPermission.INVENTORY_OPERATIONS, baseNow))
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(scopedAdmin, "الموردين", com.example.util.ErpActionPermission.CREATE, baseNow))
+    assertFalse("Scoped Admin must NOT have access to Factory", com.example.util.ErpLifecycleEngine.hasGranularPermission(scopedAdmin, "المصنع", com.example.util.ErpActionPermission.VIEW, baseNow))
+    assertFalse("Scoped Admin must NOT have access to Accounting/Treasury", com.example.util.ErpLifecycleEngine.hasGranularPermission(scopedAdmin, "المحاسبة", com.example.util.ErpActionPermission.FINANCIAL_OPERATIONS, baseNow))
+    assertFalse("Scoped Admin must NOT have Administrative Settings", com.example.util.ErpLifecycleEngine.hasGranularPermission(scopedAdmin, "الإعدادات", com.example.util.ErpActionPermission.ADMINISTRATIVE_SETTINGS, baseNow))
+
+    // 3. Verify all 11 Granular Action Permissions across employee accounts:
+    // (View, Create, Edit, Delete, Approve, Export, Print, Financial operations, Inventory operations, User management, Administrative settings)
+    val allElevenActions = listOf(
+      com.example.util.ErpActionPermission.VIEW,
+      com.example.util.ErpActionPermission.CREATE,
+      com.example.util.ErpActionPermission.EDIT,
+      com.example.util.ErpActionPermission.DELETE,
+      com.example.util.ErpActionPermission.APPROVE,
+      com.example.util.ErpActionPermission.EXPORT,
+      com.example.util.ErpActionPermission.PRINT,
+      com.example.util.ErpActionPermission.FINANCIAL_OPERATIONS,
+      com.example.util.ErpActionPermission.INVENTORY_OPERATIONS,
+      com.example.util.ErpActionPermission.USER_MANAGEMENT,
+      com.example.util.ErpActionPermission.ADMINISTRATIVE_SETTINGS
+    )
+    for (action in allElevenActions) {
+      assertTrue(
+        "SuperAdmin must have $action permission",
+        com.example.util.ErpLifecycleEngine.hasGranularPermission(superAdmin, "المصنع", action, baseNow)
+      )
+    }
+
+    // Accountant checks:
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "المحاسبة", com.example.util.ErpActionPermission.VIEW, baseNow))
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "العملاء", com.example.util.ErpActionPermission.CREATE, baseNow))
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "المبيعات", com.example.util.ErpActionPermission.EDIT, baseNow))
+    assertFalse("Accountant without delete grant cannot delete", com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "المبيعات", com.example.util.ErpActionPermission.DELETE, baseNow))
+    assertFalse("Accountant without approve grant cannot approve", com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "المبيعات", com.example.util.ErpActionPermission.APPROVE, baseNow))
+    assertTrue("Accountant has Export", com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "التقارير", com.example.util.ErpActionPermission.EXPORT, baseNow))
+    assertTrue("Accountant has Print", com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "المبيعات", com.example.util.ErpActionPermission.PRINT, baseNow))
+    assertTrue("Accountant has Financial operations", com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "الخزن", com.example.util.ErpActionPermission.FINANCIAL_OPERATIONS, baseNow))
+    assertFalse("Accountant does NOT have Inventory operations", com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "المخازن", com.example.util.ErpActionPermission.INVENTORY_OPERATIONS, baseNow))
+    assertFalse("Accountant does NOT have User management", com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "المستخدمين", com.example.util.ErpActionPermission.USER_MANAGEMENT, baseNow))
+    assertFalse("Accountant does NOT have Administrative settings", com.example.util.ErpLifecycleEngine.hasGranularPermission(accountant, "الإعدادات", com.example.util.ErpActionPermission.ADMINISTRATIVE_SETTINGS, baseNow))
+
+    // Storekeeper checks across Warehouses, Raw materials, Packaging:
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(storekeeper, "المخازن", com.example.util.ErpActionPermission.INVENTORY_OPERATIONS, baseNow))
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(storekeeper, "مواد الإنتاج", com.example.util.ErpActionPermission.VIEW, baseNow))
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(storekeeper, "التعبئة والتغليف", com.example.util.ErpActionPermission.CREATE, baseNow))
+    assertFalse(com.example.util.ErpLifecycleEngine.hasGranularPermission(storekeeper, "الخزن", com.example.util.ErpActionPermission.FINANCIAL_OPERATIONS, baseNow))
+
+    // Factory engineer checks across Factory, Production, Raw materials, Packaging:
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(factoryEngineer, "المصنع", com.example.util.ErpActionPermission.VIEW, baseNow))
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(factoryEngineer, "الإنتاج", com.example.util.ErpActionPermission.CREATE, baseNow))
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(factoryEngineer, "مواد الإنتاج", com.example.util.ErpActionPermission.EDIT, baseNow))
+    assertTrue(com.example.util.ErpLifecycleEngine.hasGranularPermission(factoryEngineer, "التعبئة والتغليف", com.example.util.ErpActionPermission.VIEW, baseNow))
+    assertFalse(com.example.util.ErpLifecycleEngine.hasGranularPermission(factoryEngineer, "العملاء", com.example.util.ErpActionPermission.VIEW, baseNow))
+    assertFalse(com.example.util.ErpLifecycleEngine.hasGranularPermission(factoryEngineer, "الموردين", com.example.util.ErpActionPermission.VIEW, baseNow))
+
+    // 4. Verify Unauthorized Tabs Remain Hidden:
+    val accountantScreens = accountant.resolveAllowedScreens(baseNow)
+    assertTrue("Accountant sees Treasury", PmpScreen.TREASURY in accountantScreens)
+    assertTrue("Accountant sees Sales", PmpScreen.SALES in accountantScreens)
+    assertTrue("Accountant sees Reports", PmpScreen.REPORTS in accountantScreens)
+    assertFalse("Accountant must NOT see Inventory tab", PmpScreen.INVENTORY in accountantScreens)
+    assertFalse("Accountant must NOT see Factory tab", PmpScreen.FACTORY in accountantScreens)
+    assertFalse("Accountant must NOT see Users tab", PmpScreen.USERS in accountantScreens)
+
+    val storekeeperScreens = storekeeper.resolveAllowedScreens(baseNow)
+    assertTrue("Storekeeper sees Inventory tab", PmpScreen.INVENTORY in storekeeperScreens)
+    assertTrue("Storekeeper sees Factory/Packaging tab", PmpScreen.FACTORY in storekeeperScreens)
+    assertFalse("Storekeeper must NOT see Treasury tab", PmpScreen.TREASURY in storekeeperScreens)
+    assertFalse("Storekeeper must NOT see Sales tab", PmpScreen.SALES in storekeeperScreens)
+
+    val scopedAdminScreens = scopedAdmin.resolveAllowedScreens(baseNow)
+    assertTrue("Scoped Admin sees Inventory", PmpScreen.INVENTORY in scopedAdminScreens)
+    assertTrue("Scoped Admin sees Purchases (Suppliers)", PmpScreen.PURCHASES in scopedAdminScreens)
+    assertTrue("Scoped Admin sees Users", PmpScreen.USERS in scopedAdminScreens)
+    assertFalse("Scoped Admin must NOT see Treasury", PmpScreen.TREASURY in scopedAdminScreens)
+    assertFalse("Scoped Admin must NOT see Sales", PmpScreen.SALES in scopedAdminScreens)
+    assertFalse("Scoped Admin must NOT see Factory", PmpScreen.FACTORY in scopedAdminScreens)
+
+    // 5. Verify Individual Employee Permission Configuration & Permission Change History:
+    val configResult = com.example.util.EnterpriseRbacManager.configureEmployeePermissions(
+      actor = scopedAdmin,
+      targetUser = accountant,
+      newRole = "محاسب أول ومراجع",
+      newPermissions = "المحاسبة,الخزن,المبيعات,العملاء,التقارير,تصدير PDF,طباعة المستندات,العمليات المالية,اعتماد المستندات,صلاحية الحذف والتصفير",
+      reason = "ترقية المحاسب ومنحه صلاحية الاعتماد والحذف",
+      nowMillis = baseNow + 10_000L
+    )
+    assertTrue("Authorized Scoped Admin must be able to configure employee permissions", configResult.isSuccess)
+    val upgradedAccountant = configResult.getOrThrow()
+    assertTrue(
+      "Upgraded accountant must now have APPROVE permission",
+      com.example.util.ErpLifecycleEngine.hasGranularPermission(upgradedAccountant, "المبيعات", com.example.util.ErpActionPermission.APPROVE, baseNow + 10_000L)
+    )
+    assertTrue(
+      "Upgraded accountant must now have DELETE permission",
+      com.example.util.ErpLifecycleEngine.hasGranularPermission(upgradedAccountant, "المبيعات", com.example.util.ErpActionPermission.DELETE, baseNow + 10_000L)
+    )
+
+    // Verify anti-escalation: Scoped Admin cannot modify SuperAdmin or grant Administrative Settings
+    val escalateSuperAdminAttempt = com.example.util.EnterpriseRbacManager.configureEmployeePermissions(
+      actor = scopedAdmin,
+      targetUser = superAdmin,
+      newRole = "موظف",
+      newPermissions = "المبيعات",
+      reason = "محاولة غير مصرح بها",
+      nowMillis = baseNow + 15_000L
+    )
+    assertTrue("Scoped Admin must be blocked from modifying SuperAdmin", escalateSuperAdminAttempt.isFailure)
+
+    val escalateSettingsAttempt = com.example.util.EnterpriseRbacManager.configureEmployeePermissions(
+      actor = scopedAdmin,
+      targetUser = accountant,
+      newRole = "المحاسب",
+      newPermissions = "المحاسبة,الإعدادات الإدارية",
+      reason = "محاولة منح إعدادات إدارية",
+      nowMillis = baseNow + 16_000L
+    )
+    assertTrue("Scoped Admin cannot grant Administrative Settings they do not possess", escalateSettingsAttempt.isFailure)
+
+    // Verify Permission Change History was accurately recorded
+    val history = com.example.util.EnterpriseRbacManager.getPermissionChangeHistory("USR-ACC-10")
+    assertEquals("Permission change history must contain 1 entry for accountant", 1, history.size)
+    val entry = history.first()
+    assertEquals("scoped_admin", entry.actorUsername)
+    assertEquals("acc_sudan", entry.targetUsername)
+    assertEquals("ترقية المحاسب ومنحه صلاحية الاعتماد والحذف", entry.reason)
+    assertTrue(entry.addedPermissions.contains("اعتماد المستندات"))
+    assertTrue(entry.addedPermissions.contains("صلاحية الحذف والتصفير"))
+
+    // 6. Verify Optional Temporary Permissions with Expiration Dates:
+    // Grant storekeeper temporary access to "المبيعات" for 2 hours
+    val expiresAt = baseNow + (2 * 3600_000L)
+    val tempGrantRes = com.example.util.EnterpriseRbacManager.grantTemporaryPermission(
+      actor = superAdmin,
+      targetUser = storekeeper,
+      permissionToken = "المبيعات",
+      expiresAtMillis = expiresAt,
+      reason = "تغطية مؤقتة لقسم المبيعات لمدة ساعتين",
+      nowMillis = baseNow + 20_000L
+    )
+    assertTrue("Temporary permission grant must succeed", tempGrantRes.isSuccess)
+    val storekeeperWithTemp = tempGrantRes.getOrThrow()
+
+    // Before expiration (baseNow + 1 hour): storekeeper HAS Sales access and sees Sales tab
+    val duringTempMillis = baseNow + 3600_000L
+    assertTrue(
+      "Storekeeper must have Sales VIEW permission before temporary grant expires",
+      com.example.util.ErpLifecycleEngine.hasGranularPermission(storekeeperWithTemp, "المبيعات", com.example.util.ErpActionPermission.VIEW, duringTempMillis)
+    )
+    assertTrue(
+      "Sales tab must be visible while temporary permission is active",
+      PmpScreen.SALES in storekeeperWithTemp.resolveAllowedScreens(duringTempMillis)
+    )
+    assertEquals(1, com.example.util.EnterpriseRbacManager.getActiveTemporaryGrants(storekeeperWithTemp, duringTempMillis).size)
+
+    // After expiration (baseNow + 3 hours): temporary permission automatically expires!
+    val afterExpiryMillis = baseNow + (3 * 3600_000L)
+    assertFalse(
+      "Storekeeper must AUTOMATICALLY lose Sales permission after expiration timestamp",
+      com.example.util.ErpLifecycleEngine.hasGranularPermission(storekeeperWithTemp, "المبيعات", com.example.util.ErpActionPermission.VIEW, afterExpiryMillis)
+    )
+    assertFalse(
+      "Sales tab must be hidden again once temporary permission expires",
+      PmpScreen.SALES in storekeeperWithTemp.resolveAllowedScreens(afterExpiryMillis)
+    )
+    assertEquals(0, com.example.util.EnterpriseRbacManager.getActiveTemporaryGrants(storekeeperWithTemp, afterExpiryMillis).size)
+    assertEquals(1, com.example.util.EnterpriseRbacManager.getExpiredTemporaryGrants(storekeeperWithTemp, afterExpiryMillis).size)
+
+    // 7. Verify Backend API / Repository Request Rejection:
+    val unauthorizedBackendCall = com.example.util.EnterpriseRbacManager.validateBackendRequest(
+      user = storekeeper,
+      module = "الخزن",
+      action = com.example.util.ErpActionPermission.FINANCIAL_OPERATIONS,
+      nowMillis = baseNow
+    )
+    assertFalse("Unauthorized backend financial request by storekeeper must be rejected", unauthorizedBackendCall.allowed)
+    assertEquals(403, unauthorizedBackendCall.statusCode)
+    assertEquals("ERR_RBAC_FORBIDDEN", unauthorizedBackendCall.errorCode)
+
+    val expiredTempBackendCall = com.example.util.EnterpriseRbacManager.validateBackendRequest(
+      user = storekeeperWithTemp,
+      module = "المبيعات",
+      action = com.example.util.ErpActionPermission.CREATE,
+      nowMillis = afterExpiryMillis
+    )
+    assertFalse("Backend request using an expired temporary permission must be rejected", expiredTempBackendCall.allowed)
+    assertEquals(403, expiredTempBackendCall.statusCode)
+
+    val authorizedBackendCall = com.example.util.EnterpriseRbacManager.validateBackendRequest(
+      user = accountant,
+      module = "الخزن",
+      action = com.example.util.ErpActionPermission.FINANCIAL_OPERATIONS,
+      nowMillis = baseNow
+    )
+    assertTrue("Authorized backend financial request by accountant must succeed", authorizedBackendCall.allowed)
+    assertEquals(200, authorizedBackendCall.statusCode)
+
+    assertTrue(
+      "Rejected backend requests must be logged in audit memory",
+      com.example.util.EnterpriseRbacManager.getRejectedBackendRequests().size >= 2
+    )
+  }
 }
+
