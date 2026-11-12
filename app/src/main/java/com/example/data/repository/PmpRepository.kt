@@ -1308,7 +1308,7 @@ class PmpRepository(
                 fullName = cleanName,
                 username = cleanUsername,
                 phoneOrEmail = phoneOrEmail.trim(),
-                pinOrPassword = hashSecret(pinOrPassword.trim()),
+                pinOrPassword = com.example.util.PasswordSecurityUtil.hashPassword(pinOrPassword.trim()),
                 role = role,
                 branch = branch,
                 permissions = permissions.ifBlank { "الخزن,المبيعات,المخازن" },
@@ -1337,26 +1337,29 @@ class PmpRepository(
         if (!target.active) {
             return Result.failure(Exception("هذا الحساب موقوف حالياً، يرجى تفعيله أولاً"))
         }
+        var activeTarget = target
         if (pinInput != null) {
             val cleanPin = pinInput.trim()
-            val matches = cleanPin == target.pinOrPassword || hashSecret(cleanPin) == target.pinOrPassword
+            val matches = com.example.util.PasswordSecurityUtil.verifyPassword(cleanPin, target.pinOrPassword)
             if (!matches) {
                 return Result.failure(Exception("رمز الدخول (PIN) غير صحيح للحساب ${target.fullName}"))
             }
-            if (cleanPin == target.pinOrPassword && cleanPin != hashSecret(cleanPin)) {
-                dao.updateUserAccount(target.copy(pinOrPassword = hashSecret(cleanPin)))
+            if (com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2(target.pinOrPassword)) {
+                val upgradedHash = com.example.util.PasswordSecurityUtil.hashPassword(cleanPin)
+                activeTarget = target.copy(pinOrPassword = upgradedHash)
+                dao.updateUserAccount(activeTarget)
             }
         }
 
         dao.setActiveSessionUser(targetUserId)
         dao.insertAuditLog(
             AuditLogEntity(
-                username = target.fullName,
+                username = activeTarget.fullName,
                 action = "SWITCH_USER_SESSION",
-                detail = "تفعيل الجلسة بالحساب ${target.fullName} (${target.userCode}) - ${target.role}"
+                detail = "تفعيل الجلسة بالحساب ${activeTarget.fullName} (${activeTarget.userCode}) - ${activeTarget.role}"
             )
         )
-        return Result.success(target.copy(isCurrentSession = true))
+        return Result.success(activeTarget.copy(isCurrentSession = true))
     }
 
     suspend fun verifySystemManagerPassword(passwordInput: String): Result<UserAccountEntity> {
@@ -1364,16 +1367,21 @@ class PmpRepository(
         if (cleanInput.isBlank()) {
             return Result.failure(Exception("يرجى إدخال كلمة المرور الخاصة بمدير النظام لتأكيد الحذف"))
         }
-        val hashed = hashSecret(cleanInput)
         val allUsers = dao.getAllUserAccounts().first()
         val managers = allUsers.filter {
             it.role.contains("مدير النظام") || it.username.equals("admin", ignoreCase = true)
         }
         val matchedManager = managers.firstOrNull {
-            it.pinOrPassword == cleanInput || it.pinOrPassword == hashed
+            com.example.util.PasswordSecurityUtil.verifyPassword(cleanInput, it.pinOrPassword)
         }
         return if (matchedManager != null) {
-            Result.success(matchedManager)
+            if (com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2(matchedManager.pinOrPassword)) {
+                val upgraded = matchedManager.copy(pinOrPassword = com.example.util.PasswordSecurityUtil.hashPassword(cleanInput))
+                dao.updateUserAccount(upgraded)
+                Result.success(upgraded)
+            } else {
+                Result.success(matchedManager)
+            }
         } else {
             Result.failure(Exception("كلمة المرور الخاصة بمدير النظام غير صحيحة! تم إيقاف عملية تصفير السيرفر."))
         }
@@ -1431,6 +1439,17 @@ class PmpRepository(
         return Result.success(newToken)
     }
 
+    suspend fun findUserByIdentity(identity: String): UserAccountEntity? {
+        val cleanIdentity = identity.trim().lowercase(Locale.ROOT)
+        if (cleanIdentity.isBlank()) return null
+        val allUsers = dao.getAllUserAccounts().first()
+        return allUsers.firstOrNull { user ->
+            user.username.lowercase(Locale.ROOT) == cleanIdentity ||
+                (user.phoneOrEmail.isNotBlank() && user.phoneOrEmail.lowercase(Locale.ROOT) == cleanIdentity) ||
+                user.userCode.lowercase(Locale.ROOT) == cleanIdentity
+        }
+    }
+
     suspend fun authenticateUserCredentials(
         emailOrUsername: String,
         passwordOrPin: String
@@ -1438,7 +1457,7 @@ class PmpRepository(
         val cleanIdentity = emailOrUsername.trim().lowercase(Locale.ROOT)
         val cleanSecret = passwordOrPin.trim()
         if (cleanIdentity.isBlank()) {
-            return Result.failure(Exception("يرجى إدخال البريد الإلكتروني أو اسم المستخدم"))
+            return Result.failure(Exception("يرجى إدخال البريد الإلكتروني أو اسم المستخدم أو كود الحساب"))
         }
         if (cleanSecret.length < 4) {
             return Result.failure(Exception("كلمة المرور أو رمز الدخول يجب أن يتكون من 4 خانات على الأقل"))
@@ -1447,8 +1466,8 @@ class PmpRepository(
         val allUsers = dao.getAllUserAccounts().first()
         val matchedUser = allUsers.firstOrNull { user ->
             user.username.lowercase(Locale.ROOT) == cleanIdentity ||
-                user.phoneOrEmail.lowercase(Locale.ROOT) == cleanIdentity ||
-                cleanIdentity.substringBefore("@") == user.username.lowercase(Locale.ROOT)
+                (user.phoneOrEmail.isNotBlank() && user.phoneOrEmail.lowercase(Locale.ROOT) == cleanIdentity) ||
+                user.userCode.lowercase(Locale.ROOT) == cleanIdentity
         }
 
         if (matchedUser != null) {
@@ -1460,23 +1479,25 @@ class PmpRepository(
             if (!matchedUser.active) {
                 return Result.failure(Exception("هذا الحساب موقوف أو غير مفعل حالياً، يرجى مراجعة مدير النظام"))
             }
-            val hashedInput = hashSecret(cleanSecret)
-            val isValidPassword = matchedUser.pinOrPassword == cleanSecret || matchedUser.pinOrPassword == hashedInput
+            val isValidPassword = com.example.util.PasswordSecurityUtil.verifyPassword(cleanSecret, matchedUser.pinOrPassword)
             if (!isValidPassword) {
                 return Result.failure(Exception("كلمة المرور أو رمز الدخول غير صحيح للحساب ${matchedUser.fullName}"))
             }
-            if (matchedUser.pinOrPassword == cleanSecret && matchedUser.pinOrPassword != hashedInput) {
-                dao.updateUserAccount(matchedUser.copy(pinOrPassword = hashedInput))
+            var authenticatedUser = matchedUser
+            if (com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2(matchedUser.pinOrPassword)) {
+                val upgradedHash = com.example.util.PasswordSecurityUtil.hashPassword(cleanSecret)
+                authenticatedUser = matchedUser.copy(pinOrPassword = upgradedHash)
+                dao.updateUserAccount(authenticatedUser)
             }
-            dao.setActiveSessionUser(matchedUser.id)
+            dao.setActiveSessionUser(authenticatedUser.id)
             dao.insertAuditLog(
                 AuditLogEntity(
-                    username = matchedUser.fullName,
+                    username = authenticatedUser.fullName,
                     action = "USER_LOGIN",
-                    detail = "تسجيل دخول ناجح للحساب ${matchedUser.fullName} (${matchedUser.userCode})"
+                    detail = "تسجيل دخول ناجح للحساب ${authenticatedUser.fullName} (${authenticatedUser.userCode})"
                 )
             )
-            return Result.success(matchedUser.copy(isCurrentSession = true))
+            return Result.success(authenticatedUser.copy(isCurrentSession = true))
         }
 
         return Result.failure(
@@ -1498,11 +1519,23 @@ class PmpRepository(
             return Result.failure(Exception("كلمة المرور الجديدة يجب أن تكون 4 خانات على الأقل"))
         }
 
-        val updatedPin = if (!newPassword.isNullOrBlank()) hashSecret(newPassword.trim()) else user.pinOrPassword
+        val passwordChanged = !newPassword.isNullOrBlank()
+        val updatedPin = if (passwordChanged) {
+            com.example.util.PasswordSecurityUtil.hashPassword(newPassword!!.trim())
+        } else {
+            user.pinOrPassword
+        }
+        val rotatedToken = if (passwordChanged) {
+            val stamp = (System.currentTimeMillis() % 90000 + 10000).toString()
+            "SYNC-PMP-${user.userCode.takeLast(4)}-$stamp"
+        } else {
+            user.serverSyncToken
+        }
         val updatedUser = user.copy(
             fullName = fullName.trim(),
             phoneOrEmail = phoneOrEmail.trim(),
-            pinOrPassword = updatedPin
+            pinOrPassword = updatedPin,
+            serverSyncToken = rotatedToken
         )
         dao.updateUserAccount(updatedUser)
         dao.insertAuditLog(
@@ -1536,7 +1569,6 @@ class PmpRepository(
             allUsers.firstOrNull { user ->
                 (uid.isNotBlank() && user.remoteServerId == uid) ||
                     (cleanEmail.isNotBlank() && user.phoneOrEmail.lowercase(Locale.ROOT) == cleanEmail) ||
-                    (cleanEmail.isNotBlank() && user.phoneOrEmail.lowercase(Locale.ROOT).startsWith(cleanEmail.substringBefore("@"))) ||
                     user.username.lowercase(Locale.ROOT) == usernameCandidate
             }
         }
@@ -1596,7 +1628,7 @@ class PmpRepository(
             fullName = cleanName,
             username = usernameCandidate,
             phoneOrEmail = cleanEmail.ifBlank { "$usernameCandidate@gmail.com" },
-            pinOrPassword = "1234",
+            pinOrPassword = com.example.util.PasswordSecurityUtil.hashPassword("1234"),
             role = "حساب Google (بانتظار موافقة المدير)",
             branch = "فرع السودان (SD-001)",
             permissions = "",
@@ -1651,7 +1683,8 @@ class PmpRepository(
 
     suspend fun generatePasswordResetCode(
         identity: String,
-        channel: String
+        channel: String,
+        providedOtpCode: String? = null
     ): Result<Pair<String, UserAccountEntity>> {
         val cleanIdentity = identity.trim().lowercase(Locale.ROOT)
         if (cleanIdentity.isBlank()) {
@@ -1661,18 +1694,19 @@ class PmpRepository(
         val allUsers = dao.getAllUserAccounts().first()
         val user = allUsers.firstOrNull {
             it.username.lowercase(Locale.ROOT) == cleanIdentity ||
-                it.phoneOrEmail.lowercase(Locale.ROOT) == cleanIdentity ||
+                (it.phoneOrEmail.isNotBlank() && it.phoneOrEmail.lowercase(Locale.ROOT) == cleanIdentity) ||
                 it.userCode.lowercase(Locale.ROOT) == cleanIdentity
         } ?: return Result.failure(Exception("لم يتم العثور على أي حساب مسجل بهذه البيانات ($identity)"))
 
-        val otpCode = String.format(Locale.US, "%06d", (100000..999999).random())
+        val otpCode = providedOtpCode?.takeIf { it.length == 6 }
+            ?: com.example.util.PasswordSecurityUtil.generateSecureSixDigitOtp()
 
         if (channel == "EMAIL") {
             dao.insertAuditLog(
                 AuditLogEntity(
                     username = user.fullName,
                     action = "PASSWORD_RESET_EMAIL_CODE",
-                    detail = "تم إنشاء رمز التحقق لإعادة تعيين كلمة المرور ($otpCode) وإرساله لبريد Google (${user.phoneOrEmail}) للحساب ${user.userCode}"
+                    detail = "تم إنشاء رمز تحقق مشفر (صالح لمدة 10 دقائق) لبريد Google (${user.phoneOrEmail}) للحساب ${user.userCode}"
                 )
             )
         } else {
@@ -1680,7 +1714,7 @@ class PmpRepository(
                 AuditLogEntity(
                     username = user.fullName,
                     action = "PASSWORD_RESET_MANAGER_ALERT",
-                    detail = "★ إشعار مدير النظام: طلب إعادة تعيين كلمة المرور للموظف: ${user.fullName} (${user.userCode}). رمز التحقق هو: [$otpCode]"
+                    detail = "★ إشعار مدير النظام: طلب إعادة تعيين كلمة المرور للموظف: ${user.fullName} (${user.userCode}). رمز التحقق المؤقت (10 دقائق): [$otpCode]"
                 )
             )
         }
@@ -1697,13 +1731,19 @@ class PmpRepository(
         if (cleanPass.length < 4) {
             return Result.failure(Exception("كلمة المرور الجديدة يجب أن تتكون من 4 خانات على الأقل"))
         }
-        val updated = user.copy(pinOrPassword = hashSecret(cleanPass))
+        val stamp = (System.currentTimeMillis() % 90000 + 10000).toString()
+        val rotatedToken = "SYNC-PMP-${user.userCode.takeLast(4)}-$stamp"
+        val updated = user.copy(
+            pinOrPassword = com.example.util.PasswordSecurityUtil.hashPassword(cleanPass),
+            serverSyncToken = rotatedToken,
+            syncStatus = "READY_FOR_SYNC"
+        )
         dao.updateUserAccount(updated)
         dao.insertAuditLog(
             AuditLogEntity(
                 username = actor,
                 action = "PASSWORD_RESET_SUCCESS",
-                detail = "تم بنجاح تغيير كلمة المرور لحساب ${user.fullName} (${user.userCode})"
+                detail = "تم بنجاح تغيير كلمة المرور وتدوير رمز الجلسة لحساب ${user.fullName} (${user.userCode})"
             )
         )
         return Result.success(updated)

@@ -116,6 +116,7 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         runCatching {
+            viewModel.verifyActiveSessionNotExpired()
             viewModel.verifyPostInstallAndRefreshVersion()
         }
     }
@@ -300,7 +301,10 @@ fun PmpAppContent(
                     firebaseUser = Firebase.auth.currentUser
                 }
                 is UserSessionManager.SessionEvent.ProfileSynced -> {
-                    viewModel.switchActiveUser(event.user.id, event.user.pinOrPassword)
+                    val activeCode = currentUser?.userCode.orEmpty()
+                    if (activeCode.isBlank() || activeCode.equals(event.user.userCode, ignoreCase = true)) {
+                        viewModel.switchActiveUser(event.user.id, null)
+                    }
                 }
             }
         }
@@ -339,6 +343,17 @@ fun PmpAppContent(
         if (openUpdatesScreenRequest && isSessionAuthenticated) {
             currentScreen = PmpScreen.SETTINGS
             onOpenUpdatesScreenConsumed()
+        }
+    }
+
+    // Enforce session expiration, idle timeout, and session/device revocation checks
+    LaunchedEffect(isSessionAuthenticated, currentScreen) {
+        if (isSessionAuthenticated) {
+            viewModel.verifyActiveSessionNotExpired()
+            while (isSessionAuthenticated) {
+                delay(60_000L)
+                viewModel.verifyActiveSessionNotExpired()
+            }
         }
     }
 

@@ -2,7 +2,6 @@ package com.example.util
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.os.Build
 import android.util.Log
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
@@ -15,10 +14,11 @@ object BiometricAuthManager {
     private const val PREFS_NAME = "pmp_security_prefs"
     private const val KEY_BIOMETRIC_ENABLED = "biometric_enabled"
     private const val KEY_LAST_AUTH_TIME = "last_biometric_auth_time"
-    private const val AUTH_GRACE_PERIOD_MS = 60_000L // 1 minute grace period between sensitive screens
+    private const val KEY_LAST_AUTH_USER_CODE = "last_biometric_auth_user_code"
+    private const val AUTH_GRACE_PERIOD_MS = 60_000L // 1 minute grace period scoped strictly to the same userCode
 
     private fun getPrefs(context: Context): SharedPreferences {
-        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
     /**
@@ -48,29 +48,48 @@ object BiometricAuthManager {
      */
     fun setBiometricLockEnabled(context: Context, enabled: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_BIOMETRIC_ENABLED, enabled).apply()
+        if (!enabled) {
+            clearRecentAuthentication(context)
+        }
     }
 
     /**
-     * Checks if the user was recently authenticated within the grace period.
+     * Checks if the CURRENT active user was recently authenticated within the 60s grace period.
+     * Never shares the grace period across different employee accounts.
      */
     fun isRecentlyAuthenticated(context: Context): Boolean {
-        val lastTime = getPrefs(context).getLong(KEY_LAST_AUTH_TIME, 0L)
-        return System.currentTimeMillis() - lastTime < AUTH_GRACE_PERIOD_MS
+        val prefs = getPrefs(context)
+        val lastTime = prefs.getLong(KEY_LAST_AUTH_TIME, 0L)
+        val lastUserCode = prefs.getString(KEY_LAST_AUTH_USER_CODE, "").orEmpty()
+        val activeUserCode = DeviceSessionStore.getActiveUserCode(context)
+        if (activeUserCode.isBlank() || !activeUserCode.equals(lastUserCode, ignoreCase = true)) {
+            return false
+        }
+        return (System.currentTimeMillis() - lastTime) in 0 until AUTH_GRACE_PERIOD_MS
     }
 
     private fun recordAuthenticationSuccess(context: Context) {
-        getPrefs(context).edit().putLong(KEY_LAST_AUTH_TIME, System.currentTimeMillis()).apply()
+        val activeUserCode = DeviceSessionStore.getActiveUserCode(context)
+        getPrefs(context).edit()
+            .putLong(KEY_LAST_AUTH_TIME, System.currentTimeMillis())
+            .putString(KEY_LAST_AUTH_USER_CODE, activeUserCode)
+            .apply()
+        DeviceSessionStore.touchSessionActivity(context)
     }
 
     /**
      * Clears recent authentication timestamp so next sensitive screen access requires fresh biometric validation.
      */
     fun clearRecentAuthentication(context: Context) {
-        getPrefs(context).edit().remove(KEY_LAST_AUTH_TIME).apply()
+        getPrefs(context).edit()
+            .remove(KEY_LAST_AUTH_TIME)
+            .remove(KEY_LAST_AUTH_USER_CODE)
+            .apply()
     }
 
     /**
      * Launches the native Android BiometricPrompt for fingerprint or face unlock.
+     * SECURITY FIX: Never silently invokes onSuccess() when biometric hardware is unavailable.
      */
     fun authenticate(
         activity: FragmentActivity,
@@ -81,8 +100,15 @@ object BiometricAuthManager {
         onError: (String) -> Unit
     ) {
         if (!isBiometricAvailable(activity)) {
-            // If biometrics not enrolled on hardware, treat as authorized so user is never locked out
-            onSuccess()
+            onError("مستشعر البصمة أو قفل الجهاز غير مفعل في إعدادات الهاتف. يرجى تفعيله أو تعطيل القفل البيومتري من الإعدادات.")
+            return
+        }
+
+        // Verify that if a biometric account binding exists, it matches the currently logged-in session user
+        val activeCode = DeviceSessionStore.getActiveUserCode(activity)
+        val boundUser = BiometricPreferenceManager.getBoundUser(activity)
+        if (boundUser != null && activeCode.isNotBlank() && !boundUser.userCode.equals(activeCode, ignoreCase = true)) {
+            onError("البصمة المسجلة على هذا الجهاز مرتبطة بحساب آخر (${boundUser.fullName}). لا يمكن استخدامها لتأكيد جلسة هذا الحساب.")
             return
         }
 
@@ -100,7 +126,6 @@ object BiometricAuthManager {
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     super.onAuthenticationError(errorCode, errString)
                     Log.w(TAG, "Biometric error $errorCode: $errString")
-                    // If user cancelled, report cancellation
                     if (errorCode == BiometricPrompt.ERROR_USER_CANCELED || errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON) {
                         onError("تم إلغاء التحقق البيومتري")
                     } else {

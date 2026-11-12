@@ -12,8 +12,7 @@ object BiometricAuthHelper {
     fun isBiometricAvailable(context: Context): Pair<Boolean, String> {
         val biometricManager = BiometricManager.from(context)
         val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
-            BiometricManager.Authenticators.BIOMETRIC_WEAK or
-            BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            BiometricManager.Authenticators.BIOMETRIC_WEAK
 
         return when (biometricManager.canAuthenticate(authenticators)) {
             BiometricManager.BIOMETRIC_SUCCESS -> {
@@ -46,19 +45,38 @@ object BiometricAuthHelper {
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
+        val (available, reason) = isBiometricAvailable(activity)
+        if (!available) {
+            onError(reason)
+            return
+        }
+
+        val boundUser = BiometricPreferenceManager.getBoundUser(activity)
+        if (boundUser == null) {
+            onError("لم يتم ربط أي حساب موثق بالبصمة على هذا الجهاز بعد. يرجى تسجيل الدخول بكلمة المرور أولاً.")
+            return
+        }
+
+        val lockout = AuthSecurityManager.checkLoginAllowed(activity, boundUser.username.ifBlank { boundUser.userCode })
+        if (lockout.isLockedOut) {
+            onError(lockout.messageAr ?: "الحساب مقفل مؤقتاً بسبب محاولات دخول متكررة غير ناجحة.")
+            return
+        }
+
         val executor = ContextCompat.getMainExecutor(activity)
 
         val promptInfoBuilder = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
             .setDescription(description)
+            .setConfirmationRequired(false)
 
-        // If DEVICE_CREDENTIAL is supported on API >= 30, we can use device credentials or negative button
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             promptInfoBuilder.setAllowedAuthenticators(
                 BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                    BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                    BiometricManager.Authenticators.BIOMETRIC_WEAK
             )
+            promptInfoBuilder.setNegativeButtonText(negativeButtonText)
         } else {
             promptInfoBuilder.setNegativeButtonText(negativeButtonText)
         }
@@ -76,7 +94,14 @@ object BiometricAuthHelper {
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     super.onAuthenticationError(errorCode, errString)
-                    // If user cancelled, don't show as error message
+                    if (errorCode == BiometricPrompt.ERROR_LOCKOUT || errorCode == BiometricPrompt.ERROR_LOCKOUT_PERMANENT) {
+                        AuthSecurityManager.recordFailedLoginAttempt(
+                            context = activity,
+                            identity = boundUser.username.ifBlank { boundUser.userCode },
+                            authMethod = "BIOMETRIC",
+                            reason = "قفل مستشعر البصمة بسبب محاولات خاطئة متكررة: $errString"
+                        )
+                    }
                     if (errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
                         errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
                         errorCode != BiometricPrompt.ERROR_CANCELED
@@ -87,6 +112,12 @@ object BiometricAuthHelper {
 
                 override fun onAuthenticationFailed() {
                     super.onAuthenticationFailed()
+                    AuthSecurityManager.recordFailedLoginAttempt(
+                        context = activity,
+                        identity = boundUser.username.ifBlank { boundUser.userCode },
+                        authMethod = "BIOMETRIC",
+                        reason = "عدم تطابق البصمة الحيوية مع المستخدم المسجل"
+                    )
                     onError("لم يتم التعرف على البصمة، يرجى المحاولة مرة أخرى")
                 }
             }

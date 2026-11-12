@@ -110,6 +110,20 @@ fun SettingsScreen(
     val isDarkActive = PmpThemeController.isDarkModeActive
     var showAdminCloudTools by remember { mutableStateOf(false) }
 
+    // Phase 02 Advanced Security Flows
+    val securityActivities by viewModel.securityActivities.collectAsState()
+    val suspiciousAlerts by viewModel.suspiciousAlerts.collectAsState()
+    val trustedDevices by viewModel.trustedDevices.collectAsState()
+    val currentTwoFactorConfig by viewModel.currentTwoFactorConfig.collectAsState()
+    val latestGeneratedRecoveryCodes by viewModel.latestGeneratedRecoveryCodes.collectAsState()
+    val sessionMaxAgeHours by viewModel.sessionMaxAgeHours.collectAsState()
+    val sessionIdleTimeoutMinutes by viewModel.sessionIdleTimeoutMinutes.collectAsState()
+    var showSecurityDetailsExpanded by remember { mutableStateOf(false) }
+
+    LaunchedEffect(currentUser) {
+        viewModel.refreshSecurityStateForUser(currentUser)
+    }
+
     val versionJsonFilePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
@@ -1146,6 +1160,358 @@ fun SettingsScreen(
                                 uncheckedTrackColor = PmpNavySurface
                             )
                         )
+                    }
+                }
+            }
+        }
+
+        // Section: Phase 02 Advanced Authentication & Session Security Center
+        item {
+            val is2FaEnabled = currentTwoFactorConfig?.enabled == true
+            val unacknowledgedAlerts = remember(suspiciousAlerts, currentUser, isSuperAdmin) {
+                suspiciousAlerts.filter { alert ->
+                    !alert.acknowledged && (isSuperAdmin || alert.userCode.isBlank() || alert.userCode.equals(currentUser?.userCode, ignoreCase = true))
+                }
+            }
+            val userLoginHistory = remember(securityActivities, currentUser, isSuperAdmin) {
+                securityActivities.filter { act ->
+                    isSuperAdmin || act.userCode.equals(currentUser?.userCode, ignoreCase = true) || act.username.equals(currentUser?.username, ignoreCase = true)
+                }.take(10)
+            }
+            val currentDeviceId = remember { com.example.util.BiometricPreferenceManager.getDeviceIdentifier(context) }
+
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("advanced_security_center_card"),
+                borderColor = if (unacknowledgedAlerts.isNotEmpty()) PmpRedLight.copy(alpha = 0.65f) else PmpCyan.copy(alpha = 0.35f)
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Security, contentDescription = null, tint = PmpGold, modifier = Modifier.size(24.dp))
+                            Column {
+                                Text(
+                                    text = "مركز الأمان المتقدم وإدارة الجلسات",
+                                    color = TextWhite,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 15.sp
+                                )
+                                Text(
+                                    text = "المصادقة الثنائية (2FA) • الأجهزة الموثوقة • سجل الدخول",
+                                    color = TextMuted,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                        GlassBadge(
+                            text = if (is2FaEnabled) "2FA مفعّل" else "قياسي PBKDF2",
+                            color = if (is2FaEnabled) PmpGreen else PmpCyan
+                        )
+                    }
+
+                    // Suspicious Login Notifications Banner
+                    if (unacknowledgedAlerts.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(PmpRedLight.copy(alpha = 0.14f))
+                                .border(1.dp, PmpRedLight.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(Icons.Default.WarningAmber, contentDescription = null, tint = PmpRedLight, modifier = Modifier.size(18.dp))
+                                Text(
+                                    text = "تنبيهات أمنية لمحاولات دخول مشبوهة (${unacknowledgedAlerts.size})",
+                                    color = PmpRedLight,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.5.sp
+                                )
+                            }
+                            unacknowledgedAlerts.take(3).forEach { alert ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = alert.title,
+                                            color = TextWhite,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 12.sp
+                                        )
+                                        Text(
+                                            text = "${alert.detail} • ${dateFormat.format(Date(alert.timestamp))}",
+                                            color = TextMuted,
+                                            fontSize = 10.5.sp
+                                        )
+                                    }
+                                    TextButton(onClick = { viewModel.acknowledgeSuspiciousAlert(alert.id) }) {
+                                        Text("تأكيد القراءة", color = PmpGold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Optional Two-Factor Authentication (2FA) Toggle
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "المصادقة الثنائية الاختيارية (2FA - TOTP)",
+                                color = TextWhite,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.5.sp
+                            )
+                            Text(
+                                text = if (is2FaEnabled) {
+                                    "مفعّلة • المفتاح السري: ${currentTwoFactorConfig?.secretBase32?.take(16)}"
+                                } else {
+                                    "تأمين الحساب برمز متغير (6 أرقام) + 8 أكواد استرداد احتياطية"
+                                },
+                                color = TextMuted,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = is2FaEnabled,
+                            onCheckedChange = { enable ->
+                                if (enable) {
+                                    viewModel.enableTwoFactorForCurrentUser(requireOnEveryLogin = true)
+                                } else {
+                                    viewModel.disableTwoFactorForCurrentUser()
+                                }
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = PmpGreen,
+                                uncheckedThumbColor = TextMuted,
+                                uncheckedTrackColor = PmpNavySurface
+                            )
+                        )
+                    }
+
+                    if (is2FaEnabled) {
+                        val currentTotpSample = remember(currentTwoFactorConfig) {
+                            currentTwoFactorConfig?.secretBase32?.let { secret ->
+                                if (secret.isNotBlank()) com.example.util.PasswordSecurityUtil.generateTotpCode(secret) else ""
+                            }.orEmpty()
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(PmpNavySurface.copy(alpha = 0.7f))
+                                .border(1.dp, PmpGold.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                                .padding(10.dp)
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "مفتاح TOTP لربط تطبيق المصادقة: ${currentTwoFactorConfig?.secretBase32}",
+                                    color = PmpGold,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (currentTotpSample.isNotBlank()) {
+                                    Text(
+                                        text = "الرمز الزمني الحالي (TOTP): $currentTotpSample • الأكواد الاحتياطية المتبقية: ${currentTwoFactorConfig?.hashedRecoveryCodes?.size ?: 0}",
+                                        color = PmpCyan,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                if (latestGeneratedRecoveryCodes.isNotEmpty()) {
+                                    Text(
+                                        text = "احتفظ بأكواد الاسترداد الاحتياطية في مكان آمن:\n${latestGeneratedRecoveryCodes.joinToString("   •   ")}",
+                                        color = TextWhite,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { viewModel.regenerateBackupCodesForCurrentUser() }
+                                ) {
+                                    Text("توليد أكواد استرداد احتياطية جديدة (8 أكواد)", color = PmpGold, fontSize = 11.5.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    // Session Expiration & Revocation Controls
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "صلاحية الجلسة: $sessionMaxAgeHours ساعة • مهلة الخمول: $sessionIdleTimeoutMinutes دقيقة",
+                            color = TextMuted,
+                            fontSize = 11.5.sp
+                        )
+                        TextButton(
+                            onClick = {
+                                val nextHours = when (sessionMaxAgeHours) {
+                                    4 -> 12
+                                    12 -> 24
+                                    else -> 4
+                                }
+                                val nextIdle = when (sessionIdleTimeoutMinutes) {
+                                    15 -> 30
+                                    30 -> 60
+                                    else -> 15
+                                }
+                                viewModel.updateSessionTimeoutSettings(nextHours, nextIdle)
+                            }
+                        ) {
+                            Text("تغيير المهلة", color = PmpCyan, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    GlassButton(
+                        text = "إنهاء وإبطال جميع الجلسات الأخرى وتدوير رمز الأمان",
+                        icon = Icons.Default.PhonelinkErase,
+                        gradient = PmpBrandRedGradient,
+                        onClick = { viewModel.revokeAllOtherSessionsForCurrentUser() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("revoke_all_other_sessions_button")
+                    )
+
+                    // Expandable Trusted Devices & Login Activity History
+                    OutlinedButton(
+                        onClick = { showSecurityDetailsExpanded = !showSecurityDetailsExpanded },
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = if (showSecurityDetailsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = null,
+                            tint = PmpCyan
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (showSecurityDetailsExpanded) {
+                                "إخفاء الأجهزة الموثوقة وسجل نشاط الدخول"
+                            } else {
+                                "عرض الأجهزة الموثوقة (${trustedDevices.size}) وسجل نشاط الدخول (${userLoginHistory.size})"
+                            },
+                            color = TextWhite,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    if (showSecurityDetailsExpanded) {
+                        Text(
+                            text = "الأجهزة المسجلة والموثوقة لهذا الحساب:",
+                            color = PmpGold,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.5.sp
+                        )
+                        if (trustedDevices.isEmpty()) {
+                            Text("لا توجد أجهزة مسجلة بعد.", color = TextMuted, fontSize = 11.5.sp)
+                        } else {
+                            trustedDevices.forEach { dev ->
+                                val isThisDevice = dev.deviceId == currentDeviceId
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(PmpNavySurface.copy(alpha = 0.65f))
+                                        .padding(10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "${dev.deviceName} ${if (isThisDevice) "(هذا الجهاز)" else ""}",
+                                            color = TextWhite,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                        Text(
+                                            text = "الحالة: ${if (dev.revoked) "موقوف أمنياً" else if (dev.trusted) "جهاز موثوق" else "غير موثوق"} • آخر نشاط: ${dateFormat.format(Date(dev.lastActiveAt))}",
+                                            color = if (dev.revoked) PmpRedLight else TextMuted,
+                                            fontSize = 10.5.sp
+                                        )
+                                    }
+                                    if (dev.revoked) {
+                                        TextButton(onClick = { viewModel.restoreTrustedDevice(dev.deviceId) }) {
+                                            Text("استعادة", color = PmpGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    } else {
+                                        Row {
+                                            TextButton(onClick = { viewModel.setTrustedDeviceStatus(dev.deviceId, !dev.trusted) }) {
+                                                Text(if (dev.trusted) "إلغاء التوثيق" else "توثيق", color = PmpCyan, fontSize = 11.sp)
+                                            }
+                                            if (!isThisDevice) {
+                                                TextButton(onClick = { viewModel.revokeTrustedDevice(dev.deviceId) }) {
+                                                    Text("إبطال", color = PmpRedLight, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "سجل نشاط تسجيل الدخول الأخير:",
+                            color = PmpCyan,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.5.sp
+                        )
+                        if (userLoginHistory.isEmpty()) {
+                            Text("لا يوجد سجل نشاط دخول مسجل حتى الآن.", color = TextMuted, fontSize = 11.5.sp)
+                        } else {
+                            userLoginHistory.forEach { act ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color.White.copy(alpha = 0.04f))
+                                        .padding(8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "${act.detail} (${act.deviceName})",
+                                            color = if (act.success) TextWhite else PmpRedLight,
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        Text(
+                                            text = "${act.eventType} • ${act.username} • ${dateFormat.format(Date(act.timestamp))}",
+                                            color = TextMuted,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

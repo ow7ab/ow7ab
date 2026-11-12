@@ -602,6 +602,38 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     )
     val productionOrders: StateFlow<List<com.example.util.ProductionOrderRecord>> = _productionOrders.asStateFlow()
 
+    // --- Phase 02 Advanced Authentication & Security StateFlows (Declared strictly before init) ---
+    val twoFactorPendingUser = MutableStateFlow<UserAccountEntity?>(null)
+
+    private val _securityActivities = MutableStateFlow(
+        com.example.util.AuthSecurityManager.getLoginActivities(application)
+    )
+    val securityActivities: StateFlow<List<com.example.util.LoginActivityRecord>> = _securityActivities.asStateFlow()
+
+    private val _suspiciousAlerts = MutableStateFlow(
+        com.example.util.AuthSecurityManager.getSuspiciousAlerts(application)
+    )
+    val suspiciousAlerts: StateFlow<List<com.example.util.SuspiciousLoginAlert>> = _suspiciousAlerts.asStateFlow()
+
+    private val _trustedDevices = MutableStateFlow<List<com.example.util.TrustedDeviceRecord>>(emptyList())
+    val trustedDevices: StateFlow<List<com.example.util.TrustedDeviceRecord>> = _trustedDevices.asStateFlow()
+
+    private val _currentTwoFactorConfig = MutableStateFlow<com.example.util.TwoFactorConfig?>(null)
+    val currentTwoFactorConfig: StateFlow<com.example.util.TwoFactorConfig?> = _currentTwoFactorConfig.asStateFlow()
+
+    private val _latestGeneratedRecoveryCodes = MutableStateFlow<List<String>>(emptyList())
+    val latestGeneratedRecoveryCodes: StateFlow<List<String>> = _latestGeneratedRecoveryCodes.asStateFlow()
+
+    private val _sessionMaxAgeHours = MutableStateFlow(
+        (DeviceSessionStore.getSessionMaxAgeMs(application) / (60 * 60 * 1000L)).toInt().coerceAtLeast(1)
+    )
+    val sessionMaxAgeHours: StateFlow<Int> = _sessionMaxAgeHours.asStateFlow()
+
+    private val _sessionIdleTimeoutMinutes = MutableStateFlow(
+        (DeviceSessionStore.getSessionIdleTimeoutMs(application) / (60 * 1000L)).toInt().coerceAtLeast(5)
+    )
+    val sessionIdleTimeoutMinutes: StateFlow<Int> = _sessionIdleTimeoutMinutes.asStateFlow()
+
     init {
         val initialMode = _themeMode.value
         val isDarkInitial = when (initialMode) {
@@ -620,41 +652,43 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 DeletedAccountsRegistry.init(application)
                 DeletedRecordsRegistry.init(application)
                 val savedDeviceId = DeviceSessionStore.getActiveUserId(application)
-                if (savedDeviceId > 0L) {
+                val savedUserCode = DeviceSessionStore.getActiveUserCode(application)
+                if (savedDeviceId > 0L || savedUserCode.isNotBlank()) {
                     val dao = repository.getDao()
-                    var directUser = dao.getUserById(savedDeviceId)
+                    var directUser = if (savedUserCode.isNotBlank()) {
+                        dao.getUserAccountsDirect().firstOrNull {
+                            it.userCode.equals(savedUserCode, ignoreCase = true)
+                        } ?: dao.getUserById(savedDeviceId)
+                    } else {
+                        dao.getUserById(savedDeviceId)
+                    }
                     if (directUser == null) {
                         DatabaseBackupManager.restoreIfEmpty(application, dao)
-                        directUser = dao.getUserById(savedDeviceId)
-                            ?: dao.getUserAccountsDirect().firstOrNull { it.id == savedDeviceId }
+                        directUser = dao.getUserAccountsDirect().firstOrNull {
+                            (savedUserCode.isNotBlank() && it.userCode.equals(savedUserCode, ignoreCase = true)) ||
+                                it.id == savedDeviceId
+                        }
                     }
-                    if (directUser != null && directUser.active && directUser.syncStatus != "PENDING_MANAGER_APPROVAL") {
+                    if (directUser == null) {
+                        val seededList = userAccounts.firstOrNull { it.isNotEmpty() }.orEmpty()
+                        directUser = seededList.firstOrNull {
+                            (savedUserCode.isNotBlank() && it.userCode.equals(savedUserCode, ignoreCase = true)) ||
+                                it.id == savedDeviceId
+                        }
+                    }
+                    val validation = DeviceSessionStore.validateSessionForUser(application, directUser)
+                    if (directUser != null && validation.isValid) {
+                        DeviceSessionStore.touchSessionActivity(application)
                         activeSessionOverride.value = directUser
                         activeSessionUserId.value = directUser.id
                         isSessionAuthenticated.value = true
+                        refreshSecurityStateForUser(directUser)
                         _isInitializingSession.value = false
-                    } else if (directUser != null && (!directUser.active || directUser.syncStatus == "PENDING_MANAGER_APPROVAL")) {
+                    } else {
                         DeviceSessionStore.clearActiveSession(application)
                         activeSessionOverride.value = null
                         activeSessionUserId.value = null
                         isSessionAuthenticated.value = false
-                        _isInitializingSession.value = false
-                    } else {
-                        // Wait briefly for initial seed if DB is still initializing on first launch
-                        val seededList = userAccounts.firstOrNull { it.isNotEmpty() }.orEmpty()
-                        val matched = seededList.firstOrNull {
-                            it.id == savedDeviceId && it.active && it.syncStatus != "PENDING_MANAGER_APPROVAL"
-                        }
-                        if (matched != null) {
-                            activeSessionOverride.value = matched
-                            activeSessionUserId.value = matched.id
-                            isSessionAuthenticated.value = true
-                        } else {
-                            DeviceSessionStore.clearActiveSession(application)
-                            activeSessionOverride.value = null
-                            activeSessionUserId.value = null
-                            isSessionAuthenticated.value = false
-                        }
                         _isInitializingSession.value = false
                     }
                 } else {
@@ -1800,12 +1834,18 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     // --- User Profile Management ---
     fun updateUserProfile(fullName: String, phoneOrEmail: String, newPassword: String?) {
         viewModelScope.launch {
+            val app = getApplication<Application>()
             val user = currentUser.value ?: run {
                 postMessage("يجب تسجيل الدخول أولاً لتعديل الملف الشخصي", isError = true)
                 return@launch
             }
             val res = repository.updateUserProfile(user.id, fullName, phoneOrEmail, newPassword)
             res.onSuccess { updated ->
+                activeSessionOverride.value = updated
+                DeviceSessionStore.saveActiveUserSession(app, updated)
+                if (com.example.util.BiometricPreferenceManager.isBoundToUser(app, updated)) {
+                    com.example.util.BiometricPreferenceManager.bindUser(app, updated)
+                }
                 postMessage("تم تحديث بيانات الملف الشخصي بنجاح")
                 cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updated)
                 persistAndSyncToServer()
@@ -2651,6 +2691,70 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun refreshSecurityStateForUser(targetUser: UserAccountEntity? = currentUser.value) {
+        val app = getApplication<Application>()
+        _securityActivities.value = com.example.util.AuthSecurityManager.getLoginActivities(app)
+        _suspiciousAlerts.value = com.example.util.AuthSecurityManager.getSuspiciousAlerts(app)
+        _sessionMaxAgeHours.value = (DeviceSessionStore.getSessionMaxAgeMs(app) / (60 * 60 * 1000L)).toInt().coerceAtLeast(1)
+        _sessionIdleTimeoutMinutes.value = (DeviceSessionStore.getSessionIdleTimeoutMs(app) / (60 * 1000L)).toInt().coerceAtLeast(5)
+        if (targetUser != null && targetUser.userCode.isNotBlank()) {
+            _trustedDevices.value = com.example.util.AuthSecurityManager.getTrustedDevicesForUser(app, targetUser.userCode)
+            _currentTwoFactorConfig.value = com.example.util.AuthSecurityManager.getTwoFactorConfig(
+                app,
+                targetUser.userCode,
+                targetUser.username
+            )
+        }
+    }
+
+    private fun completeAuthenticatedSessionLogin(
+        user: UserAccountEntity,
+        method: String,
+        bindBiometricIfFirstOrSameUser: Boolean = true,
+        onSuccess: (UserAccountEntity) -> Unit = {}
+    ) {
+        val app = getApplication<Application>()
+        DeletedAccountsRegistry.removeTombstone(user.userCode, user.username, user.phoneOrEmail)
+        com.example.util.AuthSecurityManager.clearFailedLoginAttempts(app, user.username)
+        com.example.util.AuthSecurityManager.clearFailedLoginAttempts(app, user.userCode)
+        if (user.phoneOrEmail.isNotBlank()) {
+            com.example.util.AuthSecurityManager.clearFailedLoginAttempts(app, user.phoneOrEmail)
+        }
+
+        viewModelScope.launch {
+            repository.getDao().setActiveSessionUser(user.id)
+        }
+        twoFactorPendingUser.value = null
+        activeSessionOverride.value = user
+        activeSessionUserId.value = user.id
+        isSessionAuthenticated.value = true
+        DeviceSessionStore.saveActiveUserSession(app, user)
+        com.example.util.BiometricPreferenceManager.synchronizeBindingOnAuthenticatedLogin(
+            context = app,
+            authenticatedUser = user,
+            autoBindIfUnbound = bindBiometricIfFirstOrSameUser
+        )
+        com.example.util.AuthSecurityManager.registerAuthenticatedDevice(
+            context = app,
+            userCode = user.userCode,
+            username = user.username,
+            autoTrustFirstDevice = true
+        )
+        com.example.util.AuthSecurityManager.recordLoginActivity(
+            context = app,
+            userCode = user.userCode,
+            username = user.username,
+            fullName = user.fullName,
+            eventType = "LOGIN_SUCCESS",
+            method = method,
+            success = true,
+            detail = "تسجيل دخول ناجح عبر $method (${user.role})"
+        )
+        refreshSecurityStateForUser(user)
+        startCloudRealtimeSyncIfAuthenticated()
+        onSuccess(user)
+    }
+
     fun loginWithCredentials(
         emailOrUsername: String,
         passwordOrPin: String,
@@ -2659,11 +2763,12 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             try {
+                val app = getApplication<Application>()
                 val cleanIdentity = emailOrUsername.trim().lowercase(java.util.Locale.ROOT)
                 val cleanSecret = passwordOrPin.trim()
 
                 if (cleanIdentity.isBlank()) {
-                    val err = "يرجى إدخال البريد الإلكتروني أو اسم المستخدم"
+                    val err = "يرجى إدخال البريد الإلكتروني أو اسم المستخدم أو كود الحساب"
                     postMessage(err, isError = true)
                     onError(err)
                     return@launch
@@ -2675,33 +2780,55 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
+                // 0. Enforce Brute-Force Protection before checking credentials
+                val lockoutStatus = com.example.util.AuthSecurityManager.checkLoginAllowed(app, cleanIdentity)
+                if (lockoutStatus.isLocked) {
+                    postMessage(lockoutStatus.message, isError = true)
+                    onError(lockoutStatus.message)
+                    return@launch
+                }
+
                 // 1. Instant local authentication: Verify against Room first so switching users is immediate (0ms freeze)
                 val localRes = repository.authenticateUserCredentials(cleanIdentity, cleanSecret)
                 if (localRes.isSuccess) {
                     val user = localRes.getOrThrow()
-                    // Clear any lingering deleted tombstone for this valid active user
-                    DeletedAccountsRegistry.removeTombstone(user.userCode, user.username, user.phoneOrEmail)
-
-                    // Immediately switch and isolate the session
-                    repository.getDao().setActiveSessionUser(user.id)
-                    activeSessionOverride.value = user
-                    activeSessionUserId.value = user.id
-                    isSessionAuthenticated.value = true
-                    DeviceSessionStore.saveActiveSession(getApplication(), user.id, user.userCode, user.role)
-                    com.example.util.BiometricPreferenceManager.bindUser(getApplication(), user)
-
-                    // Background cloud user sync (non-blocking, won't freeze login)
-                    viewModelScope.launch(Dispatchers.IO) {
-                        try {
-                            cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), user.id)
-                        } catch (e: Exception) {
-                            Log.w("PmpViewModel", "Async post-login user sync note: ${e.message}")
-                        }
+                    val deviceId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+                    if (com.example.util.AuthSecurityManager.isDeviceRevokedForUser(app, user.userCode, deviceId)) {
+                        repository.getDao().setActiveSessionUser(-1L)
+                        val revokedMsg = "هذا الجهاز تم إبطاله أمنياً للحساب (${user.fullName}). يرجى مراجعة مدير النظام أو استعادة الجهاز من إعدادات الأمان."
+                        postMessage(revokedMsg, isError = true)
+                        onError(revokedMsg)
+                        return@launch
                     }
 
-                    startCloudRealtimeSyncIfAuthenticated()
-                    postMessage("مرحباً بك ${user.fullName} • الصلاحيات: ${user.permissions}")
-                    onSuccess(user)
+                    // Check if optional 2FA is enabled and required for this login
+                    if (com.example.util.AuthSecurityManager.isTwoFactorRequiredForLogin(app, user.userCode, deviceId)) {
+                        repository.getDao().setActiveSessionUser(-1L)
+                        com.example.util.AuthSecurityManager.clearFailedLoginAttempts(app, cleanIdentity)
+                        twoFactorPendingUser.value = user
+                        postMessage("تم التحقق من كلمة المرور. يرجى إدخال رمز المصادقة الثنائية (2FA) لإكمال تسجيل الدخول.")
+                        return@launch
+                    }
+
+                    completeAuthenticatedSessionLogin(
+                        user = user,
+                        method = "PASSWORD",
+                        bindBiometricIfFirstOrSameUser = true
+                    ) { authenticated ->
+                        // Background cloud user sync (non-blocking, won't freeze login)
+                        viewModelScope.launch(Dispatchers.IO) {
+                            try {
+                                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), authenticated.id)
+                                if (com.example.util.PasswordSecurityUtil.isPbkdf2Hash(authenticated.pinOrPassword)) {
+                                    cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, authenticated)
+                                }
+                            } catch (e: Exception) {
+                                Log.w("PmpViewModel", "Async post-login user sync note: ${e.message}")
+                            }
+                        }
+                        postMessage("مرحباً بك ${authenticated.fullName} • الصلاحيات: ${authenticated.permissions}")
+                        onSuccess(authenticated)
+                    }
                     return@launch
                 }
 
@@ -2732,18 +2859,49 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (cloudUser != null) {
                     val finalUser = cloudUser!!
-                    DeletedAccountsRegistry.removeTombstone(finalUser.userCode, finalUser.username, finalUser.phoneOrEmail)
-                    repository.getDao().setActiveSessionUser(finalUser.id)
-                    activeSessionOverride.value = finalUser
-                    activeSessionUserId.value = finalUser.id
-                    isSessionAuthenticated.value = true
-                    com.example.util.BiometricPreferenceManager.bindUser(getApplication(), finalUser)
-                    DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
-                    startCloudRealtimeSyncIfAuthenticated()
-                    postMessage("تمت مزامنة حسابك (${finalUser.fullName}) بنجاح وتسجيل الدخول!")
-                    onSuccess(finalUser)
+                    val deviceId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+                    if (com.example.util.AuthSecurityManager.isDeviceRevokedForUser(app, finalUser.userCode, deviceId)) {
+                        repository.getDao().setActiveSessionUser(-1L)
+                        val revokedMsg = "هذا الجهاز تم إبطاله أمنياً للحساب (${finalUser.fullName})."
+                        postMessage(revokedMsg, isError = true)
+                        onError(revokedMsg)
+                        return@launch
+                    }
+                    if (com.example.util.AuthSecurityManager.isTwoFactorRequiredForLogin(app, finalUser.userCode, deviceId)) {
+                        repository.getDao().setActiveSessionUser(-1L)
+                        com.example.util.AuthSecurityManager.clearFailedLoginAttempts(app, cleanIdentity)
+                        twoFactorPendingUser.value = finalUser
+                        postMessage("تم التحقق من كلمة المرور السحابية. يرجى إدخال رمز المصادقة الثنائية (2FA) لإكمال الدخول.")
+                        return@launch
+                    }
+                    DatabaseBackupManager.saveLocalSnapshot(app, repository.getDao())
+                    completeAuthenticatedSessionLogin(
+                        user = finalUser,
+                        method = "CLOUD_PASSWORD",
+                        bindBiometricIfFirstOrSameUser = true
+                    ) { authenticated ->
+                        postMessage("تمت مزامنة حسابك (${authenticated.fullName}) بنجاح وتسجيل الدخول!")
+                        onSuccess(authenticated)
+                    }
                 } else {
-                    val finalErrMsg = cloudError ?: localMsg.ifBlank { "اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات أو مراجعة مدير النظام." }
+                    val matchedAccount = repository.findUserByIdentity(cleanIdentity)
+                    val lockoutAfterFail = com.example.util.AuthSecurityManager.recordFailedLoginAttempt(
+                        context = app,
+                        identity = cleanIdentity,
+                        matchedUserCode = matchedAccount?.userCode.orEmpty(),
+                        reason = cloudError ?: localMsg.ifBlank { "كلمة المرور أو الهوية غير صحيحة" }
+                    )
+                    refreshSecurityStateForUser()
+                    val finalErrMsg = if (lockoutAfterFail.isLocked) {
+                        lockoutAfterFail.message
+                    } else {
+                        val baseErr = cloudError ?: localMsg.ifBlank { "اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات أو مراجعة مدير النظام." }
+                        if (lockoutAfterFail.remainingAttemptsBeforeLock <= 2) {
+                            "$baseErr (تنبيه أمني: متبقي ${lockoutAfterFail.remainingAttemptsBeforeLock} محاولات قبل الإغلاق المؤقت)"
+                        } else {
+                            baseErr
+                        }
+                    }
                     postMessage(finalErrMsg, isError = true)
                     onError(finalErrMsg)
                 }
@@ -2754,6 +2912,76 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 onError(friendlyError)
             }
         }
+    }
+
+    fun verifyTwoFactorLogin(
+        codeInput: String,
+        trustCurrentDevice: Boolean = true,
+        onSuccess: (UserAccountEntity) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val pendingUser = twoFactorPendingUser.value
+            if (pendingUser == null) {
+                val err = "لا توجد جلسة مصادقة ثنائية معلقة حالياً. يرجى تسجيل الدخول أولاً."
+                postMessage(err, isError = true)
+                onError(err)
+                return@launch
+            }
+            val lockoutStatus = com.example.util.AuthSecurityManager.checkLoginAllowed(app, pendingUser.userCode)
+            if (lockoutStatus.isLocked) {
+                postMessage(lockoutStatus.message, isError = true)
+                onError(lockoutStatus.message)
+                return@launch
+            }
+
+            val verifyRes = com.example.util.AuthSecurityManager.verifyTwoFactorCodeOrRecovery(
+                context = app,
+                userCode = pendingUser.userCode,
+                inputCode = codeInput
+            )
+            verifyRes.onSuccess {
+                val deviceId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+                if (trustCurrentDevice) {
+                    com.example.util.AuthSecurityManager.registerAuthenticatedDevice(
+                        context = app,
+                        userCode = pendingUser.userCode,
+                        username = pendingUser.username,
+                        autoTrustFirstDevice = true
+                    )
+                    com.example.util.AuthSecurityManager.setDeviceTrustStatus(
+                        context = app,
+                        userCode = pendingUser.userCode,
+                        deviceId = deviceId,
+                        trusted = true
+                    )
+                }
+                completeAuthenticatedSessionLogin(
+                    user = pendingUser,
+                    method = "PASSWORD_2FA",
+                    bindBiometricIfFirstOrSameUser = true
+                ) { authenticated ->
+                    postMessage("تم التحقق من المصادقة الثنائية (2FA) بنجاح! مرحباً بك ${authenticated.fullName}")
+                    onSuccess(authenticated)
+                }
+            }.onFailure { err ->
+                val failLock = com.example.util.AuthSecurityManager.recordFailedLoginAttempt(
+                    context = app,
+                    identity = pendingUser.userCode,
+                    matchedUserCode = pendingUser.userCode,
+                    reason = "فشل رمز المصادقة الثنائية (2FA)"
+                )
+                refreshSecurityStateForUser(pendingUser)
+                val msg = if (failLock.isLocked) failLock.message else (err.message ?: "رمز المصادقة الثنائية غير صحيح")
+                postMessage(msg, isError = true)
+                onError(msg)
+            }
+        }
+    }
+
+    fun cancelTwoFactorLogin() {
+        twoFactorPendingUser.value = null
     }
 
     fun submitNewEmployeeRequest(
@@ -2794,7 +3022,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
             val allUsers = repository.getDao().getUserAccountsDirect()
             val usernameCandidate = cleanUsername.ifBlank { cleanEmail.substringBefore("@") }
-            val hashedPin = com.example.data.repository.PmpRepository.hashSecret(cleanPin)
+            val hashedPin = com.example.util.PasswordSecurityUtil.hashPassword(cleanPin)
             
             // Check if account already exists with this username or email
             val existingMatch = allUsers.firstOrNull {
@@ -2881,13 +3109,28 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         onError: (String) -> Unit
     ) {
         viewModelScope.launch {
+            val app = getApplication<Application>()
             try {
                 cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Reset pull warning: ${e.message}")
             }
-            val res = repository.generatePasswordResetCode(identity, channel)
+            val targetUser = repository.findUserByIdentity(identity)
+            if (targetUser == null) {
+                val err = "لم يتم العثور على أي حساب مسجل بهذه البيانات ($identity)"
+                postMessage(err, isError = true)
+                onError(err)
+                return@launch
+            }
+            val issuedOtp = com.example.util.AuthSecurityManager.issuePasswordResetChallenge(
+                context = app,
+                userCode = targetUser.userCode,
+                username = targetUser.username,
+                channel = channel
+            )
+            val res = repository.generatePasswordResetCode(identity, channel, providedOtpCode = issuedOtp)
             res.onSuccess { (code, user) ->
+                refreshSecurityStateForUser(user)
                 persistAndSyncToServer()
                 onCodeReady(code, user)
             }.onFailure {
@@ -2898,6 +3141,37 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun confirmPasswordResetWithOtp(
+        userId: Long,
+        otpInput: String,
+        newPass: String,
+        onSuccess: (UserAccountEntity) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val user = repository.getDao().getUserById(userId)
+            if (user == null) {
+                val err = "الحساب غير موجود"
+                postMessage(err, isError = true)
+                onError(err)
+                return@launch
+            }
+            val verifyOtp = com.example.util.AuthSecurityManager.verifyAndConsumePasswordResetOtp(
+                context = app,
+                userCode = user.userCode,
+                otpInput = otpInput
+            )
+            if (verifyOtp.isFailure) {
+                val err = verifyOtp.exceptionOrNull()?.message ?: "رمز التحقق غير صحيح أو منتهي الصلاحية"
+                postMessage(err, isError = true)
+                onError(err)
+                return@launch
+            }
+            confirmPasswordReset(userId, newPass, onSuccess, onError)
+        }
+    }
+
     fun confirmPasswordReset(
         userId: Long,
         newPass: String,
@@ -2905,17 +3179,89 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         onError: (String) -> Unit
     ) {
         viewModelScope.launch {
+            val app = getApplication<Application>()
             val res = repository.completePasswordReset(userId, newPass, resolveUserActor("المستخدم"))
             res.onSuccess { updated ->
+                com.example.util.AuthSecurityManager.clearFailedLoginAttempts(app, updated.username)
+                com.example.util.AuthSecurityManager.clearFailedLoginAttempts(app, updated.userCode)
+                if (updated.phoneOrEmail.isNotBlank()) {
+                    com.example.util.AuthSecurityManager.clearFailedLoginAttempts(app, updated.phoneOrEmail)
+                }
+                com.example.util.AuthSecurityManager.revokeAllSessionsForUser(app, updated.userCode)
+                if (com.example.util.BiometricPreferenceManager.isBoundToUser(app, updated)) {
+                    com.example.util.BiometricPreferenceManager.bindUser(app, updated)
+                }
                 cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updated)
-                DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
-                postMessage("تم تغيير كلمة المرور بنجاح للحساب (${updated.fullName})")
+                DatabaseBackupManager.saveLocalSnapshot(app, repository.getDao())
+                refreshSecurityStateForUser(updated)
+                postMessage("تم تغيير كلمة المرور بنجاح وإبطال الجلسات القديمة للحساب (${updated.fullName})")
                 onSuccess(updated)
             }.onFailure {
                 val err = it.message ?: "تعذر تعيين كلمة المرور"
                 postMessage(err, isError = true)
                 onError(err)
             }
+        }
+    }
+
+    fun recoverAccountWithBackupCode(
+        identity: String,
+        backupRecoveryCode: String,
+        newPass: String,
+        onSuccess: (UserAccountEntity) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val user = repository.findUserByIdentity(identity)
+            if (user == null) {
+                val err = "لم يتم العثور على الحساب ($identity)"
+                postMessage(err, isError = true)
+                onError(err)
+                return@launch
+            }
+            if (newPass.trim().length < 4) {
+                val err = "كلمة المرور الجديدة يجب أن تتكون من 4 خانات على الأقل"
+                postMessage(err, isError = true)
+                onError(err)
+                return@launch
+            }
+            val consumed = com.example.util.AuthSecurityManager.consumeBackupRecoveryCode(
+                context = app,
+                userCode = user.userCode,
+                rawRecoveryCode = backupRecoveryCode
+            )
+            if (!consumed) {
+                com.example.util.AuthSecurityManager.recordFailedLoginAttempt(
+                    context = app,
+                    identity = user.userCode,
+                    matchedUserCode = user.userCode,
+                    reason = "فشل محاولة استرداد الحساب بكود استرداد احتياطي غير صالح"
+                )
+                val err = "كود الاسترداد الاحتياطي غير صحيح أو تم استخدامه مسبقاً."
+                postMessage(err, isError = true)
+                onError(err)
+                return@launch
+            }
+            confirmPasswordReset(
+                userId = user.id,
+                newPass = newPass,
+                onSuccess = { updated ->
+                    com.example.util.AuthSecurityManager.recordLoginActivity(
+                        context = app,
+                        userCode = updated.userCode,
+                        username = updated.username,
+                        fullName = updated.fullName,
+                        eventType = "ACCOUNT_RECOVERY_BACKUP_CODE",
+                        method = "BACKUP_RECOVERY_CODE",
+                        success = true,
+                        detail = "تم استرداد الحساب وتغيير كلمة المرور باستخدام كود استرداد احتياطي"
+                    )
+                    refreshSecurityStateForUser(updated)
+                    onSuccess(updated)
+                },
+                onError = onError
+            )
         }
     }
 
@@ -2929,7 +3275,6 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val cleanIdentity = userCodeOrUsername.trim().lowercase(java.util.Locale.ROOT)
             val cleanPin = passwordOrPin.trim()
-            val hashedPin = com.example.data.repository.PmpRepository.hashSecret(cleanPin)
 
             try {
                 withTimeoutOrNull(3000L) {
@@ -2943,7 +3288,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             val matched = allUsers.firstOrNull {
                 it.userCode.equals(cleanIdentity, ignoreCase = true) ||
                     it.username.equals(cleanIdentity, ignoreCase = true) ||
-                    it.phoneOrEmail.equals(cleanIdentity, ignoreCase = true)
+                    (it.phoneOrEmail.isNotBlank() && it.phoneOrEmail.equals(cleanIdentity, ignoreCase = true))
             }
 
             var targetMatched = matched
@@ -2956,7 +3301,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     targetMatched = repository.getDao().getUserAccountsDirect().firstOrNull {
                         it.userCode.equals(cleanIdentity, ignoreCase = true) ||
                             it.username.equals(cleanIdentity, ignoreCase = true) ||
-                            it.phoneOrEmail.equals(cleanIdentity, ignoreCase = true)
+                            (it.phoneOrEmail.isNotBlank() && it.phoneOrEmail.equals(cleanIdentity, ignoreCase = true))
                     }
                 }
             }
@@ -2973,36 +3318,38 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            val isPinValid = cleanPin.isBlank() ||
-                finalUser.pinOrPassword == cleanPin ||
-                finalUser.pinOrPassword == hashedPin
+            val isPinValid = cleanPin.isNotBlank() &&
+                com.example.util.PasswordSecurityUtil.verifyPassword(cleanPin, finalUser.pinOrPassword)
 
             if (!isPinValid) {
                 onError("كلمة المرور أو رمز الدخول غير صحيح للحساب ${finalUser.fullName}")
                 return@launch
             }
 
-            // Auto-upgrade plain password to hash if needed
-            if (cleanPin.isNotBlank() && finalUser.pinOrPassword == cleanPin) {
-                val updatedWithHash = finalUser.copy(pinOrPassword = hashedPin)
-                repository.getDao().updateUserAccount(updatedWithHash)
+            // Auto-upgrade legacy password to PBKDF2 hash if needed
+            var userToActivate = finalUser
+            if (com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2(finalUser.pinOrPassword)) {
+                val pbkdf2Hash = com.example.util.PasswordSecurityUtil.hashPassword(cleanPin)
+                userToActivate = finalUser.copy(pinOrPassword = pbkdf2Hash)
+                repository.getDao().updateUserAccount(userToActivate)
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
-                        cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updatedWithHash)
+                        cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, userToActivate)
                     } catch (e: Exception) {
                         Log.w("PmpViewModel", "Auto-upgrade password hash sync warning: ${e.message}")
                     }
                 }
             }
 
-            repository.switchActiveUser(finalUser.id, cleanPin)
-            activeSessionUserId.value = finalUser.id
-            isSessionAuthenticated.value = true
-            DeviceSessionStore.saveActiveSession(getApplication(), finalUser.id, finalUser.userCode, finalUser.role)
-            repository.getDao().setActiveSessionUser(finalUser.id)
-            startCloudRealtimeSyncIfAuthenticated()
-            postMessage("مرحباً بك ${finalUser.fullName}! تم اعتماد حسابك بنجاح من المدير بالصلاحيات: [${finalUser.permissions}]")
-            onSuccess(finalUser)
+            repository.switchActiveUser(userToActivate.id, cleanPin)
+            completeAuthenticatedSessionLogin(
+                user = userToActivate,
+                method = "PENDING_APPROVAL_LOGIN",
+                bindBiometricIfFirstOrSameUser = true
+            ) { authenticated ->
+                postMessage("مرحباً بك ${authenticated.fullName}! تم اعتماد حسابك بنجاح من المدير بالصلاحيات: [${authenticated.permissions}]")
+                onSuccess(authenticated)
+            }
         }
     }
 
@@ -3024,11 +3371,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
             when (val res = repository.bindFirebaseUserSession(uid, email, displayName)) {
                 is GoogleSignInBindingResult.Approved -> {
-                    repository.getDao().setActiveSessionUser(res.account.id)
-                    activeSessionOverride.value = res.account
-                    activeSessionUserId.value = res.account.id
-                    isSessionAuthenticated.value = true
-                    DeviceSessionStore.saveActiveSession(getApplication(), res.account.id, res.account.userCode, res.account.role)
+                    val app = getApplication<Application>()
+                    val deviceId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+                    if (com.example.util.AuthSecurityManager.isDeviceRevokedForUser(app, res.account.userCode, deviceId)) {
+                        repository.getDao().setActiveSessionUser(-1L)
+                        val msg = "هذا الجهاز موقوف أمنياً للحساب (${res.account.fullName})."
+                        postMessage(msg, isError = true)
+                        return@launch
+                    }
                     try {
                         cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, res.account)
                     } catch (e: Exception) {
@@ -3039,9 +3389,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     } catch (e: Exception) {
                         Log.w("PmpViewModel", "Cloud account sync error: ${e.message}")
                     }
-                    startCloudRealtimeSyncIfAuthenticated()
-                    postMessage("تم تسجيل الدخول عبر Google بالحساب المعتمد (${res.account.fullName}) والربط مع السيرفر")
-                    onApprovedSuccess(res.account)
+                    completeAuthenticatedSessionLogin(
+                        user = res.account,
+                        method = "GOOGLE_OAUTH",
+                        bindBiometricIfFirstOrSameUser = true
+                    ) { authenticated ->
+                        postMessage("تم تسجيل الدخول عبر Google بالحساب المعتمد (${authenticated.fullName}) والربط مع السيرفر")
+                        onApprovedSuccess(authenticated)
+                    }
                 }
                 is GoogleSignInBindingResult.PendingApproval -> {
                     activeSessionOverride.value = null
@@ -3070,56 +3425,263 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         onError: (String) -> Unit
     ) {
         viewModelScope.launch {
-            val bound = com.example.util.BiometricPreferenceManager.getBoundUser(getApplication())
+            val app = getApplication<Application>()
+            val bound = com.example.util.BiometricPreferenceManager.getBoundUser(app)
             if (bound == null) {
                 onError("لم يتم تفعيل البصمة لأي حساب على هذا الهاتف بعد. يرجى تسجيل الدخول باسم المستخدم وكلمة المرور أولاً لربط بصمتك بحسابك ومنع تداخل الحسابات.")
                 return@launch
             }
 
-            val allUsers = repository.getDao().getUserAccountsDirect()
-            val target = allUsers.firstOrNull {
-                it.id == bound.id ||
-                    (bound.userCode.isNotBlank() && it.userCode.equals(bound.userCode, ignoreCase = true)) ||
-                    (bound.username.isNotBlank() && it.username.equals(bound.username, ignoreCase = true))
-            }
-
-            if (target == null) {
-                com.example.util.BiometricPreferenceManager.clearBinding(getApplication())
-                onError("الحساب المرتبط بهذه البصمة لم يعد متوفراً على هذا الجهاز. يرجى تسجيل الدخول بكلمة المرور مجدداً.")
+            // 1. Check Brute-Force Lockout for the bound user
+            val lockoutStatus = com.example.util.AuthSecurityManager.checkLoginAllowed(app, bound.userCode)
+            if (lockoutStatus.isLocked) {
+                postMessage(lockoutStatus.message, isError = true)
+                onError(lockoutStatus.message)
                 return@launch
             }
 
-            if (!target.active) {
-                onError("الحساب المرتبط بهذه البصمة (${target.fullName}) تم إيقافه من قبل الإدارة.")
+            // 2. Validate local account binding strictly by (userCode + username + deviceId + credentialFingerprint)
+            // NEVER falls back to auto-increment Room `id`!
+            val initialUsers = repository.getDao().getUserAccountsDirect()
+            val initialValidation = com.example.util.BiometricPreferenceManager.resolveAndValidateBoundAccount(app, initialUsers)
+            if (!initialValidation.isValid || initialValidation.user == null) {
+                refreshSecurityStateForUser()
+                val errMsg = initialValidation.errorMessage.ifBlank {
+                    "فشل التحقق من ربط البصمة بالحساب المسجل. يرجى تسجيل الدخول بكلمة المرور."
+                }
+                postMessage(errMsg, isError = true)
+                onError(errMsg)
                 return@launch
             }
 
-            if (target.syncStatus == "PENDING_MANAGER_APPROVAL") {
-                onError("الحساب المرتبط بهذه البصمة (${target.fullName}) بانتظار موافقة مدير النظام وتحديد الصلاحيات أولاً.")
+            // 3. Server-Side Identity & Status Verification when online:
+            // Biometric authentication is NEVER used as a replacement for server-side verification.
+            val deviceId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+            if (isConnectedToCloud()) {
+                try {
+                    withTimeoutOrNull(2800L) {
+                        cloudErpSyncRepo.pullAndMergeCloudUsers(
+                            serverClusterCode.value,
+                            repository.getDao(),
+                            initialValidation.user.id
+                        )
+                    }
+                } catch (e: Exception) {
+                    Log.w("PmpViewModel", "Biometric server-side verification pull note: ${e.message}")
+                }
+            }
+
+            // 4. Re-validate after server sync to ensure account wasn't suspended, deleted, or had its token/password rotated on the server
+            val postSyncUsers = repository.getDao().getUserAccountsDirect()
+            val finalValidation = com.example.util.BiometricPreferenceManager.resolveAndValidateBoundAccount(app, postSyncUsers)
+            if (!finalValidation.isValid || finalValidation.user == null) {
+                refreshSecurityStateForUser()
+                val errMsg = finalValidation.errorMessage.ifBlank {
+                    "تم رفض الدخول بالبصمة بعد التحقق من السيرفر المركزي. يرجى تسجيل الدخول بكلمة المرور."
+                }
+                postMessage(errMsg, isError = true)
+                onError(errMsg)
                 return@launch
             }
 
-            DeletedAccountsRegistry.removeTombstone(target.userCode, target.username, target.phoneOrEmail)
-            repository.getDao().setActiveSessionUser(target.id)
-            activeSessionOverride.value = target
-            activeSessionUserId.value = target.id
-            isSessionAuthenticated.value = true
-            DeviceSessionStore.saveActiveSession(getApplication(), target.id, target.userCode, target.role)
-            startCloudRealtimeSyncIfAuthenticated()
-            postMessage("تم التحقق بنجاح من هوية (${target.fullName}) وتسجيل الدخول بالبصمة")
-            onSuccess(target)
+            val verifiedTarget = finalValidation.user
+
+            // 5. Check if 2FA is required on an untrusted device
+            if (com.example.util.AuthSecurityManager.isTwoFactorRequiredForLogin(app, verifiedTarget.userCode, deviceId)) {
+                twoFactorPendingUser.value = verifiedTarget
+                postMessage("تم التحقق من البصمة. يرجى إدخال رمز المصادقة الثنائية (2FA) لإكمال الدخول.")
+                return@launch
+            }
+
+            completeAuthenticatedSessionLogin(
+                user = verifiedTarget,
+                method = "BIOMETRIC",
+                bindBiometricIfFirstOrSameUser = true
+            ) { authenticated ->
+                postMessage("تم التحقق بنجاح من هوية (${authenticated.fullName}) وتسجيل الدخول بالبصمة")
+                onSuccess(authenticated)
+            }
         }
     }
 
+    fun verifyActiveSessionNotExpired(onSessionExpired: (String) -> Unit = {}) {
+        if (!isSessionAuthenticated.value) return
+        val app = getApplication<Application>()
+        val activeUser = currentUser.value
+        val validation = DeviceSessionStore.validateSessionForUser(app, activeUser)
+        if (!validation.isValid) {
+            val reason = validation.reasonMessage.ifBlank {
+                "انتهت صلاحية الجلسة الحالية، يرجى إعادة تسجيل الدخول."
+            }
+            com.example.util.AuthSecurityManager.recordLoginActivity(
+                context = app,
+                userCode = activeUser?.userCode.orEmpty(),
+                username = activeUser?.username.orEmpty(),
+                fullName = activeUser?.fullName.orEmpty(),
+                eventType = "SESSION_EXPIRED_OR_REVOKED",
+                method = "SESSION_GUARD",
+                success = false,
+                detail = reason
+            )
+            logoutSession(clearBiometrics = false) {
+                postMessage(reason, isError = true)
+                onSessionExpired(reason)
+            }
+        } else {
+            DeviceSessionStore.touchSessionActivity(app)
+        }
+    }
+
+    fun updateSessionTimeoutSettings(maxAgeHours: Int, idleTimeoutMinutes: Int) {
+        val app = getApplication<Application>()
+        val cleanHours = maxAgeHours.coerceIn(1, 168)
+        val cleanIdle = idleTimeoutMinutes.coerceIn(5, 720)
+        DeviceSessionStore.setSessionMaxAgeMs(app, cleanHours * 60L * 60L * 1000L)
+        DeviceSessionStore.setSessionIdleTimeoutMs(app, cleanIdle * 60L * 1000L)
+        _sessionMaxAgeHours.value = cleanHours
+        _sessionIdleTimeoutMinutes.value = cleanIdle
+        postMessage("تم تحديث سياسة انتهاء الجلسة: الحد الأقصى ($cleanHours ساعة) • الخمول ($cleanIdle دقيقة)")
+    }
+
+    fun revokeAllOtherSessionsForCurrentUser() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val user = currentUser.value ?: return@launch
+            val res = repository.regenerateUserSyncToken(user, resolveUserActor(user.fullName))
+            res.onSuccess { newToken ->
+                val updatedUser = user.copy(serverSyncToken = newToken, syncStatus = "READY_FOR_SYNC")
+                com.example.util.AuthSecurityManager.revokeAllSessionsForUser(app, user.userCode)
+                // Re-save current session with the new token so current device stays logged in
+                activeSessionOverride.value = updatedUser
+                DeviceSessionStore.saveActiveUserSession(app, updatedUser)
+                if (com.example.util.BiometricPreferenceManager.isBoundToUser(app, updatedUser)) {
+                    com.example.util.BiometricPreferenceManager.bindUser(app, updatedUser)
+                }
+                cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updatedUser)
+                refreshSecurityStateForUser(updatedUser)
+                postMessage("تم إبطال جميع الجلسات الأخرى وتدوير رمز الأمان السحابي لحساب (${updatedUser.fullName}) بنجاح")
+            }.onFailure {
+                postMessage(it.message ?: "تعذر إبطال الجلسات الأخرى", isError = true)
+            }
+        }
+    }
+
+    fun enableTwoFactorForCurrentUser(
+        requireOnEveryLogin: Boolean = true,
+        onEnabled: (String, List<String>) -> Unit = { _, _ -> }
+    ) {
+        val app = getApplication<Application>()
+        val user = currentUser.value ?: run {
+            postMessage("يجب تسجيل الدخول أولاً لتفعيل المصادقة الثنائية (2FA)", isError = true)
+            return
+        }
+        val (secret, backupCodes) = com.example.util.AuthSecurityManager.enableTwoFactorAuth(
+            context = app,
+            userCode = user.userCode,
+            username = user.username,
+            requireOnEveryLogin = requireOnEveryLogin
+        )
+        _latestGeneratedRecoveryCodes.value = backupCodes
+        refreshSecurityStateForUser(user)
+        postMessage("تم تفعيل المصادقة الثنائية (2FA) وتوليد ${backupCodes.size} أكواد استرداد احتياطية لحسابك")
+        onEnabled(secret, backupCodes)
+    }
+
+    fun disableTwoFactorForCurrentUser() {
+        val app = getApplication<Application>()
+        val user = currentUser.value ?: return
+        com.example.util.AuthSecurityManager.disableTwoFactorAuth(app, user.userCode, user.username)
+        _latestGeneratedRecoveryCodes.value = emptyList()
+        refreshSecurityStateForUser(user)
+        postMessage("تم إيقاف المصادقة الثنائية (2FA) للحساب (${user.fullName})")
+    }
+
+    fun regenerateBackupCodesForCurrentUser(onGenerated: (List<String>) -> Unit = {}) {
+        val app = getApplication<Application>()
+        val user = currentUser.value ?: return
+        val codes = com.example.util.AuthSecurityManager.regenerateBackupRecoveryCodes(
+            context = app,
+            userCode = user.userCode,
+            username = user.username
+        )
+        _latestGeneratedRecoveryCodes.value = codes
+        refreshSecurityStateForUser(user)
+        postMessage("تم توليد أكواد استرداد احتياطية جديدة (8 أكواد) وإبطال الأكواد السابقة")
+        onGenerated(codes)
+    }
+
+    fun setTrustedDeviceStatus(deviceId: String, trusted: Boolean) {
+        val app = getApplication<Application>()
+        val user = currentUser.value ?: return
+        com.example.util.AuthSecurityManager.setDeviceTrustStatus(app, user.userCode, deviceId, trusted)
+        refreshSecurityStateForUser(user)
+        postMessage(if (trusted) "تم توثيق الجهاز كجهاز موثوق" else "تم إلغاء توثيق الجهاز")
+    }
+
+    fun revokeTrustedDevice(deviceId: String) {
+        val app = getApplication<Application>()
+        val user = currentUser.value ?: return
+        val currentDevId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+        com.example.util.AuthSecurityManager.revokeTrustedDevice(
+            context = app,
+            userCode = user.userCode,
+            targetDeviceId = deviceId,
+            actor = user.fullName
+        )
+        refreshSecurityStateForUser(user)
+        if (deviceId == currentDevId) {
+            logoutSession(clearBiometrics = true) {
+                postMessage("تم إبطال هذا الجهاز وإنهاء الجلسة الحالية فوراً", isError = true)
+            }
+        } else {
+            postMessage("تم إبطال الجهاز المحدد ومنعه من الدخول لحسابك")
+        }
+    }
+
+    fun restoreTrustedDevice(deviceId: String) {
+        val app = getApplication<Application>()
+        val user = currentUser.value ?: return
+        com.example.util.AuthSecurityManager.restoreRevokedDevice(app, user.userCode, deviceId)
+        refreshSecurityStateForUser(user)
+        postMessage("تمت استعادة صلاحية الجهاز للوصول إلى الحساب")
+    }
+
+    fun acknowledgeSuspiciousAlert(alertId: String) {
+        val app = getApplication<Application>()
+        com.example.util.AuthSecurityManager.acknowledgeSuspiciousAlert(app, alertId)
+        refreshSecurityStateForUser()
+    }
+
     fun logoutSession(clearBiometrics: Boolean = false, onLoggedOut: () -> Unit = {}) {
+        val app = getApplication<Application>()
+        val exitingUser = currentUser.value
+        val activeSessId = DeviceSessionStore.getActiveSessionId(app)
+        if (activeSessId.isNotBlank()) {
+            com.example.util.AuthSecurityManager.revokeSessionById(app, activeSessId, "USER_LOGOUT")
+        }
+        if (exitingUser != null) {
+            com.example.util.AuthSecurityManager.recordLoginActivity(
+                context = app,
+                userCode = exitingUser.userCode,
+                username = exitingUser.username,
+                fullName = exitingUser.fullName,
+                eventType = "LOGOUT",
+                method = "MANUAL_LOGOUT",
+                success = true,
+                detail = "تسجيل خروج آمن وإبطال معرف الجلسة (${activeSessId.take(12)})"
+            )
+        }
+        twoFactorPendingUser.value = null
         activeSessionOverride.value = null
         activeSessionUserId.value = null
         isSessionAuthenticated.value = false
-        DeviceSessionStore.clearActiveSession(getApplication())
+        DeviceSessionStore.clearActiveSession(app)
+        com.example.util.BiometricAuthManager.clearRecentAuthentication(app)
         stopCloudRealtimeSync()
         if (clearBiometrics) {
-            com.example.util.BiometricPreferenceManager.clearBinding(getApplication())
+            com.example.util.BiometricPreferenceManager.clearBinding(app)
         }
+        refreshSecurityStateForUser(null)
         viewModelScope.launch {
             repository.getDao().setActiveSessionUser(-1L)
             onLoggedOut()

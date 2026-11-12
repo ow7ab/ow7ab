@@ -184,7 +184,11 @@ class UserSessionManager(
             val firestore = getFirestore()
             val dao = database.pmpDao()
 
-            // 1. Look in linked_accounts collection by linkedUid or ownerId
+            // Check if there is already an explicit active local employee session in DeviceSessionStore
+            val activeSessionUserCode = DeviceSessionStore.getActiveUserCode(appContext)
+            val activeSessionUsername = DeviceSessionStore.getActiveUsername(appContext)
+
+            // 1. Look in linked_accounts collection by linkedUid
             val linkedSnapshot = runCatching {
                 firestore.collection("linked_accounts")
                     .whereEqualTo("linkedUid", uid)
@@ -192,13 +196,17 @@ class UserSessionManager(
                     .await()
             }.getOrNull()
 
-            val doc = linkedSnapshot?.documents?.firstOrNull() ?: runCatching {
-                firestore.collection("linked_accounts")
-                    .whereEqualTo("ownerId", uid)
-                    .get()
-                    .await()
-                    .documents.firstOrNull()
-            }.getOrNull()
+            // Prefer the document matching the currently active local userCode/username if multiple documents share a manager UID
+            val docs = linkedSnapshot?.documents.orEmpty()
+            val doc = docs.firstOrNull { d ->
+                val code = d.getString("userCode") ?: d.id
+                val uname = d.getString("username").orEmpty()
+                (activeSessionUserCode.isNotBlank() && code.equals(activeSessionUserCode, ignoreCase = true)) ||
+                    (activeSessionUsername.isNotBlank() && uname.equals(activeSessionUsername, ignoreCase = true))
+            } ?: docs.firstOrNull { d ->
+                // Only fall back to a document if no conflicting active local session is bound
+                activeSessionUserCode.isBlank()
+            }
 
             val matchedUser: UserAccountEntity? = if (doc != null && doc.exists()) {
                 val userCode = doc.getString("userCode") ?: doc.id
@@ -209,6 +217,11 @@ class UserSessionManager(
                 val permissions = doc.getString("permissions") ?: "الخزن,المبيعات"
                 val active = doc.getBoolean("active") ?: true
                 val serverSyncToken = doc.getString("serverSyncToken") ?: ""
+
+                // Never hijack an active session belonging to a different employee
+                val isSameAsActiveSession = activeSessionUserCode.isBlank() ||
+                    activeSessionUserCode.equals(userCode, ignoreCase = true) ||
+                    activeSessionUsername.equals(username, ignoreCase = true)
 
                 val existing = dao.getUserByUsername(username)
                     ?: dao.getUserAccountsDirect().firstOrNull { it.userCode == userCode }
@@ -225,7 +238,7 @@ class UserSessionManager(
                         remoteServerId = uid,
                         syncStatus = "LINKED",
                         active = active,
-                        isCurrentSession = true
+                        isCurrentSession = if (isSameAsActiveSession) existing.isCurrentSession else false
                     )
                     dao.updateUserAccount(entity)
                     entity
@@ -241,20 +254,22 @@ class UserSessionManager(
                         remoteServerId = uid,
                         syncStatus = "LINKED",
                         active = active,
-                        isCurrentSession = true
+                        isCurrentSession = false
                     )
                     val newId = dao.insertUserAccount(entity)
                     entity.copy(id = newId)
                 }
 
-                dao.setActiveSessionUser(updatedUser.id)
-                Log.i(TAG, "Successfully synced permissions for (${updatedUser.fullName}): ${updatedUser.permissions}")
-                val event = SessionEvent.ProfileSynced(updatedUser)
-                _sessionEventFlow.value = event
-                sessionListeners.forEach { runCatching { it(event) } }
+                if (isSameAsActiveSession && updatedUser.isCurrentSession && updatedUser.active) {
+                    dao.setActiveSessionUser(updatedUser.id)
+                    Log.i(TAG, "Successfully synced permissions for (${updatedUser.fullName}): ${updatedUser.permissions}")
+                    val event = SessionEvent.ProfileSynced(updatedUser)
+                    _sessionEventFlow.value = event
+                    sessionListeners.forEach { runCatching { it(event) } }
+                }
                 updatedUser
             } else {
-                Log.w(TAG, "No linked_accounts document found in Firestore for UID: $uid")
+                Log.w(TAG, "No matching linked_accounts document found in Firestore for UID: $uid")
                 null
             }
 

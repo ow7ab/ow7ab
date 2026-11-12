@@ -1407,4 +1407,235 @@ class ExampleUnitTest {
       com.example.ui.theme.PmpThemeModeController.isDarkMode = previousMode
     }
   }
+
+  @Test
+  fun testPhase02AdvancedAuthenticationAndBiometricSecurity() {
+    com.example.util.AuthSecurityManager.resetInMemoryStoreForTests()
+    com.example.util.DeviceSessionStore.resetInMemoryStoreForTests()
+    com.example.util.BiometricPreferenceManager.resetInMemoryStoreForTests()
+
+    // 1. Strong Password Hashing (PBKDF2-HMAC-SHA256) + Legacy Migration
+    val pbkdf2Hash1 = com.example.util.PasswordSecurityUtil.hashPassword("PmpSecure#2026")
+    val pbkdf2Hash2 = com.example.util.PasswordSecurityUtil.hashPassword("PmpSecure#2026")
+    assertTrue("PBKDF2 hash must use pbkdf2\$sha256\$ prefix", pbkdf2Hash1.startsWith("pbkdf2\$sha256\$65536\$"))
+    assertNotEquals("Salted PBKDF2 hashes of same password must be unique", pbkdf2Hash1, pbkdf2Hash2)
+    assertTrue(com.example.util.PasswordSecurityUtil.verifyPassword("PmpSecure#2026", pbkdf2Hash1))
+    assertFalse(com.example.util.PasswordSecurityUtil.verifyPassword("WrongPass", pbkdf2Hash1))
+    assertFalse(com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2(pbkdf2Hash1))
+
+    // Verify backward compatibility with legacy SHA-256 and plaintext PINs
+    val legacySha = com.example.data.repository.PmpRepository.hashSecret("1234")
+    assertTrue(com.example.util.PasswordSecurityUtil.verifyPassword("1234", legacySha))
+    assertTrue(com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2(legacySha))
+    assertTrue(com.example.util.PasswordSecurityUtil.verifyPassword("1234", "1234"))
+    assertTrue(com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2("1234"))
+
+    // 2. Protection against repeated failed login attempts (Progressive Lockout)
+    val baseNow = 1_750_000_000_000L
+    for (i in 1..4) {
+      val st = com.example.util.AuthSecurityManager.recordFailedLoginAttempt(
+        context = null,
+        identity = "cashier_sd",
+        matchedUserCode = "USR-SD-002",
+        reason = "Wrong password",
+        nowMs = baseNow + i * 1000L
+      )
+      assertFalse("Should not lock on attempt $i", st.isLocked)
+    }
+    val fifthAttempt = com.example.util.AuthSecurityManager.recordFailedLoginAttempt(
+      context = null,
+      identity = "cashier_sd",
+      matchedUserCode = "USR-SD-002",
+      reason = "Wrong password #5",
+      nowMs = baseNow + 5000L
+    )
+    assertTrue("5th failed attempt must trigger progressive lockout", fifthAttempt.isLocked)
+    assertTrue("Lockout duration must be 5 minutes (300s)", fifthAttempt.remainingSeconds in 295..305)
+
+    // Verify login is blocked during lockout window and allowed after expiry
+    val duringLock = com.example.util.AuthSecurityManager.checkLoginAllowed(null, "cashier_sd", baseNow + 60_000L)
+    assertTrue(duringLock.isLocked)
+    val afterLock = com.example.util.AuthSecurityManager.checkLoginAllowed(null, "cashier_sd", baseNow + 310_000L)
+    assertFalse(afterLock.isLocked)
+
+    com.example.util.AuthSecurityManager.clearFailedLoginAttempts(null, "cashier_sd")
+    assertFalse(com.example.util.AuthSecurityManager.checkLoginAllowed(null, "cashier_sd", baseNow + 60_000L).isLocked)
+
+    // 3. Time-bounded (10m) & Attempt-limited (max 3 tries) OTP Password Reset
+    val otp = com.example.util.AuthSecurityManager.issuePasswordResetChallenge(
+      context = null,
+      userCode = "USR-SD-002",
+      username = "cashier_sd",
+      channel = "EMAIL",
+      nowMs = baseNow
+    )
+    assertEquals(6, otp.length)
+    // Expired OTP must fail
+    val expiredCheck = com.example.util.AuthSecurityManager.verifyAndConsumePasswordResetOtp(
+      context = null,
+      userCode = "USR-SD-002",
+      otpInput = otp,
+      nowMs = baseNow + 11 * 60 * 1000L
+    )
+    assertTrue("OTP must expire after 10 minutes", expiredCheck.isFailure)
+
+    // Re-issue and test valid consumption + single-use guarantee
+    val otp2 = com.example.util.AuthSecurityManager.issuePasswordResetChallenge(
+      context = null,
+      userCode = "USR-SD-002",
+      username = "cashier_sd",
+      channel = "EMAIL",
+      nowMs = baseNow
+    )
+    val validOtpCheck = com.example.util.AuthSecurityManager.verifyAndConsumePasswordResetOtp(
+      context = null,
+      userCode = "USR-SD-002",
+      otpInput = otp2,
+      nowMs = baseNow + 60_000L
+    )
+    assertTrue("Valid OTP within 10 minutes must succeed", validOtpCheck.isSuccess)
+    val replayOtpCheck = com.example.util.AuthSecurityManager.verifyAndConsumePasswordResetOtp(
+      context = null,
+      userCode = "USR-SD-002",
+      otpInput = otp2,
+      nowMs = baseNow + 61_000L
+    )
+    assertTrue("Consumed OTP must not be reusable", replayOtpCheck.isFailure)
+
+    // 4. Optional Two-Factor Authentication (TOTP + 8 Single-Use Backup Recovery Codes)
+    val (secret, backupCodes) = com.example.util.AuthSecurityManager.enableTwoFactorAuth(
+      context = null,
+      userCode = "USR-HQ-001",
+      username = "admin",
+      requireOnEveryLogin = true
+    )
+    assertTrue(secret.isNotBlank())
+    assertEquals(8, backupCodes.size)
+
+    val currentTotp = com.example.util.PasswordSecurityUtil.generateTotpCode(secret, baseNow)
+    assertEquals(6, currentTotp.length)
+    assertTrue(com.example.util.PasswordSecurityUtil.verifyTotpCode(secret, currentTotp, baseNow))
+
+    val totpRes = com.example.util.AuthSecurityManager.verifyTwoFactorCodeOrRecovery(
+      context = null,
+      userCode = "USR-HQ-001",
+      inputCode = currentTotp,
+      nowMs = baseNow
+    )
+    assertTrue("Valid TOTP code must pass 2FA verification", totpRes.isSuccess)
+
+    // Verify Backup Recovery Code works once and cannot be replayed
+    val firstRecoveryCode = backupCodes.first()
+    assertTrue(com.example.util.AuthSecurityManager.consumeBackupRecoveryCode(null, "USR-HQ-001", firstRecoveryCode))
+    assertFalse("Single-use backup recovery code must not work a second time", com.example.util.AuthSecurityManager.consumeBackupRecoveryCode(null, "USR-HQ-001", firstRecoveryCode))
+
+    // 5. Trusted Device Management & Session Expiration / Revocation
+    val adminUser = com.example.data.local.UserAccountEntity(
+      id = 1L,
+      userCode = "USR-HQ-001",
+      fullName = "مدير النظام",
+      username = "admin",
+      phoneOrEmail = "oaw7ab@gmail.com",
+      pinOrPassword = pbkdf2Hash1,
+      role = "مدير النظام",
+      branch = "المقر الرئيسي",
+      permissions = "الكل",
+      serverSyncToken = "SYNC-HQ-1001",
+      remoteServerId = "SRV-1",
+      syncStatus = "APPROVED_BY_MANAGER",
+      serverEndpoint = "https://firestore.googleapis.com/v1",
+      isCurrentSession = true,
+      active = true
+    )
+
+    val sessionId = com.example.util.DeviceSessionStore.saveActiveUserSession(null, adminUser, nowMs = baseNow)
+    assertTrue(sessionId.startsWith("SESS-USR-HQ-001"))
+
+    val validSession = com.example.util.DeviceSessionStore.validateSessionForUser(null, adminUser, nowMs = baseNow + 5 * 60_000L)
+    assertTrue("Active session within timeout must be valid", validSession.isValid)
+
+    val idleExpired = com.example.util.DeviceSessionStore.validateSessionForUser(null, adminUser, nowMs = baseNow + 45 * 60_000L)
+    assertFalse("Session exceeding 30-minute idle timeout must expire", idleExpired.isValid)
+
+    // Re-save and test explicit session revocation
+    val sessionId2 = com.example.util.DeviceSessionStore.saveActiveUserSession(null, adminUser, nowMs = baseNow)
+    com.example.util.AuthSecurityManager.revokeSessionById(null, sessionId2, "TEST_REVOKE", nowMs = baseNow + 1000L)
+    val revokedCheck = com.example.util.DeviceSessionStore.validateSessionForUser(null, adminUser, nowMs = baseNow + 2000L)
+    assertFalse("Explicitly revoked session ID must be rejected", revokedCheck.isValid)
+
+    // 6. BIOMETRIC AUTHENTICATION ISOLATION (Critical Security Requirement):
+    // Prove that biometric authentication is strictly bound to the exact user (userCode + username + credentialFingerprint)
+    // and NEVER opens another employee's account even if Room auto-increment IDs collide!
+    val employeeAhmad = com.example.data.local.UserAccountEntity(
+      id = 2L,
+      userCode = "USR-SD-2050",
+      fullName = "أحمد المحاسب",
+      username = "ahmad_sd",
+      phoneOrEmail = "ahmad@pmp.com",
+      pinOrPassword = pbkdf2Hash1,
+      role = "محاسب مبيعات",
+      branch = "فرع السودان (SD-001)",
+      permissions = "المبيعات,الخزن",
+      serverSyncToken = "SYNC-SD-2050",
+      remoteServerId = "SRV-2050",
+      syncStatus = "APPROVED_BY_MANAGER",
+      serverEndpoint = "https://firestore.googleapis.com/v1",
+      isCurrentSession = true,
+      active = true
+    )
+
+    com.example.util.BiometricPreferenceManager.bindUser(null, employeeAhmad)
+    val validBio = com.example.util.BiometricPreferenceManager.resolveAndValidateBoundAccount(
+      context = null,
+      allUsers = listOf(adminUser, employeeAhmad)
+    )
+    assertTrue("Biometric validation must succeed for the exact bound employee", validBio.isValid)
+    assertEquals("USR-SD-2050", validBio.user?.userCode)
+
+    // Simulate Room database re-sync where another employee ("خالد") gets id = 2L (the same local id Ahmad had!)
+    val employeeKhaledWithSameLocalId = com.example.data.local.UserAccountEntity(
+      id = 2L, // Colliding Room auto-increment ID!
+      userCode = "USR-EG-9999",
+      fullName = "خالد مخزن مصر",
+      username = "khaled_eg",
+      phoneOrEmail = "khaled@pmp.com",
+      pinOrPassword = pbkdf2Hash2,
+      role = "أمين مخزن",
+      branch = "فرع مصر",
+      permissions = "المخازن",
+      serverSyncToken = "SYNC-EG-9999",
+      remoteServerId = "SRV-9999",
+      syncStatus = "APPROVED_BY_MANAGER",
+      serverEndpoint = "https://firestore.googleapis.com/v1",
+      isCurrentSession = false,
+      active = true
+    )
+    val crossAccountCollisionCheck = com.example.util.BiometricPreferenceManager.resolveAndValidateBoundAccount(
+      context = null,
+      allUsers = listOf(adminUser, employeeKhaledWithSameLocalId)
+    )
+    assertFalse("Biometric auth MUST NEVER open another employee account when local IDs collide", crossAccountCollisionCheck.isValid)
+    assertNull("Cross-account biometric resolution must return null user", crossAccountCollisionCheck.user)
+
+    // Re-bind Ahmad and verify that if Ahmad's password or serverSyncToken changes on the server, biometric login requires password re-verification
+    com.example.util.BiometricPreferenceManager.bindUser(null, employeeAhmad)
+    val ahmadAfterServerTokenRotation = employeeAhmad.copy(serverSyncToken = "SYNC-SD-2050-ROTATED-999")
+    val rotatedTokenBioCheck = com.example.util.BiometricPreferenceManager.resolveAndValidateBoundAccount(
+      context = null,
+      allUsers = listOf(adminUser, ahmadAfterServerTokenRotation)
+    )
+    assertFalse("Biometric auth must be rejected when serverSyncToken or password changes until re-authenticated", rotatedTokenBioCheck.isValid)
+
+    // Verify that when another user (Admin) logs in on the same device, Ahmad's biometric binding is immediately replaced/isolated
+    com.example.util.BiometricPreferenceManager.bindUser(null, employeeAhmad)
+    com.example.util.BiometricPreferenceManager.synchronizeBindingOnAuthenticatedLogin(null, adminUser, autoBindIfUnbound = true)
+    val boundAfterAdminLogin = com.example.util.BiometricPreferenceManager.getBoundUser(null)
+    assertEquals("Logging in as Admin must isolate biometric binding from previous employee", "USR-HQ-001", boundAfterAdminLogin?.userCode)
+
+    // 7. Verify Login Activity History & Suspicious Login Alerts were recorded
+    val activities = com.example.util.AuthSecurityManager.getLoginActivities(null)
+    val alerts = com.example.util.AuthSecurityManager.getSuspiciousAlerts(null)
+    assertTrue("Login activities must be recorded", activities.isNotEmpty())
+    assertTrue("Suspicious login alerts must be recorded on lockout/biometric mismatch", alerts.isNotEmpty())
+  }
 }

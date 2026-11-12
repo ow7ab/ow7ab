@@ -1,6 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 import java.time.Duration
-import java.time.Instant
 
 plugins {
   alias(libs.plugins.android.application)
@@ -10,8 +9,71 @@ plugins {
   alias(libs.plugins.google.services)
 }
 
+android {
+  namespace = "com.example"
+  compileSdk { version = release(36) { minorApiLevel = 1 } }
+
+  defaultConfig {
+    applicationId = "com.aistudio.pmppaints.erp"
+    minSdk = 24
+    targetSdk = 36
+    versionCode = 18
+    versionName = "18.0"
+
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+  }
+
+  // Do not remove or modify these signingConfigs. They are necessary for building, installing,
+  // and updating Android apps in AI Studio.
+  signingConfigs {
+    create("release") {
+      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      storeFile = file(keystorePath)
+      storePassword = System.getenv("STORE_PASSWORD")
+      keyAlias = "upload"
+      keyPassword = System.getenv("KEY_PASSWORD")
+    }
+    create("debugConfig") {
+      storeFile = file("${rootDir}/debug.keystore")
+      storePassword = "android"
+      keyAlias = "androiddebugkey"
+      keyPassword = "android"
+    }
+  }
+
+  buildTypes {
+    release {
+      isCrunchPngs = false
+      isMinifyEnabled = true
+      isShrinkResources = true
+      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
+      // AI Studio.
+      signingConfig = signingConfigs.getByName("release")
+    }
+    debug {
+      // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
+      // AI Studio.
+      signingConfig = signingConfigs.getByName("debugConfig")
+    }
+  }
+  compileOptions {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+  }
+  buildFeatures {
+    compose = true
+    buildConfig = true
+    resValues = true
+  }
+  testOptions { unitTests { isIncludeAndroidResources = true } }
+  dependenciesInfo {
+    includeInApk = false
+    includeInBundle = true
+  }
+}
+
 // Suppress benign KSP in-process IntelliJ Core post-disposal callback on AWT-EventQueue-0
-// (BinaryFileTypeDecompilers -> FileDocumentManager.getInstance after ApplicationManager teardown)
 val previousUncaughtHandler = Thread.getDefaultUncaughtExceptionHandler()
 val kspAwtSafeHandler = Thread.UncaughtExceptionHandler { thread, throwable ->
   val isKspAwtTeardownRace =
@@ -66,91 +128,27 @@ val googleServicesProvidesWebClientId: Boolean =
       false
     }
 
-android {
-  namespace = "com.example"
-  compileSdk { version = release(36) { minorApiLevel = 1 } }
-buildFeatures {
-        resValues = true }
-  defaultConfig {
-    applicationId = "com.aistudio.pmppaints.erp"
-    minSdk = 24
-    targetSdk = 36
-    versionCode = 17
-    versionName = "v4.2"
-    project.findProperty("versionCode")?.toString()?.toIntOrNull()?.let { versionCode = it }
-    project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }?.let { versionName = it }
+android.defaultConfig.apply {
+  project.findProperty("versionCode")?.toString()?.toIntOrNull()?.let { versionCode = it }
+  project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }?.let { versionName = it }
 
-    buildConfigField("String", "GIT_COMMIT_SHA", "\"$resolvedGitCommit\"")
-    buildConfigField("String", "BUILD_ID", "\"$resolvedBuildId\"")
-    buildConfigField("String", "BUILD_TIMESTAMP_UTC", "\"$resolvedBuildTimestampUtc\"")
-    buildConfigField("String", "GITHUB_RELEASE_REPO", "\"ow7ab/ow7ab\"")
+  buildConfigField("String", "GIT_COMMIT_SHA", "\"$resolvedGitCommit\"")
+  buildConfigField("String", "BUILD_ID", "\"$resolvedBuildId\"")
+  buildConfigField("String", "BUILD_TIMESTAMP_UTC", "\"$resolvedBuildTimestampUtc\"")
+  buildConfigField("String", "GITHUB_RELEASE_REPO", "\"ow7ab/ow7ab\"")
 
-    // When google-services.json is absent in CI (or lacks a client_type=3 Web OAuth client),
-    // generate R.string.default_web_client_id from the configured Web OAuth 2.0 Client ID
-    // so Google Sign-In in LoginScreen.kt always compiles and resolves cleanly.
-    if (!googleServicesProvidesWebClientId && resolvedDefaultWebClientId.isNotBlank()) {
-      resValue("string", "default_web_client_id", resolvedDefaultWebClientId)
-    }
-    if (!hasGoogleServicesJson) {
-      resValue("string", "project_id", "gen-lang-client-0220128746")
-      resValue("string", "gcm_defaultSenderId", "675531579375")
-      resValue("string", "google_storage_bucket", "gen-lang-client-0220128746.firebasestorage.app")
-      resValue("string", "google_app_id", "1:675531579375:android:799a5323c0fcd1bf3ee01a")
-      val envFirebaseApiKey = System.getenv("FIREBASE_API_KEY")?.trim().orEmpty()
-      if (envFirebaseApiKey.isNotBlank()) {
-        resValue("string", "google_api_key", envFirebaseApiKey)
-      }
-    }
-
-    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+  if (!googleServicesProvidesWebClientId && resolvedDefaultWebClientId.isNotBlank()) {
+    resValue("string", "default_web_client_id", resolvedDefaultWebClientId)
   }
-
-  // Do not remove or modify these signingConfigs. They are necessary for building, installing,
-  // and updating Android apps in AI Studio.
-  signingConfigs {
-    create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+  if (!hasGoogleServicesJson) {
+    resValue("string", "project_id", "gen-lang-client-0220128746")
+    resValue("string", "gcm_defaultSenderId", "675531579375")
+    resValue("string", "google_storage_bucket", "gen-lang-client-0220128746.firebasestorage.app")
+    resValue("string", "google_app_id", "1:675531579375:android:129c907cec2b2ed43ee01a")
+    val envFirebaseApiKey = System.getenv("FIREBASE_API_KEY")?.trim().orEmpty()
+    if (envFirebaseApiKey.isNotBlank()) {
+      resValue("string", "google_api_key", envFirebaseApiKey)
     }
-    create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
-    }
-  }
-
-  buildTypes {
-    release {
-      isCrunchPngs = false
-      isMinifyEnabled = true
-      isShrinkResources = true
-      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
-      // AI Studio.
-      signingConfig = signingConfigs.getByName("release")
-    }
-    debug {
-      // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
-      // AI Studio.
-      signingConfig = signingConfigs.getByName("debugConfig")
-    }
-  }
-  compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
-  }
-  buildFeatures {
-    compose = true
-    buildConfig = true
-  }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
-  dependenciesInfo {
-    includeInApk = false
-    includeInBundle = true
   }
 }
 
@@ -241,5 +239,3 @@ tasks.withType<Test> {
     events("passed", "failed", "skipped")
   }
 }
-
-

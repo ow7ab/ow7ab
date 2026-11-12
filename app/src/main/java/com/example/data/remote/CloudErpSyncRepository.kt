@@ -667,8 +667,14 @@ class CloudErpSyncRepository(
             if (syncStatus == "PENDING_MANAGER_APPROVAL") {
                 throw Exception("هذا الحساب بانتظار موافقة مدير النظام وتحديد الصلاحيات أولاً.")
             }
-            if (storedPin != cleanSecret) {
+            if (!com.example.util.PasswordSecurityUtil.verifyPassword(cleanSecret, storedPin)) {
                 throw Exception("كلمة المرور غير صحيحة للحساب المسجل على السيرفر.")
+            }
+
+            val upgradedPin = if (com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2(storedPin)) {
+                com.example.util.PasswordSecurityUtil.hashPassword(cleanSecret)
+            } else {
+                storedPin
             }
 
             val userCode = doc.getString("userCode") ?: doc.id
@@ -689,7 +695,7 @@ class CloudErpSyncRepository(
                 fullName = doc.getString("fullName") ?: uname,
                 username = uname,
                 phoneOrEmail = email,
-                pinOrPassword = storedPin,
+                pinOrPassword = upgradedPin,
                 role = doc.getString("role") ?: "محاسب خزنة ومبيعات",
                 branch = doc.getString("branch") ?: "فرع السودان (SD-001)",
                 permissions = doc.getString("permissions") ?: "المبيعات,الخزن,الأسعار,تصدير PDF",

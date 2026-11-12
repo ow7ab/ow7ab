@@ -150,17 +150,34 @@ fun LoginScreen(
     var isCredentialsSubmitting by remember { mutableStateOf(false) }
     var isCheckingApproval by remember { mutableStateOf(false) }
 
-    // State for Forgot Password Modal
+    // State for Forgot Password & Account Recovery Modal
     var showForgotPasswordDialog by remember { mutableStateOf(false) }
+    var recoveryMode by remember { mutableIntStateOf(0) } // 0 = OTP, 1 = Backup Recovery Code
     var resetIdentityInput by remember { mutableStateOf("") }
     var resetChannelChoice by remember { mutableStateOf("EMAIL") } // "EMAIL" or "MANAGER_ALERT"
     var resetStep by remember { mutableIntStateOf(1) } // 1 = request, 2 = verify and reset
     var generatedResetCode by remember { mutableStateOf("") }
     var enteredResetCode by remember { mutableStateOf("") }
+    var backupRecoveryCodeInput by remember { mutableStateOf("") }
     var newPasswordInput by remember { mutableStateOf("") }
     var targetResetUser by remember { mutableStateOf<UserAccountEntity?>(null) }
     var resetErrorMessage by remember { mutableStateOf<String?>(null) }
     var isResetLoading by remember { mutableStateOf(false) }
+
+    // State for Two-Factor Authentication (2FA) Challenge Modal
+    val twoFactorPendingUser by viewModel.twoFactorPendingUser.collectAsState()
+    var twoFactorCodeInput by remember { mutableStateOf("") }
+    var trustThisDevice2Fa by remember { mutableStateOf(true) }
+    var twoFactorError by remember { mutableStateOf<String?>(null) }
+    var isVerifying2Fa by remember { mutableStateOf(false) }
+
+    LaunchedEffect(twoFactorPendingUser) {
+        if (twoFactorPendingUser != null) {
+            isCredentialsSubmitting = false
+            twoFactorCodeInput = ""
+            twoFactorError = null
+        }
+    }
 
     // State for New Account Request Form
     var reqFullName by remember { mutableStateOf("") }
@@ -672,6 +689,10 @@ fun LoginScreen(
                         val fragmentActivity = localContext as? androidx.fragment.app.FragmentActivity
                         var boundBiometricUser by remember { mutableStateOf(com.example.util.BiometricPreferenceManager.getBoundUser(localContext)) }
 
+                        LaunchedEffect(errorMessage, twoFactorPendingUser) {
+                            boundBiometricUser = com.example.util.BiometricPreferenceManager.getBoundUser(localContext)
+                        }
+
                         GlassButton(
                             text = if (boundBiometricUser != null) {
                                 "تسجيل الدخول بالبصمة (${boundBiometricUser?.fullName})"
@@ -681,6 +702,7 @@ fun LoginScreen(
                             icon = Icons.Default.Fingerprint,
                             gradient = GlassAccentGoldGradient,
                             onClick = {
+                                boundBiometricUser = com.example.util.BiometricPreferenceManager.getBoundUser(localContext)
                                 if (boundBiometricUser == null) {
                                     errorMessage = "لم يتم تفعيل البصمة لأي حساب على هذا الهاتف بعد. يرجى تسجيل الدخول باسم المستخدم وكلمة المرور أولاً لربط بصمتك بحسابك ومنع تداخل الحسابات."
                                     return@GlassButton
@@ -688,15 +710,19 @@ fun LoginScreen(
                                 if (fragmentActivity != null) {
                                     errorMessage = null
                                     val boundName = boundBiometricUser?.fullName ?: "الموظف"
+                                    val boundCode = boundBiometricUser?.userCode ?: ""
                                     BiometricAuthHelper.authenticate(
                                         activity = fragmentActivity,
                                         title = "تسجيل الدخول بالبصمة",
-                                        subtitle = "التحقق من هوية: $boundName",
-                                        description = "ضع إصبعك على المستشعر لتأكيد هويتك لحساب ($boundName)",
+                                        subtitle = "التحقق من هوية: $boundName ($boundCode)",
+                                        description = "ضع إصبعك على المستشعر لتأكيد هويتك لحساب ($boundName) ومطابقة شهادة الجهاز",
                                         onSuccess = {
                                             viewModel.loginWithBiometrics(
                                                 onSuccess = { onLoginSuccess() },
-                                                onError = { err -> errorMessage = err }
+                                                onError = { err ->
+                                                    boundBiometricUser = com.example.util.BiometricPreferenceManager.getBoundUser(localContext)
+                                                    errorMessage = err
+                                                }
                                             )
                                         },
                                         onError = { err -> errorMessage = err }
@@ -713,7 +739,7 @@ fun LoginScreen(
 
                         if (boundBiometricUser != null) {
                             Text(
-                                text = "البصمة مرتبطة بحساب: ${boundBiometricUser?.fullName} (${boundBiometricUser?.role}) • إلغاء الربط",
+                                text = "البصمة مرتبطة بحساب: ${boundBiometricUser?.fullName} (${boundBiometricUser?.userCode} • ${boundBiometricUser?.role}) • إلغاء الربط",
                                 color = PmpBrandNavy,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -1086,7 +1112,111 @@ fun LoginScreen(
         }
     }
 
-    // --- Modal: Forgot Password & Verification OTP ---
+    // --- Modal: Two-Factor Authentication (2FA) Challenge ---
+    val pending2FaUser = twoFactorPendingUser
+    if (pending2FaUser != null) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!isVerifying2Fa) viewModel.cancelTwoFactorLogin()
+            },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.VerifiedUser, contentDescription = null, tint = PmpGold)
+                    Text(
+                        text = "المصادقة الثنائية (2FA)",
+                        color = PmpCyan,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "الحساب (${pending2FaUser.fullName} • ${pending2FaUser.userCode}) محمي بالمصادقة الثنائية. أدخل رمز التحقق المكون من 6 أرقام من تطبيق المصادقة أو أحد أكواد الاسترداد الاحتياطية (8 خانات):",
+                        color = TextWhite,
+                        fontSize = 12.5.sp,
+                        lineHeight = 18.sp
+                    )
+                    GlassTextField(
+                        value = twoFactorCodeInput,
+                        onValueChange = {
+                            twoFactorCodeInput = it
+                            twoFactorError = null
+                        },
+                        label = "رمز 2FA (6 أرقام) أو كود الاسترداد الاحتياطي *"
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { trustThisDevice2Fa = !trustThisDevice2Fa }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = trustThisDevice2Fa,
+                            onCheckedChange = { trustThisDevice2Fa = it }
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "توثيق هذا الجهاز كجهاز موثوق لهذا الحساب",
+                            color = TextWhite,
+                            fontSize = 12.sp
+                        )
+                    }
+                    if (twoFactorError != null) {
+                        Text(
+                            text = twoFactorError.orEmpty(),
+                            color = PmpRed,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                GlassButton(
+                    text = if (isVerifying2Fa) "جاري التحقق..." else "تأكيد الدخول",
+                    enabled = !isVerifying2Fa,
+                    onClick = {
+                        if (twoFactorCodeInput.trim().length < 6) {
+                            twoFactorError = "يرجى إدخال رمز التحقق المكون من 6 أرقام أو كود الاسترداد"
+                            return@GlassButton
+                        }
+                        isVerifying2Fa = true
+                        twoFactorError = null
+                        viewModel.verifyTwoFactorLogin(
+                            codeInput = twoFactorCodeInput,
+                            trustCurrentDevice = trustThisDevice2Fa,
+                            onSuccess = {
+                                isVerifying2Fa = false
+                                onLoginSuccess()
+                            },
+                            onError = { err ->
+                                isVerifying2Fa = false
+                                twoFactorError = err
+                            }
+                        )
+                    }
+                )
+            },
+            dismissButton = {
+                GlassButton(
+                    text = "إلغاء",
+                    onClick = { viewModel.cancelTwoFactorLogin() }
+                )
+            },
+            containerColor = PmpNavySurface
+        )
+    }
+
+    // --- Modal: Forgot Password, Attempt-Limited OTP & Backup Code Account Recovery ---
     if (showForgotPasswordDialog) {
         AlertDialog(
             onDismissRequest = {
@@ -1094,7 +1224,13 @@ fun LoginScreen(
             },
             title = {
                 Text(
-                    text = if (resetStep == 1) "استعادة وتعيين كلمة المرور" else "التحقق وتعيين كلمة المرور الجديدة",
+                    text = if (recoveryMode == 1) {
+                        "استرداد الحساب بكود احتياطي"
+                    } else if (resetStep == 1) {
+                        "استعادة وتعيين كلمة المرور"
+                    } else {
+                        "التحقق وتعيين كلمة المرور الجديدة"
+                    },
                     color = PmpCyan,
                     fontWeight = FontWeight.Bold,
                     fontSize = 16.sp
@@ -1105,9 +1241,87 @@ fun LoginScreen(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (resetStep == 1) {
+                    // Recovery mode selector tabs (OTP vs Backup Recovery Code)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable {
+                                    recoveryMode = 0
+                                    resetErrorMessage = null
+                                },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (recoveryMode == 0) PmpCyan.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.06f),
+                            border = BorderStroke(1.dp, if (recoveryMode == 0) PmpCyan else GlassBorder)
+                        ) {
+                            Text(
+                                text = "رمز تحقق مؤقت (OTP)",
+                                color = TextWhite,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 6.dp)
+                            )
+                        }
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable {
+                                    recoveryMode = 1
+                                    resetErrorMessage = null
+                                },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (recoveryMode == 1) PmpGold.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.06f),
+                            border = BorderStroke(1.dp, if (recoveryMode == 1) PmpGold else GlassBorder)
+                        ) {
+                            Text(
+                                text = "كود استرداد احتياطي",
+                                color = TextWhite,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 6.dp)
+                            )
+                        }
+                    }
+
+                    if (recoveryMode == 1) {
                         Text(
-                            text = "أدخل اسم المستخدم أو البريد الإلكتروني المرتبط بحسابك، ثم اختر وسيلة استلام رمز التحقق (OTP):",
+                            text = "استخدم أحد أكواد الاسترداد الاحتياطية (8 خانات) التي قمت بحفظها عند تفعيل الأمان المتقدم لفك قفل الحساب وتعيين كلمة مرور جديدة فوراً:",
+                            color = TextWhite,
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp
+                        )
+                        GlassTextField(
+                            value = resetIdentityInput,
+                            onValueChange = {
+                                resetIdentityInput = it
+                                resetErrorMessage = null
+                            },
+                            label = "اسم المستخدم أو البريد الإلكتروني أو كود الحساب *"
+                        )
+                        GlassTextField(
+                            value = backupRecoveryCodeInput,
+                            onValueChange = {
+                                backupRecoveryCodeInput = it
+                                resetErrorMessage = null
+                            },
+                            label = "كود الاسترداد الاحتياطي (مثال: ABCD-EFGH) *"
+                        )
+                        GlassTextField(
+                            value = newPasswordInput,
+                            onValueChange = {
+                                newPasswordInput = it
+                                resetErrorMessage = null
+                            },
+                            label = "كلمة المرور الجديدة (4 خانات على الأقل) *"
+                        )
+                    } else if (resetStep == 1) {
+                        Text(
+                            text = "أدخل اسم المستخدم أو البريد الإلكتروني المرتبط بحسابك، ثم اختر وسيلة استلام رمز التحقق المؤقت (صالح لمدة 10 دقائق وبحد أقصى 3 محاولات):",
                             color = TextWhite,
                             fontSize = 12.5.sp,
                             lineHeight = 17.sp
@@ -1195,9 +1409,9 @@ fun LoginScreen(
                     } else {
                         // Step 2: Enter OTP Code + New Password
                         val channelNotice = if (resetChannelChoice == "EMAIL") {
-                            "تم إرسال كود التحقق (OTP) إلى بريد Google المسجل (${targetResetUser?.phoneOrEmail?.ifBlank { "لحسابك" }}). أدخل الكود أدناه:"
+                            "تم إنشاء كود التحقق المؤقت (صالح لمدة 10 دقائق) لبريد Google المسجل (${targetResetUser?.phoneOrEmail?.ifBlank { "لحسابك" }}). أدخل الكود أدناه:"
                         } else {
-                            "تم إرسال إشعار رسمي برمز التحقق إلى شاشة إشعارات المدير المركزي على السحابة. احصل على الكود من المدير وأدخله أدناه:"
+                            "تم إرسال إشعار رسمي برمز التحقق المؤقت (صالح لمدة 10 دقائق) إلى شاشة إشعارات المدير المركزي. احصل على الكود من المدير وأدخله أدناه:"
                         }
                         Text(
                             text = channelNotice,
@@ -1212,7 +1426,7 @@ fun LoginScreen(
                                 enteredResetCode = it
                                 resetErrorMessage = null
                             },
-                            label = "كود التحقق (6 أرقام) *",
+                            label = "كود التحقق (6 أرقام - صالح 10 دقائق) *",
                             isNumber = true
                         )
 
@@ -1237,7 +1451,46 @@ fun LoginScreen(
                 }
             },
             confirmButton = {
-                if (resetStep == 1) {
+                if (recoveryMode == 1) {
+                    GlassButton(
+                        text = if (isResetLoading) "جاري استرداد الحساب..." else "استرداد الحساب وتحديث كلمة المرور",
+                        enabled = !isResetLoading,
+                        onClick = {
+                            val targetId = resetIdentityInput.trim()
+                            val recoveryClean = backupRecoveryCodeInput.trim()
+                            val passClean = newPasswordInput.trim()
+                            if (targetId.isBlank()) {
+                                resetErrorMessage = "يرجى إدخال اسم المستخدم أو البريد الإلكتروني أو كود الحساب"
+                                return@GlassButton
+                            }
+                            if (recoveryClean.length < 6) {
+                                resetErrorMessage = "يرجى إدخال كود الاسترداد الاحتياطي الصحيح"
+                                return@GlassButton
+                            }
+                            if (passClean.length < 4) {
+                                resetErrorMessage = "كلمة المرور الجديدة يجب أن تكون 4 خانات على الأقل"
+                                return@GlassButton
+                            }
+                            isResetLoading = true
+                            resetErrorMessage = null
+                            viewModel.recoverAccountWithBackupCode(
+                                identity = targetId,
+                                backupRecoveryCode = recoveryClean,
+                                newPass = passClean,
+                                onSuccess = { updatedUser ->
+                                    isResetLoading = false
+                                    showForgotPasswordDialog = false
+                                    password = passClean
+                                    usernameInput = updatedUser.username
+                                },
+                                onError = { err ->
+                                    isResetLoading = false
+                                    resetErrorMessage = err
+                                }
+                            )
+                        }
+                    )
+                } else if (resetStep == 1) {
                     GlassButton(
                         text = if (isResetLoading) "جاري البحث والإرسال..." else "إرسال رمز التحقق",
                         enabled = !isResetLoading,
@@ -1272,8 +1525,8 @@ fun LoginScreen(
                         onClick = {
                             val codeClean = enteredResetCode.trim()
                             val passClean = newPasswordInput.trim()
-                            if (codeClean != generatedResetCode.trim()) {
-                                resetErrorMessage = "كود التحقق غير صحيح. يرجى التأكد من الرمز المدخل."
+                            if (codeClean.length != 6) {
+                                resetErrorMessage = "يرجى إدخال كود التحقق المكون من 6 أرقام"
                                 return@GlassButton
                             }
                             if (passClean.length < 4) {
@@ -1283,8 +1536,9 @@ fun LoginScreen(
                             val user = targetResetUser ?: return@GlassButton
                             isResetLoading = true
                             resetErrorMessage = null
-                            viewModel.confirmPasswordReset(
+                            viewModel.confirmPasswordResetWithOtp(
                                 userId = user.id,
+                                otpInput = codeClean,
                                 newPass = passClean,
                                 onSuccess = { updatedUser ->
                                     isResetLoading = false

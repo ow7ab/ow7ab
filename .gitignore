@@ -1,6 +1,8 @@
 *.iml
 .gradle
+.gradle/
 .kotlin
+.kotlin/
 /local.properties
 /.idea/caches
 /.idea/libraries
@@ -9,7 +11,11 @@
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
 .DS_Store
+build
+build/
 /build
+app/build/
+.build-outputs/
 /captures
 .externalNativeBuild
 .cxx
@@ -19,6 +25,8 @@ debug.keystore
 debug.keystore.base64
 *.jks
 *.keystore
+*.apk
+*.aab
 .aistudio/
+public/assets/aistudio/
 *-debug.log
-
