@@ -17,10 +17,11 @@ import {
 
 interface NavbarProps {
   onOpenLogin: () => void;
+  onOpenPortal?: () => void;
   onNavigateSection?: (sectionId: string) => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onNavigateSection }) => {
+export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onOpenPortal, onNavigateSection }) => {
   const { t, language, toggleLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
   const { linkedAccount, signOut } = useAuth();
@@ -200,7 +201,8 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onNavigateSection }
           {/* Login or Staff Portal */}
           {linkedAccount ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <div
+              <button
+                onClick={onOpenPortal || onOpenLogin}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -211,12 +213,14 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onNavigateSection }
                   border: '1px solid rgba(16, 185, 129, 0.3)',
                   color: 'var(--pmp-green)',
                   fontSize: '12px',
-                  fontWeight: 700
+                  fontWeight: 700,
+                  cursor: 'pointer'
                 }}
+                title={language === 'ar' ? 'فتح بوابة الموظفين' : 'Open Staff Portal'}
               >
                 <UserCheck size={14} />
                 <span>{linkedAccount.fullName}</span>
-              </div>
+              </button>
               <button
                 onClick={() => signOut()}
                 style={{
@@ -229,7 +233,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onNavigateSection }
                   cursor: 'pointer'
                 }}
               >
-                خروج
+                {language === 'ar' ? 'خروج' : 'Exit'}
               </button>
             </div>
           ) : (

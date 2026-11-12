@@ -10,7 +10,11 @@ import { InstallationGuideSection } from '../components/sections/InstallationGui
 import { SupportSection } from '../components/sections/SupportSection';
 import { LoginModal } from '../components/sections/LoginModal';
 
-export const HomePage: React.FC = () => {
+interface HomePageProps {
+  onEnterPortal: () => void;
+}
+
+export const HomePage: React.FC<HomePageProps> = ({ onEnterPortal }) => {
   const [isLoginOpen, setIsLoginOpen] = useState(false);
 
   const scrollToSection = (id: string) => {
@@ -23,13 +27,13 @@ export const HomePage: React.FC = () => {
   return (
     <div className="min-h-screen bg-theme-base text-theme-primary selection:bg-pmp-primary selection:text-white transition-colors duration-200">
       {/* Navigation */}
-      <Navbar onOpenLogin={() => setIsLoginOpen(true)} />
+      <Navbar onOpenLogin={() => setIsLoginOpen(true)} onOpenPortal={onEnterPortal} />
 
       {/* Main Content Sections */}
       <main>
         {/* 1. Hero */}
         <HeroSection
-          onOpenLogin={() => setIsLoginOpen(true)}
+          onOpenLogin={onEnterPortal}
           onScrollToDownload={() => scrollToSection('download')}
           onScrollToOverview={() => scrollToSection('overview')}
         />
@@ -57,7 +61,11 @@ export const HomePage: React.FC = () => {
       <Footer />
 
       {/* Auth Modal */}
-      <LoginModal isOpen={isLoginOpen} onClose={() => setIsLoginOpen(false)} />
+      <LoginModal
+        isOpen={isLoginOpen}
+        onClose={() => setIsLoginOpen(false)}
+        onLoginSuccess={onEnterPortal}
+      />
     </div>
   );
 };

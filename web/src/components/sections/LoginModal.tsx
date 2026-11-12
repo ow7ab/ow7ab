@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Lock, Mail, KeyRound, AlertCircle, CheckCircle, ShieldCheck, LogIn, X } from 'lucide-react';
+import { Lock, Mail, KeyRound, AlertCircle, CheckCircle, ShieldCheck, LogIn, ArrowRight } from 'lucide-react';
 import { Modal } from '../ui/Modal';
 import { GlassButton } from '../ui/GlassButton';
 import { GlassBadge } from '../ui/GlassBadge';
@@ -9,13 +9,14 @@ import { useLanguage } from '../../context/LanguageContext';
 interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onLoginSuccess?: () => void;
 }
 
-export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
+export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onLoginSuccess }) => {
   const { language } = useLanguage();
-  const { loginWithEmail, loginWithUsernamePin, loginWithGoogle, userProfile, isAuthenticating } = useAuth();
+  const { loginWithEmail, loginWithUsernamePin, loginWithGoogle, requestPasswordReset, isAuthenticating } = useAuth();
 
-  const [tab, setTab] = useState<'email' | 'pin'>('pin');
+  const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('pin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [username, setUsername] = useState('');
@@ -30,6 +31,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     setPin('');
     setErrorMsg(null);
     setSuccessMsg(null);
+    setTab('pin');
   };
 
   const handleClose = () => {
@@ -43,10 +45,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     setSuccessMsg(null);
     try {
       await loginWithEmail(email, password);
-      setSuccessMsg(language === 'ar' ? 'تم تسجيل الدخول بنجاح! جاري تحميل الصلاحيات...' : 'Signed in successfully! Loading roles...');
+      setSuccessMsg(language === 'ar' ? 'تم التحقق بنجاح! جاري تحويلك للبوابة...' : 'Authentication successful! Redirecting...');
       setTimeout(() => {
         handleClose();
-      }, 1500);
+        if (onLoginSuccess) onLoginSuccess();
+      }, 1200);
     } catch (err: any) {
       setErrorMsg(err.message || (language === 'ar' ? 'فشل تسجيل الدخول. تأكد من صحة البيانات.' : 'Login failed. Check your credentials.'));
     }
@@ -58,10 +61,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     setSuccessMsg(null);
     try {
       await loginWithUsernamePin(username, pin);
-      setSuccessMsg(language === 'ar' ? 'تم تسجيل الدخول بالرمز السري بنجاح!' : 'PIN authentication verified!');
+      setSuccessMsg(language === 'ar' ? 'تم تسجيل الدخول بالرمز بنجاح!' : 'PIN verified successfully!');
       setTimeout(() => {
         handleClose();
-      }, 1500);
+        if (onLoginSuccess) onLoginSuccess();
+      }, 1200);
     } catch (err: any) {
       setErrorMsg(err.message || (language === 'ar' ? 'اسم المستخدم أو الرمز السري غير صحيح.' : 'Invalid username or PIN.'));
     }
@@ -75,9 +79,27 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
       setSuccessMsg(language === 'ar' ? 'تم التحقق بحساب Google بنجاح!' : 'Google authentication verified!');
       setTimeout(() => {
         handleClose();
-      }, 1500);
+        if (onLoginSuccess) onLoginSuccess();
+      }, 1200);
     } catch (err: any) {
       setErrorMsg(err.message || (language === 'ar' ? 'تعذر إتمام الدخول بحساب Google.' : 'Google sign-in error.'));
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    if (!email) {
+      setErrorMsg(language === 'ar' ? 'الرجاء إدخال البريد الإلكتروني' : 'Please provide your email');
+      return;
+    }
+    try {
+      await requestPasswordReset(email);
+      setSuccessMsg(language === 'ar' ? 'تم إرسال رابط استعادة كلمة المرور إلى بريدك الإلكتروني.' : 'Password reset link sent to your email.');
+      setTimeout(() => setTab('email'), 3000);
+    } catch (err: any) {
+      setErrorMsg(err.message || (language === 'ar' ? 'تعذر إرسال رابط الاستعادة.' : 'Failed to send reset link.'));
     }
   };
 
@@ -85,7 +107,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     <Modal
       isOpen={isOpen}
       onClose={handleClose}
-      title={language === 'ar' ? 'بوابة دخول موظفي PMP PAINTS' : 'PMP PAINTS Enterprise Portal'}
+      title={
+        tab === 'reset'
+          ? (language === 'ar' ? 'استعادة كلمة المرور' : 'Password Recovery')
+          : (language === 'ar' ? 'بوابة دخول موظفي PMP PAINTS' : 'PMP PAINTS Enterprise Portal')
+      }
       maxWidth="max-w-md"
     >
       <div className="space-y-6">
@@ -102,31 +128,33 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
           </div>
         </div>
 
-        {/* Tab switch */}
-        <div className="grid grid-cols-2 p-1 rounded-xl bg-theme-surface border border-theme">
-          <button
-            type="button"
-            onClick={() => { setTab('pin'); setErrorMsg(null); }}
-            className={`py-2 text-xs font-bold rounded-lg transition-all ${
-              tab === 'pin'
-                ? 'bg-pmp-primary text-white shadow-md'
-                : 'text-theme-secondary hover:text-theme-primary'
-            }`}
-          >
-            {language === 'ar' ? 'اسم المستخدم والرمز (PIN)' : 'Username & PIN'}
-          </button>
-          <button
-            type="button"
-            onClick={() => { setTab('email'); setErrorMsg(null); }}
-            className={`py-2 text-xs font-bold rounded-lg transition-all ${
-              tab === 'email'
-                ? 'bg-pmp-primary text-white shadow-md'
-                : 'text-theme-secondary hover:text-theme-primary'
-            }`}
-          >
-            {language === 'ar' ? 'البريد الإلكتروني' : 'Enterprise Email'}
-          </button>
-        </div>
+        {tab !== 'reset' && (
+          /* Tab switch */
+          <div className="grid grid-cols-2 p-1 rounded-xl bg-theme-surface border border-theme">
+            <button
+              type="button"
+              onClick={() => { setTab('pin'); setErrorMsg(null); }}
+              className={`py-2 text-xs font-bold rounded-lg transition-all ${
+                tab === 'pin'
+                  ? 'bg-pmp-primary text-white shadow-md'
+                  : 'text-theme-secondary hover:text-theme-primary'
+              }`}
+            >
+              {language === 'ar' ? 'اسم المستخدم والرمز (PIN)' : 'Username & PIN'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setTab('email'); setErrorMsg(null); }}
+              className={`py-2 text-xs font-bold rounded-lg transition-all ${
+                tab === 'email'
+                  ? 'bg-pmp-primary text-white shadow-md'
+                  : 'text-theme-secondary hover:text-theme-primary'
+              }`}
+            >
+              {language === 'ar' ? 'البريد الإلكتروني' : 'Enterprise Email'}
+            </button>
+          </div>
+        )}
 
         {errorMsg && (
           <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 flex items-center gap-2 text-xs text-red-500">
@@ -142,41 +170,37 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
           </div>
         )}
 
-        {tab === 'pin' ? (
+        {tab === 'pin' && (
           <form onSubmit={handlePinLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-theme-primary mb-1">
                 {language === 'ar' ? 'اسم المستخدم الوظيفي' : 'Username'}
               </label>
-              <div className="relative">
-                <input
-                  type="text"
-                  required
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder={language === 'ar' ? 'مثال: ahmed_factory' : 'e.g. ahmed_factory'}
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary"
-                />
-              </div>
+              <input
+                type="text"
+                required
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder={language === 'ar' ? 'مثال: admin أو ahmed_acc' : 'e.g. admin or ahmed_acc'}
+                className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary"
+              />
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-theme-primary mb-1">
                 {language === 'ar' ? 'الرمز السري المشفر (PIN)' : 'Secret PIN'}
               </label>
-              <div className="relative">
-                <input
-                  type="password"
-                  required
-                  maxLength={12}
-                  value={pin}
-                  onChange={(e) => setPin(e.target.value)}
-                  placeholder="••••"
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary tracking-widest"
-                />
-              </div>
+              <input
+                type="password"
+                required
+                maxLength={12}
+                value={pin}
+                onChange={(e) => setPin(e.target.value)}
+                placeholder="••••"
+                className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary tracking-widest"
+              />
               <span className="text-[11px] text-theme-muted mt-1 block">
-                {language === 'ar' ? 'يتم مطابقة الرمز بواسطة خوارزمية PBKDF2 المشفرة.' : 'Secured via PBKDF2 high-iteration hash matching.'}
+                {language === 'ar' ? 'للتهيئة التجريبية: استخدم الرمز 1234' : 'Default setup PIN: 1234'}
               </span>
             </div>
 
@@ -192,38 +216,45 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
                 : (language === 'ar' ? 'دخول بوابة الموظف' : 'Enter Portal')}
             </GlassButton>
           </form>
-        ) : (
+        )}
+
+        {tab === 'email' && (
           <form onSubmit={handleEmailLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-theme-primary mb-1">
                 {language === 'ar' ? 'البريد الإلكتروني المعتمد' : 'Corporate Email'}
               </label>
-              <div className="relative">
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="name@pmppaints.com"
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary"
-                />
-              </div>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@pmppaints.com"
+                className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary"
+              />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-theme-primary mb-1">
-                {language === 'ar' ? 'كلمة المرور' : 'Password'}
-              </label>
-              <div className="relative">
-                <input
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary"
-                />
+              <div className="flex justify-between items-center mb-1">
+                <label className="text-xs font-semibold text-theme-primary">
+                  {language === 'ar' ? 'كلمة المرور' : 'Password'}
+                </label>
+                <button
+                  type="button"
+                  onClick={() => { setTab('reset'); setErrorMsg(null); }}
+                  className="text-[11px] text-pmp-accent hover:underline focus:outline-none"
+                >
+                  {language === 'ar' ? 'نسيت كلمة المرور؟' : 'Forgot Password?'}
+                </button>
               </div>
+              <input
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary"
+              />
             </div>
 
             <GlassButton
@@ -240,31 +271,79 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
           </form>
         )}
 
-        {/* Google Enterprise Sign-In */}
-        <div className="relative pt-2">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-theme"></div>
-          </div>
-          <div className="relative flex justify-center text-xs">
-            <span className="px-3 bg-theme-surface text-theme-muted font-medium">
-              {language === 'ar' ? 'أو عبر الحساب المعتمد' : 'Or via Verified Enterprise SSO'}
-            </span>
-          </div>
-        </div>
+        {tab === 'reset' && (
+          <form onSubmit={handleResetPassword} className="space-y-4">
+            <p className="text-xs text-theme-secondary leading-relaxed">
+              {language === 'ar'
+                ? 'أدخل بريدك الإلكتروني المعتمد وسنرسل لك رابطاً مشفراً لإعادة تعيين كلمة المرور فوراً.'
+                : 'Enter your registered enterprise email and a secure reset link will be sent.'}
+            </p>
 
-        <GlassButton
-          variant="secondary"
-          onClick={handleGoogleLogin}
-          disabled={isAuthenticating}
-          className="w-full justify-center"
-        >
-          <img
-            src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
-            alt="Google"
-            className="w-4 h-4 ml-2"
-          />
-          <span>{language === 'ar' ? 'الدخول بحساب Google المعتمد' : 'Sign in with Google Workspace'}</span>
-        </GlassButton>
+            <div>
+              <label className="block text-xs font-semibold text-theme-primary mb-1">
+                {language === 'ar' ? 'البريد الإلكتروني المسجل' : 'Registered Email'}
+              </label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@pmppaints.com"
+                className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary"
+              />
+            </div>
+
+            <div className="flex gap-2">
+              <GlassButton
+                type="button"
+                variant="secondary"
+                onClick={() => setTab('email')}
+                className="flex-1 justify-center"
+              >
+                {language === 'ar' ? 'رجوع' : 'Back'}
+              </GlassButton>
+
+              <GlassButton
+                type="submit"
+                variant="primary"
+                disabled={isAuthenticating}
+                className="flex-1 justify-center"
+              >
+                {language === 'ar' ? 'إرسال الرابط' : 'Send Link'}
+              </GlassButton>
+            </div>
+          </form>
+        )}
+
+        {/* Google Enterprise Sign-In */}
+        {tab !== 'reset' && (
+          <>
+            <div className="relative pt-2">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-theme"></div>
+              </div>
+              <div className="relative flex justify-center text-xs">
+                <span className="px-3 bg-theme-surface text-theme-muted font-medium">
+                  {language === 'ar' ? 'أو عبر الحساب المعتمد' : 'Or via Verified Enterprise SSO'}
+                </span>
+              </div>
+            </div>
+
+            <GlassButton
+              variant="secondary"
+              onClick={handleGoogleLogin}
+              disabled={isAuthenticating}
+              className="w-full justify-center"
+            >
+              <img
+                src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
+                alt="Google"
+                className="w-4 h-4 ml-2"
+              />
+              <span>{language === 'ar' ? 'الدخول بحساب Google المعتمد' : 'Sign in with Google Workspace'}</span>
+            </GlassButton>
+          </>
+        )}
 
         <p className="text-[11px] text-center text-theme-muted leading-relaxed">
           {language === 'ar'

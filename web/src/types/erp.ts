@@ -5,6 +5,8 @@
 
 export type CurrencyCode = 'SDG' | 'EGP' | 'USD';
 
+export type UserRoleType = 'SUPER_ADMIN' | 'MANAGER' | 'EMPLOYEE';
+
 export type JobRole =
   | 'مدير النظام'
   | 'المدير'
@@ -29,6 +31,7 @@ export interface UserAccount {
   username: string;
   phoneOrEmail: string;
   role: JobRole;
+  roleType: UserRoleType;
   branch: string;
   permissions: string;
   serverSyncToken: string;
@@ -36,8 +39,10 @@ export interface UserAccount {
   syncStatus: 'APPROVED_BY_MANAGER' | 'PENDING_MANAGER_APPROVAL' | 'REJECTED';
   active: boolean;
   isCurrentSession?: boolean;
+  passwordHash?: string;
   createdAt?: string;
   updatedAt?: string;
+  lastLoginAt?: string;
 }
 
 export interface LinkedAccountDoc {
@@ -48,15 +53,28 @@ export interface LinkedAccountDoc {
   fullName: string;
   username: string;
   role: string;
+  roleType?: UserRoleType;
   branch: string;
   permissions: string;
   serverSyncToken: string;
+  passwordHash?: string;
   active: boolean;
   createdAt: any;
   updatedAt: any;
+  lastLoginAt?: any;
 }
 
 export type LinkedAccountModel = LinkedAccountDoc;
+
+export interface TemporaryPermissionGrant {
+  grantId: string;
+  targetUserCode: string;
+  permissionToken: string;
+  grantedBy: string;
+  grantedAtMillis: number;
+  expiresAtMillis: number;
+  reason: string;
+}
 
 export interface Cashbox {
   id: number;
@@ -264,4 +282,18 @@ export interface PermissionChangeAuditEntry {
   reason: string;
   changedAtMillis: number;
   formattedDate?: string;
+}
+
+export interface LoginActivityLog {
+  id: string;
+  userCode: string;
+  username: string;
+  fullName: string;
+  timestamp: number;
+  dateStr: string;
+  ipAddress?: string;
+  userAgent?: string;
+  method: 'PASSWORD' | 'GOOGLE' | 'PIN';
+  status: 'SUCCESS' | 'FAILED' | 'LOCKED_OUT';
+  details?: string;
 }
