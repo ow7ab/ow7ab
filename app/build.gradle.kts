@@ -166,6 +166,29 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
+// Automatically sync official PMP drawable brand assets into public/assets for the official website
+runCatching {
+  val drawableDir = file("src/main/res/drawable")
+  val publicAssetsDir = rootProject.file("public/assets")
+  if (drawableDir.isDirectory) {
+    publicAssetsDir.mkdirs()
+    listOf(
+            "ic_pmp_emblem.png",
+            "ic_pmp_emblem_solid.png",
+            "pmp_brand_logo.jpg",
+            "pmp_brand_poster.jpg",
+            "pmp_reference_poster.jpg"
+        )
+        .forEach { assetName ->
+          val srcFile = File(drawableDir, assetName)
+          val dstFile = File(publicAssetsDir, assetName)
+          if (srcFile.isFile && (!dstFile.isFile || dstFile.length() != srcFile.length())) {
+            srcFile.copyTo(dstFile, overwrite = true)
+          }
+        }
+  }
+}
+
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {

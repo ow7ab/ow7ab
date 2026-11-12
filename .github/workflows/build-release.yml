@@ -1,4 +1,4 @@
-name: PMP Paints - Build & Release Signed APK
+name: PMP Paints - Official Website & Automated Signed APK Release
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version_code:
-        description: "رقم البناء الجديد (versionCode) - يجب أن يكون أكبر من الإصدار السابق"
+        description: "رقم البناء الجديد (versionCode) - يزيد تلقائياً إذا كان مستخدماً مسبقاً"
         required: true
         default: "18"
       version_name:
@@ -17,9 +17,9 @@ on:
         required: true
         default: "18.0"
       release_notes:
-        description: "ملاحظات التحديث التي ستظهر للمستخدمين"
+        description: "ملاحظات التحديث التي ستظهر للمستخدمين وعلى الموقع الرسمي"
         required: false
-        default: "إصدار 18.0 (بناء 18): ترقية شاملة لمنظومة المصادقة والأمان المتقدم (PBKDF2، 2FA، إدارة الأجهزة الموثوقة، وعزل البصمة) مع تفعيل R8/ProGuard."
+        default: "إصدار 18.0 (بناء 18): إطلاق الموقع الرسمي المتكامل ومنظومة الإصدارات الآلية، مع ترقية شاملة للأمان (PBKDF2، 2FA، عزل البصمة) وتفعيل R8/ProGuard."
       public_base_url:
         description: "رابط الاستضافة العامة الاختياري (يُستخدم GitHub Pages تلقائياً عند تركه فارغاً)"
         required: false
@@ -30,10 +30,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: pmp-release-and-pages-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
-    name: Build, Verify & Publish Signed APK
+    name: Build, Verify, Publish APK & Deploy Official Website
     runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]')"
     permissions:
       contents: write
       pages: write
@@ -45,13 +50,83 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Detect Change Scope & Sync Brand Visual Assets to Website
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import os
+          import shutil
+          import subprocess
+
+          # 1. Always sync official PMP brand drawable assets into public/assets/
+          drawable_dir = os.path.join("app", "src", "main", "res", "drawable")
+          public_assets_dir = os.path.join("public", "assets")
+          os.makedirs(public_assets_dir, exist_ok=True)
+          for asset_name in [
+              "ic_pmp_emblem.png",
+              "ic_pmp_emblem_solid.png",
+              "pmp_brand_logo.jpg",
+              "pmp_brand_poster.jpg",
+              "pmp_reference_poster.jpg",
+          ]:
+              src = os.path.join(drawable_dir, asset_name)
+              dst = os.path.join(public_assets_dir, asset_name)
+              if os.path.isfile(src):
+                  shutil.copy2(src, dst)
+                  print(f"Synced brand asset: {src} -> {dst}")
+
+          # 2. Detect whether this push modified only website/documentation files
+          event_name = os.environ.get("EVENT_NAME", "")
+          ref_name = os.environ.get("REF_NAME", "")
+          before_sha = os.environ.get("BEFORE_SHA", "")
+          current_sha = os.environ.get("CURRENT_SHA", "")
+
+          website_only = False
+          if event_name == "push" and not ref_name.startswith("v") and before_sha and before_sha != "0000000000000000000000000000000000000000":
+              proc = subprocess.run(
+                  ["git", "diff", "--name-only", before_sha, current_sha],
+                  text=True,
+                  capture_output=True,
+              )
+              if proc.returncode == 0:
+                  changed_files = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+                  print(f"Changed files in push ({len(changed_files)}): {changed_files}")
+                  if changed_files and all(
+                      f.startswith("public/") or f == "README.md"
+                      for f in changed_files
+                  ):
+                      website_only = True
+
+          env_path = os.environ["GITHUB_ENV"]
+          with open(env_path, "a", encoding="utf-8") as ef:
+              ef.write(f"WEBSITE_ONLY={'true' if website_only else 'false'}\n")
+
+          out_path = os.environ.get("GITHUB_OUTPUT")
+          if out_path:
+              with open(out_path, "a", encoding="utf-8") as of:
+                  of.write(f"website_only={'true' if website_only else 'false'}\n")
+
+          if website_only:
+              print("Detected website-only change (public/** or README.md). Will redeploy official website without rebuilding Android APK.")
+          else:
+              print("Detected Android/workflow/release change. Running full test, build, sign, verify, and release pipeline.")
+          PYEOF
+
       - name: Set up JDK 21 (Required for AGP 9.1.1 & Android SDK Command-Line Tools)
+        if: env.WEBSITE_ONLY != 'true'
         uses: actions/setup-java@v4
         with:
           distribution: "temurin"
           java-version: "21"
 
       - name: Locate Android SDK & Verify sdkmanager Path
+        if: env.WEBSITE_ONLY != 'true'
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
@@ -100,6 +175,7 @@ jobs:
           "$SDKMANAGER_BIN" --sdk_root="$SDK_ROOT" --version
 
       - name: Accept All Android SDK Licenses Non-Interactively
+        if: env.WEBSITE_ONLY != 'true'
         run: |
           set -euo pipefail
           python3 - << 'PYEOF'
@@ -151,7 +227,7 @@ jobs:
                   f.write("\n")
 
           # Run sdkmanager --licenses non-interactively with strict exit-code verification
-          result = subprocess.run(
+          subprocess.run(
               [sdkmanager, f"--sdk_root={sdk_root}", "--licenses"],
               input="y\n" * 120,
               text=True,
@@ -162,6 +238,7 @@ jobs:
           PYEOF
 
       - name: Install Compatible Android SDK Platforms & Build Tools (API 36 / 36.1 & Build-Tools 36.0.0)
+        if: env.WEBSITE_ONLY != 'true'
         run: |
           set -euo pipefail
           python3 - << 'PYEOF'
@@ -200,11 +277,13 @@ jobs:
           PYEOF
 
       - name: Setup Gradle 9.3.1 (Compatible with AGP 9.1.1)
+        if: env.WEBSITE_ONLY != 'true'
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.3.1"
 
       - name: Prepare Environment Config & Verify Compatible Signing Keystore (debug.keystore)
+        if: env.WEBSITE_ONLY != 'true'
         env:
           DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
           GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
@@ -251,7 +330,6 @@ jobs:
               sys.exit(1)
 
           def clean_b64_input(raw: str) -> str:
-              # Remove any accidental markdown code block fences, quotes, or whitespace
               stripped = re.sub(r"```[a-zA-Z0-9_-]*", "", raw)
               stripped = stripped.replace("```", "").replace('"', "").replace("'", "")
               return re.sub(r"\s+", "", stripped)
@@ -304,7 +382,6 @@ jobs:
                       "Signing keystore is missing! Neither GitHub Actions secret DEBUG_KEYSTORE_BASE64 nor debug.keystore.base64 was found."
                   )
 
-          # Validate keystore format, alias (androiddebugkey), and extract SHA-256 certificate fingerprint
           proc = subprocess.run(
               [
                   "keytool",
@@ -350,7 +427,6 @@ jobs:
 
           print(f"Verified valid debug.keystore (alias: androiddebugkey, SHA-256: {cert_sha256} matches approved PMP PAINTS certificate).")
 
-          # Resolve Firebase google-services.json (if provided via secret) and verify Web OAuth 2.0 Client ID (client_type 3)
           import json as _json
           gs_path = os.path.join("app", "google-services.json")
           gs_b64 = os.environ.get("GOOGLE_SERVICES_JSON_BASE64", "").strip()
@@ -414,9 +490,11 @@ jobs:
           print("Verified Web OAuth 2.0 client configuration for R.string.default_web_client_id.")
           PYEOF
 
-      - name: Resolve & Validate Version Metadata and Build Identity
+      - name: Resolve & Validate Monotonic Version Metadata and Build Identity
+        if: env.WEBSITE_ONLY != 'true'
         id: meta
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_VERSION_CODE: ${{ github.event.inputs.version_code || github.event.client_payload.version_code }}
           INPUT_VERSION_NAME: ${{ github.event.inputs.version_name || github.event.client_payload.version_name }}
           INPUT_RELEASE_NOTES: ${{ github.event.inputs.release_notes || github.event.client_payload.release_notes }}
@@ -427,6 +505,7 @@ jobs:
           import json
           import os
           import re
+          import urllib.request
           from datetime import datetime, timezone
 
           repo = os.environ.get("GITHUB_REPOSITORY", "ow7ab/ow7ab")
@@ -435,6 +514,7 @@ jobs:
           git_commit = git_sha_full[:8] if git_sha_full else "9a8b7c6d"
           published_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+          # 1. Read configured versionCode and versionName from app/build.gradle.kts
           gradle_code = 18
           gradle_name = "18.0"
           if os.path.exists("app/build.gradle.kts"):
@@ -450,6 +530,7 @@ jobs:
               except Exception:
                   pass
 
+          # 2. Read last published versionCode from version.json
           existing_code = 17
           existing_name = "v4.2"
           if os.path.exists("version.json"):
@@ -461,31 +542,69 @@ jobs:
               except Exception:
                   existing_code = 17
 
+          # 3. Query GitHub Releases API to discover highest already-published versionCode
+          highest_github_release_code = existing_code
+          gh_token = os.environ.get("GITHUB_TOKEN", "").strip()
+          try:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/releases?per_page=30",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "PMP-Paints-Release-Pipeline",
+                      **({"Authorization": f"Bearer {gh_token}"} if gh_token else {}),
+                  },
+              )
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  if resp.status == 200:
+                      releases_data = json.loads(resp.read().decode("utf-8"))
+                      if isinstance(releases_data, list):
+                          for rel in releases_data:
+                              if not isinstance(rel, dict):
+                                  continue
+                              if rel.get("draft") or rel.get("prerelease"):
+                                  continue
+                              title_and_body = f"{rel.get('name', '')} {rel.get('body', '')}"
+                              for m in re.finditer(r"(?:Build|versionCode|b|#)\s*[:=`]*\s*(\d+)", title_and_body, re.IGNORECASE):
+                                  code_val = int(m.group(1))
+                                  if 1 <= code_val < 100000 and code_val > highest_github_release_code:
+                                      highest_github_release_code = code_val
+                              for asset in rel.get("assets", []) or []:
+                                  aname = str(asset.get("name", ""))
+                                  am = re.search(r"-b(\d+)\.apk", aname, re.IGNORECASE)
+                                  if am:
+                                      code_val = int(am.group(1))
+                                      if code_val > highest_github_release_code:
+                                          highest_github_release_code = code_val
+          except Exception as exc:
+              print(f"Note: GitHub Releases lookup skipped or unavailable ({exc}); using repository metadata.")
+
+          highest_published_code = max(existing_code, highest_github_release_code)
           v_code_str = os.environ.get("INPUT_VERSION_CODE", "").strip()
           v_name_str = os.environ.get("INPUT_VERSION_NAME", "").strip()
           notes_str = os.environ.get("INPUT_RELEASE_NOTES", "").strip()
           public_base = os.environ.get("INPUT_PUBLIC_BASE_URL", "").strip().rstrip("/")
 
+          # Monotonically increasing versionCode strategy:
+          # Ensure new release versionCode is strictly greater than any previously published release
           if not v_code_str:
-              v_code = max(gradle_code, existing_code, 18)
+              v_code = max(gradle_code, highest_published_code + 1, 18)
           else:
-              v_code = int(v_code_str)
+              requested_code = int(v_code_str)
+              v_code = max(requested_code, highest_published_code + 1) if requested_code <= highest_published_code else requested_code
 
           if v_code <= 0:
               raise SystemExit(f"Invalid versionCode: {v_code}")
 
-          if not v_name_str:
+          if not v_name_str or (v_code_str and int(v_code_str) != v_code):
               if v_code == gradle_code and gradle_name:
                   v_name_str = gradle_name
-              elif v_code == existing_code and existing_name:
-                  v_name_str = existing_name
               else:
                   v_name_str = f"{v_code}.0"
 
           v_clean = v_name_str.lstrip("vV").strip()
 
           if not notes_str:
-              notes_str = f"إصدار PMP PAINTS v{v_clean} (بناء #{v_code} - Commit {git_commit})"
+              notes_str = f"إصدار PMP PAINTS v{v_clean} (بناء #{v_code} - Commit {git_commit}): تحديث رسمي موقّع ومتحقق منه عبر GitHub Actions."
 
           build_id = f"PMP-v{v_clean}-b{v_code}-{git_commit}"
           apk_filename = f"pmp-paints-v{v_clean}-b{v_code}.apk"
@@ -493,8 +612,9 @@ jobs:
           if not public_base:
               public_base = f"https://{owner}.github.io/{repo_name}"
 
-          primary_download_url = f"{public_base}/{apk_filename}"
+          pages_download_url = f"{public_base}/{apk_filename}"
           github_release_url = f"https://github.com/{repo}/releases/download/v{v_clean}/{apk_filename}"
+          primary_download_url = github_release_url
 
           env_path = os.environ["GITHUB_ENV"]
           with open(env_path, "a", encoding="utf-8") as env_file:
@@ -506,15 +626,17 @@ jobs:
               env_file.write(f"BUILD_ID={build_id}\n")
               env_file.write(f"APK_FILENAME={apk_filename}\n")
               env_file.write(f"PRIMARY_DOWNLOAD_URL={primary_download_url}\n")
+              env_file.write(f"PAGES_DOWNLOAD_URL={pages_download_url}\n")
               env_file.write(f"GITHUB_RELEASE_URL={github_release_url}\n")
 
           with open("/tmp/release_notes.txt", "w", encoding="utf-8") as nf:
               nf.write(notes_str)
 
-          print(f"Resolved Build Identity: {build_id} -> {apk_filename}")
+          print(f"Resolved Monotonic Build Identity: {build_id} (versionCode={v_code}, versionName={v_name_str}) -> {apk_filename}")
           PYEOF
 
       - name: Run Automated Unit & Update Verification Tests (Gate Before APK Build)
+        if: env.WEBSITE_ONLY != 'true'
         run: |
           set -euo pipefail
           if [ -x "./gradlew" ]; then
@@ -533,6 +655,7 @@ jobs:
             --no-daemon
 
       - name: Build Signed APK with Embedded Build Identity
+        if: env.WEBSITE_ONLY != 'true'
         run: |
           set -euo pipefail
           if [ -x "./gradlew" ]; then
@@ -540,7 +663,7 @@ jobs:
           else
             GRADLE_CMD="gradle"
           fi
-          echo "Building APK using ${GRADLE_CMD}..."
+          echo "Building signed production APK using ${GRADLE_CMD}..."
           ${GRADLE_CMD} :app:assembleDebug \
             -PversionCode="${V_CODE}" \
             -PversionName="${V_NAME}" \
@@ -551,6 +674,7 @@ jobs:
             --no-daemon
 
       - name: Verify Compiled APK Binary (Package Name, Version, Signature & Checksum)
+        if: env.WEBSITE_ONLY != 'true'
         run: |
           set -euo pipefail
           APK_SOURCE="app/build/outputs/apk/debug/app-debug.apk"
@@ -615,7 +739,8 @@ jobs:
           echo "APK_SIZE_BYTES=${FILE_SIZE_BYTES}" >> "$GITHUB_ENV"
           echo "APK_SIZE_MB=${FILE_SIZE_MB}" >> "$GITHUB_ENV"
 
-      - name: Generate Schema-Validated version.json Safely via Python
+      - name: Generate Schema-Validated version.json & releases-history.json Safely via Python
+        if: env.WEBSITE_ONLY != 'true'
         run: |
           set -euo pipefail
           python3 - << 'PYEOF'
@@ -634,6 +759,7 @@ jobs:
           git_commit = os.environ["GIT_COMMIT_SHORT"]
           published_at = os.environ["PUBLISHED_AT_UTC"]
           primary_url = os.environ["PRIMARY_DOWNLOAD_URL"]
+          pages_url = os.environ.get("PAGES_DOWNLOAD_URL", primary_url)
           github_release_url = os.environ["GITHUB_RELEASE_URL"]
           cert_sha256 = os.environ.get("KEYSTORE_CERT_SHA256", "")
 
@@ -641,7 +767,8 @@ jobs:
               "versionCode": v_code,
               "versionName": v_name,
               "downloadUrl": primary_url,
-              "apkUrl": primary_url,
+              "apkUrl": pages_url,
+              "pagesDownloadUrl": pages_url,
               "githubReleaseUrl": github_release_url,
               "releaseNotes": release_notes,
               "apkSha256": sha256,
@@ -668,6 +795,49 @@ jobs:
                   json.dump(payload, out_f, ensure_ascii=False, indent=2)
                   out_f.write("\n")
 
+          # Update public/releases-history.json so the official website always has the full release history
+          history_path = os.path.join("public", "releases-history.json")
+          existing_releases = []
+          if os.path.isfile(history_path):
+              try:
+                  with open(history_path, "r", encoding="utf-8") as hf:
+                      hist_doc = json.load(hf)
+                      if isinstance(hist_doc, dict) and isinstance(hist_doc.get("releases"), list):
+                          existing_releases = hist_doc["releases"]
+              except Exception:
+                  existing_releases = []
+
+          by_code = {}
+          for item in existing_releases:
+              if isinstance(item, dict) and item.get("versionCode"):
+                  by_code[int(item["versionCode"])] = item
+
+          by_code[v_code] = {
+              "versionCode": v_code,
+              "versionName": v_name if v_name.startswith("v") else f"v{v_name}",
+              "buildId": build_id,
+              "gitCommit": git_commit,
+              "publishedAt": published_at,
+              "fileSize": file_size_bytes,
+              "fileSizeMb": file_size_mb,
+              "apkSha256": sha256,
+              "downloadUrl": github_release_url,
+              "pagesDownloadUrl": pages_url,
+              "releaseStatus": "PUBLISHED",
+              "releaseNotes": release_notes,
+          }
+
+          sorted_releases = [by_code[k] for k in sorted(by_code.keys(), reverse=True)]
+          history_doc = {
+              "repository": os.environ.get("GITHUB_REPOSITORY", "ow7ab/ow7ab"),
+              "applicationId": "com.aistudio.pmppaints.erp",
+              "signingCertSha256": cert_sha256,
+              "releases": sorted_releases,
+          }
+          with open(history_path, "w", encoding="utf-8") as hf:
+              json.dump(history_doc, hf, ensure_ascii=False, indent=2)
+              hf.write("\n")
+
           # Validate JSON round-trip
           with open("release_out/version.json", "r", encoding="utf-8") as check_f:
               verified = json.load(check_f)
@@ -676,12 +846,12 @@ jobs:
               assert verified["apkSize"] == file_size_bytes
               assert verified["releaseStatus"] == "PUBLISHED"
               assert verified["buildId"] == build_id
-          print("Generated and validated version.json:")
+          print("Generated and validated version.json and public/releases-history.json:")
           print(json.dumps(verified, ensure_ascii=False, indent=2))
           PYEOF
 
       - name: Publish Release to GitHub Releases
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && env.WEBSITE_ONLY != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.V_TAG }}
@@ -706,16 +876,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify Published Release Asset Download URL
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && env.WEBSITE_ONLY != 'true'
         run: |
           set -euo pipefail
-          echo "Verifying published GitHub Release asset reachability: ${GITHUB_RELEASE_URL}"
-          HTTP_STATUS=$(curl -sL -o /tmp/probe_apk_head.bin -w "%{http_code}" -r 0-3 "${GITHUB_RELEASE_URL}" || echo "000")
-          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "206" ]; then
-            echo "Verified public GitHub Release URL is reachable (HTTP $HTTP_STATUS)."
-          else
-            echo "::warning::Direct unauthenticated probe returned HTTP $HTTP_STATUS (expected if repository is private; GitHub Pages deployment will serve public assets)."
-          fi
+          python3 - << 'PYEOF'
+          import os
+          import urllib.request
+
+          url = os.environ.get("GITHUB_RELEASE_URL", "")
+          print(f"Verifying published GitHub Release asset reachability: {url}")
+          req = urllib.request.Request(url, headers={"Range": "bytes=0-3", "User-Agent": "PMP-Release-Verifier"})
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  print(f"Verified public GitHub Release URL is reachable (HTTP {resp.status}).")
+          except Exception as exc:
+              print(f"::warning::Direct unauthenticated probe returned ({exc}); GitHub Pages deployment will also serve public assets.")
+          PYEOF
 
       - name: Upload Public Artifacts for GitHub Pages Hosting
         if: github.event_name != 'pull_request'
@@ -723,7 +899,7 @@ jobs:
         with:
           path: ./public
 
-      - name: Deploy Public Release Endpoint to GitHub Pages
+      - name: Deploy Official Website & Release Portal to GitHub Pages
         if: github.event_name != 'pull_request'
         id: deployment
         continue-on-error: true

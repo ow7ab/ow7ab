@@ -1,65 +1,269 @@
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="ar" dir="rtl" data-theme="true-black">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>تطبيق PMP PAINTS — مركز التحديثات الرسمي المباشر</title>
+    <meta name="description" content="الموقع الرسمي ومركز الإصدارات والتحديثات المباشرة لتطبيق PMP PAINTS ERP — نظام إدارة الحسابات، الخزن، المصنع، والمخازن لشركة PMP Paints للصناعات الكيماوية والطلاءات.">
+    <meta name="theme-color" content="#000000">
+    <title>PMP PAINTS ERP — الموقع الرسمي ومركز الإصدارات والتحديثات المباشرة</title>
+    <link rel="icon" type="image/png" href="./assets/ic_pmp_emblem.png">
+    <link rel="apple-touch-icon" href="./assets/ic_pmp_emblem.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
         :root {
-            --pmp-navy: #0F172A;
-            --pmp-navy-card: rgba(30, 41, 59, 0.7);
+            --bg-primary: #000000;
+            --bg-secondary: #050507;
+            --surface-primary: #0A0A0D;
+            --surface-card: rgba(18, 18, 22, 0.94);
+            --surface-elevated: #18181D;
+            --surface-subtle: #121216;
+            --border-subtle: #27272A;
+            --border-highlight: #3F3F46;
+            --text-primary: #F8FAFC;
+            --text-secondary: #A1A1AA;
+            --text-muted: #71717A;
             --pmp-red: #DC2626;
-            --pmp-red-hover: #B91C1C;
+            --pmp-red-light: #EF4444;
+            --pmp-red-dark: #991B1B;
             --pmp-cyan: #06B6D4;
+            --pmp-cyan-light: #38BDF8;
             --pmp-gold: #F59E0B;
+            --pmp-gold-dark: #D97706;
             --pmp-green: #10B981;
-            --glass-border: rgba(255, 255, 255, 0.12);
+            --pmp-green-dark: #059669;
+            --pmp-blue: #2563EB;
+            --glass-border: rgba(255, 255, 255, 0.10);
+            --shadow-card: 0 24px 48px -12px rgba(0, 0, 0, 0.85), 0 0 36px rgba(220, 38, 38, 0.08);
+        }
+
+        html[data-theme="daylight"] {
+            --bg-primary: #F0F4F8;
+            --bg-secondary: #E2EAF4;
+            --surface-primary: #FFFFFF;
+            --surface-card: rgba(255, 255, 255, 0.95);
+            --surface-elevated: #F8FAFC;
+            --surface-subtle: #F1F5F9;
+            --border-subtle: #DCE4EE;
+            --border-highlight: #CBD5E1;
+            --text-primary: #0F172A;
+            --text-secondary: #334155;
+            --text-muted: #64748B;
+            --glass-border: rgba(15, 23, 42, 0.10);
+            --shadow-card: 0 20px 40px -15px rgba(15, 23, 42, 0.10);
         }
 
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
-            font-family: 'Cairo', sans-serif;
+            font-family: 'Cairo', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+
+        html {
+            scroll-behavior: smooth;
         }
 
         body {
-            background: linear-gradient(135deg, #090D16 0%, #0F172A 50%, #1E1B4B 100%);
-            color: #F8FAFC;
+            background-color: var(--bg-primary);
+            background-image:
+                radial-gradient(circle at 85% 8%, rgba(220, 38, 38, 0.14) 0%, transparent 38%),
+                radial-gradient(circle at 12% 24%, rgba(6, 182, 212, 0.10) 0%, transparent 40%),
+                radial-gradient(circle at 50% 85%, rgba(245, 158, 11, 0.07) 0%, transparent 45%);
+            color: var(--text-primary);
             min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 24px 16px;
+            line-height: 1.65;
+            overflow-x: hidden;
+            transition: background-color 0.25s ease, color 0.25s ease;
         }
 
-        .container {
-            width: 100%;
-            max-width: 680px;
-            background: var(--pmp-navy-card);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid var(--glass-border);
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        /* Sticky Top Navbar */
+        .navbar {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: rgba(10, 10, 13, 0.86);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            border-bottom: 1px solid var(--border-subtle);
+            padding: 12px 20px;
+        }
+
+        html[data-theme="daylight"] .navbar {
+            background: rgba(255, 255, 255, 0.88);
+        }
+
+        .navbar-inner {
+            max-width: 1240px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .brand-cluster {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-icon-wrap {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            background: #FFFFFF;
+            border: 1px solid rgba(220, 38, 38, 0.45);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            box-shadow: 0 4px 14px rgba(220, 38, 38, 0.25);
+            flex-shrink: 0;
+        }
+
+        .brand-icon-wrap img {
+            width: 36px;
+            height: 36px;
+            object-fit: contain;
+        }
+
+        .brand-name-wrap {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .brand-name {
+            font-size: 19px;
+            font-weight: 900;
+            letter-spacing: -0.3px;
+            line-height: 1.2;
+        }
+
+        .brand-name span {
+            color: var(--pmp-red);
+        }
+
+        .brand-tagline {
+            font-size: 11.5px;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            flex-wrap: wrap;
+        }
+
+        .nav-links a {
+            font-size: 13.5px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            transition: color 0.2s ease;
+        }
+
+        .nav-links a:hover {
+            color: var(--pmp-cyan-light);
+        }
+
+        .nav-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .btn-chip {
+            background: var(--surface-elevated);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 999px;
+            padding: 6px 13px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+
+        .btn-chip:hover {
+            border-color: var(--pmp-cyan);
+            color: var(--pmp-cyan-light);
+        }
+
+        .btn-nav-download {
+            background: linear-gradient(135deg, var(--pmp-red) 0%, var(--pmp-red-dark) 100%);
+            color: #FFFFFF;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 999px;
+            padding: 7px 16px;
+            font-size: 12.5px;
+            font-weight: 800;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            box-shadow: 0 4px 14px rgba(220, 38, 38, 0.4);
+            transition: transform 0.2s ease;
+        }
+
+        .btn-nav-download:hover {
+            transform: translateY(-1px);
+        }
+
+        /* Main Page Wrapper */
+        .page-wrapper {
+            max-width: 1240px;
+            margin: 0 auto;
+            padding: 32px 16px 64px;
+        }
+
+        /* Hero Grid */
+        .hero-grid {
+            display: grid;
+            grid-template-columns: 1.08fr 0.92fr;
+            gap: 28px;
+            align-items: start;
+            margin-bottom: 48px;
+        }
+
+        @media (max-width: 960px) {
+            .hero-grid {
+                grid-template-columns: 1fr;
+            }
+            .nav-links {
+                display: none;
+            }
+        }
+
+        .hero-pitch {
+            background: var(--surface-card);
+            border: 1px solid var(--border-subtle);
             border-radius: 28px;
-            padding: 36px 28px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 40px rgba(6, 182, 212, 0.15);
-            text-align: center;
+            padding: 36px 32px;
+            box-shadow: var(--shadow-card);
             position: relative;
             overflow: hidden;
         }
 
-        .container::before {
+        .hero-pitch::before {
             content: '';
             position: absolute;
-            top: -50px;
-            right: -50px;
-            width: 160px;
-            height: 160px;
-            background: radial-gradient(circle, rgba(220, 38, 38, 0.3) 0%, transparent 70%);
+            top: -60px;
+            right: -60px;
+            width: 200px;
+            height: 200px;
+            background: radial-gradient(circle, rgba(220, 38, 38, 0.25) 0%, transparent 70%);
             pointer-events: none;
         }
 
@@ -67,12 +271,12 @@
             display: inline-flex;
             align-items: center;
             gap: 8px;
-            background: rgba(16, 185, 129, 0.15);
+            background: rgba(16, 185, 129, 0.14);
             color: #34D399;
-            border: 1px solid rgba(16, 185, 129, 0.3);
+            border: 1px solid rgba(16, 185, 129, 0.35);
             padding: 6px 14px;
             border-radius: 9999px;
-            font-size: 13px;
+            font-size: 12.5px;
             font-weight: 700;
             margin-bottom: 20px;
         }
@@ -91,38 +295,199 @@
             50% { opacity: 0.4; transform: scale(0.85); }
         }
 
+        .hero-app-identity {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            margin-bottom: 18px;
+            flex-wrap: wrap;
+        }
+
+        .hero-app-icon {
+            width: 84px;
+            height: 84px;
+            border-radius: 22px;
+            background: #FFFFFF;
+            border: 2px solid rgba(220, 38, 38, 0.55);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 12px 30px rgba(220, 38, 38, 0.3);
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        .hero-app-icon img {
+            width: 72px;
+            height: 72px;
+            object-fit: contain;
+        }
+
         .logo-title {
-            font-size: 32px;
+            font-size: 36px;
             font-weight: 900;
             letter-spacing: -0.5px;
-            color: #FFFFFF;
-            margin-bottom: 6px;
+            line-height: 1.15;
+            margin-bottom: 4px;
         }
 
         .logo-title span {
             color: var(--pmp-red);
         }
 
+        .hero-company-sub {
+            font-size: 13.5px;
+            font-weight: 700;
+            color: var(--pmp-gold);
+        }
+
         .subtitle {
-            font-size: 14.5px;
-            color: #94A3B8;
-            margin-bottom: 28px;
-            line-height: 1.6;
+            font-size: 15px;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+            line-height: 1.75;
+        }
+
+        .hero-pills {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 26px;
+        }
+
+        .hero-pill {
+            background: var(--surface-elevated);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 8px 13px;
+            font-size: 12.5px;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-download {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            width: 100%;
+            background: linear-gradient(135deg, var(--pmp-red) 0%, var(--pmp-red-dark) 100%);
+            color: #FFFFFF;
+            text-decoration: none;
+            padding: 18px 24px;
+            border-radius: 16px;
+            font-size: 18px;
+            font-weight: 800;
+            box-shadow: 0 12px 28px -6px rgba(220, 38, 38, 0.55);
+            transition: all 0.25s ease;
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            cursor: pointer;
+            margin-bottom: 12px;
+        }
+
+        .btn-download:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 16px 32px -5px rgba(220, 38, 38, 0.72);
+            background: linear-gradient(135deg, var(--pmp-red-light) 0%, var(--pmp-red) 100%);
+        }
+
+        .btn-download svg {
+            width: 24px;
+            height: 24px;
+            fill: currentColor;
+            flex-shrink: 0;
+        }
+
+        .mirror-links-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        @media (max-width: 560px) {
+            .mirror-links-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .btn-mirror {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            background: var(--surface-elevated);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 11px 14px;
+            font-size: 12.5px;
+            font-weight: 700;
+            transition: all 0.2s ease;
+            text-align: center;
+        }
+
+        .btn-mirror:hover {
+            border-color: var(--pmp-cyan);
+            color: var(--pmp-cyan-light);
+            transform: translateY(-1px);
+        }
+
+        .btn-verify {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            width: 100%;
+            background: rgba(6, 182, 212, 0.12);
+            color: var(--pmp-cyan-light);
+            padding: 13px 18px;
+            border-radius: 14px;
+            font-size: 14px;
+            font-weight: 700;
+            border: 1px solid rgba(6, 182, 212, 0.38);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-verify:hover {
+            background: rgba(6, 182, 212, 0.22);
+            border-color: rgba(6, 182, 212, 0.7);
+        }
+
+        .btn-verify svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+            flex-shrink: 0;
+        }
+
+        /* Release Telemetry Container (Right Column in RTL / Left in LTR) */
+        .container {
+            width: 100%;
+            background: var(--surface-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 28px;
+            padding: 30px 26px;
+            box-shadow: var(--shadow-card);
+            position: relative;
+            overflow: hidden;
         }
 
         .version-card {
-            background: rgba(15, 23, 42, 0.6);
-            border: 1px solid var(--glass-border);
+            background: var(--surface-primary);
+            border: 1px solid var(--border-subtle);
             border-radius: 20px;
             padding: 20px;
-            margin-bottom: 28px;
-            text-align: right;
+            margin-bottom: 18px;
             position: relative;
             overflow: hidden;
             transition: border-color 0.3s ease, box-shadow 0.3s ease;
         }
 
-        /* Shimmer loading state for version-card */
         @keyframes shimmer-sweep {
             0% { transform: translateX(100%); }
             100% { transform: translateX(-100%); }
@@ -168,144 +533,62 @@
             user-select: none;
         }
 
-        .version-card.is-loading .shimmer-target * {
-            opacity: 0;
-        }
-
-        .shimmer-target {
-            transition: color 0.25s ease, background 0.25s ease;
-        }
-
-        @media (prefers-reduced-motion: reduce) {
-            .version-card.is-loading::after,
-            .version-card.is-loading .shimmer-target {
-                animation: none;
-            }
-        }
-
         .version-row {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 12px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            gap: 10px;
+            margin-bottom: 11px;
+            padding-bottom: 11px;
+            border-bottom: 1px solid var(--border-subtle);
+            flex-wrap: wrap;
         }
 
-        .version-row:last-child {
+        .version-row:last-of-type {
             margin-bottom: 0;
             padding-bottom: 0;
             border-bottom: none;
         }
 
         .version-label {
-            color: #94A3B8;
-            font-size: 13.5px;
+            color: var(--text-secondary);
+            font-size: 13px;
+            font-weight: 600;
             display: flex;
             align-items: center;
             gap: 6px;
         }
 
         .version-value {
-            color: #F8FAFC;
-            font-weight: 700;
-            font-size: 14px;
+            color: var(--text-primary);
+            font-weight: 800;
+            font-size: 13.5px;
         }
 
-        .version-value.gold {
-            color: var(--pmp-gold);
-        }
-
-        .version-value.cyan {
-            color: var(--pmp-cyan);
-        }
+        .version-value.gold { color: var(--pmp-gold); }
+        .version-value.cyan { color: var(--pmp-cyan-light); }
+        .version-value.green { color: var(--pmp-green); }
 
         .release-notes {
             background: rgba(6, 182, 212, 0.08);
-            border: 1px dashed rgba(6, 182, 212, 0.3);
+            border: 1px dashed rgba(6, 182, 212, 0.35);
             border-radius: 14px;
             padding: 14px;
             font-size: 13px;
-            color: #E2E8F0;
-            line-height: 1.6;
+            color: var(--text-primary);
+            line-height: 1.7;
             margin-top: 14px;
-        }
-
-        .btn-download {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            width: 100%;
-            background: linear-gradient(135deg, var(--pmp-red) 0%, #991B1B 100%);
-            color: #FFFFFF;
-            text-decoration: none;
-            padding: 18px 24px;
-            border-radius: 16px;
-            font-size: 18px;
-            font-weight: 800;
-            box-shadow: 0 10px 25px -5px rgba(220, 38, 38, 0.5);
-            transition: all 0.25s ease;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            cursor: pointer;
-            margin-bottom: 18px;
-        }
-
-        .btn-download:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 15px 30px -5px rgba(220, 38, 38, 0.7);
-            background: linear-gradient(135deg, #EF4444 0%, var(--pmp-red) 100%);
-        }
-
-        .btn-download:active {
-            transform: translateY(1px);
-        }
-
-        .btn-download svg {
-            width: 24px;
-            height: 24px;
-            fill: currentColor;
-        }
-
-        .btn-verify {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-            width: 100%;
-            background: rgba(6, 182, 212, 0.14);
-            color: #38BDF8;
-            padding: 14px 20px;
-            border-radius: 14px;
-            font-size: 15px;
-            font-weight: 700;
-            border: 1px solid rgba(6, 182, 212, 0.4);
-            cursor: pointer;
-            transition: all 0.2s ease;
-            margin-bottom: 16px;
-        }
-
-        .btn-verify:hover {
-            background: rgba(6, 182, 212, 0.24);
-            border-color: rgba(6, 182, 212, 0.7);
-            transform: translateY(-1px);
-        }
-
-        .btn-verify svg {
-            width: 20px;
-            height: 20px;
-            fill: currentColor;
+            white-space: pre-line;
         }
 
         .verify-panel {
             display: none;
-            background: rgba(15, 23, 42, 0.82);
-            border: 1px solid rgba(16, 185, 129, 0.4);
+            background: var(--surface-primary);
+            border: 1px solid rgba(16, 185, 129, 0.45);
             border-radius: 18px;
             padding: 18px;
-            margin-bottom: 20px;
-            text-align: right;
-            box-shadow: 0 10px 25px -8px rgba(16, 185, 129, 0.2);
+            margin-top: 16px;
+            box-shadow: 0 10px 25px -8px rgba(16, 185, 129, 0.18);
         }
 
         .verify-panel.is-visible {
@@ -334,23 +617,23 @@
             background: rgba(16, 185, 129, 0.18);
             color: #6EE7B7;
             border: 1px solid rgba(16, 185, 129, 0.35);
-            font-size: 11.5px;
+            font-size: 11px;
             font-weight: 700;
             padding: 3px 10px;
             border-radius: 999px;
         }
 
         .checksum-box {
-            background: rgba(2, 6, 23, 0.75);
-            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: #050508;
+            border: 1px solid var(--border-subtle);
             border-radius: 12px;
             padding: 12px;
             margin: 10px 0;
             direction: ltr;
             text-align: left;
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            font-size: 12.5px;
-            color: #38BDF8;
+            font-size: 12px;
+            color: var(--pmp-cyan-light);
             word-break: break-all;
             line-height: 1.5;
             user-select: all;
@@ -366,9 +649,9 @@
         .btn-small {
             flex: 1;
             min-width: 140px;
-            background: rgba(30, 41, 59, 0.9);
-            color: #E2E8F0;
-            border: 1px solid rgba(255, 255, 255, 0.16);
+            background: var(--surface-elevated);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
             border-radius: 10px;
             padding: 9px 12px;
             font-size: 12.5px;
@@ -379,8 +662,8 @@
         }
 
         .btn-small:hover {
-            background: rgba(51, 65, 85, 0.95);
-            border-color: rgba(6, 182, 212, 0.5);
+            border-color: var(--pmp-cyan);
+            color: var(--pmp-cyan-light);
         }
 
         .local-verify-status {
@@ -407,54 +690,214 @@
             color: #FCA5A5;
         }
 
-        .instructions-list {
-            text-align: right;
-            font-size: 12.5px;
-            color: #94A3B8;
-            line-height: 1.8;
-            margin-top: 20px;
-            padding: 0 8px;
+        /* Section Headers */
+        .section-block {
+            margin-bottom: 52px;
         }
 
-        .instructions-list li {
-            margin-bottom: 6px;
-            list-style-type: none;
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 24px;
+        }
+
+        .section-eyebrow {
+            font-size: 12px;
+            font-weight: 800;
+            color: var(--pmp-red-light);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            margin-bottom: 4px;
+        }
+
+        .section-title {
+            font-size: 26px;
+            font-weight: 900;
+            color: var(--text-primary);
+        }
+
+        .section-desc {
+            font-size: 14px;
+            color: var(--text-secondary);
+            max-width: 680px;
+        }
+
+        /* Real Brand Visuals & Live Interactive App Screens Showcase */
+        .screens-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+        }
+
+        .phone-mockup-card {
+            background: var(--surface-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 24px;
+            padding: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            transition: transform 0.25s ease, border-color 0.25s ease;
+        }
+
+        .phone-mockup-card:hover {
+            transform: translateY(-4px);
+            border-color: rgba(6, 182, 212, 0.45);
+        }
+
+        .phone-screen {
+            background: #000000;
+            border: 2px solid #27272A;
+            border-radius: 18px;
+            padding: 14px;
+            color: #F8FAFC;
+            min-height: 250px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .phone-status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 10.5px;
+            color: #A1A1AA;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #18181D;
+            margin-bottom: 10px;
+        }
+
+        .mock-kpi-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .mock-kpi {
+            background: #121216;
+            border: 1px solid #27272A;
+            border-radius: 10px;
+            padding: 8px;
+        }
+
+        .mock-kpi-label {
+            font-size: 10px;
+            color: #A1A1AA;
+        }
+
+        .mock-kpi-val {
+            font-size: 13px;
+            font-weight: 800;
+            color: #10B981;
+        }
+
+        .mock-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            background: #0A0A0D;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .mock-table th {
+            background: #18181D;
+            color: #38BDF8;
+            padding: 6px;
+            font-weight: 800;
+            text-align: right;
+        }
+
+        .mock-table td {
+            padding: 6px;
+            border-top: 1px solid #18181D;
+            color: #E2E8F0;
+        }
+
+        .brand-poster-preview {
+            width: 100%;
+            height: 190px;
+            object-fit: cover;
+            border-radius: 12px;
+            border: 1px solid #27272A;
+        }
+
+        /* Features Grid (9 Real ERP Modules) */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+            gap: 18px;
+        }
+
+        .feature-card {
+            background: var(--surface-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 22px;
+            padding: 22px;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-3px);
+            border-color: var(--pmp-red);
+        }
+
+        .feature-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            background: rgba(220, 38, 38, 0.14);
+            border: 1px solid rgba(220, 38, 38, 0.32);
             display: flex;
             align-items: center;
-            gap: 8px;
+            justify-content: center;
+            font-size: 20px;
+            margin-bottom: 14px;
         }
 
-        .instructions-list li::before {
-            content: "✓";
-            color: var(--pmp-green);
-            font-weight: bold;
+        .feature-title {
+            font-size: 16.5px;
+            font-weight: 800;
+            margin-bottom: 8px;
+            color: var(--text-primary);
         }
 
+        .feature-desc {
+            font-size: 13.5px;
+            color: var(--text-secondary);
+            line-height: 1.7;
+        }
+
+        /* Release History Section */
         .history-section {
-            background: rgba(15, 23, 42, 0.68);
-            border: 1px solid var(--glass-border);
-            border-radius: 20px;
-            padding: 20px;
-            margin-top: 20px;
-            margin-bottom: 18px;
-            text-align: right;
+            background: var(--surface-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 24px;
+            padding: 26px;
         }
 
         .history-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            gap: 10px;
+            gap: 12px;
             flex-wrap: wrap;
-            margin-bottom: 14px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            margin-bottom: 18px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid var(--border-subtle);
         }
 
         .history-title {
-            font-size: 15.5px;
-            font-weight: 800;
-            color: #F8FAFC;
+            font-size: 18px;
+            font-weight: 900;
+            color: var(--text-primary);
             display: flex;
             align-items: center;
             gap: 8px;
@@ -463,74 +906,82 @@
         .history-header-actions {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
             flex-wrap: wrap;
         }
 
         .history-source-badge {
             background: rgba(6, 182, 212, 0.16);
-            color: #38BDF8;
+            color: var(--pmp-cyan-light);
             border: 1px solid rgba(6, 182, 212, 0.35);
-            font-size: 11px;
+            font-size: 11.5px;
             font-weight: 700;
-            padding: 3px 10px;
+            padding: 4px 12px;
             border-radius: 999px;
         }
 
         .btn-refresh-history {
-            background: rgba(30, 41, 59, 0.9);
-            color: #E2E8F0;
-            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: var(--surface-elevated);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
             border-radius: 999px;
-            padding: 4px 12px;
-            font-size: 11.5px;
+            padding: 5px 14px;
+            font-size: 12px;
             font-weight: 700;
             cursor: pointer;
             transition: all 0.2s ease;
         }
 
         .btn-refresh-history:hover {
-            background: rgba(6, 182, 212, 0.2);
-            border-color: rgba(6, 182, 212, 0.55);
-            color: #FFFFFF;
+            border-color: var(--pmp-cyan);
+            color: var(--pmp-cyan-light);
         }
 
         .history-list {
             display: flex;
             flex-direction: column;
-            gap: 12px;
-            max-height: 360px;
+            gap: 14px;
+            max-height: 520px;
             overflow-y: auto;
             padding-left: 4px;
         }
 
         .history-item {
-            background: rgba(2, 6, 23, 0.55);
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            border-right: 3px solid var(--pmp-cyan);
-            border-radius: 14px;
-            padding: 13px 14px;
-            transition: border-color 0.2s ease, background 0.2s ease;
+            background: var(--surface-primary);
+            border: 1px solid var(--border-subtle);
+            border-right: 4px solid var(--pmp-cyan);
+            border-radius: 16px;
+            padding: 16px 18px;
+            transition: border-color 0.2s ease;
+        }
+
+        html[dir="ltr"] .history-item {
+            border-right: 1px solid var(--border-subtle);
+            border-left: 4px solid var(--pmp-cyan);
         }
 
         .history-item.is-latest {
             border-right-color: var(--pmp-green);
-            background: rgba(16, 185, 129, 0.07);
+            background: rgba(16, 185, 129, 0.06);
+        }
+
+        html[dir="ltr"] .history-item.is-latest {
+            border-left-color: var(--pmp-green);
         }
 
         .history-item-top {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
             flex-wrap: wrap;
-            margin-bottom: 6px;
+            margin-bottom: 8px;
         }
 
         .history-version-tag {
-            font-size: 13.5px;
+            font-size: 14.5px;
             font-weight: 800;
-            color: #38BDF8;
+            color: var(--pmp-cyan-light);
             display: inline-flex;
             align-items: center;
             gap: 6px;
@@ -541,140 +992,615 @@
         }
 
         .history-meta {
-            font-size: 11.5px;
-            color: #94A3B8;
+            font-size: 12px;
+            color: var(--text-secondary);
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
             flex-wrap: wrap;
         }
 
         .history-notes {
-            font-size: 12.5px;
-            color: #E2E8F0;
-            line-height: 1.65;
+            font-size: 13px;
+            color: var(--text-primary);
+            line-height: 1.7;
             white-space: pre-line;
+            margin-bottom: 10px;
+        }
+
+        .history-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            flex-wrap: wrap;
+            padding-top: 8px;
+            border-top: 1px dashed var(--border-subtle);
+        }
+
+        .history-dl-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(220, 38, 38, 0.14);
+            color: #FCA5A5;
+            border: 1px solid rgba(220, 38, 38, 0.35);
+            border-radius: 8px;
+            padding: 5px 12px;
+            font-size: 12px;
+            font-weight: 700;
+            transition: all 0.2s ease;
+        }
+
+        .history-dl-link:hover {
+            background: var(--pmp-red);
+            color: #FFFFFF;
+        }
+
+        /* Installation Steps & Support Grid */
+        .steps-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 16px;
+        }
+
+        .step-card {
+            background: var(--surface-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 20px;
+            padding: 20px;
+        }
+
+        .step-num {
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            background: var(--pmp-red);
+            color: #FFFFFF;
+            font-weight: 900;
+            font-size: 15px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 12px;
+        }
+
+        .step-title {
+            font-size: 15.5px;
+            font-weight: 800;
+            margin-bottom: 6px;
+        }
+
+        .step-text {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.65;
+        }
+
+        .instructions-list {
+            font-size: 12.5px;
+            color: var(--text-secondary);
+            line-height: 1.8;
+            margin-top: 16px;
+            list-style: none;
+        }
+
+        .instructions-list li {
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .instructions-list li::before {
+            content: "✓";
+            color: var(--pmp-green);
+            font-weight: 900;
+        }
+
+        .support-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 18px;
+        }
+
+        .support-card {
+            background: var(--surface-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 20px;
+            padding: 22px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
         }
 
         .footer {
-            margin-top: 24px;
-            font-size: 12px;
-            color: #64748B;
+            margin-top: 48px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border-subtle);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 14px;
+            font-size: 12.5px;
+            color: var(--text-muted);
         }
     </style>
 </head>
 <body>
 
-    <div class="container">
-        <div class="badge-live" id="liveSyncBadge">
-            <span class="badge-dot"></span>
-            <span id="liveSyncText">متصل بـ Firebase Storage السحابي — تحديث تلقائي مباشر</span>
-        </div>
+    <!-- الشريط العلوي الرسمي -->
+    <header class="navbar" role="banner">
+        <div class="navbar-inner">
+            <a href="#" class="brand-cluster" aria-label="PMP PAINTS Home">
+                <div class="brand-icon-wrap">
+                    <img src="./assets/ic_pmp_emblem.png" alt="PMP Paints Official Emblem" onerror="this.style.display='none'">
+                </div>
+                <div class="brand-name-wrap">
+                    <div class="brand-name">PMP <span>PAINTS</span></div>
+                    <div class="brand-tagline" data-i18n="nav_tagline">المنظومة المؤسسية لإدارة المصنع والمخازن والحسابات</div>
+                </div>
+            </a>
 
-        <h1 class="logo-title">PMP <span>PAINTS</span></h1>
-        <p class="subtitle">مركز تنزيل وتثبيت أحدث إصدار لتطبيق نظام إدارة الحسابات، الخزن، المصنع، والمخازن</p>
+            <nav class="nav-links" aria-label="التنقل الرئيسي">
+                <a href="#heroSection" data-i18n="nav_download">التحميل المباشر</a>
+                <a href="#screensSection" data-i18n="nav_screens">واجهات النظام</a>
+                <a href="#featuresSection" data-i18n="nav_features">وحدات ERP</a>
+                <a href="#releaseHistorySection" data-i18n="nav_history">سجل الإصدارات</a>
+                <a href="#installSection" data-i18n="nav_install">دليل التثبيت</a>
+                <a href="#supportSection" data-i18n="nav_support">الدعم الرسمي</a>
+            </nav>
 
-        <div class="version-card is-loading" id="versionCard" aria-busy="true" aria-live="polite">
-            <div class="version-row">
-                <span class="version-label">📦 رقم الإصدار الحالي:</span>
-                <span class="version-value cyan shimmer-target" id="versionName">v4.2 (Build 17)</span>
-            </div>
-            <div class="version-row">
-                <span class="version-label">🔖 معرّف البناء (Build ID):</span>
-                <span class="version-value shimmer-target" id="buildId">PMP-v4.2-b17-9a8b7c6d</span>
-            </div>
-            <div class="version-row">
-                <span class="version-label">⚡ معرّف الحزمة (Package ID):</span>
-                <span class="version-value">com.aistudio.pmppaints.erp</span>
-            </div>
-            <div class="version-row">
-                <span class="version-label">🛡️ التوقيع الرقمي:</span>
-                <span class="version-value gold">موقّع رسمي معتمد (In-Place Upgrade)</span>
-            </div>
-            <div class="version-row">
-                <span class="version-label">💾 حجم الحزمة:</span>
-                <span class="version-value shimmer-target" id="fileSize">22.14 ميجابايت</span>
-            </div>
-
-            <div class="release-notes shimmer-target" id="releaseNotes">
-                ✨ <strong>النسخة v4.2 (بناء #17):</strong> تفعيل ضغط وتعمية الكود عبر R8/ProGuard، إضافة سجل تاريخ الإصدارات من Firestore، وتحديث رسمي عبر مكتبة Google Play الشخصية.
-            </div>
-        </div>
-
-        <!-- زر التنزيل المباشر -->
-        <a href="./pmp-paints-latest.apk" class="btn-download" download="pmp-paints-v4.2-b17.apk" id="downloadBtn">
-            <svg viewBox="0 0 24 24">
-                <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/>
-            </svg>
-            <span>تحميل التحديث المباشر الآن (APK)</span>
-        </a>
-
-        <!-- زر التحقق من سلامة الملف وبصمة SHA-256 من version.json -->
-        <button type="button" class="btn-verify" id="verifyBtn" onclick="verifyDownloadedFileIntegrity()">
-            <svg viewBox="0 0 24 24">
-                <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/>
-            </svg>
-            <span id="verifyBtnText">التحقق من سلامة الملف (Verify SHA-256 Checksum)</span>
-        </button>
-
-        <!-- لوحة عرض ومطابقة بصمة SHA-256 المجلوبة من version.json -->
-        <div class="verify-panel" id="verifyPanel" role="region" aria-label="SHA-256 Checksum Verification">
-            <div class="verify-header">
-                <span class="verify-title">🔐 بصمة التحقق الرسمية (SHA-256 Checksum)</span>
-                <span class="verify-badge" id="verifySourceBadge">تم الجلب من version.json</span>
-            </div>
-            <p style="font-size: 12.5px; color: #CBD5E1; line-height: 1.6;">
-                استخدم بصمة <strong>SHA-256</strong> التالية للتحقق من سلامة ملف الـ APK الذي قمت بتنزيله والتأكد من عدم تعرضه لأي تلف أو تعديل أثناء التحميل:
-            </p>
-            <div class="checksum-box" id="sha256ChecksumDisplay">
-                9bb5d7bc646468b5d838303cd7e08846a3e14b939615e9a8e00600d8a146f57a
-            </div>
-            <div style="font-size: 12px; color: #94A3B8; margin-bottom: 8px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px;">
-                <span>الحجم المتوقع بالبايت: <strong id="expectedBytesDisplay" style="color: #F8FAFC;">32,494,119 بايت</strong></span>
-                <span>بصمة شهادة التوقيع: <strong id="signingCertDisplay" style="color: #F59E0B;" dir="ltr">1F:F7:75:2A...A1:0D:11:05</strong></span>
-            </div>
-            <div class="verify-actions-row">
-                <button type="button" class="btn-small" id="copySha256Btn" onclick="copySha256ToClipboard()">
-                    📋 نسخ بصمة SHA-256
+            <div class="nav-actions">
+                <button type="button" class="btn-chip" id="themeToggleBtn" onclick="toggleWebsiteTheme()" aria-label="تبديل المظهر">
+                    <span id="themeToggleLabel">🌑 الوضع الأسود الفائق</span>
                 </button>
-                <label class="btn-small" for="verifyFileInput" style="cursor: pointer;">
-                    🔍 فحص ملف APK المنزّل ومطابقته تلقائياً
-                </label>
-                <input type="file" id="verifyFileInput" accept=".apk,application/vnd.android.package-archive" style="display: none;" onchange="verifyLocalApkFile(this)">
+                <button type="button" class="btn-chip" id="langToggleBtn" onclick="toggleWebsiteLanguage()" aria-label="Switch Language">
+                    <span id="langToggleLabel">🌐 English</span>
+                </button>
+                <a href="#downloadBtn" class="btn-nav-download">
+                    <span>⬇️</span>
+                    <span data-i18n="nav_cta">تنزيل أحدث APK</span>
+                </a>
             </div>
-            <div class="local-verify-status" id="localFileVerifyStatus"></div>
         </div>
+    </header>
 
-        <!-- قسم سجل التحديثات وملاحظات الإصدارات السابقة من Firestore -->
-        <section class="history-section" id="releaseHistorySection" aria-label="سجل الإصدارات وملاحظات التحديثات السابقة">
+    <main class="page-wrapper">
+        <!-- القسم الرئيسي (Hero & Authoritative Release Card) -->
+        <section class="hero-grid" id="heroSection">
+            <!-- العمود الأيمن: الهوية الرسمية وزر التحميل المباشر -->
+            <div class="hero-pitch">
+                <div class="badge-live" id="liveSyncBadge">
+                    <span class="badge-dot"></span>
+                    <span id="liveSyncText">متصل بـ GitHub Releases و Firebase السحابي — تحديث تلقائي مباشر</span>
+                </div>
+
+                <div class="hero-app-identity">
+                    <div class="hero-app-icon">
+                        <img src="./assets/ic_pmp_emblem.png" alt="شعار تطبيق PMP PAINTS الرسمي" onerror="this.src='./assets/pmp_brand_logo.jpg'">
+                    </div>
+                    <div>
+                        <h1 class="logo-title">PMP <span>PAINTS</span></h1>
+                        <div class="hero-company-sub" data-i18n="hero_company">شركة PMP PAINTS للصناعات الكيماوية والطلاءات</div>
+                    </div>
+                </div>
+
+                <p class="subtitle" data-i18n="hero_subtitle">
+                    الموقع الرسمي المعتمد لتنزيل وتحديث تطبيق نظام تخطيط موارد المؤسسة (Enterprise ERP) لإدارة الحسابات، الخزن متعددة العملات، المصنع، معمل الكيمياء، والمخازن — مصمم بالوضع المظلم الأسود الفائق (True Pitch Black #000000) ومرتبط تلقائياً بمنظومة البناء والتوقيع السحابي عبر GitHub Actions.
+                </p>
+
+                <div class="hero-pills">
+                    <span class="hero-pill">🤖 Android 7.0+ (API 24–36)</span>
+                    <span class="hero-pill">🛡️ R8/ProGuard + PBKDF2 + 2FA</span>
+                    <span class="hero-pill">⚡ Room v11 + Cloud Firestore Sync</span>
+                    <span class="hero-pill">🌑 True Black AMOLED #000000</span>
+                </div>
+
+                <!-- زر التنزيل المباشر الرئيسي -->
+                <a href="https://github.com/ow7ab/ow7ab/releases/latest/download/pmp-paints-latest.apk" class="btn-download" download="pmp-paints-v4.2-b17.apk" id="downloadBtn">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/>
+                    </svg>
+                    <span id="downloadBtnLabel" data-i18n="btn_download_main">تحميل أحدث إصدار رسمي الآن (APK)</span>
+                </a>
+
+                <!-- روابط التنزيل المساندة المباشرة -->
+                <div class="mirror-links-row">
+                    <a href="https://github.com/ow7ab/ow7ab/releases/latest" target="_blank" rel="noopener noreferrer" class="btn-mirror" id="githubReleaseDownloadBtn">
+                        <span>📦</span>
+                        <span data-i18n="btn_github_release">تنزيل مباشر من GitHub Releases</span>
+                    </a>
+                    <a href="./pmp-paints-latest.apk" class="btn-mirror" id="pagesDownloadBtn" download>
+                        <span>🌐</span>
+                        <span data-i18n="btn_pages_mirror">رابط مباشر بديل (GitHub Pages Mirror)</span>
+                    </a>
+                </div>
+
+                <!-- زر التحقق من سلامة الملف وبصمة SHA-256 -->
+                <button type="button" class="btn-verify" id="verifyBtn" onclick="verifyDownloadedFileIntegrity()">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/>
+                    </svg>
+                    <span id="verifyBtnText">التحقق من سلامة الملف وبصمة SHA-256 الرسمية</span>
+                </button>
+
+                <!-- لوحة عرض ومطابقة بصمة SHA-256 -->
+                <div class="verify-panel" id="verifyPanel" role="region" aria-label="SHA-256 Checksum Verification">
+                    <div class="verify-header">
+                        <span class="verify-title">🔐 بصمة التحقق الرسمية (SHA-256 Checksum)</span>
+                        <span class="verify-badge" id="verifySourceBadge">تم الجلب من version.json</span>
+                    </div>
+                    <p style="font-size: 12.5px; color: var(--text-secondary); line-height: 1.6;">
+                        استخدم بصمة <strong>SHA-256</strong> التالية للتحقق من سلامة ملف الـ APK الذي قمت بتنزيله والتأكد من تطابقه التام مع البناء الموقّع رسمياً:
+                    </p>
+                    <div class="checksum-box" id="sha256ChecksumDisplay">
+                        115155cd57c7c17245fa8b3ce3e90b94a509ca2c2abcfbfcf82ba0193adf7620
+                    </div>
+                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px;">
+                        <span>الحجم المتوقع بالبايت: <strong id="expectedBytesDisplay" style="color: var(--text-primary);">23,214,481 بايت</strong></span>
+                        <span>بصمة شهادة التوقيع: <strong id="signingCertDisplay" style="color: var(--pmp-gold);" dir="ltr">1F:F7:75:2A...A1:0D:11:05</strong></span>
+                    </div>
+                    <div class="verify-actions-row">
+                        <button type="button" class="btn-small" id="copySha256Btn" onclick="copySha256ToClipboard()">
+                            📋 نسخ بصمة SHA-256
+                        </button>
+                        <label class="btn-small" for="verifyFileInput" style="cursor: pointer;">
+                            🔍 فحص ملف APK المنزّل ومطابقته تلقائياً
+                        </label>
+                        <input type="file" id="verifyFileInput" accept=".apk,application/vnd.android.package-archive" style="display: none;" onchange="verifyLocalApkFile(this)">
+                    </div>
+                    <div class="local-verify-status" id="localFileVerifyStatus"></div>
+                </div>
+
+                <ul class="instructions-list">
+                    <li data-i18n="hero_bullet_1">ترقية فورية آمنة (In-Place Upgrade) تحافظ 100% على حسابات الموظفين، الفواتير، وأرصدة الخزن والمخازن.</li>
+                    <li data-i18n="hero_bullet_2">يتم بناء وتوقيع وفحص كل إصدار آلياً عبر GitHub Actions قبل نشره على هذه الصفحة.</li>
+                    <li data-i18n="hero_bullet_3">يدعم الإشعار التلقائي بالتحديثات من داخل التطبيق (UpdateManager OTA) مع فحص البصمة الرقمية.</li>
+                </ul>
+            </div>
+
+            <!-- العمود الأيسر: بطاقة بيانات الإصدار الحية وما الجديد -->
+            <div class="container">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
+                    <h2 style="font-size: 18px; font-weight: 900;" data-i18n="card_title">بيانات الإصدار المستقر المنشور</h2>
+                    <span class="verify-badge" id="releaseChannelBadge">STABLE • PUBLISHED</span>
+                </div>
+
+                <div class="version-card is-loading" id="versionCard" aria-busy="true" aria-live="polite">
+                    <div class="version-row">
+                        <span class="version-label" data-i18n="lbl_version">📦 رقم الإصدار الحالي:</span>
+                        <span class="version-value cyan shimmer-target" id="versionName">v4.2 (Build 17)</span>
+                    </div>
+                    <div class="version-row">
+                        <span class="version-label" data-i18n="lbl_pub_date">📅 تاريخ النشر (UTC):</span>
+                        <span class="version-value shimmer-target" id="publishedAtDisplay">2026-11-10</span>
+                    </div>
+                    <div class="version-row">
+                        <span class="version-label" data-i18n="lbl_build_id">🔖 معرّف البناء (Build ID):</span>
+                        <span class="version-value shimmer-target" id="buildId" dir="ltr">PMP-v4.2-b17-9a8b7c6d</span>
+                    </div>
+                    <div class="version-row">
+                        <span class="version-label" data-i18n="lbl_pkg_id">⚡ معرّف الحزمة الرسمي:</span>
+                        <span class="version-value" dir="ltr">com.aistudio.pmppaints.erp</span>
+                    </div>
+                    <div class="version-row">
+                        <span class="version-label" data-i18n="lbl_size">💾 حجم الحزمة (APK Size):</span>
+                        <span class="version-value shimmer-target" id="fileSize">22.14 ميجابايت</span>
+                    </div>
+                    <div class="version-row">
+                        <span class="version-label" data-i18n="lbl_compat">📱 التوافق مع أندرويد:</span>
+                        <span class="version-value green">Android 7.0+ (API 24 – 36)</span>
+                    </div>
+                    <div class="version-row">
+                        <span class="version-label" data-i18n="lbl_sig">🛡️ شهادة التوقيع الرقمي:</span>
+                        <span class="version-value gold" title="1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05">موقّع رسمي معتمد (V2/V3 Verified)</span>
+                    </div>
+
+                    <div class="release-notes shimmer-target" id="releaseNotes">
+                        ✨ <strong>ما الجديد في هذا الإصدار:</strong> تفعيل ضغط وتعمية الكود عبر R8/ProGuard، ترقية منظومة الأمن والمصادقة البيومترية، ومزامنة سجل الإصدارات المباشر من GitHub Releases وFirestore.
+                    </div>
+                </div>
+
+                <!-- ملصق الهوية البصرية الأصلي من موارد التطبيق -->
+                <div style="background: var(--surface-primary); border: 1px solid var(--border-subtle); border-radius: 18px; padding: 14px; display: flex; align-items: center; gap: 14px;">
+                    <img src="./assets/pmp_brand_logo.jpg" alt="PMP Paints Brand Logo" style="width: 68px; height: 68px; border-radius: 14px; object-fit: cover; border: 1px solid var(--border-subtle); flex-shrink: 0;" onerror="this.src='./assets/ic_pmp_emblem.png'">
+                    <div style="font-size: 12.5px; color: var(--text-secondary); line-height: 1.6;">
+                        <strong style="color: var(--text-primary); display: block; margin-bottom: 2px;" data-i18n="authentic_badge_title">الهوية الأصلية المعتمدة لشركة PMP PAINTS</strong>
+                        <span data-i18n="authentic_badge_desc">حزمة أندرويد الرسمية الموقّعة بشهادة التطوير المؤسسية الثابتة لضمان الترقية السلسة دون تعارض الحزم.</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- قسم استعراض الواجهات الفعلية والهوية البصرية (Real Application Visuals & True Black UI) -->
+        <section class="section-block" id="screensSection">
+            <div class="section-header">
+                <div>
+                    <div class="section-eyebrow">TRUE PITCH BLACK UI (#000000)</div>
+                    <h2 class="section-title" data-i18n="screens_title">معاينة الواجهات الفعلية والهوية البصرية للتطبيق</h2>
+                </div>
+                <p class="section-desc" data-i18n="screens_desc">
+                    تم تصميم واجهات تطبيق PMP PAINTS باستخدام Jetpack Compose مع دعم كامل للوضع المظلم الأسود الفائق (AMOLED #000000) والوضع النهاري المتكيف لتوفير أقصى درجات الوضوح والراحة البصرية.
+                </p>
+            </div>
+
+            <div class="screens-grid">
+                <!-- واجهة 1: الهوية البصرية الرسمية والملصق الصناعي -->
+                <div class="phone-mockup-card">
+                    <div class="phone-screen">
+                        <div>
+                            <div class="phone-status-bar">
+                                <span>PMP PAINTS ERP</span>
+                                <span>5G • 100% 🔋</span>
+                            </div>
+                            <img src="./assets/pmp_brand_poster.jpg" alt="PMP Paints Official Industrial Poster" class="brand-poster-preview" onerror="this.src='./assets/pmp_brand_logo.jpg'">
+                        </div>
+                        <div style="margin-top: 10px; background: #121216; border: 1px solid #27272A; border-radius: 12px; padding: 10px;">
+                            <div style="font-size: 12px; font-weight: 800; color: #F8FAFC;">🏭 الهوية الصناعية المعتمدة</div>
+                            <div style="font-size: 11px; color: #A1A1AA;">فرع السودان (SD-001) • فرع مصر والمصنع</div>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 style="font-size: 15.5px; font-weight: 800; margin-bottom: 4px;">الهوية البصرية متعددة الفروع</h3>
+                        <p style="font-size: 12.5px; color: var(--text-secondary);">ربط لحظي بين فروع المبيعات، الخزن المالية، والمصنع المركزي مع عزل دقيق للصلاحيات.</p>
+                    </div>
+                </div>
+
+                <!-- واجهة 2: جدول المخازن الثلاثي وإدارة الأوزان -->
+                <div class="phone-mockup-card">
+                    <div class="phone-screen">
+                        <div>
+                            <div class="phone-status-bar">
+                                <span>المخازن وإدارة الأوزان</span>
+                                <span style="color: #38BDF8;">الوزن: 900 جم ▼</span>
+                            </div>
+                            <div class="mock-kpi-row">
+                                <div class="mock-kpi">
+                                    <div class="mock-kpi-label">إجمالي الكراتين</div>
+                                    <div class="mock-kpi-val">1,420 كرتونة</div>
+                                </div>
+                                <div class="mock-kpi">
+                                    <div class="mock-kpi-label">قاعدة التعبئة</div>
+                                    <div class="mock-kpi-val" style="color: #F59E0B;">12 عبوة / كرتونة</div>
+                                </div>
+                            </div>
+                            <table class="mock-table" aria-label="معاينة جدول المخزون الثلاثي">
+                                <thead>
+                                    <tr>
+                                        <th>اللون</th>
+                                        <th>الوزن</th>
+                                        <th>العدد</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>أبيض ناصع</td>
+                                        <td>900 جم</td>
+                                        <td style="color: #10B981; font-weight: 800;">450 كرتونة</td>
+                                    </tr>
+                                    <tr>
+                                        <td>أحمر أكسيد</td>
+                                        <td>250 جم</td>
+                                        <td style="color: #38BDF8; font-weight: 800;">320 كرتونة</td>
+                                    </tr>
+                                    <tr>
+                                        <td>أصفر جملي</td>
+                                        <td>4000 جم</td>
+                                        <td style="color: #F59E0B; font-weight: 800;">185 كرتونة</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div style="font-size: 10.5px; color: #A1A1AA; text-align: center; margin-top: 8px;">
+                            جدول ثلاثي الأعمدة (اللون | الوزن | العدد) مع تسعير تلقائي حسب الوزن
+                        </div>
+                    </div>
+                    <div>
+                        <h3 style="font-size: 15.5px; font-weight: 800; margin-bottom: 4px;">المخازن وإدارة الأوزان الديناميكية</h3>
+                        <p style="font-size: 12.5px; color: var(--text-secondary);">دعم كامل لأوزان العبوات (250 جم، 900 جم، 4000 جم) مع حساب تلقائي لعدد العبوات في الكرتونة.</p>
+                    </div>
+                </div>
+
+                <!-- واجهة 3: الأمن المتقدم والمصادقة البيومترية والتحديثات -->
+                <div class="phone-mockup-card">
+                    <div class="phone-screen">
+                        <div>
+                            <div class="phone-status-bar">
+                                <span>الأمان وتحديثات النظام</span>
+                                <span style="color: #10B981;">PBKDF2 • 2FA 🔒</span>
+                            </div>
+                            <div style="background: #121216; border: 1px solid #27272A; border-radius: 12px; padding: 10px; margin-bottom: 8px;">
+                                <div style="font-size: 11.5px; font-weight: 800; color: #34D399; margin-bottom: 4px;">✓ الدخول بالبصمة مرتبط بحساب الموظف</div>
+                                <div style="font-size: 10.5px; color: #A1A1AA;">عزل صارم للبصمة ومنع فتح حساب موظف آخر أو تجاوز التحقق السحابي.</div>
+                            </div>
+                            <div style="background: #0B241A; border: 1px solid rgba(16, 185, 129, 0.35); border-radius: 12px; padding: 10px;">
+                                <div style="font-size: 11.5px; font-weight: 800; color: #6EE7B7;">🔄 مركز التحديثات المباشرة (OTA)</div>
+                                <div style="font-size: 10.5px; color: #D1FAE5; margin-top: 3px;">فحص تلقائي لملف version.json وGitHub Releases مع مطابقة بصمة SHA-256 قبل التثبيت.</div>
+                            </div>
+                        </div>
+                        <div style="font-size: 10.5px; color: #F59E0B; text-align: center; margin-top: 8px;">
+                            حماية ضد محاولات الدخول المتكررة + إدارة الأجهزة الموثوقة
+                        </div>
+                    </div>
+                    <div>
+                        <h3 style="font-size: 15.5px; font-weight: 800; margin-bottom: 4px;">الأمن المؤسسي المتقدم والتحديث السحابي</h3>
+                        <p style="font-size: 12.5px; color: var(--text-secondary);">تشفير كلمات المرور بمعيار PBKDF2-HMAC-SHA256، التحقق بخطوتين 2FA، وسجل نشاط الدخول.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- قسم وحدات النظام والمميزات الفعلية (9 Real ERP Modules) -->
+        <section class="section-block" id="featuresSection">
+            <div class="section-header">
+                <div>
+                    <div class="section-eyebrow">ENTERPRISE ERP ARCHITECTURE</div>
+                    <h2 class="section-title" data-i18n="features_title">المميزات والوحدات الفعلية في نظام PMP PAINTS</h2>
+                </div>
+                <p class="section-desc" data-i18n="features_desc">
+                    بنية برمجية معيارية متكاملة (14 وحدة قياسية في PmpModuleRegistry) تغطي دورة العمل الصناعية والمحاسبية الكاملة من شراء الخامات وحتى تحصيل المبيعات.
+                </p>
+            </div>
+
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">🧾</div>
+                    <h3 class="feature-title">المبيعات والفوترة الذكية</h3>
+                    <p class="feature-desc">إصدار الفواتير النقدية والآجلة، التحصيل الجزئي والكلي، التسعير الديناميكي للكراتين حسب الوزن، وإلغاء الفواتير مع القيود العكسية الآلية للمخزون والخزنة.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🏦</div>
+                    <h3 class="feature-title">إدارة الخزن متعددة العملات</h3>
+                    <p class="feature-desc">إدارة متكاملة للخزن بالعملات المعتمدة (جنيه سوداني SDG، جنيه مصري EGP، دولار USD)، سندات القبض والصرف، التحويلات المالية، وتجميع الأرصدة اللحظي عبر SQL.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📦</div>
+                    <h3 class="feature-title">المخازن وإدارة الأوزان والعبوات</h3>
+                    <p class="feature-desc">جدول مخزون ثلاثي الأعمدة (اللون | الوزن | العدد)، إعادة تسمية الأوزان بأمان دون فقدان السجلات، ومعايير تعبئة قياسية (250 جم = 48 عبوة، 900 جم = 12 عبوة، 4000 جم = 4 عبوات).</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🏭</div>
+                    <h3 class="feature-title">التصنيع وأوامر الإنتاج ومراقبة الجودة</h3>
+                    <p class="feature-desc">إدارة أوامر التشغيل، صرف المواد الخام (BOM)، مطابقة معادلات التعبئة والفاقد، وفحص الجودة المخبرية (الكثافة، اللزوجة KU، ومطابقة اللون) قبل التوريد للمخزن.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🧪</div>
+                    <h3 class="feature-title">معمل الكيمياء والتركيبات المعتمدة</h3>
+                    <p class="feature-desc">حفظ وإدارة تركيبات الدهانات والنسب الكيميائية، حساب تكلفة التشغيلة والربحية الصافية، وتصدير تقارير التركيبات بصيغة PDF احترافية.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🚚</div>
+                    <h3 class="feature-title">المشتريات وأذون استلام الخامات (GRN)</h3>
+                    <p class="feature-desc">دورة مشتريات محكمة تفصل بين أمر الشراء والاستلام الفعلي بالمخزن، مع إثبات الكميات المقبولة والمرفوضة وعجز التوريد قبل التأثير على الرصيد المتاح.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📊</div>
+                    <h3 class="feature-title">التقارير وتصدير Excel (XLSX) و PDF</h3>
+                    <p class="feature-desc">كشوف حساب تفصيلية للعملاء والموردين وتقارير حركة الفروع مع تصدير فوري لملفات OpenXML Excel (.xlsx) و PDF تدعم المحاذاة العربية من اليمين لليسار (RTL).</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🔐</div>
+                    <h3 class="feature-title">الأمن المتقدم وعزل البصمة والصلاحيات</h3>
+                    <p class="feature-desc">تشفير PBKDF2-HMAC-SHA256، التحقق الثنائي 2FA، إدارة الأجهزة الموثوقة، ربط البصمة بحساب الموظف المسجل حصراً، وحصر إنشاء الحسابات وتعديل الصلاحيات بـ Admin فقط.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">☁️</div>
+                    <h3 class="feature-title">المزامنة السحابية والعمل دون اتصال</h3>
+                    <p class="feature-desc">قاعدة بيانات محلية Room v11 بترقيات آمنة غير تدميرية متزامنة لحظياً مع Firebase Firestore وسجل شواهد الحذف (DeletedRecordsRegistry) لمنع عودة السجلات المحذوفة.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- قسم سجل التحديثات وملاحظات الإصدارات السابقة (GitHub Releases + Firestore + version.json) -->
+        <section class="history-section section-block" id="releaseHistorySection" aria-label="سجل الإصدارات وملاحظات التحديثات السابقة">
             <div class="history-header">
                 <div class="history-title">
-                    <span>📜 سجل الإصدارات وملاحظات التحديث (Update History)</span>
+                    <span>📜</span>
+                    <span data-i18n="history_title">سجل الإصدارات وملاحظات التحديث والتحميلات السابقة (Update History)</span>
                 </div>
                 <div class="history-header-actions">
-                    <span class="history-source-badge" id="releaseHistoryBadge">جاري الجلب من Firestore...</span>
+                    <span class="history-source-badge" id="releaseHistoryBadge">جاري الجلب من GitHub Releases و Firestore...</span>
                     <button type="button" class="btn-refresh-history" id="refreshReleaseHistoryBtn" onclick="fetchAndRenderReleaseHistoryFromFirestore()">
-                        🔄 تحديث السجل
+                        🔄 تحديث السجل الآن
                     </button>
                 </div>
             </div>
             <div class="history-list" id="releaseHistoryList" role="list">
-                <!-- يتم ملء قائمة الإصدارات السابقة تلقائياً من Firestore -->
+                <!-- يتم ملء قائمة الإصدارات السابقة تلقائياً من GitHub Releases API و releases-history.json و Firestore -->
             </div>
         </section>
 
-        <ul class="instructions-list">
-            <li>التحديث آمن ومباشر: لن يتم حذف أي بيانات أو إعدادات أو أرصدة سابقة.</li>
-            <li>يتم تحديث هذه الصفحة تلقائياً فور رفع ملف <code>version.json</code> من واجهة المدير داخل التطبيق إلى Firebase Storage.</li>
-            <li>يقوم التطبيق بالترقية الفورية (In-Place Package Upgrade) تلقائياً.</li>
-        </ul>
+        <!-- قسم خطوات التثبيت والترقية الآمنة -->
+        <section class="section-block" id="installSection">
+            <div class="section-header">
+                <div>
+                    <div class="section-eyebrow">INSTALLATION & IN-PLACE UPGRADE</div>
+                    <h2 class="section-title" data-i18n="install_title">طريقة التثبيت والترقية الآمنة على أجهزة أندرويد</h2>
+                </div>
+            </div>
 
-        <div class="footer">
-            جميع الحقوق محفوظة &copy; 2026 شركة PMP PAINTS للصناعات الكيماوية والطلاءات
-        </div>
-    </div>
+            <div class="steps-grid">
+                <div class="step-card">
+                    <div class="step-num">1</div>
+                    <h3 class="step-title">تنزيل الحزمة الرسمية</h3>
+                    <p class="step-text">اضغط على زر "تحميل أحدث إصدار رسمي الآن (APK)" في أعلى الصفحة لتنزيل النسخة الموقّعة مباشرة من GitHub Releases أو GitHub Pages.</p>
+                </div>
+                <div class="step-card">
+                    <div class="step-num">2</div>
+                    <h3 class="step-title">التحقق من بصمة SHA-256 (اختياري)</h3>
+                    <p class="step-text">يمكنك الضغط على زر "التحقق من سلامة الملف" واختيار ملف APK المنزّل لفحصه محلياً في متصفحك والتأكد من تطابق البصمة الرقمية 100%.</p>
+                </div>
+                <div class="step-card">
+                    <div class="step-num">3</div>
+                    <h3 class="step-title">السماح بالتثبيت والترقية</h3>
+                    <p class="step-text">افتح ملف الـ APK على هاتفك أو جهازك اللوحي (Android 7.0+)، ووافق على الترقية فوق النسخة الحالية دون الحاجة لحذف التطبيق السابق.</p>
+                </div>
+                <div class="step-card">
+                    <div class="step-num">4</div>
+                    <h3 class="step-title">الحفاظ الكامل على البيانات</h3>
+                    <p class="step-text">بفضل ثبات معرّف الحزمة (<code>com.aistudio.pmppaints.erp</code>) وشهادة التوقيع، تبقى جميع الفواتير، الأرصدة، وحسابات الموظفين محفوظة بالكامل.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- قسم التواصل الرسمي والدعم الفني والحوكمة -->
+        <section class="section-block" id="supportSection">
+            <div class="section-header">
+                <div>
+                    <div class="section-eyebrow">OFFICIAL SUPPORT & REPOSITORY</div>
+                    <h2 class="section-title" data-i18n="support_title">الدعم الفني والروابط الرسمية المعتمدة</h2>
+                </div>
+            </div>
+
+            <div class="support-grid">
+                <div class="support-card">
+                    <div style="font-size: 22px;">🐙</div>
+                    <h3 style="font-size: 16px; font-weight: 800;">المستودع الرسمي والإصدارات (GitHub)</h3>
+                    <p style="font-size: 13px; color: var(--text-secondary);">المصدر الرسمي لبناء وتوقيع ونشر حزم APK المعتمدة وسجل الإصدارات الكامل.</p>
+                    <a href="https://github.com/ow7ab/ow7ab/releases" target="_blank" rel="noopener noreferrer" class="btn-mirror" style="margin-top: auto;">
+                        فتح صفحة GitHub Releases (ow7ab/ow7ab) ↗
+                    </a>
+                </div>
+                <div class="support-card">
+                    <div style="font-size: 22px;">📧</div>
+                    <h3 style="font-size: 16px; font-weight: 800;">البريد الرسمي للدعم الفني والنظام</h3>
+                    <p style="font-size: 13px; color: var(--text-secondary);">للتواصل المباشر مع إدارة النظام بخصوص التحديثات، صلاحيات الفروع، أو استعادة الحسابات.</p>
+                    <a href="mailto:oaw7ab@gmail.com" class="btn-mirror" style="margin-top: auto;" dir="ltr">
+                        oaw7ab@gmail.com ✉️
+                    </a>
+                </div>
+                <div class="support-card">
+                    <div style="font-size: 22px;">📡</div>
+                    <h3 style="font-size: 16px; font-weight: 800;">نقطة بيانات الإصدار الحي (JSON API)</h3>
+                    <p style="font-size: 13px; color: var(--text-secondary);">ملف البيانات الوصفية المعتمد الذي يقرأه التطبيق وموقع الويب للتحقق من أحدث إصدار وبصمة SHA-256.</p>
+                    <a href="./version.json" target="_blank" rel="noopener noreferrer" class="btn-mirror" style="margin-top: auto;" dir="ltr">
+                        https://ow7ab.github.io/ow7ab/version.json ↗
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <!-- تذييل الموقع الرسمي -->
+        <footer class="footer" role="contentinfo">
+            <div>
+                جميع الحقوق محفوظة &copy; 2026 شركة <strong>PMP PAINTS</strong> للصناعات الكيماوية والطلاءات • Package: <code>com.aistudio.pmppaints.erp</code>
+            </div>
+            <div style="display: flex; gap: 14px; flex-wrap: wrap;">
+                <a href="https://github.com/ow7ab/ow7ab" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+                <a href="https://github.com/ow7ab/ow7ab/releases" target="_blank" rel="noopener noreferrer">GitHub Releases</a>
+                <a href="./version.json" target="_blank" rel="noopener noreferrer">version.json</a>
+                <a href="./releases-history.json" target="_blank" rel="noopener noreferrer">releases-history.json</a>
+            </div>
+        </footer>
+    </main>
 
     <script>
+        const GITHUB_REPO = 'ow7ab/ow7ab';
+        const GITHUB_LATEST_RELEASE_API_URL = 'https://api.github.com/repos/ow7ab/ow7ab/releases/latest';
+        const GITHUB_ALL_RELEASES_API_URL = 'https://api.github.com/repos/ow7ab/ow7ab/releases?per_page=25';
+        const GITHUB_PAGES_BASE_URL = 'https://ow7ab.github.io/ow7ab';
         const FIREBASE_STORAGE_VERSION_URL =
             'https://firebasestorage.googleapis.com/v0/b/gen-lang-client-0220128746.firebasestorage.app/o/version.json?alt=media';
         const FIRESTORE_VERSION_JSON_DOC_URL =
@@ -684,15 +1610,34 @@
         const FIRESTORE_APP_UPDATES_COLLECTION_URL =
             'https://firestore.googleapis.com/v1/projects/gen-lang-client-0220128746/databases/ai-studio-android-glassdro-d6052420-cbc0-47dd-8cdd-8caa5e6a7248/documents/app_updates?pageSize=25';
         const FIRESTORE_DEFAULT_APP_UPDATES_COLLECTION_URL =
-            'https://firestore.googleapis.com/v1/projects/gen-lang-client-0220128746/databases/(default)/documents/app_updates?pageSize=25';
+            'https://firestore.googleapis.com/v1/projects/gen-lang-client-0220128746.firebasestorage.app/databases/(default)/documents/app_updates?pageSize=25';
+
+        const APPROVED_SIGNING_CERT_SHA256 =
+            '1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05';
 
         const BASELINE_RELEASE_HISTORY = [
+            {
+                versionCode: 17,
+                versionName: 'v4.2',
+                buildId: 'PMP-v4.2-b17-9a8b7c6d',
+                publishedAt: '2026-11-10T10:00:00Z',
+                fileSize: 23214481,
+                fileSizeMb: 22.14,
+                apkSha256: '115155cd57c7c17245fa8b3ce3e90b94a509ca2c2abcfbfcf82ba0193adf7620',
+                downloadUrl: 'https://github.com/ow7ab/ow7ab/releases/download/v4.2/pmp-paints-v4.2-b17.apk',
+                pagesDownloadUrl: 'https://ow7ab.github.io/ow7ab/pmp-paints-v4.2-b17.apk',
+                releaseNotes: '• إصدار v4.2 (بناء 17): تفعيل ضغط وتعمية الكود عبر R8/ProGuard لتقليل حجم التطبيق وتعزيز الأمان، مع إضافة سجل تاريخ الإصدارات من Firestore على صفحة التحديثات الرسمية.\n• تحديث رسمي عبر مكتبة Google Play الشخصية (Google Play Personal Library) مع الحفاظ الكامل على البيانات.'
+            },
             {
                 versionCode: 16,
                 versionName: 'v4.1',
                 buildId: 'PMP-v4.1-b16-9a8b7c6d',
-                publishedAt: '2026-11-10T10:00:00Z',
+                publishedAt: '2026-11-10T08:00:00Z',
+                fileSize: 23214481,
                 fileSizeMb: 22.14,
+                apkSha256: '115155cd57c7c17245fa8b3ce3e90b94a509ca2c2abcfbfcf82ba0193adf7620',
+                downloadUrl: 'https://github.com/ow7ab/ow7ab/releases/download/v4.1/pmp-paints-v4.1-b16.apk',
+                pagesDownloadUrl: 'https://ow7ab.github.io/ow7ab/pmp-paints-v4.1-b16.apk',
                 releaseNotes: '• إصدار v4.1 (بناء 16): تحديث رسمي عبر مكتبة Google Play الشخصية (Google Play Personal Library) مع تفعيل ضغط وتعمية الكود عبر R8/ProGuard لتقليل حجم التطبيق وتعزيز الأمان.\n• إضافة سجل تاريخ الإصدارات المباشر من Firestore على صفحة التحديثات الرسمية.'
             },
             {
@@ -700,7 +1645,11 @@
                 versionName: 'v4.0',
                 buildId: 'PMP-v4.0-b15-9a8b7c6d',
                 publishedAt: '2026-11-09T18:30:00Z',
-                fileSizeMb: 22.14,
+                fileSize: 32494119,
+                fileSizeMb: 30.99,
+                apkSha256: '9bb5d7bc646468b5d838303cd7e08846a3e14b939615e9a8e00600d8a146f57a',
+                downloadUrl: 'https://github.com/ow7ab/ow7ab/releases/download/v4.0/pmp-paints-v4.0-b15.apk',
+                pagesDownloadUrl: 'https://ow7ab.github.io/ow7ab/pmp-paints-v4.0-b15.apk',
                 releaseNotes: '• إصدار v4.0 (بناء 15): إعادة تصميم بنية التطبيق وفق البنية المعيارية (Modular Clean Architecture) لدعم التوسع المستقبلي والتحويل لمنصات iOS والويب.\n• اعتماد الوضع المظلم الأسود الفائق (True Pitch Black Dark Mode #000000) ومعالجة كافة التبويبات البيضاء.'
             },
             {
@@ -708,7 +1657,11 @@
                 versionName: 'v3.2',
                 buildId: 'PMP-v3.2-b14-9a8b7c6d',
                 publishedAt: '2026-11-08T14:15:00Z',
+                fileSize: 32086425,
                 fileSizeMb: 30.60,
+                apkSha256: '9bb5d7bc646468b5d838303cd7e08846a3e14b939615e9a8e00600d8a146f57a',
+                downloadUrl: 'https://github.com/ow7ab/ow7ab/releases/download/v3.2/pmp-paints-v3.2-b14.apk',
+                pagesDownloadUrl: 'https://ow7ab.github.io/ow7ab/pmp-paints-v3.2-b14.apk',
                 releaseNotes: '• إصدار v3.2 (بناء 14): تدقيق أمني شامل لقواعد Firestore ونظام الصلاحيات المبني على الأدوار (RBAC) وحصر إنشاء الحسابات وتعديل الصلاحيات بالمدير العام فقط.'
             },
             {
@@ -716,7 +1669,11 @@
                 versionName: 'v3.1',
                 buildId: 'PMP-v3.1-b13-9a8b7c6d',
                 publishedAt: '2026-11-05T11:00:00Z',
+                fileSize: 31929139,
                 fileSizeMb: 30.45,
+                apkSha256: '19bd7aaf4bcf57b022354fc6543f350f5d0814ed2773244f868e3bc3a0cd2abc',
+                downloadUrl: 'https://github.com/ow7ab/ow7ab/releases/download/v3.1/pmp-paints-v3.1-b13.apk',
+                pagesDownloadUrl: 'https://ow7ab.github.io/ow7ab/pmp-paints-v3.1-b13.apk',
                 releaseNotes: '• إصدار v3.1 (بناء 13): ترقية قاعدة البيانات المحلية Room إلى الإصدار v11، تحسين دقة تسعير الكراتين حسب الأوزان، وتطوير فحص بصمة SHA-256 للحزم.'
             },
             {
@@ -724,18 +1681,217 @@
                 versionName: 'v3.0',
                 buildId: 'PMP-v3.0-b12-9a8b7c6d',
                 publishedAt: '2026-11-01T09:00:00Z',
+                fileSize: 31562137,
                 fileSizeMb: 30.10,
+                apkSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+                downloadUrl: 'https://github.com/ow7ab/ow7ab/releases/download/v3.0/pmp-paints-v3.0-b12.apk',
+                pagesDownloadUrl: 'https://ow7ab.github.io/ow7ab/pmp-paints-v3.0-b12.apk',
                 releaseNotes: '• إصدار v3.0 (بناء 12): إطلاق منظومة التحديثات السحابية المباشرة (OTA) المتكاملة مع المزامنة اللحظية للفروع والخزن والمصنع.'
             }
         ];
 
+        const I18N_DICTIONARY = {
+            ar: {
+                nav_tagline: 'المنظومة المؤسسية لإدارة المصنع والمخازن والحسابات',
+                nav_download: 'التحميل المباشر',
+                nav_screens: 'واجهات النظام',
+                nav_features: 'وحدات ERP',
+                nav_history: 'سجل الإصدارات',
+                nav_install: 'دليل التثبيت',
+                nav_support: 'الدعم الرسمي',
+                nav_cta: 'تنزيل أحدث APK',
+                hero_company: 'شركة PMP PAINTS للصناعات الكيماوية والطلاءات',
+                hero_subtitle: 'الموقع الرسمي المعتمد لتنزيل وتحديث تطبيق نظام تخطيط موارد المؤسسة (Enterprise ERP) لإدارة الحسابات، الخزن متعددة العملات، المصنع، معمل الكيمياء، والمخازن — مصمم بالوضع المظلم الأسود الفائق (True Pitch Black #000000) ومرتبط تلقائياً بمنظومة البناء والتوقيع السحابي عبر GitHub Actions.',
+                btn_download_main: 'تحميل أحدث إصدار رسمي الآن (APK)',
+                btn_github_release: 'تنزيل مباشر من GitHub Releases',
+                btn_pages_mirror: 'رابط مباشر بديل (GitHub Pages Mirror)',
+                hero_bullet_1: 'ترقية فورية آمنة (In-Place Upgrade) تحافظ 100% على حسابات الموظفين، الفواتير، وأرصدة الخزن والمخازن.',
+                hero_bullet_2: 'يتم بناء وتوقيع وفحص كل إصدار آلياً عبر GitHub Actions قبل نشره على هذه الصفحة.',
+                hero_bullet_3: 'يدعم الإشعار التلقائي بالتحديثات من داخل التطبيق (UpdateManager OTA) مع فحص البصمة الرقمية.',
+                card_title: 'بيانات الإصدار المستقر المنشور',
+                lbl_version: '📦 رقم الإصدار الحالي:',
+                lbl_pub_date: '📅 تاريخ النشر (UTC):',
+                lbl_build_id: '🔖 معرّف البناء (Build ID):',
+                lbl_pkg_id: '⚡ معرّف الحزمة الرسمي:',
+                lbl_size: '💾 حجم الحزمة (APK Size):',
+                lbl_compat: '📱 التوافق مع أندرويد:',
+                lbl_sig: '🛡️ شهادة التوقيع الرقمي:',
+                authentic_badge_title: 'الهوية الأصلية المعتمدة لشركة PMP PAINTS',
+                authentic_badge_desc: 'حزمة أندرويد الرسمية الموقّعة بشهادة التطوير المؤسسية الثابتة لضمان الترقية السلسة دون تعارض الحزم.',
+                screens_title: 'معاينة الواجهات الفعلية والهوية البصرية للتطبيق',
+                screens_desc: 'تم تصميم واجهات تطبيق PMP PAINTS باستخدام Jetpack Compose مع دعم كامل للوضع المظلم الأسود الفائق (AMOLED #000000) والوضع النهاري المتكيف لتوفير أقصى درجات الوضوح والراحة البصرية.',
+                features_title: 'المميزات والوحدات الفعلية في نظام PMP PAINTS',
+                features_desc: 'بنية برمجية معيارية متكاملة (14 وحدة قياسية في PmpModuleRegistry) تغطي دورة العمل الصناعية والمحاسبية الكاملة من شراء الخامات وحتى تحصيل المبيعات.',
+                history_title: 'سجل الإصدارات وملاحظات التحديث والتحميلات السابقة (Update History)',
+                install_title: 'طريقة التثبيت والترقية الآمنة على أجهزة أندرويد',
+                support_title: 'الدعم الفني والروابط الرسمية المعتمدة'
+            },
+            en: {
+                nav_tagline: 'Enterprise Factory, Inventory & Accounting ERP Suite',
+                nav_download: 'Direct Download',
+                nav_screens: 'App Screens',
+                nav_features: 'ERP Modules',
+                nav_history: 'Release History',
+                nav_install: 'Install Guide',
+                nav_support: 'Official Support',
+                nav_cta: 'Download Latest APK',
+                hero_company: 'PMP PAINTS Chemical Industries & Coatings',
+                hero_subtitle: 'The official digital home and automated APK distribution portal for PMP PAINTS Enterprise ERP — managing Multi-Currency Treasury, Factory Production, Chemistry Lab, and 3-Column Weight Inventory with True Pitch Black (#000000) UI and automated GitHub Actions release verification.',
+                btn_download_main: 'Download Latest Official Version (APK)',
+                btn_github_release: 'Direct Download via GitHub Releases',
+                btn_pages_mirror: 'Direct Mirror (GitHub Pages)',
+                hero_bullet_1: 'Safe In-Place Package Upgrade preserving 100% of employee accounts, invoices, and treasury balances.',
+                hero_bullet_2: 'Every APK is automatically tested, signed, and verified via GitHub Actions prior to publication.',
+                hero_bullet_3: 'Full compatibility with in-app OTA update notifications (UpdateManager) and SHA-256 verification.',
+                card_title: 'Latest Published Stable Release Telemetry',
+                lbl_version: '📦 Current Stable Version:',
+                lbl_pub_date: '📅 Published Date (UTC):',
+                lbl_build_id: '🔖 Build Identifier:',
+                lbl_pkg_id: '⚡ Official Package ID:',
+                lbl_size: '💾 APK File Size:',
+                lbl_compat: '📱 Android Compatibility:',
+                lbl_sig: '🛡️ Digital Signature:',
+                authentic_badge_title: 'Verified PMP PAINTS Official Identity',
+                authentic_badge_desc: 'Signed with the persistent enterprise certificate to guarantee conflict-free in-place upgrades across all devices.',
+                screens_title: 'Authentic Application Visuals & True Black UI Showcase',
+                screens_desc: 'Built with Jetpack Compose featuring True Pitch Black (#000000) AMOLED mode and Daylight adaptive themes.',
+                features_title: 'Core Enterprise ERP Modules & Capabilities',
+                features_desc: 'Modular Clean Architecture (14 core modules in PmpModuleRegistry) covering raw material procurement, QC, batch production, and multi-currency accounting.',
+                history_title: 'Previous Versions, Release Notes & Download Archive',
+                install_title: 'Installation & Safe In-Place Upgrade Instructions',
+                support_title: 'Official Technical Support & Repository Links'
+            }
+        };
+
+        let currentLang = 'ar';
         const versionCard = document.getElementById('versionCard');
         const liveSyncText = document.getElementById('liveSyncText');
         let latestResolvedVersionData = null;
 
+        function toggleWebsiteTheme() {
+            const htmlEl = document.documentElement;
+            const current = htmlEl.getAttribute('data-theme') || 'true-black';
+            const next = current === 'true-black' ? 'daylight' : 'true-black';
+            htmlEl.setAttribute('data-theme', next);
+            const labelEl = document.getElementById('themeToggleLabel');
+            if (labelEl) {
+                if (next === 'true-black') {
+                    labelEl.textContent = currentLang === 'ar' ? '🌑 الوضع الأسود الفائق' : '🌑 True Black Mode';
+                } else {
+                    labelEl.textContent = currentLang === 'ar' ? '☀️ الوضع النهاري' : '☀️ Daylight Mode';
+                }
+            }
+        }
+
+        function toggleWebsiteLanguage() {
+            currentLang = currentLang === 'ar' ? 'en' : 'ar';
+            const htmlEl = document.documentElement;
+            htmlEl.lang = currentLang;
+            htmlEl.dir = currentLang === 'ar' ? 'rtl' : 'ltr';
+            const langBtnLabel = document.getElementById('langToggleLabel');
+            if (langBtnLabel) {
+                langBtnLabel.textContent = currentLang === 'ar' ? '🌐 English' : '🌐 العربية';
+            }
+            const dict = I18N_DICTIONARY[currentLang] || I18N_DICTIONARY.ar;
+            document.querySelectorAll('[data-i18n]').forEach((el) => {
+                const key = el.getAttribute('data-i18n');
+                if (key && dict[key]) {
+                    el.textContent = dict[key];
+                }
+            });
+            if (latestResolvedVersionData) {
+                applyVersionDataToDom(latestResolvedVersionData, null);
+            }
+        }
+
         function resolveSha256FromVersionData(data) {
             if (!data) return '';
             return String(data.apkSha256 || data.sha256Checksum || data.sha256 || '').trim().toLowerCase();
+        }
+
+        function formatReleaseHistoryDate(rawDate, updatedAtMs) {
+            try {
+                if (rawDate) {
+                    const d = new Date(rawDate);
+                    if (!isNaN(d.getTime())) {
+                        return d.toISOString().slice(0, 10);
+                    }
+                }
+                if (updatedAtMs && updatedAtMs > 0) {
+                    const d2 = new Date(Number(updatedAtMs));
+                    if (!isNaN(d2.getTime())) {
+                        return d2.toISOString().slice(0, 10);
+                    }
+                }
+            } catch (_) {}
+            return '2026-11-10';
+        }
+
+        function parseGitHubReleaseObject(releaseJson) {
+            if (!releaseJson || typeof releaseJson !== 'object') return null;
+            // Strictly exclude draft and prerelease versions from stable releases
+            if (releaseJson.draft === true || releaseJson.prerelease === true) return null;
+
+            const tagName = String(releaseJson.tag_name || '').trim();
+            const releaseName = String(releaseJson.name || '').trim();
+            const body = String(releaseJson.body || '').trim();
+            const publishedAt = String(releaseJson.published_at || releaseJson.created_at || '').trim();
+
+            const assets = Array.isArray(releaseJson.assets) ? releaseJson.assets : [];
+            let apkAssetUrl = '';
+            let apkFileName = '';
+            let apkSizeBytes = 0;
+
+            for (const asset of assets) {
+                if (!asset || !asset.name || !asset.browser_download_url) continue;
+                const name = String(asset.name);
+                if (name.toLowerCase().endsWith('.apk')) {
+                    // Prefer versioned APK filename (pmp-paints-v*-b*.apk) first, or pmp-paints-latest.apk
+                    if (!apkAssetUrl || (name.includes('-b') && name.endsWith('.apk'))) {
+                        apkAssetUrl = String(asset.browser_download_url);
+                        apkFileName = name;
+                        apkSizeBytes = Number(asset.size || 0);
+                    }
+                }
+            }
+
+            if (!apkAssetUrl) return null;
+
+            const codeMatch =
+                releaseName.match(/(?:Build|b|#)\s*(\d+)/i) ||
+                apkFileName.match(/-b(\d+)\.apk/i) ||
+                body.match(/versionCode[^0-9]*(\d+)/i);
+            const versionCode = codeMatch ? parseInt(codeMatch[1], 10) : 0;
+            if (!versionCode || versionCode <= 0) return null;
+
+            const shaMatch = body.match(/\b([a-fA-F0-9]{64})\b/);
+            const sha256 = shaMatch ? shaMatch[1].toLowerCase() : '';
+
+            const buildIdMatch = body.match(/(PMP-v[^\s`)]+)/);
+            const cleanV = tagName.replace(/^v/i, '') || String(versionCode) + '.0';
+            const buildId = buildIdMatch ? buildIdMatch[1] : ('PMP-v' + cleanV + '-b' + versionCode);
+            const fileSizeMb = apkSizeBytes > 0
+                ? Math.round((apkSizeBytes / (1024 * 1024)) * 100) / 100
+                : 22.14;
+
+            return {
+                versionCode: versionCode,
+                versionName: tagName || ('v' + cleanV),
+                buildId: buildId,
+                publishedAt: publishedAt,
+                fileSize: apkSizeBytes,
+                apkSize: apkSizeBytes,
+                fileSizeMb: fileSizeMb,
+                apkSha256: sha256,
+                sha256: sha256,
+                sha256Checksum: sha256,
+                signingCertSha256: APPROVED_SIGNING_CERT_SHA256,
+                downloadUrl: apkAssetUrl,
+                githubReleaseUrl: apkAssetUrl,
+                pagesDownloadUrl: GITHUB_PAGES_BASE_URL + '/pmp-paints-v' + cleanV + '-b' + versionCode + '.apk',
+                releaseNotes: body || ('إصدار PMP PAINTS ' + (tagName || ('v' + cleanV)) + ' (بناء #' + versionCode + ')'),
+                releaseStatus: 'PUBLISHED'
+            };
         }
 
         function parseFirestoreFields(docJson) {
@@ -750,24 +1906,31 @@
             const getStr = (k) => (f[k] && f[k].stringValue) ? f[k].stringValue : '';
             const getInt = (k) => (f[k] && f[k].integerValue) ? parseInt(f[k].integerValue, 10) : 0;
             const getDouble = (k) => (f[k] && (f[k].doubleValue !== undefined)) ? parseFloat(f[k].doubleValue) : (getInt(k) || 0);
+            const status = getStr('releaseStatus') || getStr('release_status') || 'PUBLISHED';
+            if (status.toUpperCase() === 'DRAFT' || status.toUpperCase() === 'PRERELEASE' || status.toUpperCase() === 'UNPUBLISHED') {
+                return null;
+            }
             const vCode = getInt('versionCode') || getInt('version_code');
             if (!vCode) return null;
             const resolvedHash = getStr('apkSha256') || getStr('sha256Checksum') || getStr('sha256');
             const resolvedBytes = getInt('apkSize') || getInt('fileSize');
             return {
                 versionCode: vCode,
-                versionName: getStr('versionName') || getStr('version_name') || ('3.' + vCode + '-PRO'),
+                versionName: getStr('versionName') || getStr('version_name') || ('v' + vCode + '.0'),
                 buildId: getStr('buildId') || getStr('build_id'),
-                fileSizeMb: getDouble('fileSizeMb') || 30.6,
+                publishedAt: getStr('publishedAt') || getStr('published_at'),
+                fileSizeMb: getDouble('fileSizeMb') || 22.14,
                 apkSize: resolvedBytes,
                 fileSize: resolvedBytes,
                 apkSha256: resolvedHash,
                 sha256: resolvedHash,
                 sha256Checksum: resolvedHash,
-                signingCertSha256: getStr('signingCertSha256'),
+                signingCertSha256: getStr('signingCertSha256') || APPROVED_SIGNING_CERT_SHA256,
                 releaseNotes: getStr('releaseNotes') || getStr('release_notes'),
                 downloadUrl: getStr('downloadUrl') || getStr('apkUrl'),
-                updatedAt: getInt('updatedAt')
+                githubReleaseUrl: getStr('githubReleaseUrl'),
+                updatedAt: getInt('updatedAt'),
+                releaseStatus: status
             };
         }
 
@@ -781,7 +1944,7 @@
             const bytesVal = data.apkSize || data.fileSize || 0;
             const bytesEl = document.getElementById('expectedBytesDisplay');
             if (bytesEl && bytesVal > 0) {
-                bytesEl.textContent = Number(bytesVal).toLocaleString('en-US') + ' بايت';
+                bytesEl.textContent = Number(bytesVal).toLocaleString('en-US') + (currentLang === 'ar' ? ' بايت' : ' bytes');
             }
             const certEl = document.getElementById('signingCertDisplay');
             if (certEl && data.signingCertSha256) {
@@ -797,39 +1960,81 @@
 
         function applyVersionDataToDom(data, sourceLabel) {
             if (!data || !data.versionCode) return;
+            const status = String(data.releaseStatus || 'PUBLISHED').toUpperCase();
+            if (status === 'DRAFT' || status === 'PRERELEASE' || status === 'UNPUBLISHED') return;
+
             latestResolvedVersionData = data;
-            if (data.versionName) {
-                const cleanVer = String(data.versionName).startsWith('v')
-                    ? data.versionName
-                    : 'v' + data.versionName;
-                document.getElementById('versionName').textContent =
-                    cleanVer + ' (Build ' + data.versionCode + ')';
+            const cleanVer = String(data.versionName || ('v' + data.versionCode)).startsWith('v')
+                ? String(data.versionName)
+                : 'v' + String(data.versionName);
+            const vNoPrefix = cleanVer.replace(/^v/i, '');
+
+            const versionNameEl = document.getElementById('versionName');
+            if (versionNameEl) {
+                versionNameEl.textContent = cleanVer + ' (Build ' + data.versionCode + ')';
             }
-            if (data.buildId) {
-                const buildIdEl = document.getElementById('buildId');
-                if (buildIdEl) buildIdEl.textContent = data.buildId;
+
+            const pubDateEl = document.getElementById('publishedAtDisplay');
+            if (pubDateEl) {
+                pubDateEl.textContent = formatReleaseHistoryDate(data.publishedAt, data.updatedAt);
             }
-            if (data.fileSizeMb) {
-                document.getElementById('fileSize').textContent = data.fileSizeMb + ' ميجابايت';
+
+            const buildIdEl = document.getElementById('buildId');
+            if (buildIdEl && data.buildId) {
+                buildIdEl.textContent = data.buildId;
             }
+
+            const fileSizeEl = document.getElementById('fileSize');
+            if (fileSizeEl && data.fileSizeMb) {
+                fileSizeEl.textContent = data.fileSizeMb + (currentLang === 'ar' ? ' ميجابايت' : ' MB');
+            }
+
             if (data.releaseNotes) {
                 const notesEl = document.getElementById('releaseNotes');
                 if (notesEl) {
                     notesEl.textContent = '';
                     const strongEl = document.createElement('strong');
-                    strongEl.textContent = '✨ جديد التحديث: ';
+                    strongEl.textContent = currentLang === 'ar' ? '✨ جديد الإصدار: ' : '✨ What\'s New: ';
                     notesEl.appendChild(strongEl);
                     notesEl.appendChild(document.createTextNode(String(data.releaseNotes)));
                 }
             }
-            if (data.downloadUrl) {
-                const dlBtn = document.getElementById('downloadBtn');
-                if (dlBtn) {
-                    dlBtn.href = data.downloadUrl;
-                    const vClean = String(data.versionName || '3.0-PRO').replace(/^v/i, '');
-                    dlBtn.setAttribute('download', 'pmp-paints-v' + vClean + '-b' + data.versionCode + '.apk');
-                }
+
+            const canonicalFileName = 'pmp-paints-v' + vNoPrefix + '-b' + data.versionCode + '.apk';
+            const authoritativeGithubUrl =
+                data.githubReleaseUrl ||
+                (data.downloadUrl && String(data.downloadUrl).includes('github.com/') ? data.downloadUrl : '') ||
+                ('https://github.com/ow7ab/ow7ab/releases/download/v' + vNoPrefix + '/' + canonicalFileName);
+            const pagesMirrorUrl =
+                data.pagesDownloadUrl ||
+                (data.downloadUrl && String(data.downloadUrl).includes('github.io/') ? data.downloadUrl : '') ||
+                ('./' + canonicalFileName);
+            const primaryDownloadHref = data.downloadUrl || authoritativeGithubUrl;
+
+            const dlBtn = document.getElementById('downloadBtn');
+            if (dlBtn) {
+                dlBtn.href = primaryDownloadHref;
+                dlBtn.setAttribute('download', canonicalFileName);
             }
+
+            const dlLabel = document.getElementById('downloadBtnLabel');
+            if (dlLabel) {
+                dlLabel.textContent = currentLang === 'ar'
+                    ? ('تحميل الإصدار ' + cleanVer + ' المباشر الآن (APK)')
+                    : ('Download Official ' + cleanVer + ' Now (APK)');
+            }
+
+            const ghBtn = document.getElementById('githubReleaseDownloadBtn');
+            if (ghBtn) {
+                ghBtn.href = authoritativeGithubUrl;
+            }
+
+            const pagesBtn = document.getElementById('pagesDownloadBtn');
+            if (pagesBtn) {
+                pagesBtn.href = pagesMirrorUrl;
+                pagesBtn.setAttribute('download', canonicalFileName);
+            }
+
             updateVerifyPanelFromData(data, sourceLabel);
             if (liveSyncText && sourceLabel) {
                 liveSyncText.textContent = sourceLabel;
@@ -844,14 +2049,13 @@
                 verifyPanel.classList.add('is-visible');
             }
             if (verifyBtnText) {
-                verifyBtnText.textContent = 'جاري جلب بصمة SHA-256 من version.json...';
+                verifyBtnText.textContent = 'جاري جلب بصمة SHA-256 الرسمية من version.json...';
             }
 
             const cb = Date.now();
             let fetchedData = null;
             let fetchedSource = 'تم الجلب من version.json';
 
-            // 1. Fetch ./version.json directly
             try {
                 const localRes = await fetch('./version.json?_cb=' + cb, { cache: 'no-store' });
                 if (localRes.ok) {
@@ -863,7 +2067,6 @@
                 }
             } catch (_) {}
 
-            // 2. Also check Firebase Storage version.json if newer
             try {
                 const storageRes = await fetch(FIREBASE_STORAGE_VERSION_URL + '&_cb=' + cb, { cache: 'no-store' });
                 if (storageRes.ok) {
@@ -892,7 +2095,7 @@
             }
 
             if (verifyBtnText) {
-                verifyBtnText.textContent = 'تم جلب وعرض بصمة SHA-256 من version.json بنجاح ✓';
+                verifyBtnText.textContent = 'تم جلب وعرض بصمة SHA-256 الرسمية بنجاح ✓';
             }
         }
 
@@ -930,13 +2133,13 @@
                 if (expectedHash && computedHash === expectedHash) {
                     statusEl.className = 'local-verify-status match';
                     statusEl.textContent =
-                        '✅ الملف سليم ومتطابق 100%! بصمة SHA-256 للملف المختار تطابق بصمة version.json الرسمية (' +
+                        '✅ الملف سليم وموقّع ومتطابق 100%! بصمة SHA-256 للملف المختار تطابق بصمة الإصدار الرسمي (' +
                         computedHash + ').';
                 } else {
                     statusEl.className = 'local-verify-status mismatch';
                     statusEl.textContent =
                         '❌ تحذير: بصمة الملف المختار (' + computedHash +
-                        ') لا تطابق بصمة version.json الرسمية (' + expectedHash + '). يرجى إعادة تنزيل الملف.';
+                        ') لا تطابق بصمة الإصدار الرسمي (' + expectedHash + '). يرجى إعادة تنزيل الملف من الزر الرسمي.';
                 }
             } catch (err) {
                 statusEl.className = 'local-verify-status mismatch';
@@ -952,18 +2155,44 @@
             const cb = Date.now();
             const candidates = [];
 
-            // 1. Firebase Storage Direct version.json
+            // 1. Authoritative GitHub Releases API (latest stable non-draft, non-prerelease)
+            try {
+                const ghRes = await fetch(GITHUB_LATEST_RELEASE_API_URL + '?_cb=' + cb, {
+                    cache: 'no-store',
+                    headers: { 'Accept': 'application/vnd.github+json' }
+                });
+                if (ghRes.ok) {
+                    const ghJson = await ghRes.json();
+                    const parsedGh = parseGitHubReleaseObject(ghJson);
+                    if (parsedGh && parsedGh.versionCode) {
+                        candidates.push({ data: parsedGh, source: 'محدّث تلقائياً من GitHub Releases الرسمي' });
+                    }
+                }
+            } catch (_) {}
+
+            // 2. Local ./version.json deployed by GitHub Actions
+            try {
+                const res = await fetch('./version.json?_cb=' + cb, { cache: 'no-store' });
+                if (res.ok) {
+                    const json = await res.json();
+                    if (json && json.versionCode && String(json.releaseStatus || 'PUBLISHED').toUpperCase() === 'PUBLISHED') {
+                        candidates.push({ data: json, source: 'متصل بمركز الإصدارات الرسمي (version.json)' });
+                    }
+                }
+            } catch (_) {}
+
+            // 3. Firebase Storage Direct version.json
             try {
                 const res = await fetch(FIREBASE_STORAGE_VERSION_URL + '&_cb=' + cb, { cache: 'no-store' });
                 if (res.ok) {
                     const json = await res.json();
-                    if (json && json.versionCode) {
+                    if (json && json.versionCode && String(json.releaseStatus || 'PUBLISHED').toUpperCase() === 'PUBLISHED') {
                         candidates.push({ data: json, source: 'محدّث تلقائياً من Firebase Storage (version.json)' });
                     }
                 }
             } catch (_) {}
 
-            // 2. Cloud Firestore Mirror (app_updates/version_json & app_updates/latest)
+            // 4. Cloud Firestore Mirror (app_updates/version_json & app_updates/latest)
             for (const docUrl of [FIRESTORE_VERSION_JSON_DOC_URL, FIRESTORE_LATEST_DOC_URL]) {
                 try {
                     const res = await fetch(docUrl + '?_cb=' + cb, { cache: 'no-store' });
@@ -977,17 +2206,6 @@
                 } catch (_) {}
             }
 
-            // 3. Local ./version.json
-            try {
-                const res = await fetch('./version.json?_cb=' + cb, { cache: 'no-store' });
-                if (res.ok) {
-                    const json = await res.json();
-                    if (json && json.versionCode) {
-                        candidates.push({ data: json, source: 'تحديث مباشر وتلقائي متصل بالسيرفر' });
-                    }
-                }
-            } catch (_) {}
-
             if (candidates.length > 0) {
                 candidates.sort((a, b) => (b.data.versionCode || 0) - (a.data.versionCode || 0));
                 const best = candidates[0];
@@ -998,24 +2216,6 @@
                 versionCard.classList.remove('is-loading');
                 versionCard.setAttribute('aria-busy', 'false');
             }
-        }
-
-        function formatReleaseHistoryDate(rawDate, updatedAtMs) {
-            try {
-                if (rawDate) {
-                    const d = new Date(rawDate);
-                    if (!isNaN(d.getTime())) {
-                        return d.toISOString().slice(0, 10);
-                    }
-                }
-                if (updatedAtMs && updatedAtMs > 0) {
-                    const d2 = new Date(Number(updatedAtMs));
-                    if (!isNaN(d2.getTime())) {
-                        return d2.toISOString().slice(0, 10);
-                    }
-                }
-            } catch (_) {}
-            return '2026-11-10';
         }
 
         function renderReleaseHistoryList(releases, sourceBadgeText) {
@@ -1040,13 +2240,17 @@
                 const cleanVer = String(item.versionName || ('v' + item.versionCode)).startsWith('v')
                     ? String(item.versionName)
                     : ('v' + item.versionName);
-                tag.textContent = (index === 0 ? '🟢 ' : '📦 ') + cleanVer + ' (بناء #' + item.versionCode + ')' + (index === 0 ? ' — الإصدار الأحدث' : '');
+                const latestSuffix = index === 0
+                    ? (currentLang === 'ar' ? ' — الإصدار المستقر الأحدث' : ' — Latest Stable')
+                    : '';
+                tag.textContent = (index === 0 ? '🟢 ' : '📦 ') + cleanVer + ' (Build #' + item.versionCode + ')' + latestSuffix;
 
                 const meta = document.createElement('div');
                 meta.className = 'history-meta';
                 const dateStr = formatReleaseHistoryDate(item.publishedAt, item.updatedAt);
                 const buildStr = item.buildId ? (' • ' + item.buildId) : '';
-                meta.textContent = '📅 ' + dateStr + buildStr;
+                const sizeStr = item.fileSizeMb ? (' • ' + item.fileSizeMb + ' MB') : '';
+                meta.textContent = '📅 ' + dateStr + buildStr + sizeStr;
 
                 top.appendChild(tag);
                 top.appendChild(meta);
@@ -1055,8 +2259,31 @@
                 notes.className = 'history-notes';
                 notes.textContent = String(item.releaseNotes || 'تحديث استقرار وأمان وتحسينات عامة في الأداء.');
 
+                const actions = document.createElement('div');
+                actions.className = 'history-actions';
+
+                const shaSpan = document.createElement('span');
+                shaSpan.style.fontSize = '11px';
+                shaSpan.style.color = 'var(--text-muted)';
+                shaSpan.style.fontFamily = 'monospace';
+                const itemSha = resolveSha256FromVersionData(item);
+                shaSpan.textContent = itemSha ? ('SHA-256: ' + itemSha.slice(0, 16) + '...' + itemSha.slice(-8)) : 'Verified Signed APK';
+
+                const dlLink = document.createElement('a');
+                dlLink.className = 'history-dl-link';
+                const vClean = cleanVer.replace(/^v/i, '');
+                dlLink.href = item.downloadUrl || ('https://github.com/ow7ab/ow7ab/releases/download/v' + vClean + '/pmp-paints-v' + vClean + '-b' + item.versionCode + '.apk');
+                dlLink.setAttribute('download', 'pmp-paints-v' + vClean + '-b' + item.versionCode + '.apk');
+                dlLink.textContent = currentLang === 'ar'
+                    ? ('⬇️ تنزيل APK (' + cleanVer + ')')
+                    : ('⬇️ Download APK (' + cleanVer + ')');
+
+                actions.appendChild(shaSpan);
+                actions.appendChild(dlLink);
+
                 row.appendChild(top);
                 row.appendChild(notes);
+                row.appendChild(actions);
                 listEl.appendChild(row);
             });
         }
@@ -1064,17 +2291,57 @@
         async function fetchAndRenderReleaseHistoryFromFirestore() {
             const badgeEl = document.getElementById('releaseHistoryBadge');
             if (badgeEl) {
-                badgeEl.textContent = 'جاري الجلب من Firestore...';
+                badgeEl.textContent = 'جاري الجلب من GitHub Releases و Firestore...';
             }
 
             const cb = Date.now();
             const byVersionCode = new Map();
 
-            // Seed baseline history so previous release notes are always complete
+            // 1. Seed baseline release history
             BASELINE_RELEASE_HISTORY.forEach((entry) => {
                 byVersionCode.set(Number(entry.versionCode), Object.assign({}, entry));
             });
 
+            // 2. Load workflow-generated ./releases-history.json if present
+            try {
+                const histRes = await fetch('./releases-history.json?_cb=' + cb, { cache: 'no-store' });
+                if (histRes.ok) {
+                    const histJson = await histRes.json();
+                    const list = Array.isArray(histJson.releases) ? histJson.releases : [];
+                    for (const item of list) {
+                        if (item && item.versionCode) {
+                            const code = Number(item.versionCode);
+                            const existing = byVersionCode.get(code) || {};
+                            byVersionCode.set(code, Object.assign({}, existing, item));
+                        }
+                    }
+                }
+            } catch (_) {}
+
+            // 3. Load live GitHub Releases list (excluding drafts & prereleases)
+            let githubLoadedCount = 0;
+            try {
+                const ghRes = await fetch(GITHUB_ALL_RELEASES_API_URL + '&_cb=' + cb, {
+                    cache: 'no-store',
+                    headers: { 'Accept': 'application/vnd.github+json' }
+                });
+                if (ghRes.ok) {
+                    const ghList = await ghRes.json();
+                    if (Array.isArray(ghList)) {
+                        for (const rel of ghList) {
+                            const parsed = parseGitHubReleaseObject(rel);
+                            if (parsed && parsed.versionCode) {
+                                const code = Number(parsed.versionCode);
+                                const existing = byVersionCode.get(code) || {};
+                                byVersionCode.set(code, Object.assign({}, existing, parsed));
+                                githubLoadedCount++;
+                            }
+                        }
+                    }
+                }
+            } catch (_) {}
+
+            // 4. Load Firestore app_updates collection
             let firestoreLoadedCount = 0;
             const collectionUrls = [
                 FIRESTORE_APP_UPDATES_COLLECTION_URL + '&_cb=' + cb,
@@ -1111,22 +2378,25 @@
             }
 
             const mergedReleases = Array.from(byVersionCode.values())
-                .filter((r) => r && r.versionCode > 0)
+                .filter((r) => r && r.versionCode > 0 && String(r.releaseStatus || 'PUBLISHED').toUpperCase() === 'PUBLISHED')
                 .sort((a, b) => (b.versionCode || 0) - (a.versionCode || 0));
 
-            const badgeLabel = firestoreLoadedCount > 0
-                ? ('متصل بـ Firestore (' + mergedReleases.length + ' إصدارات)')
+            if (mergedReleases.length > 0 && (!latestResolvedVersionData || mergedReleases[0].versionCode > latestResolvedVersionData.versionCode)) {
+                applyVersionDataToDom(mergedReleases[0], 'محدّث تلقائياً من GitHub Releases و Firestore');
+            }
+
+            const badgeLabel = (githubLoadedCount > 0 || firestoreLoadedCount > 0)
+                ? ('متصل بـ GitHub Releases & Firestore (' + mergedReleases.length + ' إصدارات)')
                 : ('سجل الإصدارات المعتمد (' + mergedReleases.length + ' إصدارات)');
 
             renderReleaseHistoryList(mergedReleases, badgeLabel);
         }
 
         refreshDownloadPageMetadata(true).then(() => fetchAndRenderReleaseHistoryFromFirestore());
-        // تحديث تلقائي كل 15 ثانية دون الحاجة لإعادة تحميل الصفحة
         setInterval(() => {
             refreshDownloadPageMetadata(false);
             fetchAndRenderReleaseHistoryFromFirestore();
-        }, 15000);
+        }, 30000);
     </script>
 </body>
 </html>

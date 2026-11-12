@@ -452,6 +452,14 @@ class ExampleUnitTest {
       "Must run automated unit tests (:app:testDebugUnitTest) before building release APK",
       content.contains(":app:testDebugUnitTest")
     )
+    assertTrue(
+      "Must configure concurrency control to prevent duplicate release races",
+      content.contains("concurrency:") && content.contains("cancel-in-progress: false")
+    )
+    assertTrue(
+      "Must support website-only fast deployment path without rebuilding Android APK",
+      content.contains("WEBSITE_ONLY") && content.contains("actions/upload-pages-artifact@v3") && content.contains("actions/deploy-pages@v4")
+    )
 
     // 7. Verify root version.json and public/version.json are synchronized and represent a valid published release
     //    (kept separate from the new in-progress build version until the new APK is built, verified, and published)
@@ -1172,6 +1180,18 @@ class ExampleUnitTest {
     assertTrue("Download page must include Firestore release history section (#releaseHistorySection)", indexHtml.contains("id=\"releaseHistorySection\""))
     assertTrue("Download page must include release history list (#releaseHistoryList)", indexHtml.contains("id=\"releaseHistoryList\""))
     assertTrue("Download page must fetch release notes history from Firestore app_updates collection", indexHtml.contains("FIRESTORE_APP_UPDATES_COLLECTION_URL") && indexHtml.contains("fetchAndRenderReleaseHistoryFromFirestore"))
+    assertTrue("Official website must integrate authoritative GitHub Releases API", indexHtml.contains("GITHUB_LATEST_RELEASE_API_URL") && indexHtml.contains("GITHUB_ALL_RELEASES_API_URL"))
+    assertTrue("Official website must exclude draft and prerelease GitHub releases", indexHtml.contains("releaseJson.draft === true || releaseJson.prerelease === true"))
+    assertTrue("Official website must support True Pitch Black mode and Arabic/English switcher", indexHtml.contains("data-theme=\"true-black\"") && indexHtml.contains("function toggleWebsiteLanguage()") && indexHtml.contains("function toggleWebsiteTheme()"))
+    assertTrue("Official website must showcase real PMP brand assets from ./assets/", indexHtml.contains("./assets/ic_pmp_emblem.png") && indexHtml.contains("./assets/pmp_brand_logo.jpg"))
+
+    val releasesHistoryFile = listOf(
+      java.io.File("public/releases-history.json"),
+      java.io.File("../public/releases-history.json")
+    ).firstOrNull { it.exists() }
+    assertNotNull("public/releases-history.json must exist", releasesHistoryFile)
+    val releasesHistoryText = releasesHistoryFile!!.readText(Charsets.UTF_8)
+    assertTrue("releases-history.json must reference com.aistudio.pmppaints.erp", releasesHistoryText.contains("\"applicationId\": \"com.aistudio.pmppaints.erp\""))
 
     // 2. Verify app/build.gradle.kts and gradle.properties configure R.string.default_web_client_id
     //    using the Web OAuth 2.0 Client ID (client_type 3), never the Android OAuth Client ID (client_type 1),

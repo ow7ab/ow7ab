@@ -797,12 +797,19 @@ class UpdateManager(private val context: Context) {
                 )
             }
 
-            // ترتيب الإصدارات المكتشفة من الأحدث إلى الأقدم مع استبعاد المسودات غير المنشورة
+            // ترتيب الإصدارات المكتشفة من الأحدث إلى الأقدم مع استبعاد المسودات والإصدارات التجريبية غير المستقرة
             val newerCandidates = discoveredUpdates
                 .filter {
-                    it.versionCode > currentVersionCode &&
+                    com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(
+                        installedVersionCode = currentVersionCode,
+                        installedVersionName = BuildConfig.VERSION_NAME,
+                        remoteVersionCode = it.versionCode,
+                        remoteVersionName = it.versionName
+                    ) &&
                         !it.releaseStatus.equals("DRAFT", ignoreCase = true) &&
-                        !it.releaseStatus.equals("UNPUBLISHED", ignoreCase = true)
+                        !it.releaseStatus.equals("PRERELEASE", ignoreCase = true) &&
+                        !it.releaseStatus.equals("UNPUBLISHED", ignoreCase = true) &&
+                        !it.releaseStatus.equals("INVALID", ignoreCase = true)
                 }
                 .sortedWith(
                     compareByDescending<UpdateInfo> { it.versionCode }
@@ -1074,7 +1081,7 @@ class UpdateManager(private val context: Context) {
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
             val raw = connection.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(raw)
-            if (json.optBoolean("draft", false)) return null
+            if (json.optBoolean("draft", false) || json.optBoolean("prerelease", false)) return null
 
             val assets = json.optJSONArray("assets")
             var apkDownloadUrl = ""
