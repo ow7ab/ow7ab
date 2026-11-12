@@ -30,3 +30,5 @@ debug.keystore.base64
 .aistudio/
 public/assets/aistudio/
 *-debug.log
+web/node_modules/
+web/dist/

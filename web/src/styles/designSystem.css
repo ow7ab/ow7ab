@@ -1,0 +1,250 @@
+/* PMP PAINTS Enterprise ERP — Modern Design System (True-Black & Daylight) */
+:root {
+  --font-family: 'Cairo', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* True Black Theme Tokens */
+  --bg-primary: #000000;
+  --bg-secondary: #050508;
+  --surface-primary: #0A0A0E;
+  --surface-card: rgba(16, 16, 22, 0.92);
+  --surface-elevated: #181822;
+  --surface-subtle: #101016;
+  --border-subtle: #242430;
+  --border-highlight: #3F3F50;
+  --glass-border: rgba(255, 255, 255, 0.08);
+
+  --text-primary: #F8FAFC;
+  --text-secondary: #94A3B8;
+  --text-muted: #64748B;
+  --text-white: #FFFFFF;
+
+  /* Brand Colors */
+  --pmp-red: #DC2626;
+  --pmp-red-light: #EF4444;
+  --pmp-red-dark: #991B1B;
+  --pmp-red-soft: rgba(220, 38, 38, 0.12);
+
+  --pmp-navy: #0B132B;
+  --pmp-navy-card: #141C33;
+  --pmp-navy-light: #1E293B;
+
+  --pmp-cyan: #06B6D4;
+  --pmp-cyan-light: #38BDF8;
+  --pmp-cyan-soft: rgba(6, 182, 212, 0.12);
+
+  --pmp-gold: #F59E0B;
+  --pmp-gold-dark: #D97706;
+  --pmp-gold-soft: rgba(245, 158, 11, 0.12);
+
+  --pmp-green: #10B981;
+  --pmp-green-dark: #059669;
+  --pmp-green-soft: rgba(16, 185, 129, 0.12);
+
+  --gradient-red: linear-gradient(135deg, #DC2626 0%, #991B1B 100%);
+  --gradient-blue: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
+  --gradient-cyan: linear-gradient(135deg, #06B6D4 0%, #0284C7 100%);
+  --gradient-gold: linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
+  --gradient-card: linear-gradient(180deg, rgba(24, 24, 32, 0.85) 0%, rgba(12, 12, 16, 0.95) 100%);
+
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 12px 28px -6px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 24px 48px -12px rgba(0, 0, 0, 0.85), 0 0 32px rgba(220, 38, 38, 0.08);
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-full: 9999px;
+}
+
+[data-theme="daylight"] {
+  --bg-primary: #F1F5F9;
+  --bg-secondary: #E2E8F0;
+  --surface-primary: #FFFFFF;
+  --surface-card: rgba(255, 255, 255, 0.95);
+  --surface-elevated: #F8FAFC;
+  --surface-subtle: #F1F5F9;
+  --border-subtle: #CBD5E1;
+  --border-highlight: #94A3B8;
+  --glass-border: rgba(15, 23, 42, 0.08);
+
+  --text-primary: #0F172A;
+  --text-secondary: #334155;
+  --text-muted: #64748B;
+  --text-white: #0F172A;
+
+  --pmp-red-soft: rgba(220, 38, 38, 0.08);
+  --pmp-cyan-soft: rgba(6, 182, 212, 0.08);
+  --pmp-gold-soft: rgba(245, 158, 11, 0.08);
+  --pmp-green-soft: rgba(16, 185, 129, 0.08);
+
+  --gradient-card: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.95) 100%);
+  --shadow-sm: 0 2px 6px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 10px 24px -4px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 20px 40px -10px rgba(15, 23, 42, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-family);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg-primary);
+  background-image:
+    radial-gradient(circle at 90% 10%, rgba(220, 38, 38, 0.12) 0%, transparent 40%),
+    radial-gradient(circle at 10% 30%, rgba(6, 182, 212, 0.08) 0%, transparent 45%),
+    radial-gradient(circle at 50% 90%, rgba(245, 158, 11, 0.06) 0%, transparent 50%);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.6;
+  overflow-x: hidden;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+/* Glassmorphism primitives */
+.glass-panel {
+  background: var(--surface-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.glass-panel:hover {
+  border-color: rgba(220, 38, 38, 0.35);
+  box-shadow: var(--shadow-lg);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.badge-red {
+  background: var(--pmp-red-soft);
+  color: var(--pmp-red-light);
+  border: 1px solid rgba(220, 38, 38, 0.3);
+}
+
+.badge-cyan {
+  background: var(--pmp-cyan-soft);
+  color: var(--pmp-cyan-light);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+}
+
+.badge-green {
+  background: var(--pmp-green-soft);
+  color: var(--pmp-green);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-gold {
+  background: var(--pmp-gold-soft);
+  color: var(--pmp-gold);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  text-decoration: none;
+  outline: none;
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn-primary {
+  background: var(--gradient-red);
+  color: #FFFFFF;
+  box-shadow: 0 4px 16px rgba(220, 38, 38, 0.35);
+}
+
+.btn-primary:hover {
+  box-shadow: 0 6px 22px rgba(220, 38, 38, 0.5);
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+}
+
+.btn-secondary:hover {
+  background: var(--border-subtle);
+  border-color: var(--border-highlight);
+}
+
+.btn-cyan {
+  background: var(--gradient-cyan);
+  color: #FFFFFF;
+  box-shadow: 0 4px 16px rgba(6, 182, 212, 0.35);
+}
+
+.btn-cyan:hover {
+  box-shadow: 0 6px 22px rgba(6, 182, 212, 0.5);
+  transform: translateY(-1px);
+}
+
+/* Form inputs */
+.input-field {
+  width: 100%;
+  padding: 12px 16px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  outline: none;
+}
+
+.input-field:focus {
+  border-color: var(--pmp-red);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.15);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--pmp-red);
+}
