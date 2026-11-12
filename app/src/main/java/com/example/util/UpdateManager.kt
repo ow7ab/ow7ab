@@ -2677,7 +2677,7 @@ class UpdateManager(private val context: Context) {
 
         const val DEFAULT_DOWNLOAD_PORTAL_URL = "https://github.com/ow7ab/ow7ab/releases/latest/download"
         const val SHARED_DOWNLOAD_PORTAL_URL = "https://github.com/oaw7ab/pmp-paints-releases/releases/latest/download"
-        const val DEFAULT_APK_DOWNLOAD_URL = com.example.core.architecture.PmpAppVersionContract.DEFAULT_PAGES_APK_URL
+        val DEFAULT_APK_DOWNLOAD_URL = com.example.core.architecture.PmpAppVersionContract.DEFAULT_PAGES_APK_URL
 
         /**
          * بيانات الإصدار المرجعي المنشور والمتحقق منه فعلياً (Version v4.0 / Build 15)
@@ -2783,6 +2783,7 @@ class UpdateManager(private val context: Context) {
                 "http://",
                 ".apk",
                 "ow7ab",
+                "com.aistudio.pmppaints.erp",
                 "com.pmp",
                 "exception",
                 "stacktrace",
@@ -2811,6 +2812,7 @@ class UpdateManager(private val context: Context) {
                         !line.contains("ow7ab", ignoreCase = true) &&
                         !line.contains("https://", ignoreCase = true) &&
                         !line.contains(".apk", ignoreCase = true) &&
+                        !line.contains("com.aistudio.pmppaints.erp", ignoreCase = true) &&
                         !line.contains("com.pmp", ignoreCase = true) &&
                         !line.contains("Build ID", ignoreCase = true) &&
                         !line.contains("Commit", ignoreCase = true)

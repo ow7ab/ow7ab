@@ -19,18 +19,22 @@ enum class PmpTargetPlatform(val id: String, val displayNameAr: String) {
 }
 
 /**
- * Single Source of Truth for Application Release Identity & Update Compatibility (`v4.0`).
+ * Single Source of Truth for Application Release Identity & Update Compatibility.
  */
 object PmpAppVersionContract {
     const val APPLICATION_ID: String = "com.aistudio.pmppaints.erp"
-    const val CURRENT_VERSION_CODE: Int = 17
-    const val CURRENT_VERSION_NAME: String = "v4.2"
+    val CURRENT_VERSION_CODE: Int = com.example.BuildConfig.VERSION_CODE
+    val CURRENT_VERSION_NAME: String = com.example.BuildConfig.VERSION_NAME
+    const val LAST_PUBLISHED_VERSION_CODE: Int = 17
+    const val LAST_PUBLISHED_VERSION_NAME: String = "v4.2"
     const val MINIMUM_SUPPORTED_VERSION_CODE: Int = 10
-    const val DEFAULT_RELEASE_BUILD_ID: String = "PMP-v4.2-b17-9a8b7c6d"
-    const val DEFAULT_APK_FILE_NAME: String = "pmp-paints-v4.2-b17.apk"
-    const val DEFAULT_PAGES_APK_URL: String = "https://ow7ab.github.io/ow7ab/pmp-paints-v4.2-b17.apk"
-    const val DEFAULT_GITHUB_RELEASE_APK_URL: String =
-        "https://github.com/ow7ab/ow7ab/releases/download/v4.2/pmp-paints-v4.2-b17.apk"
+    private val cleanCurrentVersionName: String =
+        CURRENT_VERSION_NAME.removePrefix("v").removePrefix("V").trim().ifBlank { "18.0" }
+    val DEFAULT_RELEASE_BUILD_ID: String = com.example.BuildConfig.BUILD_ID
+    val DEFAULT_APK_FILE_NAME: String = "pmp-paints-v${cleanCurrentVersionName}-b${CURRENT_VERSION_CODE}.apk"
+    val DEFAULT_PAGES_APK_URL: String = "https://ow7ab.github.io/ow7ab/$DEFAULT_APK_FILE_NAME"
+    val DEFAULT_GITHUB_RELEASE_APK_URL: String =
+        "https://github.com/ow7ab/ow7ab/releases/download/v${cleanCurrentVersionName}/$DEFAULT_APK_FILE_NAME"
     const val DEFAULT_VERSION_METADATA_URL: String = "https://ow7ab.github.io/ow7ab/version.json"
     const val GOOGLE_PLAY_STORE_URL: String = "https://play.google.com/store/apps/details?id=com.aistudio.pmppaints.erp"
 
@@ -58,8 +62,8 @@ object PmpAppVersionContract {
             .substringBefore(" ")
         val parts = cleaned.split(".").mapNotNull { it.toIntOrNull() }
         return SemanticVersion(
-            major = parts.getOrElse(0) { 4 },
-            minor = parts.getOrElse(1) { 2 },
+            major = parts.getOrElse(0) { 18 },
+            minor = parts.getOrElse(1) { 0 },
             patch = parts.getOrElse(2) { 0 }
         )
     }

@@ -90,10 +90,14 @@ Thread.getAllStackTraces().keys
     .filter { it.name.startsWith("AWT-EventQueue") }
     .forEach { it.uncaughtExceptionHandler = kspAwtSafeHandler }
 
+val defaultConfiguredVersionCode: Int = android.defaultConfig.versionCode ?: 18
+val defaultConfiguredVersionName: String =
+    android.defaultConfig.versionName?.takeIf { it.isNotBlank() } ?: "18.0"
 val resolvedVersionCode: Int =
-    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: 17
+    (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: defaultConfiguredVersionCode
 val resolvedVersionName: String =
-    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }) ?: "v4.2"
+    (project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() })
+        ?: defaultConfiguredVersionName
 val resolvedGitCommit: String =
     (project.findProperty("gitCommit")?.toString()?.trim()?.takeIf { it.isNotBlank() })
         ?: System.getenv("GITHUB_SHA")?.take(8)?.takeIf { it.isNotBlank() }
@@ -129,8 +133,8 @@ val googleServicesProvidesWebClientId: Boolean =
     }
 
 android.defaultConfig.apply {
-  project.findProperty("versionCode")?.toString()?.toIntOrNull()?.let { versionCode = it }
-  project.findProperty("versionName")?.toString()?.takeIf { it.isNotBlank() }?.let { versionName = it }
+  versionCode = resolvedVersionCode
+  versionName = resolvedVersionName
 
   buildConfigField("String", "GIT_COMMIT_SHA", "\"$resolvedGitCommit\"")
   buildConfigField("String", "BUILD_ID", "\"$resolvedBuildId\"")

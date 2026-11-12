@@ -438,8 +438,11 @@ class ExampleUnitTest {
     )
     assertFalse("Must never auto-generate a random keystore", content.contains("-genkeypair"))
 
-    // 6. Must verify APK package name (com.pmp), versionCode, signature, and approved SHA-256 certificate before release
-    assertTrue("Must verify com.pmp package name with aapt2", content.contains("name='com.pmp'"))
+    // 6. Must verify APK package name (com.aistudio.pmppaints.erp), versionCode, signature, and approved SHA-256 certificate before release
+    assertTrue(
+      "Must verify com.aistudio.pmppaints.erp package name with aapt2",
+      content.contains("name='com.aistudio.pmppaints.erp'")
+    )
     assertTrue("Must verify APK signature with apksigner", content.contains("apksigner"))
     assertTrue(
       "Must enforce approved PMP PAINTS signing certificate SHA-256 in workflow",
@@ -450,7 +453,8 @@ class ExampleUnitTest {
       content.contains(":app:testDebugUnitTest")
     )
 
-    // 7. Verify root version.json and public/version.json are synchronized at v4.0 (versionCode 17)
+    // 7. Verify root version.json and public/version.json are synchronized and represent a valid published release
+    //    (kept separate from the new in-progress build version until the new APK is built, verified, and published)
     val rootVersionFile = listOf(
       java.io.File("version.json"),
       java.io.File("../version.json")
@@ -466,8 +470,16 @@ class ExampleUnitTest {
     val publicParsed = com.example.util.UpdateManager.parseVersionJsonToUpdateInfo(publicVersionFile!!.readText(Charsets.UTF_8))
     assertNotNull(rootParsed)
     assertNotNull(publicParsed)
-    assertEquals(BuildConfig.VERSION_CODE, rootParsed!!.versionCode)
-    assertEquals("v4.2", rootParsed.versionName)
+    assertTrue(
+      "Published version.json versionCode (${rootParsed!!.versionCode}) must be >= MINIMUM_SUPPORTED_VERSION_CODE",
+      rootParsed.versionCode >= com.example.core.architecture.PmpAppVersionContract.MINIMUM_SUPPORTED_VERSION_CODE
+    )
+    assertTrue(
+      "Published version.json versionCode (${rootParsed.versionCode}) must be <= current build versionCode (${BuildConfig.VERSION_CODE})",
+      rootParsed.versionCode <= BuildConfig.VERSION_CODE
+    )
+    assertTrue("Published version.json versionName must not be blank", rootParsed.versionName.isNotBlank())
+    assertTrue("Published version.json buildId must not be blank", rootParsed.buildId.isNotBlank())
     assertEquals(rootParsed.versionCode, publicParsed!!.versionCode)
     assertEquals(rootParsed.versionName, publicParsed.versionName)
     assertEquals(rootParsed.buildId, publicParsed.buildId)
@@ -1336,35 +1348,44 @@ class ExampleUnitTest {
 
   @Test
   fun testModularCrossPlatformArchitectureAndTrueBlackDarkMode() {
-    // 1. Verify unified v4.2 (versionCode 17) across PmpAppVersionContract, BuildConfig, UpdateManager, and version.json
+    // 1. Verify unified version contract across PmpAppVersionContract, BuildConfig, and UpdateManager
     assertEquals(BuildConfig.VERSION_CODE, com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE)
-    assertEquals("v4.2", com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME)
-    assertEquals(17, BuildConfig.VERSION_CODE)
-    assertEquals("v4.2", BuildConfig.VERSION_NAME)
+    assertEquals(BuildConfig.VERSION_NAME, com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME)
+    assertTrue("BuildConfig.VERSION_CODE must be strictly greater than 15", BuildConfig.VERSION_CODE > 15)
+    assertTrue("BuildConfig.VERSION_NAME must not be blank", BuildConfig.VERSION_NAME.isNotBlank())
     assertEquals(BuildConfig.VERSION_CODE, com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionCode)
-    assertEquals("v4.2", com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionName)
+    assertEquals(BuildConfig.VERSION_NAME, com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.versionName)
+    assertEquals("com.aistudio.pmppaints.erp", com.example.core.architecture.PmpAppVersionContract.APPLICATION_ID)
 
     val parsedVersion = com.example.core.architecture.PmpAppVersionContract.parseSemanticVersion("v4.2")
     assertEquals(4, parsedVersion.major)
     assertEquals(2, parsedVersion.minor)
     assertEquals(0, parsedVersion.patch)
 
+    val parsedCurrent = com.example.core.architecture.PmpAppVersionContract.parseSemanticVersion(BuildConfig.VERSION_NAME)
+    assertTrue("Parsed major version of BuildConfig.VERSION_NAME must be positive", parsedCurrent.major > 0)
+
+    val currentCode = BuildConfig.VERSION_CODE
+    val currentName = BuildConfig.VERSION_NAME
+    val nextCode = currentCode + 1
+    val nextName = "${parsedCurrent.major}.${parsedCurrent.minor + 1}"
+
     assertTrue(
-      "Remote version v4.3 (code 18) must be detected as newer than v4.2 (code 17)",
+      "Next remote version ($nextName / code $nextCode) must be detected as newer than installed ($currentName / code $currentCode)",
       com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(
-        installedVersionCode = 17,
-        installedVersionName = "v4.2",
-        remoteVersionCode = 18,
-        remoteVersionName = "v4.3"
+        installedVersionCode = currentCode,
+        installedVersionName = currentName,
+        remoteVersionCode = nextCode,
+        remoteVersionName = nextName
       )
     )
     assertFalse(
-      "Same version v4.2 (code 17) must not trigger a redundant update",
+      "Same version ($currentName / code $currentCode) must not trigger a redundant update",
       com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(
-        installedVersionCode = 17,
-        installedVersionName = "v4.2",
-        remoteVersionCode = 17,
-        remoteVersionName = "v4.2"
+        installedVersionCode = currentCode,
+        installedVersionName = currentName,
+        remoteVersionCode = currentCode,
+        remoteVersionName = currentName
       )
     )
 

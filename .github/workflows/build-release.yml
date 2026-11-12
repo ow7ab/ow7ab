@@ -11,15 +11,15 @@ on:
       version_code:
         description: "رقم البناء الجديد (versionCode) - يجب أن يكون أكبر من الإصدار السابق"
         required: true
-        default: "17"
+        default: "18"
       version_name:
-        description: "اسم الإصدار (versionName) مثل v4.2"
+        description: "اسم الإصدار (versionName) مثل 18.0"
         required: true
-        default: "v4.2"
+        default: "18.0"
       release_notes:
         description: "ملاحظات التحديث التي ستظهر للمستخدمين"
         required: false
-        default: "إصدار v4.2: تفعيل R8/ProGuard لتقليل حجم التطبيق وتعزيز الأمان، وإضافة سجل تاريخ الإصدارات من Firestore."
+        default: "إصدار 18.0 (بناء 18): ترقية شاملة لمنظومة المصادقة والأمان المتقدم (PBKDF2، 2FA، إدارة الأجهزة الموثوقة، وعزل البصمة) مع تفعيل R8/ProGuard."
       public_base_url:
         description: "رابط الاستضافة العامة الاختياري (يُستخدم GitHub Pages تلقائياً عند تركه فارغاً)"
         required: false
@@ -392,7 +392,7 @@ jobs:
                           .get("android_client_info", {})
                           .get("package_name", "")
                       )
-                      if pkg == "com.pmp":
+                      if pkg in ("com.aistudio.pmppaints.erp", "com.pmp"):
                           oauth_list = client.setdefault("oauth_client", [])
                           web_clients = [c for c in oauth_list if c.get("client_type") == 3 and c.get("client_id")]
                           if web_clients:
@@ -404,7 +404,7 @@ jobs:
                       with open(gs_path, "w", encoding="utf-8") as gf:
                           _json.dump(gs_data, gf, indent=2)
                           gf.write("\n")
-                      print("Ensured Web OAuth 2.0 client (client_type 3) is present in app/google-services.json for com.pmp.")
+                      print("Ensured Web OAuth 2.0 client (client_type 3) is present in app/google-services.json for com.aistudio.pmppaints.erp.")
               except Exception as exc:
                   print(f"::warning::Unable to inspect app/google-services.json: {exc}")
 
@@ -426,6 +426,7 @@ jobs:
           python3 - << 'PYEOF'
           import json
           import os
+          import re
           from datetime import datetime, timezone
 
           repo = os.environ.get("GITHUB_REPOSITORY", "ow7ab/ow7ab")
@@ -434,16 +435,31 @@ jobs:
           git_commit = git_sha_full[:8] if git_sha_full else "9a8b7c6d"
           published_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-          existing_code = 15
-          existing_name = "v4.0"
+          gradle_code = 18
+          gradle_name = "18.0"
+          if os.path.exists("app/build.gradle.kts"):
+              try:
+                  with open("app/build.gradle.kts", "r", encoding="utf-8") as gf:
+                      gradle_text = gf.read()
+                  m_code = re.search(r"versionCode\s*=\s*(\d+)", gradle_text)
+                  m_name = re.search(r'versionName\s*=\s*"([^"]+)"', gradle_text)
+                  if m_code:
+                      gradle_code = int(m_code.group(1))
+                  if m_name:
+                      gradle_name = m_name.group(1).strip()
+              except Exception:
+                  pass
+
+          existing_code = 17
+          existing_name = "v4.2"
           if os.path.exists("version.json"):
               try:
                   with open("version.json", "r", encoding="utf-8") as f:
                       prev = json.load(f)
-                      existing_code = int(prev.get("versionCode", 15))
-                      existing_name = str(prev.get("versionName", "v4.0")).strip()
+                      existing_code = int(prev.get("versionCode", 17))
+                      existing_name = str(prev.get("versionName", "v4.2")).strip()
               except Exception:
-                  existing_code = 15
+                  existing_code = 17
 
           v_code_str = os.environ.get("INPUT_VERSION_CODE", "").strip()
           v_name_str = os.environ.get("INPUT_VERSION_NAME", "").strip()
@@ -451,7 +467,7 @@ jobs:
           public_base = os.environ.get("INPUT_PUBLIC_BASE_URL", "").strip().rstrip("/")
 
           if not v_code_str:
-              v_code = max(existing_code, 15)
+              v_code = max(gradle_code, existing_code, 18)
           else:
               v_code = int(v_code_str)
 
@@ -459,7 +475,12 @@ jobs:
               raise SystemExit(f"Invalid versionCode: {v_code}")
 
           if not v_name_str:
-              v_name_str = existing_name if v_code == existing_code and existing_name else f"v4.{max(0, v_code - 15)}"
+              if v_code == gradle_code and gradle_name:
+                  v_name_str = gradle_name
+              elif v_code == existing_code and existing_name:
+                  v_name_str = existing_name
+              else:
+                  v_name_str = f"{v_code}.0"
 
           v_clean = v_name_str.lstrip("vV").strip()
 
@@ -557,8 +578,8 @@ jobs:
           BADGING_OUT=$("$AAPT2_BIN" dump badging "release_out/${APK_FILENAME}")
           echo "$BADGING_OUT" | grep "package: name="
 
-          if ! echo "$BADGING_OUT" | grep -q "name='com.pmp'"; then
-            echo "::error::APK packageName is not com.pmp!"
+          if ! echo "$BADGING_OUT" | grep -q "name='com.aistudio.pmppaints.erp'"; then
+            echo "::error::APK packageName is not com.aistudio.pmppaints.erp!"
             exit 1
           fi
           if ! echo "$BADGING_OUT" | grep -q "versionCode='${V_CODE}'"; then
