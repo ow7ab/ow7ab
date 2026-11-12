@@ -1,0 +1,53 @@
+name: PMP Paints - Cloudflare Pages & Web Production Deployment
+
+on:
+  push:
+    branches:
+      - "main"
+    paths:
+      - "web/**"
+      - "public/**"
+      - ".github/workflows/deploy-web.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: pmp-web-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy-web:
+    name: Build & Verify Web Platform
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'web/package.json'
+
+      - name: Install Web Dependencies
+        run: |
+          npm ci --prefix web
+
+      - name: Run Web Automated Tests
+        run: |
+          node --test web/tests/rbac.test.mjs
+          node --test web/tests/erp_operations.test.mjs
+
+      - name: Build Web Production Bundle
+        run: |
+          npm run build --prefix web
+
+      - name: Verify Web Dist Integrity
+        run: |
+          test -f web/dist/index.html
+          echo "Web distribution bundle verified successfully."

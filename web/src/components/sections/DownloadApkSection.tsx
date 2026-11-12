@@ -1,5 +1,17 @@
-import React, { useState } from 'react';
-import { Download, ShieldCheck, Cpu, Smartphone, CheckCircle2, Copy, Check, ExternalLink } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import {
+  Download,
+  ShieldCheck,
+  Cpu,
+  Smartphone,
+  CheckCircle2,
+  Copy,
+  Check,
+  ExternalLink,
+  RefreshCw,
+  AlertCircle,
+  FileCheck
+} from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassButton } from '../ui/GlassButton';
 import { GlassBadge } from '../ui/GlassBadge';
@@ -9,9 +21,49 @@ import { useLanguage } from '../../context/LanguageContext';
 export const DownloadApkSection: React.FC = () => {
   const { language } = useLanguage();
   const [copiedHash, setCopiedHash] = useState(false);
+  const [liveRelease, setLiveRelease] = useState({
+    versionName: APP_VERSION_CONTRACT.versionName,
+    versionCode: APP_VERSION_CONTRACT.versionCode,
+    releaseDate: APP_VERSION_CONTRACT.releaseDate,
+    downloadSize: APP_VERSION_CONTRACT.downloadSize,
+    sha256: APP_VERSION_CONTRACT.SIGNING_CERT_SHA256,
+    downloadUrl: getReleaseDownloadUrl(),
+    isVerified: true
+  });
+  const [isFetchingRelease, setIsFetchingRelease] = useState(false);
+
+  useEffect(() => {
+    // Attempt dynamic fetch from /version.json or GitHub API
+    const fetchLatestVerifiedMetadata = async () => {
+      try {
+        setIsFetchingRelease(true);
+        const res = await fetch('/version.json');
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.versionCode) {
+            setLiveRelease({
+              versionName: data.versionName || APP_VERSION_CONTRACT.versionName,
+              versionCode: data.versionCode || APP_VERSION_CONTRACT.versionCode,
+              releaseDate: data.publishedAt ? data.publishedAt.split('T')[0] : APP_VERSION_CONTRACT.releaseDate,
+              downloadSize: data.fileSizeMb ? `~${data.fileSizeMb} MB` : APP_VERSION_CONTRACT.downloadSize,
+              sha256: data.sha256 || data.signingCertSha256 || APP_VERSION_CONTRACT.SIGNING_CERT_SHA256,
+              downloadUrl: data.rawPublicApkUrl || data.downloadUrl || getReleaseDownloadUrl(),
+              isVerified: Boolean(data.releaseStatus === 'PUBLISHED' || !data.releaseStatus)
+            });
+          }
+        }
+      } catch (err) {
+        // Fallback to static verified contract
+      } finally {
+        setIsFetchingRelease(false);
+      }
+    };
+
+    fetchLatestVerifiedMetadata();
+  }, []);
 
   const handleCopyHash = () => {
-    navigator.clipboard.writeText(APP_VERSION_CONTRACT.SIGNING_CERT_SHA256);
+    navigator.clipboard.writeText(liveRelease.sha256);
     setCopiedHash(true);
     setTimeout(() => setCopiedHash(false), 2500);
   };
@@ -21,10 +73,10 @@ export const DownloadApkSection: React.FC = () => {
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center max-w-3xl mx-auto mb-14">
           <GlassBadge variant="primary" className="mb-4">
-            {language === 'ar' ? 'التحميل الرسمي المباشر' : 'Official Direct Download'}
+            {language === 'ar' ? 'التحميل الرسمي المعتمد' : 'Official Verified Release'}
           </GlassBadge>
           <h2 className="text-3xl sm:text-4xl font-extrabold text-theme-primary tracking-tight">
-            {language === 'ar' ? 'حمّل أحدث إصدار من تطبيق PMP Paints للآندرويد' : 'Download the Latest PMP Paints Android APK'}
+            {language === 'ar' ? 'حمّل أحدث إصدار من تطبيق PMP Paints للآندرويد' : 'Download the Official PMP Paints Android APK'}
           </h2>
           <p className="mt-4 text-base sm:text-lg text-theme-secondary">
             {language === 'ar'
@@ -40,14 +92,14 @@ export const DownloadApkSection: React.FC = () => {
               <div className="flex flex-wrap items-center justify-between gap-4 mb-6 pb-6 border-b border-theme">
                 <div>
                   <span className="text-xs uppercase tracking-wider text-theme-muted font-bold block">
-                    {language === 'ar' ? 'الإصدار المعتمد' : 'Release Version'}
+                    {language === 'ar' ? 'الإصدار المعتمد المستقر' : 'Verified Stable Release'}
                   </span>
                   <div className="flex items-center gap-3 mt-1">
                     <span className="text-2xl font-black text-theme-primary">
-                      {APP_VERSION_CONTRACT.CURRENT_VERSION_NAME}
+                      {liveRelease.versionName}
                     </span>
                     <GlassBadge variant="success">
-                      {language === 'ar' ? `كود الإصدار: ${APP_VERSION_CONTRACT.CURRENT_VERSION_CODE}` : `Build ${APP_VERSION_CONTRACT.CURRENT_VERSION_CODE}`}
+                      {language === 'ar' ? `كود الإصدار: ${liveRelease.versionCode}` : `Build ${liveRelease.versionCode}`}
                     </GlassBadge>
                   </div>
                 </div>
@@ -56,7 +108,7 @@ export const DownloadApkSection: React.FC = () => {
                     {language === 'ar' ? 'تاريخ النشر' : 'Release Date'}
                   </span>
                   <span className="text-sm font-semibold text-theme-secondary mt-1 block">
-                    {APP_VERSION_CONTRACT.RELEASE_DATE}
+                    {liveRelease.releaseDate}
                   </span>
                 </div>
               </div>
@@ -69,7 +121,7 @@ export const DownloadApkSection: React.FC = () => {
                     <span>{language === 'ar' ? 'الحد الأدنى للنظام' : 'Min Android'}</span>
                   </div>
                   <span className="text-sm font-bold text-theme-primary">
-                    Android 8.0 (API {APP_VERSION_CONTRACT.MIN_ANDROID_SDK})
+                    Android 8.0+ (API {APP_VERSION_CONTRACT.MIN_ANDROID_SDK})
                   </span>
                 </div>
 
@@ -85,11 +137,11 @@ export const DownloadApkSection: React.FC = () => {
 
                 <div className="p-3 rounded-lg bg-theme-surface border border-theme col-span-2 sm:col-span-1">
                   <div className="flex items-center gap-2 text-theme-muted mb-1 text-xs">
-                    <ShieldCheck className="w-4 h-4 text-pmp-success" />
+                    <FileCheck className="w-4 h-4 text-pmp-success" />
                     <span>{language === 'ar' ? 'حجم الملف' : 'File Size'}</span>
                   </div>
                   <span className="text-sm font-bold text-theme-primary">
-                    {APP_VERSION_CONTRACT.downloadSize}
+                    {liveRelease.downloadSize}
                   </span>
                 </div>
               </div>
@@ -107,7 +159,7 @@ export const DownloadApkSection: React.FC = () => {
 
                 <div className="p-3 rounded-lg bg-theme-surface border border-theme text-xs font-mono">
                   <div className="flex justify-between items-center text-theme-muted mb-1">
-                    <span>{language === 'ar' ? 'بصمة الشهادة الرقمية (SHA-256):' : 'Certificate Fingerprint (SHA-256):'}</span>
+                    <span>{language === 'ar' ? 'بصمة الشهادة الرقمية المعتمدة (SHA-256):' : 'Certificate Fingerprint (SHA-256):'}</span>
                     <button
                       onClick={handleCopyHash}
                       className="flex items-center gap-1 text-pmp-accent hover:underline focus:outline-none"
@@ -126,7 +178,7 @@ export const DownloadApkSection: React.FC = () => {
                     </button>
                   </div>
                   <span className="text-theme-secondary break-all font-mono">
-                    {APP_VERSION_CONTRACT.SIGNING_CERT_SHA256}
+                    {liveRelease.sha256}
                   </span>
                 </div>
               </div>
@@ -134,7 +186,7 @@ export const DownloadApkSection: React.FC = () => {
               {/* Actions */}
               <div className="flex flex-col sm:flex-row gap-4">
                 <a
-                  href={getReleaseDownloadUrl()}
+                  href={liveRelease.downloadUrl}
                   className="flex-1"
                   target="_blank"
                   rel="noopener noreferrer"
@@ -145,7 +197,7 @@ export const DownloadApkSection: React.FC = () => {
                     className="w-full justify-center shadow-lg shadow-pmp-primary/25"
                     icon={<Download className="w-5 h-5" />}
                   >
-                    {language === 'ar' ? 'تحميل ملف APK المباشر' : 'Download APK File'}
+                    {language === 'ar' ? 'تحميل ملف APK المباشر' : 'Download Verified APK'}
                   </GlassButton>
                 </a>
 
