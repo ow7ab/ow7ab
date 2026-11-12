@@ -5,6 +5,8 @@ interface StatCardProps {
   title: string;
   value: string;
   subtitle?: string;
+  change?: string;
+  isPositive?: boolean;
   badge?: string;
   badgeVariant?: 'red' | 'cyan' | 'green' | 'gold';
   icon?: React.ReactNode;
@@ -14,6 +16,8 @@ export const StatCard: React.FC<StatCardProps> = ({
   title,
   value,
   subtitle,
+  change,
+  isPositive = true,
   badge,
   badgeVariant = 'red',
   icon
@@ -46,9 +50,9 @@ export const StatCard: React.FC<StatCardProps> = ({
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        {subtitle && (
-          <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-            {subtitle}
+        {(subtitle || change) && (
+          <span style={{ fontSize: '12px', color: change ? (isPositive ? 'var(--pmp-green)' : 'var(--pmp-red)') : 'var(--text-muted)' }}>
+            {change || subtitle}
           </span>
         )}
         {badge && (
