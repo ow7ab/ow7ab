@@ -17,9 +17,20 @@ import {
 } from '../services/SecurityService';
 import { AccountService } from '../services/AccountService';
 import { ErpDataService, safeId } from '../services/ErpDataService';
-import { verifyPassword, needsUpgradeToPbkdf2 } from '../services/PasswordSecurity';
+import {
+  verifyPassword,
+  needsUpgradeToPbkdf2,
+  computeSessionIntegritySeal,
+  verifySessionIntegritySeal,
+  LoginRateLimiter
+} from '../services/PasswordSecurity';
 
 const SESSION_STORAGE_KEY = 'pmp_web_portal_user';
+
+function formatLockDurationAr(seconds: number): string {
+  const mins = Math.max(1, Math.ceil(seconds / 60));
+  return `${mins} دقيقة`;
+}
 
 interface AuthContextType {
   currentUser: User | null;
@@ -63,39 +74,78 @@ const AuthContext = createContext<AuthContextType>({
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [linkedAccount, setLinkedAccount] = useState<UserAccount | null>(() => {
-    const saved = localStorage.getItem(SESSION_STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved) as UserAccount;
-        if (parsed && parsed.userCode && parsed.active !== false) {
-          parsed.roleType = resolveUserRoleType(parsed);
-          return parsed;
-        }
-      } catch {
-        localStorage.removeItem(SESSION_STORAGE_KEY);
-      }
-    }
-    return null;
-  });
+  const [linkedAccount, setLinkedAccount] = useState<UserAccount | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
 
   const persistSession = (account: UserAccount | null) => {
     if (account) {
+      const issuedAt = Date.now();
       const sanitized: UserAccount = {
         ...account,
         pinOrPassword: undefined, // Never persist secret hashes into localStorage
         roleType: resolveUserRoleType(account)
       };
       setLinkedAccount(sanitized);
-      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sanitized));
+      void computeSessionIntegritySeal({
+        userCode: sanitized.userCode,
+        username: sanitized.username,
+        role: sanitized.role,
+        roleType: sanitized.roleType,
+        branch: sanitized.branch,
+        permissions: sanitized.permissions,
+        active: sanitized.active,
+        syncStatus: sanitized.syncStatus,
+        serverSyncToken: sanitized.serverSyncToken,
+        issuedAt
+      })
+        .then((seal) => {
+          localStorage.setItem(
+            SESSION_STORAGE_KEY,
+            JSON.stringify({
+              ...sanitized,
+              _issuedAt: issuedAt,
+              _integritySeal: seal
+            })
+          );
+        })
+        .catch(() => {
+          localStorage.removeItem(SESSION_STORAGE_KEY);
+        });
     } else {
       setLinkedAccount(null);
       localStorage.removeItem(SESSION_STORAGE_KEY);
     }
   };
+
+  // Restore cached session ONLY if its cryptographic integrity seal is valid
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const saved = localStorage.getItem(SESSION_STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          const sealOk = await verifySessionIntegritySeal(parsed);
+          if (sealOk && parsed?.userCode && parsed.active !== false && !cancelled) {
+            const cleanAccount: UserAccount = { ...parsed };
+            delete (cleanAccount as any)._integritySeal;
+            delete (cleanAccount as any)._issuedAt;
+            cleanAccount.roleType = resolveUserRoleType(cleanAccount);
+            setLinkedAccount(cleanAccount);
+          } else {
+            localStorage.removeItem(SESSION_STORAGE_KEY);
+          }
+        }
+      } catch {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Start global tombstone & epoch sync for the active cluster
   useEffect(() => {
@@ -150,17 +200,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsubscribe();
   }, []);
 
-  // Live session security listener: watches Firestore user_accounts doc so suspended/deleted users or role/permission edits sync immediately
+  // Live session security listener: watches Firestore user_accounts & deleted_users so suspended/deleted/spoofed sessions terminate immediately
   useEffect(() => {
     if (!linkedAccount?.userCode) return;
     const cluster = ErpDataService.activeCluster;
     const docId = safeId(linkedAccount.userCode, `USR-${linkedAccount.id}`);
     const userRef = doc(firestore, `erp_clusters/${cluster}/user_accounts`, docId);
+    const deletedRef = doc(firestore, `erp_clusters/${cluster}/deleted_users`, docId);
+
+    const unsubDeleted = onSnapshot(
+      deletedRef,
+      (snap) => {
+        if (snap.exists()) {
+          persistSession(null);
+        }
+      },
+      () => {}
+    );
 
     const unsub = onSnapshot(
       userRef,
       (snap) => {
-        if (!snap.exists()) return;
+        // Authoritative server check: if the user doc does not exist on Firestore (except cached latency, check fromCache), terminate spoofed/deleted sessions
+        if (!snap.exists()) {
+          if (!snap.metadata.fromCache) {
+            persistSession(null);
+          }
+          return;
+        }
         const d = snap.data() || {};
         if (d.active === false || d.syncStatus === 'PENDING_MANAGER_APPROVAL') {
           persistSession(null);
@@ -178,12 +245,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           active: d.active !== false
         };
         refreshed.roleType = resolveUserRoleType(refreshed);
-        // Only update state if permissions, role, branch, or name changed
+        // Always sync authoritative role/permissions/branch/name from server
         if (
           refreshed.permissions !== linkedAccount.permissions ||
           refreshed.role !== linkedAccount.role ||
           refreshed.branch !== linkedAccount.branch ||
-          refreshed.fullName !== linkedAccount.fullName
+          refreshed.fullName !== linkedAccount.fullName ||
+          refreshed.username !== linkedAccount.username
         ) {
           persistSession(refreshed);
         }
@@ -191,7 +259,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       () => {}
     );
 
-    return () => unsub();
+    return () => {
+      unsub();
+      unsubDeleted();
+    };
   }, [linkedAccount?.userCode]);
 
   const userRoleType: UserRoleType = resolveUserRoleType(linkedAccount);
@@ -219,15 +290,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginWithUsernamePin = async (userVal: string, pinVal: string) => {
     setIsAuthenticating(true);
     try {
-      const cleanUser = userVal.trim();
-      const cleanPin = pinVal.trim();
+      const cleanUser = (userVal || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 64);
+      const cleanPin = (pinVal || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 128);
       if (!cleanUser || !cleanPin) {
         throw new Error('يرجى إدخال اسم المستخدم والرمز السري / كلمة المرور.');
       }
 
+      const lockStatus = LoginRateLimiter.checkLockStatus(cleanUser);
+      if (lockStatus.locked) {
+        await ErpDataService.logAudit(
+          cleanUser,
+          'WEB_LOGIN_LOCKED_OUT',
+          `حظر مؤقت لمحاولة تسجيل دخول متكررة (${formatLockDurationAr(lockStatus.remainingSeconds)})`
+        );
+        throw new Error(
+          `تم تعليق محاولات الدخول مؤقتاً بسبب تكرار الخطأ. يرجى المحاولة بعد ${formatLockDurationAr(lockStatus.remainingSeconds)}.`
+        );
+      }
+
       const matched = await AccountService.findAccountForLogin(cleanUser);
       if (!matched) {
-        throw new Error('اسم المستخدم غير مسجل في قاعدة بيانات PMP السحابية.');
+        const rl = LoginRateLimiter.recordFailure(cleanUser);
+        if (rl.locked) {
+          throw new Error(
+            `تم قفل تسجيل الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)} حمايةً للنظام.`
+          );
+        }
+        throw new Error('اسم المستخدم أو الرمز السري غير صحيح.');
       }
 
       validateAccountAccessState(matched);
@@ -239,9 +328,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const verified = await verifyPassword(cleanPin, storedSecret);
       if (!verified) {
-        await ErpDataService.logAudit(cleanUser, 'WEB_LOGIN_FAILED', 'محاولة دخول برمز سري غير صحيح');
-        throw new Error('الرمز السري أو كلمة المرور غير صحيحة.');
+        const rl = LoginRateLimiter.recordFailure(cleanUser);
+        await ErpDataService.logAudit(
+          cleanUser,
+          rl.locked ? 'WEB_LOGIN_LOCKED_OUT' : 'WEB_LOGIN_FAILED',
+          rl.locked
+            ? `تجاوز الحد الأقصى للمحاولات الفاشلة وتم الحظر لمدة ${formatLockDurationAr(rl.remainingSeconds)}`
+            : `محاولة دخول برمز سري غير صحيح (متبقي ${rl.attemptsRemaining} محاولات)`
+        );
+        if (rl.locked) {
+          throw new Error(
+            `تم تجاوز الحد المسموح للمحاولات. تم إيقاف الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
+          );
+        }
+        throw new Error(`الرمز السري أو كلمة المرور غير صحيحة (متبقي ${rl.attemptsRemaining} محاولات).`);
       }
+
+      LoginRateLimiter.recordSuccess(cleanUser);
 
       // Transparent upgrade from legacy SHA-256 / plaintext PIN to PBKDF2-HMAC-SHA256
       if (needsUpgradeToPbkdf2(storedSecret)) {
@@ -267,10 +370,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginWithEmail = async (emailVal: string, passVal: string) => {
     setIsAuthenticating(true);
     try {
-      const cleanEmail = emailVal.trim().toLowerCase();
-      const cleanPass = passVal.trim();
+      const cleanEmail = (emailVal || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().toLowerCase().slice(0, 120);
+      const cleanPass = (passVal || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 128);
       if (!cleanEmail || !cleanPass) {
         throw new Error('يرجى إدخال البريد الإلكتروني وكلمة المرور.');
+      }
+
+      const lockStatus = LoginRateLimiter.checkLockStatus(cleanEmail);
+      if (lockStatus.locked) {
+        await ErpDataService.logAudit(
+          cleanEmail,
+          'WEB_LOGIN_LOCKED_OUT',
+          `حظر مؤقت لتكرار محاولات البريد الخاطئة (${formatLockDurationAr(lockStatus.remainingSeconds)})`
+        );
+        throw new Error(
+          `تم تعليق تسجيل الدخول مؤقتاً بسبب تكرار المحاولات الخاطئة. يرجى المحاولة بعد ${formatLockDurationAr(lockStatus.remainingSeconds)}.`
+        );
       }
 
       // 1. Check Firebase Auth if configured for this corporate email
@@ -292,8 +407,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const storedSecret = (matched.pinOrPassword || '').trim();
           const ok = storedSecret ? await verifyPassword(cleanPass, storedSecret) : false;
           if (!ok) {
-            await ErpDataService.logAudit(cleanEmail, 'WEB_EMAIL_LOGIN_FAILED', 'كلمة مرور غير صحيحة');
-            throw new Error('البريد الإلكتروني أو كلمة المرور غير صحيحة.');
+            const rl = LoginRateLimiter.recordFailure(cleanEmail);
+            await ErpDataService.logAudit(
+              cleanEmail,
+              rl.locked ? 'WEB_LOGIN_LOCKED_OUT' : 'WEB_EMAIL_LOGIN_FAILED',
+              'كلمة مرور غير صحيحة'
+            );
+            if (rl.locked) {
+              throw new Error(
+                `تم تجاوز الحد المسموح للمحاولات. تم قفل الدخول لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
+              );
+            }
+            throw new Error(`البريد الإلكتروني أو كلمة المرور غير صحيحة (متبقي ${rl.attemptsRemaining} محاولات).`);
           }
           if (needsUpgradeToPbkdf2(storedSecret)) {
             AccountService.updateEmployee(matched, matched, 'ترقية تشفير كلمة المرور إلى PBKDF2', cleanPass).catch(
@@ -302,6 +427,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         }
 
+        LoginRateLimiter.recordSuccess(cleanEmail);
         await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${cleanEmail}`);
         persistSession(matched);
         return;
@@ -327,16 +453,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             active: data.active !== false
           };
           validateAccountAccessState(mapped);
+          LoginRateLimiter.recordSuccess(cleanEmail);
           persistSession(mapped);
           return;
         }
         throw new Error('تم التحقق من البريد ولكن الحساب غير مرتبط بسجل موظف معتمد في المنظومة.');
       }
 
+      LoginRateLimiter.recordFailure(cleanEmail);
       throw new Error(
         fbAuthError?.code === 'auth/wrong-password' || fbAuthError?.code === 'auth/invalid-credential'
           ? 'بيانات الدخول غير صحيحة.'
-          : fbAuthError?.message || 'لا يوجد حساب موظف مطابق لهذا البريد الإلكتروني.'
+          : 'بيانات الدخول غير مطابقة لأي حساب معتمد.'
       );
     } finally {
       setIsAuthenticating(false);
@@ -356,6 +484,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const matched = await AccountService.findAccountForLogin(email);
       if (matched) {
         validateAccountAccessState(matched);
+        LoginRateLimiter.recordSuccess(email);
         await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_GOOGLE', `تسجيل دخول عبر Google (${email})`);
         persistSession(matched);
         return;
@@ -385,7 +514,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const updateCurrentUserProfile = async (data: Partial<UserAccount>) => {
     if (!linkedAccount) return;
-    const updated: UserAccount = { ...linkedAccount, ...data };
+    // SECURITY: Strict whitelist blocks self-privilege escalation (cannot overwrite role, roleType, permissions, active, userCode, username, syncStatus)
+    const updated: UserAccount = {
+      ...linkedAccount,
+      fullName: typeof data.fullName === 'string' && data.fullName.trim() ? data.fullName.trim().slice(0, 120) : linkedAccount.fullName,
+      phoneOrEmail: typeof data.phoneOrEmail === 'string' ? data.phoneOrEmail.trim().slice(0, 120) : linkedAccount.phoneOrEmail,
+      lastLoginAt: data.lastLoginAt ?? linkedAccount.lastLoginAt
+    };
     updated.roleType = resolveUserRoleType(updated);
     persistSession(updated);
     await AccountService.updateEmployee(updated, updated, 'تحديث بيانات الحساب الشخصي');

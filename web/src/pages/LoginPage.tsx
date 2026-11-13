@@ -318,6 +318,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   <input
                     type="text"
                     required
+                    maxLength={64}
                     autoComplete="username"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
@@ -336,6 +337,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   <input
                     type="password"
                     required
+                    maxLength={64}
                     autoComplete="current-password"
                     value={pin}
                     onChange={(e) => setPin(e.target.value)}
@@ -376,6 +378,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   <input
                     type="email"
                     required
+                    maxLength={128}
                     autoComplete="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -407,6 +410,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   <input
                     type="password"
                     required
+                    maxLength={128}
                     autoComplete="current-password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}

@@ -944,6 +944,7 @@ class CloudErpSyncRepository(
                             "description" to m.description,
                             "reference" to m.reference,
                             "createdBy" to m.createdBy,
+                            "createdAt" to m.createdAt,
                             "serverUpdatedBy" to actor,
                             "serverUpdatedAt" to FieldValue.serverTimestamp()
                         )
@@ -992,6 +993,7 @@ class CloudErpSyncRepository(
                         "destinationAmount" to t.destinationAmount,
                         "description" to t.description,
                         "createdBy" to t.createdBy,
+                        "createdAt" to t.createdAt,
                         "serverUpdatedBy" to actor,
                         "serverUpdatedAt" to FieldValue.serverTimestamp()
                     )
@@ -1127,6 +1129,12 @@ class CloudErpSyncRepository(
             }
 
             val warehouses = dao.getWarehousesDirect()
+                .filterNot { wh ->
+                    DeletedRecordsRegistry.isDeleted("warehouses", wh.id) ||
+                        DeletedRecordsRegistry.isDeleted("warehouses", "WH-${wh.id}") ||
+                        DeletedRecordsRegistry.isDeleted("warehouses", wh.name)
+                }
+                .distinctBy { it.name.trim().lowercase() }
             if (warehouses.isNotEmpty()) {
                 val batch = firestore.batch()
                 warehouses.forEach { wh ->
@@ -1135,8 +1143,12 @@ class CloudErpSyncRepository(
                         cRef.collection("warehouses").document(docId),
                         mapOf(
                             "id" to wh.id,
-                            "name" to wh.name,
+                            "name" to wh.name.trim(),
                             "active" to wh.active,
+                            "currency" to wh.currency,
+                            "linkedCashbox" to wh.linkedCashbox,
+                            "warehouseType" to wh.warehouseType,
+                            "serverUpdatedBy" to actor,
                             "serverUpdatedAt" to FieldValue.serverTimestamp()
                         ),
                         SetOptions.merge()
@@ -1295,8 +1307,15 @@ class CloudErpSyncRepository(
                 batch.commit().await()
             }
 
-            // 9. Stock Moves (Batched)
-            val stockMoves = dao.getStockMovesDirect()
+            // 9. Stock Moves (Batched - excluding tombstoned & orphan moves for deleted products/warehouses)
+            val validProductIds = products.map { it.id }.toSet()
+            val validWarehouseIds = warehouses.map { it.id }.toSet()
+            val stockMoves = dao.getStockMovesDirect().filterNot { sm ->
+                DeletedRecordsRegistry.isDeleted("stock_moves", sm.id) ||
+                    DeletedRecordsRegistry.isDeleted("stock_moves", "SM-${sm.id}") ||
+                    (validProductIds.isNotEmpty() && sm.productId !in validProductIds) ||
+                    (validWarehouseIds.isNotEmpty() && sm.warehouseId !in validWarehouseIds)
+            }
             stockMoves.chunked(300).forEach { chunk ->
                 val batch = firestore.batch()
                 chunk.forEach { sm ->
@@ -1548,7 +1567,8 @@ class CloudErpSyncRepository(
                     amount = doc.getDouble("amount") ?: 0.0,
                     description = doc.getString("description") ?: "",
                     reference = ref,
-                    createdBy = doc.getString("createdBy") ?: "المدير"
+                    createdBy = doc.getString("createdBy") ?: "المدير",
+                    createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             }
             val distinctMovements = restoredMovements.distinctBy {
@@ -1563,9 +1583,11 @@ class CloudErpSyncRepository(
             val trfSnapshot = cRef.collection("transfers").get().await()
             val restoredTransfers = trfSnapshot.documents.mapNotNull { doc ->
                 val trfId = doc.getLong("id") ?: 0L
+                val docCreatedAt = doc.getLong("createdAt") ?: 0L
                 val isTrfDeleted = DeletedRecordsRegistry.isDeleted("transfers", trfId) ||
                     DeletedRecordsRegistry.isDeleted("transfers", "TRF-$trfId") ||
-                    DeletedRecordsRegistry.isDeleted("transfers", doc.id)
+                    DeletedRecordsRegistry.isDeleted("transfers", doc.id) ||
+                    DeletedRecordsRegistry.isPreEpoch(docCreatedAt)
                 if (isTrfDeleted) {
                     runCatching { doc.reference.delete() }
                     dao.deleteTransferById(trfId)
@@ -1583,7 +1605,8 @@ class CloudErpSyncRepository(
                     rate = doc.getDouble("rate") ?: 1.0,
                     destinationAmount = doc.getDouble("destinationAmount") ?: 0.0,
                     description = doc.getString("description") ?: "",
-                    createdBy = doc.getString("createdBy") ?: "المدير"
+                    createdBy = doc.getString("createdBy") ?: "المدير",
+                    createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             }
             if (restoredTransfers.isNotEmpty()) {
@@ -1700,18 +1723,48 @@ class CloudErpSyncRepository(
                 weightMgr.syncDiscoveredProductWeights(currentProdWeights)
             }
 
-            // 6. Fetch Warehouses and Cashboxes
+            // 6. Fetch Warehouses and Cashboxes (with tombstone shield & strict name deduplication)
+            val initialLocalWh = dao.getWarehousesDirect()
+            initialLocalWh.forEach { wh ->
+                if (DeletedRecordsRegistry.isDeleted("warehouses", wh.id) ||
+                    DeletedRecordsRegistry.isDeleted("warehouses", "WH-${wh.id}") ||
+                    DeletedRecordsRegistry.isDeleted("warehouses", wh.name)
+                ) {
+                    dao.clearStockMovesByWarehouse(wh.id)
+                    dao.deleteWarehouse(wh.id)
+                }
+            }
             val localWh = dao.getWarehousesDirect()
             val whSnapshot = cRef.collection("warehouses").get().await()
             val restoredWarehouses = whSnapshot.documents.mapNotNull { doc ->
-                val name = doc.getString("name") ?: return@mapNotNull null
-                val existing = localWh.firstOrNull { it.name.trim().equals(name.trim(), ignoreCase = true) }
+                val name = doc.getString("name")?.trim() ?: return@mapNotNull null
+                if (name.isBlank()) return@mapNotNull null
+                val remoteId = doc.getLong("id") ?: 0L
+                if (DeletedRecordsRegistry.isDeleted("warehouses", name) ||
+                    DeletedRecordsRegistry.isDeleted("warehouses", doc.id) ||
+                    (remoteId > 0L && (
+                        DeletedRecordsRegistry.isDeleted("warehouses", remoteId) ||
+                            DeletedRecordsRegistry.isDeleted("warehouses", "WH-$remoteId")
+                        ))
+                ) {
+                    runCatching { doc.reference.delete() }
+                    localWh.filter { it.name.trim().equals(name, ignoreCase = true) || (remoteId > 0L && it.id == remoteId) }
+                        .forEach {
+                            dao.clearStockMovesByWarehouse(it.id)
+                            dao.deleteWarehouse(it.id)
+                        }
+                    return@mapNotNull null
+                }
+                val existing = localWh.firstOrNull { it.name.trim().equals(name, ignoreCase = true) }
                 WarehouseEntity(
-                    id = existing?.id ?: (doc.getLong("id") ?: 0L),
+                    id = existing?.id ?: remoteId,
                     name = name,
-                    active = doc.getBoolean("active") ?: true
+                    active = doc.getBoolean("active") ?: existing?.active ?: true,
+                    currency = doc.getString("currency") ?: existing?.currency ?: "SDG",
+                    linkedCashbox = doc.getString("linkedCashbox") ?: existing?.linkedCashbox ?: "خزنة السودان",
+                    warehouseType = doc.getString("warehouseType") ?: existing?.warehouseType ?: "مبيعات"
                 )
-            }
+            }.distinctBy { it.name.trim().lowercase() }
             if (restoredWarehouses.isNotEmpty()) {
                 dao.upsertWarehouses(restoredWarehouses)
                 restoredCount += restoredWarehouses.size
@@ -1878,20 +1931,36 @@ class CloudErpSyncRepository(
                 restoredCount += restoredBatches.size
             }
 
-            // 9. Fetch Stock Moves
+            // 9. Fetch Stock Moves (with tombstone shield & deleted-product/warehouse cleanup)
+            val currentProdIds = dao.getProductsDirect().map { it.id }.toSet()
             val smSnapshot = cRef.collection("stock_moves").get().await()
             val restoredStockMoves = smSnapshot.documents.mapNotNull { doc ->
                 val id = doc.getLong("id") ?: return@mapNotNull null
+                val prodId = doc.getLong("productId") ?: 0L
+                val whId = doc.getLong("warehouseId") ?: 0L
+                val docCreatedAt = doc.getLong("createdAt") ?: 0L
+                val isMoveDeleted = DeletedRecordsRegistry.isDeleted("stock_moves", id) ||
+                    DeletedRecordsRegistry.isDeleted("stock_moves", "SM-$id") ||
+                    DeletedRecordsRegistry.isDeleted("stock_moves", doc.id) ||
+                    DeletedRecordsRegistry.isDeleted("products", prodId) ||
+                    DeletedRecordsRegistry.isDeleted("warehouses", whId) ||
+                    DeletedRecordsRegistry.isPreEpoch(docCreatedAt) ||
+                    (currentProdIds.isNotEmpty() && prodId !in currentProdIds)
+                if (isMoveDeleted) {
+                    runCatching { doc.reference.delete() }
+                    dao.deleteStockMoveById(id)
+                    return@mapNotNull null
+                }
                 StockMoveEntity(
                     id = id,
-                    warehouseId = doc.getLong("warehouseId") ?: 1L,
-                    productId = doc.getLong("productId") ?: 1L,
+                    warehouseId = whId.takeIf { it > 0L } ?: 1L,
+                    productId = prodId.takeIf { it > 0L } ?: 1L,
                     quantity = doc.getDouble("quantity") ?: 1.0,
                     kind = doc.getString("kind") ?: "IN",
                     invoiceId = doc.getLong("invoiceId")?.takeIf { it > 0 },
                     note = doc.getString("note") ?: "",
                     createdBy = doc.getString("createdBy") ?: "المدير",
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                    createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             }
             if (restoredStockMoves.isNotEmpty()) {
@@ -1927,9 +1996,10 @@ class CloudErpSyncRepository(
                 restoredCount += restoredHalfaInvoices.size
             }
 
-            // Clean any residual duplicates across cashboxes, transactions, and user accounts
+            // Clean any residual duplicates across cashboxes, warehouses, transactions, and user accounts
             runCatching {
                 dao.removeDuplicateCashboxes()
+                dao.removeDuplicateWarehouses()
                 dao.removeDuplicateMovements()
                 dao.removeDuplicateUserAccounts()
             }
@@ -2132,8 +2202,29 @@ class CloudErpSyncRepository(
                                     "invoices" -> if (numId != null) dao.deleteInvoiceById(numId)
                                     "transfers" -> if (numId != null) dao.deleteTransferById(numId)
                                     "factory_items" -> if (numId != null) dao.deleteFactoryItemById(numId)
-                                    "products" -> if (numId != null) dao.deleteProduct(numId)
-                                    "warehouses" -> if (numId != null) dao.deleteWarehouse(numId)
+                                    "products" -> if (numId != null) {
+                                        dao.clearStockMovesByProduct(numId)
+                                        dao.deleteProduct(numId)
+                                    }
+                                    "stock_moves" -> if (numId != null) dao.deleteStockMoveById(numId)
+                                    "warehouses" -> {
+                                        val entityIdStr = doc.safeString("entityId")?.trim().orEmpty()
+                                        if (numId != null && numId > 0L) {
+                                            dao.clearStockMovesByWarehouse(numId)
+                                            dao.deleteWarehouse(numId)
+                                        }
+                                        val currentWarehouses = dao.getWarehousesDirect()
+                                        currentWarehouses.forEach { wh ->
+                                            if ((entityIdStr.isNotBlank() && wh.name.trim().equals(entityIdStr, ignoreCase = true)) ||
+                                                "WH-${wh.id}".equals(docId, ignoreCase = true) ||
+                                                DeletedRecordsRegistry.isDeleted("warehouses", wh.name) ||
+                                                DeletedRecordsRegistry.isDeleted("warehouses", wh.id)
+                                            ) {
+                                                dao.clearStockMovesByWarehouse(wh.id)
+                                                dao.deleteWarehouse(wh.id)
+                                            }
+                                        }
+                                    }
                                     "cashboxes" -> {
                                         val entityIdStr = doc.safeString("entityId")?.trim().orEmpty()
                                         if (numId != null && numId > 0L) {
@@ -2309,7 +2400,8 @@ class CloudErpSyncRepository(
                                         amount = doc.safeDouble("amount") ?: 0.0,
                                         description = doc.safeString("description") ?: "",
                                         reference = doc.safeString("reference") ?: doc.id,
-                                        createdBy = doc.safeString("createdBy") ?: "المدير"
+                                        createdBy = doc.safeString("createdBy") ?: "المدير",
+                                        createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis()
                                     )
                                 }
                                 if (list.isNotEmpty()) dao.upsertMovements(list)
@@ -2546,6 +2638,73 @@ class CloudErpSyncRepository(
                 }
             }
 
+        val whListener = cRef.collection("warehouses")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                        try {
+                            val localWh = dao.getWarehousesDirect()
+                            for (dc in snapshot.documentChanges) {
+                                if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                                    val removedName = dc.document.safeString("name")?.trim().orEmpty()
+                                    val removedId = dc.document.safeLong("id")
+                                    if (removedId != null && removedId > 0L) {
+                                        dao.clearStockMovesByWarehouse(removedId)
+                                        dao.deleteWarehouse(removedId)
+                                    }
+                                    if (removedName.isNotBlank()) {
+                                        localWh.filter { it.name.trim().equals(removedName, ignoreCase = true) }
+                                            .forEach {
+                                                dao.clearStockMovesByWarehouse(it.id)
+                                                dao.deleteWarehouse(it.id)
+                                            }
+                                    }
+                                }
+                            }
+                            if (!snapshot.isEmpty) {
+                                val currentLocal = dao.getWarehousesDirect()
+                                val validList = snapshot.documents.mapNotNull { doc ->
+                                    val name = doc.safeString("name")?.trim() ?: return@mapNotNull null
+                                    if (name.isBlank()) return@mapNotNull null
+                                    val remoteId = doc.safeLong("id") ?: 0L
+                                    if (DeletedRecordsRegistry.isDeleted("warehouses", name) ||
+                                        DeletedRecordsRegistry.isDeleted("warehouses", doc.id) ||
+                                        (remoteId > 0L && (
+                                            DeletedRecordsRegistry.isDeleted("warehouses", remoteId) ||
+                                                DeletedRecordsRegistry.isDeleted("warehouses", "WH-$remoteId")
+                                            ))
+                                    ) {
+                                        runCatching { doc.reference.delete() }
+                                        currentLocal.filter { it.name.trim().equals(name, ignoreCase = true) || (remoteId > 0L && it.id == remoteId) }
+                                            .forEach {
+                                                dao.clearStockMovesByWarehouse(it.id)
+                                                dao.deleteWarehouse(it.id)
+                                            }
+                                        return@mapNotNull null
+                                    }
+                                    val existing = currentLocal.firstOrNull { it.name.trim().equals(name, ignoreCase = true) }
+                                    WarehouseEntity(
+                                        id = existing?.id ?: remoteId,
+                                        name = name,
+                                        active = doc.safeBoolean("active") ?: existing?.active ?: true,
+                                        currency = doc.safeString("currency") ?: existing?.currency ?: "SDG",
+                                        linkedCashbox = doc.safeString("linkedCashbox") ?: existing?.linkedCashbox ?: "خزنة السودان",
+                                        warehouseType = doc.safeString("warehouseType") ?: existing?.warehouseType ?: "مبيعات"
+                                    )
+                                }.distinctBy { it.name.trim().lowercase() }
+                                if (validList.isNotEmpty()) {
+                                    dao.upsertWarehouses(validList)
+                                    dao.removeDuplicateWarehouses()
+                                }
+                            }
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "Error syncing live warehouses", e)
+                        }
+                    }
+                }
+            }
+
         awaitClose {
             tombListener.remove()
             invListener.remove()
@@ -2555,6 +2714,7 @@ class CloudErpSyncRepository(
             weightsListener.remove()
             fiListener.remove()
             cbListener.remove()
+            whListener.remove()
         }
     }
 
@@ -2951,6 +3111,127 @@ class CloudErpSyncRepository(
     }
 
     /**
+     * Permanently deletes a warehouse (and all duplicates sharing its name) + linked stock_moves from Firestore
+     * and writes Android/Web tombstones so deleted warehouses never reappear across devices.
+     */
+    suspend fun deleteWarehouseFromCloud(
+        clusterCode: String,
+        id: Long,
+        warehouseName: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanName = warehouseName.trim()
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            val actor = currentActorId
+            val primaryDocId = "WH-$id"
+
+            if (id > 0L) {
+                DeletedRecordsRegistry.registerDeleted("warehouses", id, primaryDocId, actor)
+            }
+            if (cleanName.isNotBlank()) {
+                DeletedRecordsRegistry.registerDeleted("warehouses", cleanName, primaryDocId, actor)
+            }
+
+            val tombDocId = safeId("warehouses_$primaryDocId", primaryDocId)
+            val tombstoneData = mapOf(
+                "collection" to "warehouses",
+                "entityId" to cleanName.ifBlank { primaryDocId },
+                "numericId" to id,
+                "docId" to primaryDocId,
+                "deletedAt" to FieldValue.serverTimestamp(),
+                "deletedBy" to actor,
+                "clusterCode" to cleanCluster
+            )
+            runCatching {
+                cRef.collection("deleted_records").document(tombDocId).set(tombstoneData, SetOptions.merge()).await()
+                firestore.collection("deleted_records").document(tombDocId).set(tombstoneData, SetOptions.merge())
+            }
+
+            if (id > 0L) {
+                runCatching { cRef.collection("warehouses").document(primaryDocId).delete().await() }
+                deleteStockMovesByWarehouseFromCloud(cleanCluster, id)
+            }
+            if (cleanName.isNotBlank()) {
+                runCatching {
+                    val byNameSnap = cRef.collection("warehouses").whereEqualTo("name", cleanName).get().await()
+                    for (doc in byNameSnap.documents) {
+                        val dupId = doc.getLong("id")
+                        if (dupId != null && dupId > 0L) {
+                            DeletedRecordsRegistry.registerDeleted("warehouses", dupId, doc.id, actor)
+                            deleteStockMovesByWarehouseFromCloud(cleanCluster, dupId)
+                        }
+                        doc.reference.delete().await()
+                    }
+                }
+            }
+            Unit
+        }
+    }
+
+    suspend fun deleteStockMovesByWarehouseFromCloud(
+        clusterCode: String,
+        warehouseId: Long
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cRef = clusterRef(clusterCode)
+            val actor = currentActorId
+            val snap = cRef.collection("stock_moves").whereEqualTo("warehouseId", warehouseId).get().await()
+            for (doc in snap.documents) {
+                val moveId = doc.getLong("id") ?: 0L
+                val docId = doc.id
+                DeletedRecordsRegistry.registerDeleted("stock_moves", moveId.takeIf { it > 0L }?.toString() ?: docId, docId, actor)
+                val tombDocId = safeId("stock_moves_$docId", docId)
+                runCatching {
+                    cRef.collection("deleted_records").document(tombDocId).set(
+                        mapOf(
+                            "collection" to "stock_moves",
+                            "entityId" to docId,
+                            "docId" to docId,
+                            "deletedAt" to FieldValue.serverTimestamp(),
+                            "deletedBy" to actor
+                        ),
+                        SetOptions.merge()
+                    )
+                }
+                runCatching { doc.reference.delete().await() }
+            }
+            Unit
+        }
+    }
+
+    suspend fun deleteStockMovesByProductFromCloud(
+        clusterCode: String,
+        productId: Long
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cRef = clusterRef(clusterCode)
+            val actor = currentActorId
+            val snap = cRef.collection("stock_moves").whereEqualTo("productId", productId).get().await()
+            for (doc in snap.documents) {
+                val moveId = doc.getLong("id") ?: 0L
+                val docId = doc.id
+                DeletedRecordsRegistry.registerDeleted("stock_moves", moveId.takeIf { it > 0L }?.toString() ?: docId, docId, actor)
+                val tombDocId = safeId("stock_moves_$docId", docId)
+                runCatching {
+                    cRef.collection("deleted_records").document(tombDocId).set(
+                        mapOf(
+                            "collection" to "stock_moves",
+                            "entityId" to docId,
+                            "docId" to docId,
+                            "deletedAt" to FieldValue.serverTimestamp(),
+                            "deletedBy" to actor
+                        ),
+                        SetOptions.merge()
+                    )
+                }
+                runCatching { doc.reference.delete().await() }
+            }
+            Unit
+        }
+    }
+
+    /**
      * Instantly pushes a single financial MovementEntity to Cloud Firestore in < 100ms
      */
     suspend fun syncSingleMovementToCloud(
@@ -2971,6 +3252,7 @@ class CloudErpSyncRepository(
                 "description" to m.description,
                 "reference" to m.reference,
                 "createdBy" to m.createdBy,
+                "createdAt" to m.createdAt,
                 "serverUpdatedBy" to actor,
                 "serverUpdatedAt" to FieldValue.serverTimestamp()
             )
@@ -3011,6 +3293,7 @@ class CloudErpSyncRepository(
                 "destinationAmount" to t.destinationAmount,
                 "description" to t.description,
                 "createdBy" to t.createdBy,
+                "createdAt" to t.createdAt,
                 "serverUpdatedBy" to actor,
                 "serverUpdatedAt" to FieldValue.serverTimestamp()
             )

@@ -32,6 +32,7 @@ const PasswordSecurity = await loadTsModule('PasswordSecurity.ts');
 const PvcEngine = await loadTsModule('PvcEngine.ts');
 const SecurityService = await loadTsModule('SecurityService.ts');
 const ErpCalculations = await loadTsModule('ErpCalculations.ts');
+const ReportExporter = await loadTsModule('ReportExporter.ts');
 
 test.after(() => {
   fs.rmSync(tmpOutDir, { recursive: true, force: true });
@@ -234,4 +235,159 @@ test('ErpCalculations: safeId, cashbox deduplication, warehouse stock parity, an
   assert.equal(statement.entries[statement.entries.length - 1].runningBalance, 350);
 });
 
+test('Security Hardening: Pass-the-Hash blocked, session integrity seal detects role/permission tampering, and LoginRateLimiter locks brute force', async () => {
+  const hashed = await PasswordSecurity.hashPassword('StrongPin@2026');
+  // Submitting raw stored hash string directly MUST NOT pass verification (Pass-the-Hash blocked)
+  assert.equal(await PasswordSecurity.verifyPassword(hashed, hashed), false);
 
+  const legacy = await PasswordSecurity.legacySha256Hash('123456');
+  assert.equal(await PasswordSecurity.verifyPassword(legacy, legacy), false);
+
+  // Session integrity sealing & tamper detection
+  const account = {
+    userCode: 'EMP-100',
+    username: 'cashier_sd',
+    role: 'محاسب مبيعات',
+    roleType: 'EMPLOYEE',
+    branch: 'SD-001',
+    permissions: 'الخزن,المبيعات',
+    active: true,
+    syncStatus: 'APPROVED_BY_MANAGER',
+    serverSyncToken: 'SYNC-OK'
+  };
+  const issuedAt = Date.now();
+  const seal = await PasswordSecurity.computeSessionIntegritySeal({ ...account, issuedAt });
+  assert.equal(
+    await PasswordSecurity.verifySessionIntegritySeal({ ...account, _issuedAt: issuedAt, _integritySeal: seal }),
+    true
+  );
+
+  // Attacker tampers with role or permissions inside localStorage
+  assert.equal(
+    await PasswordSecurity.verifySessionIntegritySeal({
+      ...account,
+      roleType: 'ADMIN',
+      permissions: 'ALL',
+      _issuedAt: issuedAt,
+      _integritySeal: seal
+    }),
+    false
+  );
+
+  // Rate limiter locks out after 5 consecutive failures and resets on success
+  const limiter = PasswordSecurity.LoginRateLimiter;
+  limiter.clearAll();
+  const key = 'test_user_bruteforce';
+  for (let i = 0; i < 4; i++) {
+    const status = limiter.recordFailure(key);
+    assert.equal(status.locked, false);
+  }
+  const lockResult = limiter.recordFailure(key);
+  assert.equal(lockResult.locked, true);
+  assert.ok(lockResult.remainingSeconds >= 240);
+  assert.equal(limiter.checkLockStatus(key).locked, true);
+  limiter.recordSuccess(key);
+  assert.equal(limiter.checkLockStatus(key).locked, false);
+});
+
+test('Warehouse Stock Reconciliation & ReportExporter XSS / CSV formula neutralization', () => {
+  const products = [
+    { id: 1, name: 'معجون أبيض - 900 جم', paintColor: 'أبيض', packageWeight: '900 جم', salePrice: 100, currentStock: 0 }
+  ];
+  // Warehouse 10 has excess outflow (net -15 clamped to 0), Warehouse 20 has 40 net.
+  // Total across warehouses MUST equal 0 + 40 = 40 (NOT -15 + 40 = 25).
+  const moves = [
+    { id: 1, productId: 1, warehouseId: 10, kind: 'IN', quantity: 5 },
+    { id: 2, productId: 1, warehouseId: 10, kind: 'SALE', quantity: 20 },
+    { id: 3, productId: 1, warehouseId: 20, kind: 'IN', quantity: 50 },
+    { id: 4, productId: 1, warehouseId: 20, kind: 'OUT', quantity: 10 }
+  ];
+  const totalMap = ErpCalculations.computeProductStocks(products, moves, null);
+  const whSummaries = ErpCalculations.computeWarehouseStockSummary(
+    [
+      { id: 10, code: 'WH-10', name: 'A', branch: 'A', location: '', manager: '', active: true },
+      { id: 20, code: 'WH-20', name: 'B', branch: 'B', location: '', manager: '', active: true }
+    ],
+    products,
+    moves
+  );
+  const sumOfWarehouses = whSummaries.reduce((s, w) => s + w.netCartons, 0);
+  assert.equal(totalMap.get(1), 40);
+  assert.equal(sumOfWarehouses, 40);
+
+  const breakdown = ErpCalculations.computeProductMoveBreakdown(products, moves, null);
+  assert.equal(breakdown.get(1)?.inQty, 55);
+  assert.equal(breakdown.get(1)?.outQty, 30);
+  assert.equal(breakdown.get(1)?.netStock, 40);
+
+  // ReportExporter XSS & CSV neutralization
+  assert.equal(ReportExporter.escapeHtml('<script>alert(1)</script>'), '&lt;script&gt;alert(1)&lt;/script&gt;');
+  assert.equal(ReportExporter.sanitizeCsvCell('=CMD("calc")'), "'=CMD(\"calc\")");
+});
+
+test('Duplicate Warehouse Deduplication, Orphan +720 Move Exclusion, Chronological Treasury Sorting & Treasury PDF Export', () => {
+  // 1. Duplicate warehouses sharing identical Arabic name must merge into 1 canonical warehouse preserving _aliasIds & _aliasDocIds
+  const rawWarehouses = [
+    { id: 1, _docId: 'WH-1', name: 'مخزن مبيعات حلفا', branch: 'وادي حلفا', active: true },
+    { id: 7, _docId: 'WH-7', name: 'مخزن مبيعات حلفا ', branch: 'حلفا', active: true },
+    { id: 2, _docId: 'WH-2', name: 'مخزن مبيعات عطبرة', branch: 'عطبرة', active: true }
+  ];
+  const dedupedWh = ErpCalculations.deduplicateCollectionRecords('warehouses', rawWarehouses);
+  assert.equal(dedupedWh.length, 2);
+  const halfaWh = dedupedWh.find((w) => w.name.includes('حلفا'));
+  assert.ok(halfaWh);
+  assert.equal(halfaWh.id, 1);
+  assert.deepEqual(halfaWh._aliasIds, [1, 7]);
+  assert.deepEqual(halfaWh._aliasDocIds, ['WH-1', 'WH-7']);
+
+  // 2. Orphan stock_moves (+720) for deleted productId=999 must NOT inflate warehouse inflow or net balance
+  const products = [
+    { id: 101, name: 'معجون أبيض', paintColor: 'أبيض', packageWeight: '900 جم', salePrice: 100, currentStock: 0 }
+  ];
+  const stockMovesWithOrphan = [
+    { id: 1, productId: 999, warehouseId: 7, kind: 'IN', quantity: 720 }, // Deleted product phantom inflow
+    { id: 2, productId: 101, warehouseId: 1, kind: 'IN', quantity: 25 },
+    { id: 3, productId: 101, warehouseId: 7, kind: 'IN', quantity: 15 }  // Alias warehouse ID 7 merges with canonical ID 1!
+  ];
+  const whSummaries = ErpCalculations.computeWarehouseStockSummary(dedupedWh, products, stockMovesWithOrphan);
+  const halfaSummary = whSummaries.find((w) => w.warehouse.id === 1);
+  assert.equal(halfaSummary?.inQty, 40); // Excludes 720 orphan! Combines 25 + 15 across alias IDs 1 & 7
+  assert.equal(halfaSummary?.netCartons, 40);
+
+  const halfaProducts = ErpCalculations.computeProductStocksList(products, stockMovesWithOrphan, 1, dedupedWh);
+  assert.equal(halfaProducts[0].currentStock, 40);
+  const halfaBreakdown = ErpCalculations.computeProductMoveBreakdown(products, stockMovesWithOrphan, 1, dedupedWh);
+  assert.equal(halfaBreakdown.get(101)?.inQty, 40);
+
+  // If existing catalog has 0 inflow for Halfa (only deleted product had 720), both chip & KPI show 0
+  const onlyOrphanMoves = [{ id: 1, productId: 999, warehouseId: 7, kind: 'IN', quantity: 720 }];
+  const zeroCheck = ErpCalculations.computeWarehouseStockSummary(dedupedWh, products, onlyOrphanMoves);
+  assert.equal(zeroCheck.find((w) => w.warehouse.id === 1)?.inQty, 0);
+  assert.equal(zeroCheck.find((w) => w.warehouse.id === 1)?.netCartons, 0);
+
+  // 3. Chronological sorting works accurately by txDate even when Android sync omitted createdAt
+  const unsortedMovements = [
+    { id: 1, txDate: '2026-10-12', amount: 100 }, // missing createdAt
+    { id: 2, txDate: '2026-10-15', amount: 200, createdAt: 1700000000000 },
+    { id: 3, txDate: '2026-10-10', amount: 50, createdAt: 1999999999999 }, // newer timestamp on older txDate!
+    { id: 4, txDate: '14/10/2026', amount: 150 } // DD/MM/YYYY format
+  ];
+  const sortedDesc = [...unsortedMovements].sort((a, b) =>
+    ErpCalculations.compareRecordsChronologically(a, b, 'desc')
+  );
+  assert.deepEqual(
+    sortedDesc.map((m) => m.id),
+    [2, 4, 1, 3]
+  );
+
+  const sortedAsc = [...unsortedMovements].sort((a, b) =>
+    ErpCalculations.compareRecordsChronologically(a, b, 'asc')
+  );
+  assert.deepEqual(
+    sortedAsc.map((m) => m.id),
+    [3, 1, 4, 2]
+  );
+
+  // 4. ReportExporter exposes Treasury Cashbox PDF statement export
+  assert.equal(typeof ReportExporter.ReportExporter.exportTreasuryStatementToPrint, 'function');
+});

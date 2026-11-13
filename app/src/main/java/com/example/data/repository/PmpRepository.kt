@@ -564,11 +564,29 @@ class PmpRepository(
         paymentAmount: Double? = null,
         date: String = currentDateString()
     ): Result<Long> = runInTransaction {
-        if (items.isEmpty()) return@runInTransaction Result.failure(Exception("يجب إضافة بند واحد على الأقل"))
+        val cleanCustomerName = customerName.trim()
+        if (cleanCustomerName.isBlank()) {
+            return@runInTransaction Result.failure(Exception("يرجى تحديد اسم العميل"))
+        }
+        if (items.isEmpty()) {
+            return@runInTransaction Result.failure(Exception("يجب إضافة بند واحد على الأقل"))
+        }
+        if (items.any { !it.quantity.isFinite() || it.quantity <= 0.0 || !it.unitPrice.isFinite() || it.unitPrice < 0.0 }) {
+            return@runInTransaction Result.failure(Exception("كمية أو سعر أحد البنود غير صالح"))
+        }
+        if (!discount.isFinite() || discount < 0.0) {
+            return@runInTransaction Result.failure(Exception("قيمة الخصم غير صالحة"))
+        }
+        if (paymentAmount != null && (!paymentAmount.isFinite() || paymentAmount < 0.0)) {
+            return@runInTransaction Result.failure(Exception("مبلغ السداد الفوري غير صالح"))
+        }
 
-        val subtotal = items.sumOf { it.lineTotal }
+        val normalizedItems = items.map { item ->
+            item.copy(lineTotal = item.quantity * item.unitPrice)
+        }
+        val subtotal = normalizedItems.sumOf { it.lineTotal }
         val finalDiscount = discount.coerceIn(0.0, subtotal)
-        val total = subtotal - finalDiscount
+        val total = (subtotal - finalDiscount).coerceAtLeast(0.0)
 
         val invoiceNumber = "INV-" + SimpleDateFormat("yyMMdd-HHmmss", Locale.getDefault()).format(Date())
 
@@ -576,19 +594,19 @@ class PmpRepository(
             InvoiceEntity(
                 invoiceNo = invoiceNumber,
                 customerId = customerId,
-                customerName = customerName,
+                customerName = cleanCustomerName,
                 invoiceDate = date,
                 currency = currency,
                 subtotal = subtotal,
                 discount = finalDiscount,
                 total = total,
-                notes = notes,
+                notes = notes.trim(),
                 createdBy = user
             )
         )
 
         // Insert line items & record stock movements for products
-        val updatedItems = items.map { it.copy(invoiceId = invoiceId) }
+        val updatedItems = normalizedItems.map { it.copy(invoiceId = invoiceId) }
         dao.insertInvoiceItems(updatedItems)
 
         for (item in updatedItems) {
@@ -661,7 +679,21 @@ class PmpRepository(
         entityType = "invoice_payments",
         details = "دفعة $amount $currency لفاتورة $invoiceNo ($customerName) في $cashbox"
     ) {
-        if (amount <= 0) return@runInTransaction Result.failure(Exception("المبلغ غير صالح"))
+        if (!amount.isFinite() || amount <= 0.0) {
+            return@runInTransaction Result.failure(Exception("المبلغ غير صالح"))
+        }
+        val invoice = dao.getInvoiceById(invoiceId)
+            ?: return@runInTransaction Result.failure(Exception("الفاتورة غير موجودة"))
+        if (invoice.status.equals("cancelled", ignoreCase = true) || invoice.status == "ملغاة") {
+            return@runInTransaction Result.failure(Exception("لا يمكن تحصيل دفعة لفاتورة ملغاة"))
+        }
+        val activePaid = dao.getInvoicePaymentsByInvoiceIdDirect(invoiceId)
+            .filter { it.status == "active" }
+            .sumOf { it.amount }
+        val remaining = (invoice.total - activePaid).coerceAtLeast(0.0)
+        if (amount > remaining + 0.01) {
+            return@runInTransaction Result.failure(Exception("مبلغ الدفعة يتجاوز المتبقي المستحق على الفاتورة"))
+        }
 
         val cleanCurrency = currency.trim().uppercase().ifBlank { "SDG" }
         val taggedNote = if (note.contains("[$cleanCurrency]")) note else "${note.ifBlank { "سداد دفعة" }} [$cleanCurrency]"
@@ -830,8 +862,9 @@ class PmpRepository(
     }
 
     suspend fun deleteWarehouse(id: Long, user: String): Result<Unit> {
+        dao.clearStockMovesByWarehouse(id)
         dao.deleteWarehouse(id)
-        dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_WAREHOUSE", detail = "حذف المخزن #$id"))
+        dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_WAREHOUSE", detail = "حذف المخزن #$id وتنظيف حركاته"))
         return Result.success(Unit)
     }
 
@@ -1001,8 +1034,9 @@ class PmpRepository(
     }
 
     suspend fun deleteProduct(id: Long, productName: String, user: String): Result<Unit> {
+        dao.clearStockMovesByProduct(id)
         dao.deleteProduct(id)
-        dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_PRODUCT", detail = "حذف صنف من النظام: $productName (#$id)"))
+        dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_PRODUCT", detail = "حذف صنف من النظام: $productName (#$id) مع تنظيف حركاته"))
         return Result.success(Unit)
     }
 

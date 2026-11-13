@@ -198,6 +198,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <input
                 type="text"
                 required
+                maxLength={64}
+                autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder={language === 'ar' ? 'مثال: admin أو ahmed_acc' : 'e.g. admin or ahmed_acc'}
@@ -212,7 +214,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <input
                 type="password"
                 required
-                maxLength={12}
+                maxLength={64}
+                autoComplete="current-password"
                 value={pin}
                 onChange={(e) => setPin(e.target.value)}
                 placeholder="••••"
@@ -243,6 +246,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <input
                 type="email"
                 required
+                maxLength={128}
+                autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="name@pmppaints.com"
@@ -266,6 +271,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <input
                 type="password"
                 required
+                maxLength={128}
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"

@@ -12,6 +12,7 @@ import {
   Trash2,
   Edit3,
   FileSpreadsheet,
+  Printer,
   RotateCcw,
   BookOpen,
   Wallet
@@ -125,13 +126,13 @@ export const TreasuryModuleView: React.FC = () => {
       setLoading(false);
     });
     const u2 = ErpDataService.subscribeToCollection<TreasuryMovement>('movements', (items) => {
-      setMovements([...items].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+      setMovements([...items].sort((a, b) => ErpDataService.compareRecordsChronologically(a, b, 'desc')));
     });
     const u3 = ErpDataService.subscribeToCollection<TreasuryTransfer>('transfers', (items) => {
-      setTransfers([...items].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+      setTransfers([...items].sort((a, b) => ErpDataService.compareRecordsChronologically(a, b, 'desc')));
     });
     const u4 = ErpDataService.subscribeToCollection<DailyClosing>('daily_closings', (items) => {
-      setClosings([...items].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+      setClosings([...items].sort((a, b) => ErpDataService.compareRecordsChronologically(a, b, 'desc')));
     });
     const u5 = ErpDataService.subscribeToCollection<SalesInvoice>('invoices', setInvoices);
 
@@ -471,16 +472,31 @@ export const TreasuryModuleView: React.FC = () => {
     }
   };
 
-  // Tab 4: Statement filtered movements
+  // Tab 4: Statement filtered movements (chronological ascending with running balance)
   const statementMovements = useMemo(
     () =>
-      movements.filter(
-        (m) =>
-          normalizeEntityKey(m.cashbox) === normalizeEntityKey(statementBox) &&
-          (m.currency || '').trim().toUpperCase() === statementCur
-      ),
+      movements
+        .filter(
+          (m) =>
+            normalizeEntityKey(m.cashbox) === normalizeEntityKey(statementBox) &&
+            (m.currency || '').trim().toUpperCase() === statementCur
+        )
+        .sort((a, b) => ErpDataService.compareRecordsChronologically(a, b, 'asc')),
     [movements, statementBox, statementCur]
   );
+
+  const statementEntriesWithBalance = useMemo(() => {
+    let running = 0;
+    return statementMovements.map((m) => {
+      const amt = Math.abs(Number(m.amount || 0));
+      if (m.direction === 'وارد') running += amt;
+      else running -= amt;
+      return {
+        movement: m,
+        runningBalance: running
+      };
+    });
+  }, [statementMovements]);
 
   const statementClosingBalance = useMemo(
     () => getBalanceForBoxAndCurrency(statementBox, statementCur),
@@ -488,21 +504,31 @@ export const TreasuryModuleView: React.FC = () => {
   );
 
   const handleExportStatementCsv = () => {
-    const headers = ['التاريخ', 'رقم المستند', 'النوع', 'المبلغ', 'العملة', 'البيان', 'المنفذ'];
-    const rows = statementMovements.map((m) => [
+    const headers = ['التاريخ', 'رقم المستند', 'النوع', 'المبلغ', 'العملة', 'الرصيد التراكمي', 'البيان', 'المنفذ'];
+    const rows = statementEntriesWithBalance.map(({ movement: m, runningBalance }) => [
       m.txDate || '',
       m.reference,
       m.direction,
       m.amount,
       m.currency,
+      runningBalance,
       m.description,
       m.createdBy || ''
     ]);
     ReportExporter.exportToCsv(
-      `pmp_treasury_${statementBox.replace(/\s+/g, '_')}_${statementCur}.csv`,
+      `كشف_حساب_خزنة_${statementBox.replace(/\s+/g, '_')}_${statementCur}.csv`,
       headers,
       rows
     );
+  };
+
+  const handleExportStatementPdf = () => {
+    ReportExporter.exportTreasuryStatementToPrint({
+      cashboxName: statementBox,
+      currency: statementCur,
+      closingBalance: statementClosingBalance,
+      movements: statementMovements
+    });
   };
 
   // Tab 5: Manage Cashboxes (Add, Edit, Zero Out, Delete)
@@ -622,21 +648,65 @@ export const TreasuryModuleView: React.FC = () => {
   };
 
   const filteredMovements = useMemo(() => {
-    return movements.filter((m) => {
-      const q = txSearch.trim().toLowerCase();
-      const matchQ =
-        !q ||
-        (m.reference || '').toLowerCase().includes(q) ||
-        (m.description || '').toLowerCase().includes(q) ||
-        (m.cashbox || '').toLowerCase().includes(q) ||
-        (m.createdBy || '').toLowerCase().includes(q);
-      const matchDir = txDirFilter === 'ALL' || m.direction === txDirFilter;
-      const matchBox =
-        txCashboxFilter === 'ALL' ||
-        normalizeEntityKey(m.cashbox) === normalizeEntityKey(txCashboxFilter);
-      return matchQ && matchDir && matchBox;
-    });
+    return movements
+      .filter((m) => {
+        const q = txSearch.trim().toLowerCase();
+        const matchQ =
+          !q ||
+          (m.reference || '').toLowerCase().includes(q) ||
+          (m.description || '').toLowerCase().includes(q) ||
+          (m.cashbox || '').toLowerCase().includes(q) ||
+          (m.createdBy || '').toLowerCase().includes(q);
+        const matchDir = txDirFilter === 'ALL' || m.direction === txDirFilter;
+        const matchBox =
+          txCashboxFilter === 'ALL' ||
+          normalizeEntityKey(m.cashbox) === normalizeEntityKey(txCashboxFilter);
+        return matchQ && matchDir && matchBox;
+      })
+      .sort((a, b) => ErpDataService.compareRecordsChronologically(a, b, 'desc'));
   }, [movements, txSearch, txDirFilter, txCashboxFilter]);
+
+  const handleExportFilteredMovementsPdf = () => {
+    const targetBoxLabel = txCashboxFilter === 'ALL' ? 'كل الخزن' : txCashboxFilter;
+    const ascMoves = [...filteredMovements].sort((a, b) =>
+      ErpDataService.compareRecordsChronologically(a, b, 'asc')
+    );
+    const closingBal =
+      txCashboxFilter === 'ALL'
+        ? distinctCashboxes.reduce((s, b) => s + Number(b.balances[defaultCurrency] || 0), 0)
+        : getBalanceForBoxAndCurrency(txCashboxFilter, defaultCurrency);
+    ReportExporter.exportTreasuryStatementToPrint({
+      cashboxName: targetBoxLabel,
+      currency: txCashboxFilter === 'ALL' ? defaultCurrency : distinctCashboxes.find((b) => normalizeEntityKey(b.name) === normalizeEntityKey(txCashboxFilter))?.primaryCurrency || defaultCurrency,
+      closingBalance: closingBal,
+      movements: ascMoves
+    });
+  };
+
+  const handleExportFilteredMovementsCsv = () => {
+    const targetBoxLabel = txCashboxFilter === 'ALL' ? 'كل_الخزن' : txCashboxFilter.replace(/\s+/g, '_');
+    const ascMoves = [...filteredMovements].sort((a, b) =>
+      ErpDataService.compareRecordsChronologically(a, b, 'asc')
+    );
+    let running = 0;
+    const headers = ['التاريخ', 'رقم المستند', 'الخزنة', 'النوع', 'المبلغ', 'العملة', 'الرصيد التراكمي', 'البيان', 'المنفذ'];
+    const rows = ascMoves.map((m) => {
+      const amt = Math.abs(Number(m.amount || 0));
+      running += m.direction === 'وارد' ? amt : -amt;
+      return [
+        m.txDate || '',
+        m.reference || '',
+        m.cashbox || '',
+        m.direction || '',
+        amt,
+        m.currency || defaultCurrency,
+        running,
+        m.description || '',
+        m.createdBy || ''
+      ];
+    });
+    ReportExporter.exportToCsv(`كشف_حركة_الخزنة_${targetBoxLabel}.csv`, headers, rows);
+  };
 
   return (
     <div className="space-y-6">
@@ -865,6 +935,26 @@ export const TreasuryModuleView: React.FC = () => {
                 سجل الحركات المالية ({filteredMovements.length})
               </h3>
               <div className="flex flex-wrap items-center gap-2">
+                <GlassButton
+                  type="button"
+                  size="sm"
+                  variant="primary"
+                  onClick={handleExportFilteredMovementsPdf}
+                  icon={<Printer className="w-3.5 h-3.5" />}
+                  className="text-xs"
+                >
+                  تصدير كشف حساب PDF
+                </GlassButton>
+                <GlassButton
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={handleExportFilteredMovementsCsv}
+                  icon={<FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />}
+                  className="text-xs"
+                >
+                  Excel
+                </GlassButton>
                 <select
                   value={txDirFilter}
                   onChange={(e) => setTxDirFilter(e.target.value as any)}
@@ -1254,14 +1344,24 @@ export const TreasuryModuleView: React.FC = () => {
               <h3 className="text-base font-bold text-theme-primary">كشف حساب مفصل للخزنة</h3>
               <GlassBadge variant="cyan">{statementMovements.length} حركة</GlassBadge>
             </div>
-            <GlassButton
-              variant="secondary"
-              onClick={handleExportStatementCsv}
-              icon={<FileSpreadsheet className="w-4 h-4 text-emerald-400" />}
-              className="text-xs"
-            >
-              تصدير كشف الحساب إكسيل (Excel)
-            </GlassButton>
+            <div className="flex items-center gap-2 flex-wrap">
+              <GlassButton
+                variant="primary"
+                onClick={handleExportStatementPdf}
+                icon={<Printer className="w-4 h-4" />}
+                className="text-xs"
+              >
+                طباعة / تصدير PDF
+              </GlassButton>
+              <GlassButton
+                variant="secondary"
+                onClick={handleExportStatementCsv}
+                icon={<FileSpreadsheet className="w-4 h-4 text-emerald-400" />}
+                className="text-xs"
+              >
+                تصدير إكسيل (Excel)
+              </GlassButton>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
@@ -1296,18 +1396,18 @@ export const TreasuryModuleView: React.FC = () => {
           </div>
 
           <div className="space-y-2 max-h-[500px] overflow-y-auto">
-            {statementMovements.length === 0 ? (
+            {statementEntriesWithBalance.length === 0 ? (
               <div className="py-10 text-center text-xs text-theme-muted">
                 لا توجد معاملات مسجلة لخزنة ({statementBox}) بالعملة ({statementCur}) حتى الآن
               </div>
             ) : (
-              statementMovements.map((m) => (
+              [...statementEntriesWithBalance].reverse().map(({ movement: m, runningBalance }) => (
                 <div
                   key={m.id}
                   className="p-3 rounded-xl bg-theme-base border border-theme flex justify-between items-center gap-3 text-xs"
                 >
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <GlassBadge variant={m.direction === 'وارد' ? 'green' : 'red'}>{m.direction}</GlassBadge>
                       <span className="font-bold text-theme-primary">{m.description}</span>
                     </div>
@@ -1315,14 +1415,19 @@ export const TreasuryModuleView: React.FC = () => {
                       {m.txDate} • مستند: {m.reference} • موظف الحساب: {m.createdBy || 'المدير'}
                     </div>
                   </div>
-                  <span
-                    className={`font-mono font-bold text-sm ${
-                      m.direction === 'وارد' ? 'text-emerald-400' : 'text-red-400'
-                    }`}
-                  >
-                    {m.direction === 'وارد' ? '+' : '-'}
-                    {Number(m.amount).toLocaleString()} {m.currency}
-                  </span>
+                  <div className="text-left shrink-0 space-y-1">
+                    <div
+                      className={`font-mono font-bold text-sm ${
+                        m.direction === 'وارد' ? 'text-emerald-400' : 'text-red-400'
+                      }`}
+                    >
+                      {m.direction === 'وارد' ? '+' : '-'}
+                      {Number(m.amount).toLocaleString()} {m.currency}
+                    </div>
+                    <div className="text-[10px] font-mono text-theme-secondary">
+                      الرصيد التراكمي: <strong>{runningBalance.toLocaleString()} {statementCur}</strong>
+                    </div>
+                  </div>
                 </div>
               ))
             )}

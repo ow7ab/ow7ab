@@ -59,6 +59,7 @@ import {
   computeCashboxBalancesByCurrency,
   computeProductStocks,
   computeProductStocksList,
+  computeProductMoveBreakdown,
   computeWarehouseStockSummary,
   computeColorWeightStockRows,
   computeFactoryItemBalances,
@@ -70,6 +71,9 @@ import {
   normalizeEntityKey,
   resolveCanonicalCurrency,
   isStockInMoveKind,
+  resolveWarehouseFilterIds,
+  parseDateStringToEpochMs,
+  compareRecordsChronologically,
   DistinctCashboxSummary,
   WarehouseStockSummaryItem,
   ColorWeightStockRow,
@@ -87,6 +91,7 @@ export {
   computeCashboxBalancesByCurrency,
   computeProductStocks,
   computeProductStocksList,
+  computeProductMoveBreakdown,
   computeWarehouseStockSummary,
   computeColorWeightStockRows,
   computeFactoryItemBalances,
@@ -97,7 +102,10 @@ export {
   normalizeArabicText,
   normalizeEntityKey,
   resolveCanonicalCurrency,
-  isStockInMoveKind
+  isStockInMoveKind,
+  resolveWarehouseFilterIds,
+  parseDateStringToEpochMs,
+  compareRecordsChronologically
 };
 
 export type {
@@ -258,15 +266,78 @@ class ErpDataServiceImpl {
     }
   }
 
+  private tombstoneKeysByCollection: Map<string, Set<string>> = new Map();
+  private tombstoneUnsub: Unsubscribe | null = null;
+
+  private ensureTombstoneSubscription(): void {
+    if (this.tombstoneUnsub) return;
+    try {
+      const colRef = collection(firestore, this.collectionPath('deleted_records', PRIMARY_CLUSTER));
+      this.tombstoneUnsub = onSnapshot(
+        colRef,
+        (snap) => {
+          const nextMap = new Map<string, Set<string>>();
+          snap.forEach((d) => {
+            const data = d.data() || {};
+            const col = String(data.collection || '').trim();
+            if (!col) return;
+            let set = nextMap.get(col);
+            if (!set) {
+              set = new Set<string>();
+              nextMap.set(col, set);
+            }
+            const docId = String(data.docId || d.id || '').trim();
+            const entityId = String(data.entityId ?? '').trim();
+            if (docId) set.add(docId.toLowerCase());
+            if (entityId) {
+              set.add(entityId.toLowerCase());
+              set.add(normalizeEntityKey(entityId));
+            }
+          });
+          this.tombstoneKeysByCollection = nextMap;
+        },
+        () => {}
+      );
+    } catch {
+      // Ignore subscription setup issues in unit test environment
+    }
+  }
+
+  private isRecordTombstoned(collectionName: string, raw: Record<string, any>): boolean {
+    const keys = this.tombstoneKeysByCollection.get(collectionName);
+    if (!keys || keys.size === 0) return false;
+    const candidates = [
+      raw._docId,
+      raw.id,
+      raw.name,
+      raw.invoiceNo,
+      raw.reference,
+      collectionName === 'warehouses' && raw.id ? `WH-${raw.id}` : '',
+      collectionName === 'stock_moves' && raw.id ? `SM-${raw.id}` : '',
+      collectionName === 'products' && raw.id ? `PRD-${raw.id}` : '',
+      collectionName === 'products' && raw.id ? `PROD-${raw.id}` : ''
+    ];
+    for (const c of candidates) {
+      if (c === undefined || c === null) continue;
+      const str = String(c).trim();
+      if (!str) continue;
+      if (keys.has(str.toLowerCase()) || keys.has(normalizeEntityKey(str))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Subscribes in real-time to `/erp_clusters/PMP-ERP-MAIN-CLUSTER/{collectionName}`.
-   * Automatically deduplicates records on read.
+   * Automatically filters out records present in `deleted_records` tombstones and deduplicates records on read.
    */
   subscribeToCollection<T = any>(
     collectionName: ErpCollectionName | string,
     onData: (items: T[]) => void,
     onError?: (err: Error) => void
   ): Unsubscribe {
+    this.ensureTombstoneSubscription();
     const primaryColRef = collection(firestore, this.collectionPath(collectionName, PRIMARY_CLUSTER));
 
     const unsubPrimary = onSnapshot(
@@ -274,7 +345,10 @@ class ErpDataServiceImpl {
       (snap) => {
         const primaryItems: T[] = [];
         snap.forEach((docSnap) => {
-          primaryItems.push(normalizeDocData<T>(docSnap.id, docSnap.data()));
+          const normalized = normalizeDocData<T>(docSnap.id, docSnap.data());
+          if (!this.isRecordTombstoned(collectionName, normalized as Record<string, any>)) {
+            primaryItems.push(normalized);
+          }
         });
         onData(deduplicateCollectionRecords<T>(collectionName, primaryItems));
       },
@@ -380,15 +454,47 @@ class ErpDataServiceImpl {
   }
 
   /**
+   * Deletes a document AND records an Android-compatible tombstone in `deleted_records`
+   * so offline/mobile devices remove it locally and never re-upload it.
+   */
+  async deleteDocumentWithTombstone(
+    collectionName: ErpCollectionName | string,
+    docId: string,
+    entityIdOrName: number | string,
+    deletedBy: string = 'المدير'
+  ): Promise<void> {
+    const cleanId = safeId(docId, docId);
+    await this.deleteDocument(collectionName, cleanId);
+
+    const tombDocId = safeId(`${collectionName}_${cleanId}`, `${collectionName}_${Date.now()}`);
+    await setDoc(
+      doc(firestore, this.collectionPath('deleted_records', PRIMARY_CLUSTER), tombDocId),
+      {
+        collection: collectionName,
+        docId: cleanId,
+        entityId: String(entityIdOrName),
+        deletedBy: deletedBy || 'المدير',
+        deletedAt: Date.now(),
+        serverUpdatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
+  }
+
+  /**
    * Alias for `deleteDocument` used by modules passing `(collectionName, docId, numericId?, actor?)`.
    */
   async deleteRecord(
     collectionName: ErpCollectionName | string,
     docId: string,
-    _numericId?: number | string,
-    _actorUsername?: string
+    numericId?: number | string,
+    actorUsername?: string
   ): Promise<void> {
-    await this.deleteDocument(collectionName, docId);
+    if (numericId !== undefined && numericId !== null) {
+      await this.deleteDocumentWithTombstone(collectionName, docId, numericId, actorUsername || 'المدير');
+    } else {
+      await this.deleteDocument(collectionName, docId);
+    }
   }
 
   /**
@@ -476,17 +582,28 @@ class ErpDataServiceImpl {
   computeProductStocks(
     products: Product[],
     stockMoves: StockMove[],
-    warehouseIdFilter?: number | null
+    warehouseIdFilter?: number | null,
+    warehouses?: Warehouse[]
   ): Map<number, number> {
-    return computeProductStocks(products, stockMoves, warehouseIdFilter);
+    return computeProductStocks(products, stockMoves, warehouseIdFilter, warehouses);
   }
 
   computeProductStocksList(
     products: Product[],
     stockMoves: StockMove[],
-    warehouseIdFilter?: number | null
+    warehouseIdFilter?: number | null,
+    warehouses?: Warehouse[]
   ): Product[] {
-    return computeProductStocksList(products, stockMoves, warehouseIdFilter);
+    return computeProductStocksList(products, stockMoves, warehouseIdFilter, warehouses);
+  }
+
+  computeProductMoveBreakdown(
+    products: Product[],
+    stockMoves: StockMove[],
+    warehouseIdFilter?: number | null,
+    warehouses?: Warehouse[]
+  ): Map<number, { inQty: number; outQty: number; netStock: number }> {
+    return computeProductMoveBreakdown(products, stockMoves, warehouseIdFilter, warehouses);
   }
 
   computeWarehouseStockSummary(
@@ -501,9 +618,10 @@ class ErpDataServiceImpl {
     products: Product[],
     stockMoves: StockMove[],
     selectedWeight: string,
-    warehouseIdFilter?: number | null
+    warehouseIdFilter?: number | null,
+    warehouses?: Warehouse[]
   ): ColorWeightStockRow[] {
-    return computeColorWeightStockRows(products, stockMoves, selectedWeight, warehouseIdFilter);
+    return computeColorWeightStockRows(products, stockMoves, selectedWeight, warehouseIdFilter, warehouses);
   }
 
   computeFactoryItemBalances(
@@ -554,6 +672,18 @@ class ErpDataServiceImpl {
     payments: InvoicePayment[]
   ): CustomerStatementResult {
     return computeCustomerStatement(customer, invoices, payments);
+  }
+
+  parseDateStringToEpochMs(rawDate: unknown): number {
+    return parseDateStringToEpochMs(rawDate);
+  }
+
+  compareRecordsChronologically(
+    a: Record<string, any>,
+    b: Record<string, any>,
+    order: 'desc' | 'asc' = 'desc'
+  ): number {
+    return compareRecordsChronologically(a, b, order);
   }
 }
 

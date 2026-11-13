@@ -21,7 +21,7 @@ function validLinkedAccountPayload(overrides = {}) {
     userCode: "USR-SD-1001",
     ownerId: MANAGER_UID,
     linkedUid: EMPLOYEE_UID,
-    clusterCode: "PMP-ERP-V16-CLUSTER",
+    clusterCode: "PMP-ERP-MAIN-CLUSTER",
     fullName: "أحمد محمد أحمد - محاسب فرع السودان",
     username: "sudan_acc",
     role: "محاسب خزنة ومبيعات",
@@ -160,7 +160,7 @@ test("9. ERP Cluster: multi-user nodes can sync user_accounts and invoices in er
   await assertSucceeds(
     nodeADb
       .collection("erp_clusters")
-      .doc("PMP-ERP-V16-CLUSTER")
+      .doc("PMP-ERP-MAIN-CLUSTER")
       .collection("user_accounts")
       .doc("USR-HQ-001")
       .set({
@@ -175,9 +175,40 @@ test("9. ERP Cluster: multi-user nodes can sync user_accounts and invoices in er
   await assertSucceeds(
     nodeBDb
       .collection("erp_clusters")
-      .doc("PMP-ERP-V16-CLUSTER")
+      .doc("PMP-ERP-MAIN-CLUSTER")
       .collection("user_accounts")
       .get()
+  );
+});
+
+test("10. Security Hardening: cluster audit_logs are append-only and negative invoice/stock values are rejected", async () => {
+  const clientDb = testEnv.unauthenticatedContext().firestore();
+  const auditRef = clientDb
+    .collection("erp_clusters")
+    .doc("PMP-ERP-MAIN-CLUSTER")
+    .collection("audit_logs")
+    .doc("AUD-1001");
+
+  await assertSucceeds(auditRef.set({ action: "CREATE_INVOICE", actor: "admin", timestamp: Date.now() }));
+  await assertFails(auditRef.update({ action: "TAMPERED" }));
+  await assertFails(auditRef.delete());
+
+  await assertFails(
+    clientDb
+      .collection("erp_clusters")
+      .doc("PMP-ERP-MAIN-CLUSTER")
+      .collection("invoices")
+      .doc("INV-BAD")
+      .set({ customerName: "عميل", total: -500, subtotal: -500 })
+  );
+
+  await assertFails(
+    clientDb
+      .collection("erp_clusters")
+      .doc("PMP-ERP-MAIN-CLUSTER")
+      .collection("stock_moves")
+      .doc("SM-BAD")
+      .set({ productId: 1, warehouseId: 1, kind: "IN", quantity: -25 })
   );
 });
 

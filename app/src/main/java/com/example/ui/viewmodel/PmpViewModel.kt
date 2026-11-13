@@ -249,6 +249,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val warehouses = repository.getWarehouses()
+        .map { list ->
+            list.filter { wh ->
+                !DeletedRecordsRegistry.isDeleted("warehouses", wh.id) &&
+                    !DeletedRecordsRegistry.isDeleted("warehouses", "WH-${wh.id}") &&
+                    !DeletedRecordsRegistry.isDeleted("warehouses", wh.name)
+            }.distinctBy { it.name.trim().lowercase() }
+        }
         .onEach { _isInitialDataLoading.value = false }
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in warehouses flow", e)
@@ -1286,10 +1293,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = repository.deleteWarehouse(id, user)
             res.onSuccess {
-                viewModelScope.launch(Dispatchers.IO) {
-                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "warehouses", "WH-$id")
+                DeletedRecordsRegistry.registerDeleted("warehouses", id, "WH-$id", user)
+                if (name.isNotBlank()) {
+                    DeletedRecordsRegistry.registerDeleted("warehouses", name.trim(), "WH-$id", user)
                 }
-                postMessage("تم حذف المخزن $name بنجاح")
+                viewModelScope.launch(Dispatchers.IO) {
+                    cloudErpSyncRepo.deleteWarehouseFromCloud(serverClusterCode.value, id, name)
+                }
+                postMessage("تم حذف المخزن $name بنجاح من النظام والسحابة")
                 persistAndSyncToServer()
             }.onFailure {
                 postMessage(it.message ?: "تعذر حذف المخزن", isError = true)
@@ -1478,6 +1489,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         note: String
     ) {
         if (!checkOnlineBeforeTransaction("تحديث كمية المخزون")) return
+        if (!quantityInput.isFinite()) {
+            postMessage("القيمة المدخلة غير صالحة", isError = true)
+            return
+        }
         viewModelScope.launch {
             val cleanColor = color.trim().ifBlank { "أبيض" }
             val cleanWeight = com.example.util.InventoryWeightManager.normalizeWeightValue(weight).ifBlank { weight.trim() }
@@ -1532,11 +1547,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         postMessage("لا يمكن أن يكون الرصيد بالسالب", isError = true)
                         return@launch
                     }
-                    val currentMoves = repository.getDao().getStockMovesDirect().filter { it.productId == product.id }
-                    val currentBalance = currentMoves.sumOf { sm ->
-                        val sign = if (sm.kind in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع")) 1.0 else -1.0
-                        sign * sm.quantity
+                    val currentMoves = repository.getDao().getStockMovesDirect().filter {
+                        it.productId == product.id && it.warehouseId == whId
                     }
+                    val currentBalance = currentMoves.sumOf { sm ->
+                        val sign = if (sm.kind in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع", "توريد", "إضافة")) 1.0 else -1.0
+                        sign * kotlin.math.abs(sm.quantity)
+                    }.coerceAtLeast(0.0)
                     val delta = quantityInput - currentBalance
                     if (kotlin.math.abs(delta) < 0.0001) {
                         postMessage("الرصيد الفعلي مطابق للرصيد الحالي (${quantityInput.toInt()})")
@@ -1554,7 +1571,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         },
                         user = actor
                     )
-                    postMessage("تم تحديث رصيد ($cleanColor - $cleanWeight جم) إلى ${quantityInput.toInt()} بنجاح")
+                    postMessage("تم تحديث رصيد ($cleanColor - $cleanWeight جم) في $resolvedWhName إلى ${quantityInput.toInt()} بنجاح")
                 }
             }
             persistAndSyncToServer()
@@ -1574,8 +1591,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 DeletedRecordsRegistry.registerDeleted("products", productId, "PROD-$productId", actor)
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "products", "PROD-$productId")
+                    cloudErpSyncRepo.deleteStockMovesByProductFromCloud(serverClusterCode.value, productId)
                 }
-                postMessage("تم حذف الصنف ($productName) بنجاح من النظام والسحابة")
+                postMessage("تم حذف الصنف ($productName) وحركاته بنجاح من النظام والسحابة")
                 persistAndSyncToServer()
             }.onFailure {
                 postMessage(it.message ?: "تعذر حذف الصنف", isError = true)
@@ -1592,7 +1610,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             val res = repository.resetWarehouseStock(warehouseId, warehouseName, resolveUserActor("المدير"))
             res.onSuccess {
-                postMessage("تم تصفير كامل رصيد مخزن ($warehouseName) بنجاح")
+                viewModelScope.launch(Dispatchers.IO) {
+                    cloudErpSyncRepo.deleteStockMovesByWarehouseFromCloud(serverClusterCode.value, warehouseId)
+                }
+                postMessage("تم تصفير كامل رصيد مخزن ($warehouseName) وحذف حركاته من السحابة")
                 persistAndSyncToServer()
             }.onFailure {
                 postMessage(it.message ?: "تعذر تصفير المخزن", isError = true)

@@ -10,16 +10,23 @@ import {
   Trash2,
   AlertTriangle,
   Edit3,
-  Filter
+  Filter,
+  RotateCcw,
+  Sparkles
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
 import { GlassButton } from '../ui/GlassButton';
 import { Modal } from '../ui/Modal';
 import { Product, StockMove, Warehouse } from '../../types/erp';
-import { ErpDataService, isStockInMoveKind } from '../../services/ErpDataService';
+import {
+  ErpDataService,
+  isStockInMoveKind,
+  resolveWarehouseFilterIds,
+  compareRecordsChronologically
+} from '../../services/ErpDataService';
 import { ReportExporter } from '../../services/ReportExporter';
-import { GRANULAR_ACTIONS } from '../../services/SecurityService';
+import { GRANULAR_ACTIONS, isSystemManager } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
 
@@ -90,8 +97,8 @@ export const WarehousesModuleView: React.FC = () => {
   const activeWhFilterId = selectedWarehouseFilter > 0 ? selectedWarehouseFilter : null;
 
   const computedProducts = useMemo(
-    () => ErpDataService.computeProductStocksList(products, stockMoves, activeWhFilterId),
-    [products, stockMoves, activeWhFilterId]
+    () => ErpDataService.computeProductStocksList(products, stockMoves, activeWhFilterId, warehouses),
+    [products, stockMoves, activeWhFilterId, warehouses]
   );
 
   const warehouseSummaries = useMemo(
@@ -100,31 +107,50 @@ export const WarehousesModuleView: React.FC = () => {
   );
 
   const colorWeightRows = useMemo(
-    () => ErpDataService.computeColorWeightStockRows(products, stockMoves, selectedWeightFilter, activeWhFilterId),
-    [products, stockMoves, selectedWeightFilter, activeWhFilterId]
+    () => ErpDataService.computeColorWeightStockRows(products, stockMoves, selectedWeightFilter, activeWhFilterId, warehouses),
+    [products, stockMoves, selectedWeightFilter, activeWhFilterId, warehouses]
   );
 
-  // Per-product inQty and outQty for the selected warehouse filter
-  const productMoveBreakdown = useMemo(() => {
-    const map = new Map<number, { inQty: number; outQty: number }>();
-    const filteredMoves =
-      activeWhFilterId !== null
-        ? stockMoves.filter((m) => Number(m.warehouseId) === activeWhFilterId)
-        : stockMoves;
+  // Per-product inQty and outQty reconciled 1:1 with merged product signatures and warehouse filter
+  const productMoveBreakdown = useMemo(
+    () => ErpDataService.computeProductMoveBreakdown(products, stockMoves, activeWhFilterId, warehouses),
+    [products, stockMoves, activeWhFilterId, warehouses]
+  );
 
-    for (const m of filteredMoves) {
-      const pid = Number(m.productId);
-      const q = Math.abs(Number(m.quantity || 0));
-      const cur = map.get(pid) || { inQty: 0, outQty: 0 };
-      if (isStockInMoveKind(m.kind)) {
-        cur.inQty += q;
-      } else {
-        cur.outQty += q;
-      }
-      map.set(pid, cur);
+  const productByIdMap = useMemo(() => {
+    const map = new Map<number, Product>();
+    for (const p of products) map.set(Number(p.id), p);
+    return map;
+  }, [products]);
+
+  const warehouseByIdMap = useMemo(() => {
+    const map = new Map<number, Warehouse>();
+    for (const w of warehouses) {
+      const aliases: number[] = Array.isArray((w as any)._aliasIds) ? (w as any)._aliasIds : [Number(w.id)];
+      aliases.forEach((id) => map.set(Number(id), w));
+      map.set(Number(w.id), w);
     }
     return map;
-  }, [stockMoves, activeWhFilterId]);
+  }, [warehouses]);
+
+  const orphanStockMoves = useMemo(() => {
+    return stockMoves.filter((m) => {
+      const pid = Number(m.productId);
+      const wid = Number(m.warehouseId);
+      const missingProduct = products.length > 0 && !productByIdMap.has(pid);
+      const missingWarehouse = warehouses.length > 0 && !warehouseByIdMap.has(wid);
+      return missingProduct || missingWarehouse;
+    });
+  }, [stockMoves, products.length, warehouses.length, productByIdMap, warehouseByIdMap]);
+
+  const duplicateWarehouseDocsCount = useMemo(
+    () =>
+      warehouses.reduce((sum, w) => {
+        const docIds: string[] = Array.isArray((w as any)._aliasDocIds) ? (w as any)._aliasDocIds : [];
+        return sum + Math.max(0, docIds.length - 1);
+      }, 0),
+    [warehouses]
+  );
 
   const availableWeights = useMemo(() => {
     const set = new Set<string>(['250 جم', '900 جم', '4000 جم']);
@@ -138,7 +164,7 @@ export const WarehousesModuleView: React.FC = () => {
 
   const canCreate = canPerformAction(GRANULAR_ACTIONS.CREATE);
   const canEdit = canPerformAction(GRANULAR_ACTIONS.EDIT);
-  const canDelete = canPerformAction(GRANULAR_ACTIONS.DELETE);
+  const canDelete = isSystemManager(userProfile) || canPerformAction(GRANULAR_ACTIONS.DELETE);
 
   const showNotice = (type: 'ok' | 'err', text: string) => {
     setNotice({ type, text });
@@ -163,9 +189,10 @@ export const WarehousesModuleView: React.FC = () => {
     let finalDeltaQty = rawQty;
 
     if (moveKind === 'SET') {
-      // Matches Android PmpViewModel.kt updateProductInventoryCount: computes exact delta against current stock in that warehouse
+      // Matches Android PmpViewModel.kt updateProductInventoryCount: computes exact delta against current stock in that warehouse (including merged alias IDs)
+      const whAliasSet = resolveWarehouseFilterIds(Number(wh.id), warehouses) || new Set([Number(wh.id)]);
       const whMoves = stockMoves.filter(
-        (m) => Number(m.productId) === Number(prod.id) && Number(m.warehouseId) === Number(wh.id)
+        (m) => Number(m.productId) === Number(prod.id) && whAliasSet.has(Number(m.warehouseId))
       );
       let curIn = 0;
       let curOut = 0;
@@ -186,6 +213,7 @@ export const WarehousesModuleView: React.FC = () => {
     }
 
     const now = Date.now();
+    const actorName = userProfile?.fullName || userProfile?.username || 'أمين المخزن';
     const move: StockMove = {
       id: now,
       productId: Number(prod.id),
@@ -197,12 +225,14 @@ export const WarehousesModuleView: React.FC = () => {
       note:
         moveNote.trim() ||
         (moveKind === 'SET'
-          ? `تعديل جرد مباشر للرصيد الفعلي (${rawQty}) بواسطة ${userProfile?.fullName || 'المستخدم'}`
+          ? `تعديل جرد مباشر للرصيد الفعلي (${rawQty}) بواسطة ${actorName}`
           : finalKind === 'IN'
           ? 'توريد مخزني'
           : 'صرف مخزني'),
       referenceNo: `SM-${now.toString().slice(-6)}`,
-      actor: userProfile?.fullName || userProfile?.username || 'أمين المخزن',
+      createdBy: actorName,
+      actor: actorName,
+      createdAt: now,
       timestamp: now
     };
 
@@ -251,7 +281,10 @@ export const WarehousesModuleView: React.FC = () => {
     e.preventDefault();
     if (!canCreate || !prodForm.name.trim()) return;
     const now = Date.now();
-    const initQty = Number(prodForm.initialStock) || 0;
+    const actorName = userProfile?.fullName || userProfile?.username || 'النظام';
+    const initQty = Math.max(0, Number(prodForm.initialStock) || 0);
+    const minVal = Math.max(0, Number(prodForm.minLevel) || 10);
+    const costVal = Math.max(0, Number(prodForm.costPrice) || 0);
     const newProd: Product = {
       id: now,
       sku: prodForm.sku.trim() || `SKU-${now.toString().slice(-5)}`,
@@ -260,12 +293,14 @@ export const WarehousesModuleView: React.FC = () => {
       paintColor: prodForm.paintColor,
       packageWeight: prodForm.packageWeight,
       unit: prodForm.unit,
-      unitsPerCarton: Number(prodForm.unitsPerCarton) || 12,
-      costPrice: Number(prodForm.costPrice) || 0,
-      salePrice: Number(prodForm.salePrice) || 0,
-      salePriceSdg: Number(prodForm.salePrice) || 0,
-      salePriceEgp: Number(prodForm.salePriceEgp) || 0,
-      minLevel: Number(prodForm.minLevel) || 10,
+      unitsPerCarton: Math.max(1, Number(prodForm.unitsPerCarton) || 12),
+      purchasePrice: costVal,
+      costPrice: costVal,
+      salePrice: Math.max(0, Number(prodForm.salePrice) || 0),
+      salePriceSdg: Math.max(0, Number(prodForm.salePrice) || 0),
+      salePriceEgp: Math.max(0, Number(prodForm.salePriceEgp) || 0),
+      minimumStock: minVal,
+      minLevel: minVal,
       currentStock: initQty,
       active: true
     };
@@ -285,7 +320,9 @@ export const WarehousesModuleView: React.FC = () => {
         quantity: initQty,
         note: 'رصيد افتتاحي عند تعريف الصنف',
         referenceNo: `INIT-${now.toString().slice(-5)}`,
-        actor: userProfile?.fullName || 'النظام',
+        createdBy: actorName,
+        actor: actorName,
+        createdAt: now,
         timestamp: now
       };
       await ErpDataService.upsertDocument('stock_moves', `SM-${now + 1}`, sm);
@@ -303,9 +340,116 @@ export const WarehousesModuleView: React.FC = () => {
 
   const handleDeleteProduct = async (prod: Product) => {
     if (!canDelete) return;
+    if (!window.confirm(`تأكيد حذف الصنف "${prod.name}" نهائياً مع كافة حركاته المخزنية؟`)) return;
+    const actor = userProfile?.username || 'admin';
     const docId = (prod as any)._docId || `PRD-${prod.id}`;
-    await ErpDataService.deleteDocument('products', docId);
-    showNotice('ok', `تم حذف الصنف "${prod.name}"`);
+    await ErpDataService.deleteDocumentWithTombstone('products', docId, prod.id, actor);
+    // Also clean any stock moves linked to this deleted product so no phantom balances remain
+    const linkedMoves = stockMoves.filter((m) => Number(m.productId) === Number(prod.id));
+    await Promise.all(
+      linkedMoves.map((m) =>
+        ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
+      )
+    );
+    await ErpDataService.logAudit(actor, 'DELETE_PRODUCT', `حذف الصنف "${prod.name}" (#${prod.id}) وتنظيف ${linkedMoves.length} حركة مرتبطة`);
+    showNotice('ok', `تم حذف الصنف "${prod.name}" وتنظيف حركاته بنجاح`);
+  };
+
+  const handleDeleteWarehouse = async (wh: Warehouse) => {
+    if (!canDelete) {
+      showNotice('err', 'لا تملك صلاحية حذف المستودعات');
+      return;
+    }
+    if (!window.confirm(`هل تريد حذف المستودع "${wh.name}" نهائياً من النظام السحابي والموبايل وتنظيف حركاته؟`)) {
+      return;
+    }
+    const actor = userProfile?.username || 'admin';
+    const aliasIds: number[] = Array.isArray((wh as any)._aliasIds) && (wh as any)._aliasIds.length > 0
+      ? (wh as any)._aliasIds
+      : [Number(wh.id)];
+    const aliasDocIds: string[] = Array.isArray((wh as any)._aliasDocIds) && (wh as any)._aliasDocIds.length > 0
+      ? (wh as any)._aliasDocIds
+      : [(wh as any)._docId || `WH-${wh.id}`];
+
+    // Delete all duplicate Firestore documents for this warehouse + write tombstones using both name & IDs
+    await Promise.all([
+      ...aliasDocIds.map((dId) => ErpDataService.deleteDocumentWithTombstone('warehouses', dId, wh.name, actor)),
+      ...aliasIds.map((wid) => ErpDataService.deleteDocumentWithTombstone('warehouses', `WH-${wid}`, wid, actor))
+    ]);
+
+    const aliasSet = new Set(aliasIds.map(Number));
+    const linkedMoves = stockMoves.filter((m) => aliasSet.has(Number(m.warehouseId)));
+    await Promise.all(
+      linkedMoves.map((m) =>
+        ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
+      )
+    );
+
+    if (aliasSet.has(Number(selectedWarehouseFilter))) {
+      setSelectedWarehouseFilter(0);
+    }
+    await ErpDataService.logAudit(actor, 'DELETE_WAREHOUSE', `حذف المستودع "${wh.name}" مع ${linkedMoves.length} حركة مخزنية`);
+    showNotice('ok', `تم حذف المستودع "${wh.name}" ومزامنة الحذف مع تطبيق الموبايل`);
+  };
+
+  const handleResetWarehouseStock = async (wh: Warehouse) => {
+    if (!canDelete) {
+      showNotice('err', 'لا تملك صلاحية تصفير أرصدة المستودعات');
+      return;
+    }
+    if (!window.confirm(`تصفير كامل أرصدة وحركات مستودع "${wh.name}"؟`)) return;
+    const actor = userProfile?.username || 'admin';
+    const aliasIds = resolveWarehouseFilterIds(Number(wh.id), warehouses) || new Set([Number(wh.id)]);
+    const linkedMoves = stockMoves.filter((m) => aliasIds.has(Number(m.warehouseId)));
+    await Promise.all(
+      linkedMoves.map((m) =>
+        ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
+      )
+    );
+    await ErpDataService.logAudit(actor, 'ZERO_WAREHOUSE', `تصفير أرصدة وحركات المستودع "${wh.name}" (${linkedMoves.length} حركة)`);
+    showNotice('ok', `تم تصفير رصيد مستودع "${wh.name}" وحذف ${linkedMoves.length} حركة`);
+  };
+
+  const handleDeduplicateWarehouses = async () => {
+    if (!canDelete) return;
+    const actor = userProfile?.username || 'admin';
+    let removedDocs = 0;
+    for (const w of warehouses) {
+      const canonicalDocId = (w as any)._docId || `WH-${w.id}`;
+      const docIds: string[] = Array.isArray((w as any)._aliasDocIds) ? (w as any)._aliasDocIds : [];
+      const extras = docIds.filter((d) => d && d !== canonicalDocId);
+      for (const extraDocId of extras) {
+        await ErpDataService.deleteDocument('warehouses', extraDocId);
+        removedDocs++;
+      }
+    }
+    await ErpDataService.logAudit(actor, 'DEDUPLICATE_WAREHOUSES', `تنظيف وتوحيد المستودعات المكررة (حذف ${removedDocs} مستند مكرر)`);
+    showNotice('ok', removedDocs > 0 ? `تم توحيد المستودعات وحذف ${removedDocs} مستند مكرر بنجاح` : 'المستودعات موحدة ولا توجد تكرارات حالياً');
+  };
+
+  const handlePurgeOrphanStockMoves = async () => {
+    if (!canDelete && !canEdit) return;
+    if (orphanStockMoves.length === 0) return;
+    if (!window.confirm(`تأكيد حذف ${orphanStockMoves.length} حركة مخزنية يتيمة (لأصناف أو مستودعات محذوفة) من السحابة نهائياً؟`)) {
+      return;
+    }
+    const actor = userProfile?.username || 'admin';
+    await Promise.all(
+      orphanStockMoves.map((m) =>
+        ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
+      )
+    );
+    await ErpDataService.logAudit(actor, 'PURGE_ORPHAN_STOCK_MOVES', `تنظيف وحذف ${orphanStockMoves.length} حركة مخزنية يتيمة`);
+    showNotice('ok', `تم تنظيف وحذف ${orphanStockMoves.length} حركة مخزنية يتيمة بنجاح`);
+  };
+
+  const handleDeleteStockMove = async (m: StockMove) => {
+    if (!canDelete) return;
+    if (!window.confirm(`حذف حركة المخزون رقم ${m.referenceNo || m.id} (${m.quantity} كرتونة)؟`)) return;
+    const actor = userProfile?.username || 'admin';
+    await ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor);
+    await ErpDataService.logAudit(actor, 'DELETE_STOCK_MOVE', `حذف حركة مخزنية #${m.id} (${m.quantity})`);
+    showNotice('ok', 'تم حذف الحركة المخزنية بنجاح');
   };
 
   const filteredProducts = computedProducts.filter(
@@ -317,7 +461,10 @@ export const WarehousesModuleView: React.FC = () => {
         p.sku?.toLowerCase().includes(searchTerm.toLowerCase()))
   );
 
-  const selectedWhObj = warehouses.find((w) => Number(w.id) === Number(selectedWarehouseFilter));
+  const selectedWhObj = warehouses.find((w) => {
+    const aliases: number[] = Array.isArray((w as any)._aliasIds) ? (w as any)._aliasIds : [Number(w.id)];
+    return Number(w.id) === Number(selectedWarehouseFilter) || aliases.includes(Number(selectedWarehouseFilter));
+  });
   const selectedWhTitle = selectedWhObj ? selectedWhObj.name : 'كل المخازن والفروع';
 
   const totalCartons = computedProducts.reduce((s, p) => s + Math.max(0, Number(p.currentStock || 0)), 0);
@@ -436,7 +583,27 @@ export const WarehousesModuleView: React.FC = () => {
                 <Filter className="w-4 h-4 text-cyan-400" />
                 <span>تصفية الأرصدة حسب المخزن (مطابق لتطبيق الأندرويد):</span>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
+                {selectedWhObj && canDelete && (
+                  <>
+                    <GlassButton
+                      size="sm"
+                      variant="secondary"
+                      icon={<RotateCcw className="w-3.5 h-3.5 text-amber-400" />}
+                      onClick={() => handleResetWarehouseStock(selectedWhObj)}
+                    >
+                      تصفير المخزن
+                    </GlassButton>
+                    <GlassButton
+                      size="sm"
+                      variant="secondary"
+                      icon={<Trash2 className="w-3.5 h-3.5 text-red-400" />}
+                      onClick={() => handleDeleteWarehouse(selectedWhObj)}
+                    >
+                      حذف المخزن
+                    </GlassButton>
+                  </>
+                )}
                 <GlassButton
                   size="sm"
                   variant="secondary"
@@ -467,7 +634,7 @@ export const WarehousesModuleView: React.FC = () => {
                 }`}
               >
                 <WarehouseIcon className="w-3.5 h-3.5" />
-                <span>كل المخازن ({warehouses.length})</span>
+                <span>كل المخازن ({warehouseSummaries.length})</span>
               </button>
 
               {warehouseSummaries.map((ws) => {
@@ -492,6 +659,28 @@ export const WarehousesModuleView: React.FC = () => {
               })}
             </div>
           </GlassCard>
+
+          {orphanStockMoves.length > 0 && (
+            <GlassCard className="p-3.5 border border-amber-500/40 bg-amber-500/10 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 text-xs">
+              <div className="flex items-center gap-2 text-amber-300">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>
+                  تم رصد <strong>{orphanStockMoves.length}</strong> حركة مخزنية يتيمة مرتبطة بأصناف أو مستودعات محذوفة (تم استبعادها تلقائياً لضمان دقة الأرصدة الفعلية).
+                </span>
+              </div>
+              {(canDelete || canEdit) && (
+                <GlassButton
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  icon={<Trash2 className="w-3.5 h-3.5 text-red-400" />}
+                  onClick={handlePurgeOrphanStockMoves}
+                >
+                  تنظيف الحركات اليتيمة من السحابة
+                </GlassButton>
+              )}
+            </GlassCard>
+          )}
 
           {/* Summary KPI Row */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -739,58 +928,95 @@ export const WarehousesModuleView: React.FC = () => {
       {/* SUB-TAB 2: WAREHOUSES DIRECTORY */}
       {subTab === 'WAREHOUSES_DIR' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {warehouseSummaries.map((ws) => {
-              const w = ws.warehouse;
-              return (
-                <GlassCard key={w.id} className="p-5 flex flex-col justify-between gap-3">
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <span className="text-[11px] font-mono text-cyan-400">{w.code}</span>
-                        <h3 className="text-base font-black text-theme-primary">{w.name}</h3>
+          <div className="lg:col-span-2 space-y-4">
+            {duplicateWarehouseDocsCount > 0 && canDelete && (
+              <GlassCard className="p-3.5 border border-cyan-500/30 bg-cyan-500/10 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 text-xs">
+                <div className="flex items-center gap-2 text-cyan-300">
+                  <Sparkles className="w-4 h-4 shrink-0" />
+                  <span>
+                    يوجد <strong>{duplicateWarehouseDocsCount}</strong> سجل مستودع مكرر في قاعدة البيانات تم دمجه تلقائياً في العرض.
+                  </span>
+                </div>
+                <GlassButton size="sm" variant="primary" onClick={handleDeduplicateWarehouses}>
+                  تنظيف وحذف التكرارات نهائياً
+                </GlassButton>
+              </GlassCard>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {warehouseSummaries.map((ws) => {
+                const w = ws.warehouse;
+                return (
+                  <GlassCard key={w.id} className="p-5 flex flex-col justify-between gap-3">
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <span className="text-[11px] font-mono text-cyan-400">{w.code}</span>
+                          <h3 className="text-base font-black text-theme-primary">{w.name}</h3>
+                        </div>
+                        <GlassBadge variant="cyan">{w.branch}</GlassBadge>
                       </div>
-                      <GlassBadge variant="cyan">{w.branch}</GlassBadge>
-                    </div>
-                    <p className="text-xs text-theme-secondary">الموقع: {w.location || w.branch}</p>
-                    <p className="text-xs text-theme-muted">المسؤول: {w.manager || 'أمين المستودع'}</p>
+                      <p className="text-xs text-theme-secondary">الموقع: {w.location || w.branch}</p>
+                      <p className="text-xs text-theme-muted">المسؤول: {w.manager || 'أمين المستودع'}</p>
 
-                    <div className="grid grid-cols-3 gap-2 pt-2 border-t border-theme text-center">
-                      <div className="p-2 rounded-lg bg-theme-base">
-                        <div className="text-[10px] text-theme-muted">الرصيد المتاح</div>
-                        <div className="text-xs font-black font-mono text-cyan-400 mt-0.5">
-                          {ws.netCartons.toLocaleString()}
+                      <div className="grid grid-cols-3 gap-2 pt-2 border-t border-theme text-center">
+                        <div className="p-2 rounded-lg bg-theme-base">
+                          <div className="text-[10px] text-theme-muted">الرصيد المتاح</div>
+                          <div className="text-xs font-black font-mono text-cyan-400 mt-0.5">
+                            {ws.netCartons.toLocaleString()}
+                          </div>
                         </div>
-                      </div>
-                      <div className="p-2 rounded-lg bg-theme-base">
-                        <div className="text-[10px] text-theme-muted">الوارد (+)</div>
-                        <div className="text-xs font-bold font-mono text-emerald-400 mt-0.5">
-                          +{ws.inQty.toLocaleString()}
+                        <div className="p-2 rounded-lg bg-theme-base">
+                          <div className="text-[10px] text-theme-muted">الوارد (+)</div>
+                          <div className="text-xs font-bold font-mono text-emerald-400 mt-0.5">
+                            +{ws.inQty.toLocaleString()}
+                          </div>
                         </div>
-                      </div>
-                      <div className="p-2 rounded-lg bg-theme-base">
-                        <div className="text-[10px] text-theme-muted">المنصرف (-)</div>
-                        <div className="text-xs font-bold font-mono text-amber-400 mt-0.5">
-                          -{ws.outQty.toLocaleString()}
+                        <div className="p-2 rounded-lg bg-theme-base">
+                          <div className="text-[10px] text-theme-muted">المنصرف (-)</div>
+                          <div className="text-xs font-bold font-mono text-amber-400 mt-0.5">
+                            -{ws.outQty.toLocaleString()}
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
 
-                  <GlassButton
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => {
-                      setSelectedWarehouseFilter(Number(w.id));
-                      setSubTab('BALANCES');
-                    }}
-                    className="w-full justify-center"
-                  >
-                    عرض جرد وأرصدة هذا المستودع ({ws.distinctProductsCount} صنف)
-                  </GlassButton>
-                </GlassCard>
-              );
-            })}
+                    <div className="flex items-center gap-2">
+                      <GlassButton
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          setSelectedWarehouseFilter(Number(w.id));
+                          setSubTab('BALANCES');
+                        }}
+                        className="flex-1 justify-center"
+                      >
+                        عرض الجرد ({ws.distinctProductsCount} صنف)
+                      </GlassButton>
+                      {canDelete && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleResetWarehouseStock(w)}
+                            className="p-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20"
+                            title="تصفير أرصدة وحركات هذا المستودع"
+                          >
+                            <RotateCcw className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteWarehouse(w)}
+                            className="p-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20"
+                            title="حذف المستودع نهائياً ومزامنة الحذف مع الموبايل"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </GlassCard>
+                );
+              })}
+            </div>
           </div>
 
           <GlassCard className="p-5">
@@ -915,8 +1141,37 @@ export const WarehousesModuleView: React.FC = () => {
             </form>
           </GlassCard>
 
-          <GlassCard className="p-5 lg:col-span-2">
-            <h3 className="text-sm font-black text-theme-primary mb-4">سجل حركات المخزون الفوري</h3>
+          <GlassCard className="p-5 lg:col-span-2 space-y-4">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+              <h3 className="text-sm font-black text-theme-primary">
+                سجل حركات المخزون الفوري ({stockMoves.length})
+              </h3>
+              <div className="flex flex-wrap items-center gap-2">
+                {orphanStockMoves.length > 0 && (canDelete || canEdit) && (
+                  <GlassButton
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    icon={<Trash2 className="w-3.5 h-3.5 text-red-400" />}
+                    onClick={handlePurgeOrphanStockMoves}
+                  >
+                    حذف الحركات اليتيمة ({orphanStockMoves.length})
+                  </GlassButton>
+                )}
+                <select
+                  value={selectedWarehouseFilter}
+                  onChange={(e) => setSelectedWarehouseFilter(Number(e.target.value))}
+                  className="px-2.5 py-1.5 rounded-lg bg-theme-surface border border-theme text-xs"
+                >
+                  <option value={0}>كل المستودعات</option>
+                  {warehouses.map((w) => (
+                    <option key={`sm_wh_${w.id}`} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs text-right">
                 <thead>
@@ -927,33 +1182,64 @@ export const WarehousesModuleView: React.FC = () => {
                     <th className="py-2.5 px-3">النوع</th>
                     <th className="py-2.5 px-3">الكمية</th>
                     <th className="py-2.5 px-3">البيان</th>
+                    {canDelete && <th className="py-2.5 px-3">إجراء</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {[...stockMoves]
-                    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-                    .map((m) => {
-                      const isIn = isStockInMoveKind(m.kind);
-                      return (
-                        <tr key={m.id} className="hover:bg-white/[0.02]">
-                          <td className="py-2.5 px-3 font-mono text-theme-muted">
-                            {new Date(m.timestamp || Date.now()).toLocaleDateString('ar-EG')}
-                          </td>
-                          <td className="py-2.5 px-3 font-bold text-theme-primary">{m.productName}</td>
-                          <td className="py-2.5 px-3 text-theme-secondary">{m.warehouseName}</td>
-                          <td className="py-2.5 px-3">
-                            <GlassBadge variant={isIn ? 'green' : 'gold'}>
-                              {isIn ? 'وارد (+)' : 'منصرف (-)'}
-                            </GlassBadge>
-                          </td>
-                          <td className="py-2.5 px-3 font-mono font-bold">
-                            {isIn ? '+' : '-'}
-                            {Math.abs(Number(m.quantity || 0)).toLocaleString()}
-                          </td>
-                          <td className="py-2.5 px-3 text-theme-secondary">{m.note}</td>
-                        </tr>
-                      );
-                    })}
+                  {(() => {
+                    const whFilterSet = resolveWarehouseFilterIds(activeWhFilterId, warehouses);
+                    return [...stockMoves]
+                      .filter((m) => whFilterSet === null || whFilterSet.has(Number(m.warehouseId)))
+                      .sort((a, b) => compareRecordsChronologically(a, b, 'desc'))
+                      .map((m) => {
+                        const isIn = isStockInMoveKind(m.kind);
+                        const resolvedProd = productByIdMap.get(Number(m.productId));
+                        const resolvedWh = warehouseByIdMap.get(Number(m.warehouseId));
+                        const isOrphan =
+                          (products.length > 0 && !resolvedProd) ||
+                          (warehouses.length > 0 && !resolvedWh);
+                        return (
+                          <tr key={m.id} className="hover:bg-white/[0.02]">
+                            <td className="py-2.5 px-3 font-mono text-theme-muted">
+                              {new Date(m.createdAt || m.timestamp || Date.now()).toLocaleDateString('ar-EG')}
+                            </td>
+                            <td className="py-2.5 px-3 font-bold text-theme-primary">
+                              {resolvedProd?.name || m.productName || `صنف محذوف (#${m.productId})`}
+                              {isOrphan && (
+                                <span className="mr-1.5 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-normal">
+                                  يتيم
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-3 text-theme-secondary">
+                              {resolvedWh?.name || m.warehouseName || `مستودع #${m.warehouseId}`}
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <GlassBadge variant={isIn ? 'green' : 'gold'}>
+                                {isIn ? 'وارد (+)' : 'منصرف (-)'}
+                              </GlassBadge>
+                            </td>
+                            <td className="py-2.5 px-3 font-mono font-bold">
+                              {isIn ? '+' : '-'}
+                              {Math.abs(Number(m.quantity || 0)).toLocaleString()}
+                            </td>
+                            <td className="py-2.5 px-3 text-theme-secondary">{m.note}</td>
+                            {canDelete && (
+                              <td className="py-2.5 px-3">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteStockMove(m)}
+                                  className="p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400"
+                                  title="حذف الحركة"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      });
+                  })()}
                 </tbody>
               </table>
             </div>

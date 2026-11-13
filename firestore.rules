@@ -175,23 +175,59 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(batchId);
     }
 
+    function isImmutableAuditCollection(col) {
+      return col in ['audit_logs', 'permission_audit_logs'];
+    }
+
+    function isProtectedTombstoneCollection(col) {
+      return col in ['deleted_users', 'deleted_records'];
+    }
+
+    function isValidErpDocWrite(col) {
+      let d = request.resource.data;
+      return isReasonablePayload() &&
+        (col != 'invoices' || (
+          (!('total' in d) || (d.total is number && d.total >= 0)) &&
+          (!('subtotal' in d) || (d.subtotal is number && d.subtotal >= 0)) &&
+          (!('discount' in d) || (d.discount is number && d.discount >= 0)) &&
+          (!('discountAmount' in d) || (d.discountAmount is number && d.discountAmount >= 0)) &&
+          (!('paidAmount' in d) || (d.paidAmount is number && d.paidAmount >= 0)) &&
+          (!('customerName' in d) || isNonEmptyString(d.customerName, 200))
+        )) &&
+        (col != 'invoice_payments' || (
+          (!('amount' in d) || (d.amount is number && d.amount > 0))
+        )) &&
+        (col != 'movements' || (
+          (!('amount' in d) || (d.amount is number && d.amount >= 0))
+        )) &&
+        (col != 'stock_moves' || (
+          (!('quantity' in d) || (d.quantity is number && d.quantity >= 0)) &&
+          (!('kind' in d) || isNonEmptyString(d.kind, 40))
+        )) &&
+        (col != 'user_accounts' || (
+          (!('username' in d) || isNonEmptyString(d.username, 120)) &&
+          (!('active' in d) || d.active is bool)
+        ));
+    }
+
     // 6. Hardened ERP Central Clusters Rules (/erp_clusters/{clusterCode})
     match /erp_clusters/{clusterCode} {
       allow get, list: if isValidId(clusterCode);
-      allow create, update: if isValidId(clusterCode) && isReasonablePayload();
-      allow delete: if isSignedIn() && isValidId(clusterCode);
+      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isReasonablePayload();
+      allow delete: if (isSignedIn() || clusterCode == 'PMP-ERP-V16-CLUSTER') && isValidId(clusterCode);
     }
 
     match /erp_clusters/{clusterCode}/{collectionName}/{docId} {
       allow get, list: if isValidId(clusterCode) && isAllowedErpCollection(collectionName);
-      allow create, update: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId) && isReasonablePayload();
-      allow delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId);
+      allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidErpDocWrite(collectionName);
+      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && isValidId(docId) && isValidErpDocWrite(collectionName);
+      allow delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && (!isProtectedTombstoneCollection(collectionName) || isSignedIn() || clusterCode == 'PMP-ERP-V16-CLUSTER') && isValidId(docId);
     }
 
     match /erp_clusters/{clusterCode}/{collectionName}/{docId}/{subCollection}/{subDocId} {
       allow get, list: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId);
-      allow create, update: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidId(subDocId) && isReasonablePayload();
-      allow delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidId(subDocId);
+      allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidId(subDocId) && isReasonablePayload();
+      allow update, delete: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && isValidId(docId) && isValidId(subDocId) && isReasonablePayload();
     }
   }
 }

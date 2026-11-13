@@ -106,10 +106,37 @@ export function deduplicateCollectionRecords<T = any>(collectionName: string, it
         break;
       }
       case 'warehouses': {
-        if (raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== '') {
-          key = `id:${Number(raw.id)}`;
-        } else {
-          key = normalizeEntityKey(raw.name) || `wh_${raw._docId}`;
+        const nameKey = normalizeEntityKey(raw.name);
+        key = nameKey || (raw.id !== undefined && raw.id !== null ? `id:${Number(raw.id)}` : `wh_${raw._docId}`);
+        if (key) {
+          const existing = map.get(key) as Record<string, any> | undefined;
+          const rawIdNum = Number(raw.id);
+          const aliasSet = new Set<number>([
+            ...(Array.isArray(existing?._aliasIds) ? existing._aliasIds : []),
+            ...(Array.isArray(raw._aliasIds) ? raw._aliasIds : [])
+          ]);
+          if (existing && Number.isFinite(Number(existing.id))) aliasSet.add(Number(existing.id));
+          if (Number.isFinite(rawIdNum)) aliasSet.add(rawIdNum);
+
+          const docAliasSet = new Set<string>([
+            ...(Array.isArray(existing?._aliasDocIds) ? existing._aliasDocIds : []),
+            ...(Array.isArray(raw._aliasDocIds) ? raw._aliasDocIds : [])
+          ]);
+          if (existing?._docId) docAliasSet.add(String(existing._docId));
+          if (raw._docId) docAliasSet.add(String(raw._docId));
+
+          const existingTs = Number(existing?.updatedAt || existing?.timestamp || existing?.createdAt || existing?.id || 0);
+          const candidateTs = Number(raw.updatedAt || raw.timestamp || raw.createdAt || raw.id || 0);
+          const chosen = !existing || candidateTs >= existingTs ? { ...existing, ...raw } : existing;
+          // Preserve lowest canonical numeric ID so stock_moves matching original ID remain primary, while keeping all _aliasIds & _aliasDocIds
+          const sortedAliases = Array.from(aliasSet).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+          map.set(key, {
+            ...chosen,
+            id: sortedAliases.length > 0 ? sortedAliases[0] : chosen.id,
+            _aliasIds: sortedAliases,
+            _aliasDocIds: Array.from(docAliasSet)
+          } as unknown as T);
+          continue;
         }
         break;
       }
@@ -349,63 +376,135 @@ export function computeCashboxBalancesByCurrency(
 }
 
 /**
+ * Builds a Set of all numeric IDs belonging to a warehouse (including merged duplicate IDs).
+ */
+export function resolveWarehouseFilterIds(
+  warehouseIdFilter?: number | null,
+  warehouses?: Array<Warehouse & { _aliasIds?: number[] }>
+): Set<number> | null {
+  if (warehouseIdFilter === undefined || warehouseIdFilter === null || Number(warehouseIdFilter) <= 0) {
+    return null;
+  }
+  const targetId = Number(warehouseIdFilter);
+  const ids = new Set<number>([targetId]);
+  if (Array.isArray(warehouses)) {
+    for (const w of warehouses) {
+      const aliases: number[] = Array.isArray((w as any)._aliasIds)
+        ? (w as any)._aliasIds
+        : [Number(w.id)];
+      if (Number(w.id) === targetId || aliases.includes(targetId)) {
+        aliases.forEach((id) => {
+          if (Number.isFinite(id)) ids.add(id);
+        });
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * Resolves a single canonical warehouse ID for any alias ID (so moves across merged duplicate warehouse docs combine under one ID).
+ */
+function buildCanonicalWarehouseIdMap(
+  warehouses?: Array<Warehouse & { _aliasIds?: number[] }>
+): Map<number, number> {
+  const map = new Map<number, number>();
+  if (!Array.isArray(warehouses)) return map;
+  for (const w of warehouses) {
+    const canonical = Number(w.id);
+    if (!Number.isFinite(canonical)) continue;
+    map.set(canonical, canonical);
+    const aliases: number[] = Array.isArray((w as any)._aliasIds) ? (w as any)._aliasIds : [];
+    for (const a of aliases) {
+      if (Number.isFinite(a)) map.set(Number(a), canonical);
+    }
+  }
+  return map;
+}
+
+/**
  * Computes product stock balances as a `Map<number, number>` (`productId -> netQuantity`)
- * matching Android `PmpDao.kt` (`getAggregatedProductStockBalances`) and `InventoryScreen.kt` 1:1:
- * - Inflow kinds: `['IN', 'RETURN', 'RETURN_IN', 'CANCEL', 'وارد', 'مرتجع', 'توريد', 'إضافة']` -> +quantity
- * - All other kinds (`'OUT'`, `'SALE'`, `'ADJUST'`, `'ISSUE'`, `'صرف'`, `'مبيعات'`, etc.) -> -quantity
- * - Clamped at `>= 0` (`Math.max(0, netBalance)`).
+ * reconciled identically with per-warehouse totals:
+ * - Only considers stock moves belonging to existing products (when `products` is non-empty) so deleted-product orphan moves never inflate stock.
+ * - Normalizes merged duplicate warehouse IDs so alias IDs aggregate together cleanly.
+ * - Clamped `>= 0` per `(canonicalWarehouseId, productId)`.
  */
 export function computeProductStocks(
   products: Array<Partial<Product> & { id: number }>,
   stockMoves: Array<Partial<StockMove> & { productId: number; kind: string; quantity: number }>,
-  warehouseIdFilter?: number | null
+  warehouseIdFilter?: number | null,
+  warehouses?: Array<Warehouse & { _aliasIds?: number[] }>
 ): Map<number, number> {
   const uniqueProducts = deduplicateCollectionRecords('products', products);
   const uniqueMoves = deduplicateCollectionRecords('stock_moves', stockMoves);
+  const uniqueWarehouses = Array.isArray(warehouses)
+    ? deduplicateCollectionRecords('warehouses', warehouses)
+    : undefined;
 
-  const filterWhId =
-    warehouseIdFilter !== undefined && warehouseIdFilter !== null && Number(warehouseIdFilter) > 0
-      ? Number(warehouseIdFilter)
-      : null;
+  const knownProductIds = new Set<number>(uniqueProducts.map((p) => Number(p.id)).filter(Number.isFinite));
+  const filterIdSet = resolveWarehouseFilterIds(warehouseIdFilter, uniqueWarehouses);
+  const canonicalWhMap = buildCanonicalWarehouseIdMap(uniqueWarehouses);
 
-  const filteredMoves =
-    filterWhId !== null
-      ? uniqueMoves.filter((sm) => Number(sm.warehouseId) === filterWhId)
-      : uniqueMoves;
+  const filteredMoves = uniqueMoves.filter((sm) => {
+    const pid = Number(sm.productId);
+    if (!Number.isFinite(pid)) return false;
+    if (knownProductIds.size > 0 && !knownProductIds.has(pid)) return false;
+    if (filterIdSet !== null && !filterIdSet.has(Number(sm.warehouseId))) return false;
+    return true;
+  });
 
-  const deltaByProd = new Map<number, { inQty: number; outQty: number; count: number }>();
+  // Group deltas by (productId -> (canonicalWarehouseId -> { inQty, outQty }))
+  const byProdWarehouse = new Map<number, Map<number, { inQty: number; outQty: number }>>();
 
   for (const sm of filteredMoves) {
     const pid = Number(sm.productId);
-    if (!pid && pid !== 0) continue;
+    const rawWhId = Number(sm.warehouseId || 1);
+    const canonicalWhId = canonicalWhMap.get(rawWhId) ?? rawWhId;
     const qty = Math.abs(Number(sm.quantity || 0));
-    const cur = deltaByProd.get(pid) || { inQty: 0, outQty: 0, count: 0 };
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+
+    let whMap = byProdWarehouse.get(pid);
+    if (!whMap) {
+      whMap = new Map();
+      byProdWarehouse.set(pid, whMap);
+    }
+    const cur = whMap.get(canonicalWhId) || { inQty: 0, outQty: 0 };
     if (isStockInMoveKind(sm.kind)) {
       cur.inQty += qty;
     } else {
       cur.outQty += qty;
     }
-    cur.count += 1;
-    deltaByProd.set(pid, cur);
+    whMap.set(canonicalWhId, cur);
   }
+
+  const sumProductNetAcrossWarehouses = (pid: number): number => {
+    const whMap = byProdWarehouse.get(pid);
+    if (!whMap) return 0;
+    let totalNet = 0;
+    for (const stats of whMap.values()) {
+      totalNet += Math.max(0, stats.inQty - stats.outQty);
+    }
+    return totalNet;
+  };
 
   const result = new Map<number, number>();
 
   for (const p of uniqueProducts) {
     const pid = Number(p.id);
-    const stats = deltaByProd.get(pid);
-    const net = stats
-      ? Math.max(0, stats.inQty - stats.outQty)
-      : filterWhId === null && uniqueMoves.length === 0
+    const hasWhMoves = byProdWarehouse.has(pid);
+    const net = hasWhMoves
+      ? sumProductNetAcrossWarehouses(pid)
+      : filterIdSet === null && uniqueMoves.length === 0
       ? Math.max(0, Number(p.currentStock || 0))
       : 0;
     result.set(pid, net);
   }
 
-  // Also include any productId present in stockMoves even if not yet in products array
-  for (const [pid, stats] of deltaByProd.entries()) {
-    if (!result.has(pid)) {
-      result.set(pid, Math.max(0, stats.inQty - stats.outQty));
+  if (knownProductIds.size === 0) {
+    for (const pid of byProdWarehouse.keys()) {
+      if (!result.has(pid)) {
+        result.set(pid, sumProductNetAcrossWarehouses(pid));
+      }
     }
   }
 
@@ -413,15 +512,76 @@ export function computeProductStocks(
 }
 
 /**
- * Returns `Product[]` with `currentStock` populated from `computeProductStocks(products, stockMoves, warehouseIdFilter)`.
+ * Computes `{ inQty, outQty, netStock }` for each product ID and merged signature group
+ * so warehouse table inflow/outflow columns always reconcile 1:1 with `currentStock`.
+ */
+export function computeProductMoveBreakdown(
+  products: Product[],
+  stockMoves: StockMove[],
+  warehouseIdFilter?: number | null,
+  warehouses?: Array<Warehouse & { _aliasIds?: number[] }>
+): Map<number, { inQty: number; outQty: number; netStock: number }> {
+  const uniqueProducts = deduplicateCollectionRecords('products', products);
+  const uniqueMoves = deduplicateCollectionRecords('stock_moves', stockMoves);
+  const uniqueWarehouses = Array.isArray(warehouses)
+    ? deduplicateCollectionRecords('warehouses', warehouses)
+    : undefined;
+  const stockMap = computeProductStocks(uniqueProducts, uniqueMoves, warehouseIdFilter, uniqueWarehouses);
+
+  const knownProductIds = new Set<number>(uniqueProducts.map((p) => Number(p.id)).filter(Number.isFinite));
+  const filterIdSet = resolveWarehouseFilterIds(warehouseIdFilter, uniqueWarehouses);
+
+  const filteredMoves = uniqueMoves.filter((sm) => {
+    const pid = Number(sm.productId);
+    if (knownProductIds.size > 0 && !knownProductIds.has(pid)) return false;
+    if (filterIdSet !== null && !filterIdSet.has(Number(sm.warehouseId))) return false;
+    return true;
+  });
+
+  const rawBreakdown = new Map<number, { inQty: number; outQty: number }>();
+  for (const m of filteredMoves) {
+    const pid = Number(m.productId);
+    const qty = Math.abs(Number(m.quantity || 0));
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+    const cur = rawBreakdown.get(pid) || { inQty: 0, outQty: 0 };
+    if (isStockInMoveKind(m.kind)) cur.inQty += qty;
+    else cur.outQty += qty;
+    rawBreakdown.set(pid, cur);
+  }
+
+  // Merge breakdown sums across duplicate signature IDs matching computeProductStocksList
+  const sigPrimaryId = new Map<string, number>();
+  const mergedTotals = new Map<number, { inQty: number; outQty: number; netStock: number }>();
+
+  for (const p of uniqueProducts) {
+    const pid = Number(p.id);
+    const sig = `${normalizeEntityKey(p.name)}__${normalizeEntityKey(p.paintColor)}__${normalizeEntityKey(p.packageWeight)}`;
+    const targetId = sigPrimaryId.get(sig) ?? pid;
+    if (!sigPrimaryId.has(sig)) sigPrimaryId.set(sig, pid);
+
+    const own = rawBreakdown.get(pid) || { inQty: 0, outQty: 0 };
+    const prev = mergedTotals.get(targetId) || { inQty: 0, outQty: 0, netStock: 0 };
+    mergedTotals.set(targetId, {
+      inQty: prev.inQty + own.inQty,
+      outQty: prev.outQty + own.outQty,
+      netStock: prev.netStock + (stockMap.get(pid) ?? 0)
+    });
+  }
+
+  return mergedTotals;
+}
+
+/**
+ * Returns `Product[]` with `currentStock` populated from `computeProductStocks(products, stockMoves, warehouseIdFilter, warehouses)`.
  */
 export function computeProductStocksList(
   products: Product[],
   stockMoves: StockMove[],
-  warehouseIdFilter?: number | null
+  warehouseIdFilter?: number | null,
+  warehouses?: Array<Warehouse & { _aliasIds?: number[] }>
 ): Product[] {
   const uniqueProducts = deduplicateCollectionRecords('products', products);
-  const stockMap = computeProductStocks(uniqueProducts, stockMoves, warehouseIdFilter);
+  const stockMap = computeProductStocks(uniqueProducts, stockMoves, warehouseIdFilter, warehouses);
 
   const mergedBySignature = new Map<string, Product>();
   for (const p of uniqueProducts) {
@@ -446,7 +606,7 @@ export function computeProductStocksList(
 }
 
 export interface WarehouseStockSummaryItem {
-  warehouse: Warehouse;
+  warehouse: Warehouse & { _aliasIds?: number[] };
   inQty: number;
   outQty: number;
   netCartons: number;
@@ -459,7 +619,9 @@ export function computeWarehouseStockSummary(
   products: Product[],
   stockMoves: StockMove[]
 ): WarehouseStockSummaryItem[] {
-  const uniqueWarehouses = deduplicateCollectionRecords('warehouses', warehouses);
+  const uniqueWarehouses = deduplicateCollectionRecords('warehouses', warehouses) as Array<
+    Warehouse & { _aliasIds?: number[] }
+  >;
   const uniqueProducts = deduplicateCollectionRecords('products', products);
   const uniqueMoves = deduplicateCollectionRecords('stock_moves', stockMoves);
 
@@ -467,10 +629,18 @@ export function computeWarehouseStockSummary(
   for (const p of uniqueProducts) {
     productById.set(Number(p.id), p);
   }
+  const knownProductIds = new Set<number>(Array.from(productById.keys()));
 
   return uniqueWarehouses.map((wh) => {
-    const whId = Number(wh.id);
-    const whMoves = uniqueMoves.filter((m) => Number(m.warehouseId) === whId);
+    const aliasIds = new Set<number>(
+      Array.isArray(wh._aliasIds) && wh._aliasIds.length > 0 ? wh._aliasIds : [Number(wh.id)]
+    );
+    const whMoves = uniqueMoves.filter((m) => {
+      if (!aliasIds.has(Number(m.warehouseId))) return false;
+      // Only include moves linked to existing catalog products so orphan deleted-product moves never desync KPIs
+      if (knownProductIds.size > 0 && !knownProductIds.has(Number(m.productId))) return false;
+      return true;
+    });
 
     let inQty = 0;
     let outQty = 0;
@@ -479,6 +649,7 @@ export function computeWarehouseStockSummary(
     for (const m of whMoves) {
       const pid = Number(m.productId);
       const qty = Math.abs(Number(m.quantity || 0));
+      if (!Number.isFinite(qty) || qty <= 0) continue;
       if (isStockInMoveKind(m.kind)) {
         inQty += qty;
         perProdNet.set(pid, (perProdNet.get(pid) || 0) + qty);
@@ -527,19 +698,21 @@ export function computeColorWeightStockRows(
   products: Product[],
   stockMoves: StockMove[],
   selectedWeight: string,
-  warehouseIdFilter?: number | null
+  warehouseIdFilter?: number | null,
+  warehouses?: Array<Warehouse & { _aliasIds?: number[] }>
 ): ColorWeightStockRow[] {
   const uniqueProducts = deduplicateCollectionRecords('products', products);
   const uniqueMoves = deduplicateCollectionRecords('stock_moves', stockMoves);
+  const uniqueWarehouses = Array.isArray(warehouses)
+    ? deduplicateCollectionRecords('warehouses', warehouses)
+    : undefined;
+  const stockMap = computeProductStocks(uniqueProducts, uniqueMoves, warehouseIdFilter, uniqueWarehouses);
 
-  const filterWhId =
-    warehouseIdFilter !== undefined && warehouseIdFilter !== null && Number(warehouseIdFilter) > 0
-      ? Number(warehouseIdFilter)
-      : null;
+  const filterIdSet = resolveWarehouseFilterIds(warehouseIdFilter, uniqueWarehouses);
 
   const filteredMoves =
-    filterWhId !== null
-      ? uniqueMoves.filter((sm) => Number(sm.warehouseId) === filterWhId)
+    filterIdSet !== null
+      ? uniqueMoves.filter((sm) => filterIdSet.has(Number(sm.warehouseId)))
       : uniqueMoves;
 
   const cleanWeight = normalizeEntityKey(selectedWeight.replace(/جم|كجم/g, ''));
@@ -573,6 +746,7 @@ export function computeColorWeightStockRows(
     let outQty = 0;
     for (const m of prodMoves) {
       const q = Math.abs(Number(m.quantity || 0));
+      if (!Number.isFinite(q) || q <= 0) continue;
       if (isStockInMoveKind(m.kind)) {
         inQty += q;
       } else {
@@ -580,12 +754,7 @@ export function computeColorWeightStockRows(
       }
     }
 
-    const netCount =
-      prodMoves.length > 0
-        ? Math.max(0, inQty - outQty)
-        : filterWhId === null && uniqueMoves.length === 0
-        ? matchingProducts.reduce((s, p) => s + Math.max(0, Number(p.currentStock || 0)), 0)
-        : 0;
+    const netCount = matchingProducts.reduce((sum, p) => sum + (stockMap.get(Number(p.id)) ?? 0), 0);
 
     return {
       colorName,
@@ -963,3 +1132,93 @@ export function computeCustomerStatement(
     entries
   };
 }
+
+/**
+ * Parses a human date string (`YYYY-MM-DD`, `DD/MM/YYYY`, `YYYY/MM/DD`, or ISO string) into a UTC day timestamp (ms).
+ */
+export function parseDateStringToEpochMs(rawDate: unknown): number {
+  const clean = String(rawDate ?? '').trim();
+  if (!clean) return 0;
+
+  // YYYY-MM-DD or YYYY/MM/DD
+  const ymd = clean.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (ymd) {
+    const y = Number(ymd[1]);
+    const m = Number(ymd[2]);
+    const d = Number(ymd[3]);
+    if (y >= 2000 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return Date.UTC(y, m - 1, d, 12, 0, 0);
+    }
+  }
+
+  // DD-MM-YYYY or DD/MM/YYYY
+  const dmy = clean.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+  if (dmy) {
+    const d = Number(dmy[1]);
+    const m = Number(dmy[2]);
+    const y = Number(dmy[3]);
+    if (y >= 2000 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return Date.UTC(y, m - 1, d, 12, 0, 0);
+    }
+  }
+
+  const parsed = Date.parse(clean);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Computes a deterministic sort key (primary: calendar day from txDate/closeDate, secondary: exact createdAt/timestamp/id)
+ * so Android and Web movements always sort strictly in chronological order without scattered dates.
+ */
+export function resolveChronologicalSortKey(record: Record<string, any> | null | undefined): {
+  dayMs: number;
+  timeMs: number;
+  idFallback: number;
+} {
+  if (!record) return { dayMs: 0, timeMs: 0, idFallback: 0 };
+
+  let rawTime = Number(record.createdAt || record.timestamp || 0);
+  if (!Number.isFinite(rawTime) || rawTime <= 0) {
+    const srv = record.serverUpdatedAt;
+    if (srv && typeof srv === 'object' && typeof srv.seconds === 'number') {
+      rawTime = srv.seconds * 1000;
+    }
+  }
+  if (!Number.isFinite(rawTime)) rawTime = 0;
+
+  const dateStr = record.txDate || record.closeDate || record.invoiceDate || record.payDate || '';
+  let dayMs = parseDateStringToEpochMs(dateStr);
+  if (dayMs <= 0 && rawTime > 0) {
+    const d = new Date(rawTime);
+    dayMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 0, 0);
+  }
+
+  const idFallback = Number(record.id || 0);
+  return {
+    dayMs,
+    timeMs: rawTime,
+    idFallback: Number.isFinite(idFallback) ? idFallback : 0
+  };
+}
+
+export function compareRecordsChronologically(
+  a: Record<string, any>,
+  b: Record<string, any>,
+  order: 'desc' | 'asc' = 'desc'
+): number {
+  const ka = resolveChronologicalSortKey(a);
+  const kb = resolveChronologicalSortKey(b);
+  const dir = order === 'desc' ? -1 : 1;
+
+  if (ka.dayMs !== kb.dayMs) {
+    return (ka.dayMs - kb.dayMs) * dir;
+  }
+  if (ka.timeMs !== kb.timeMs) {
+    return (ka.timeMs - kb.timeMs) * dir;
+  }
+  if (ka.idFallback !== kb.idFallback) {
+    return (ka.idFallback - kb.idFallback) * dir;
+  }
+  return 0;
+}
+

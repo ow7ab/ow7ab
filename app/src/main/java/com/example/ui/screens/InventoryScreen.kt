@@ -201,8 +201,8 @@ fun InventoryScreen(
                     val whMoves = stockMoves.filter { it.warehouseId == selectedWh.id }
                     products.associate { prod ->
                         val prodMoves = whMoves.filter { it.productId == prod.id }
-                        val inQty = prodMoves.filter { it.kind in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع") }.sumOf { it.quantity }
-                        val outQty = prodMoves.filter { it.kind in listOf("OUT", "SALE", "ADJUST", "صرف", "مبيعات") }.sumOf { it.quantity }
+                        val inQty = prodMoves.filter { it.kind in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع", "توريد", "إضافة") }.sumOf { kotlin.math.abs(it.quantity) }
+                        val outQty = prodMoves.filter { it.kind !in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع", "توريد", "إضافة") }.sumOf { kotlin.math.abs(it.quantity) }
                         prod.id to (inQty - outQty).coerceAtLeast(0.0)
                     }
                 } else {
@@ -1426,7 +1426,18 @@ fun InventoryScreen(
             it.paintColor.trim().equals(targetColor, ignoreCase = true) &&
                 InventoryWeightManager.normalizeWeightValue(it.packageWeight) == currentWeightNorm
         }
-        val currentQty = matchingProds.sumOf { stockBalances[it.id] ?: 0.0 }.toInt()
+        val adjustTargetWh = warehouses.firstOrNull { it.name.trim().equals(adjustWarehouseName.trim(), ignoreCase = true) }
+        val currentQty = if (adjustTargetWh != null) {
+            val whMoves = stockMoves.filter { it.warehouseId == adjustTargetWh.id }
+            matchingProds.sumOf { prod ->
+                val prodMoves = whMoves.filter { it.productId == prod.id }
+                val inQ = prodMoves.filter { it.kind in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع", "توريد", "إضافة") }.sumOf { kotlin.math.abs(it.quantity) }
+                val outQ = prodMoves.filter { it.kind !in listOf("IN", "RETURN", "RETURN_IN", "CANCEL", "وارد", "مرتجع", "توريد", "إضافة") }.sumOf { kotlin.math.abs(it.quantity) }
+                (inQ - outQ).coerceAtLeast(0.0)
+            }.toInt()
+        } else {
+            matchingProds.sumOf { stockBalances[it.id] ?: 0.0 }.toInt()
+        }
         val warehouseChoices = warehouses.map { it.name }.ifEmpty { listOf("مخزن المصنع الرئيسي", "مخزن عطبرة", "مخزن حلفا") }
 
         AlertDialog(

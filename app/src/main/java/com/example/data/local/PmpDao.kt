@@ -19,10 +19,10 @@ interface PmpDao {
     @Query("DELETE FROM cashboxes WHERE id = :id")
     suspend fun deleteCashbox(id: Long)
 
-    @Query("SELECT * FROM movements ORDER BY id DESC")
+    @Query("SELECT * FROM movements ORDER BY txDate DESC, createdAt DESC, id DESC")
     fun getAllMovements(): Flow<List<MovementEntity>>
 
-    @Query("SELECT * FROM movements WHERE cashbox = :cashbox ORDER BY id DESC")
+    @Query("SELECT * FROM movements WHERE cashbox = :cashbox ORDER BY txDate DESC, createdAt DESC, id DESC")
     fun getMovementsByCashbox(cashbox: String): Flow<List<MovementEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -35,7 +35,7 @@ interface PmpDao {
     suspend fun deleteMovementById(id: Long)
 
     // --- Transfers ---
-    @Query("SELECT * FROM transfers ORDER BY id DESC")
+    @Query("SELECT * FROM transfers ORDER BY txDate DESC, createdAt DESC, id DESC")
     fun getAllTransfers(): Flow<List<TransferEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -45,7 +45,7 @@ interface PmpDao {
     suspend fun deleteTransferById(id: Long)
 
     // --- Daily Closings ---
-    @Query("SELECT * FROM daily_closings ORDER BY id DESC")
+    @Query("SELECT * FROM daily_closings ORDER BY closeDate DESC, closedAt DESC, id DESC")
     fun getAllDailyClosings(): Flow<List<DailyClosingEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -160,6 +160,12 @@ interface PmpDao {
     @Query("DELETE FROM stock_moves WHERE warehouseId = :warehouseId")
     suspend fun clearStockMovesByWarehouse(warehouseId: Long)
 
+    @Query("DELETE FROM stock_moves WHERE productId = :productId")
+    suspend fun clearStockMovesByProduct(productId: Long)
+
+    @Query("DELETE FROM stock_moves WHERE id = :id")
+    suspend fun deleteStockMoveById(id: Long)
+
     // --- Factory ---
     @Query("SELECT * FROM factory_items ORDER BY name ASC")
     fun getAllFactoryItems(): Flow<List<FactoryItemEntity>>
@@ -251,9 +257,12 @@ interface PmpDao {
     @Query("UPDATE user_accounts SET serverEndpoint = :endpoint, syncStatus = :status")
     suspend fun updateAllUsersServerConfig(endpoint: String, status: String)
 
-    // --- Strict Deduplication Queries to prevent duplicate cashboxes, transactions and accounts ---
+    // --- Strict Deduplication Queries to prevent duplicate cashboxes, warehouses, transactions and accounts ---
     @Query("DELETE FROM cashboxes WHERE id NOT IN (SELECT MIN(id) FROM cashboxes GROUP BY TRIM(LOWER(name)))")
     suspend fun removeDuplicateCashboxes()
+
+    @Query("DELETE FROM warehouses WHERE id NOT IN (SELECT MIN(id) FROM warehouses GROUP BY TRIM(LOWER(name)))")
+    suspend fun removeDuplicateWarehouses()
 
     @Query("DELETE FROM movements WHERE TRIM(reference) != '' AND id NOT IN (SELECT MIN(id) FROM movements WHERE TRIM(reference) != '' GROUP BY TRIM(reference))")
     suspend fun removeDuplicateMovements(): Int
@@ -449,8 +458,15 @@ interface PmpDao {
     @Query(
         """
         SELECT productId,
-               COALESCE(SUM(CASE WHEN kind IN ('IN', 'RETURN', 'RETURN_IN', 'CANCEL', 'وارد', 'مرتجع') THEN quantity ELSE -quantity END), 0.0) AS netBalance
-        FROM stock_moves
+               COALESCE(SUM(whNet), 0.0) AS netBalance
+        FROM (
+            SELECT productId,
+                   warehouseId,
+                   MAX(0.0, COALESCE(SUM(CASE WHEN kind IN ('IN', 'RETURN', 'RETURN_IN', 'CANCEL', 'وارد', 'مرتجع', 'توريد', 'إضافة') THEN ABS(quantity) ELSE -ABS(quantity) END), 0.0)) AS whNet
+            FROM stock_moves
+            WHERE productId IN (SELECT id FROM products)
+            GROUP BY productId, warehouseId
+        )
         GROUP BY productId
         """
     )

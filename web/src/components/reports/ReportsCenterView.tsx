@@ -76,9 +76,10 @@ export const ReportsCenterView: React.FC = () => {
       ErpDataService.computeProductStocksList(
         products,
         stockMoves,
-        selectedWarehouseId > 0 ? selectedWarehouseId : null
+        selectedWarehouseId > 0 ? selectedWarehouseId : null,
+        warehouses
       ),
-    [products, stockMoves, selectedWarehouseId]
+    [products, stockMoves, selectedWarehouseId, warehouses]
   );
 
   const customerDebts = useMemo(
