@@ -128,10 +128,12 @@ export const SupportSection: React.FC = () => {
               <div className="flex items-center gap-3">
                 <div className="w-3 h-3 rounded-full bg-pmp-success animate-ping" />
                 <span className="text-sm font-semibold text-theme-primary">
-                  {language === 'ar' ? 'خوادم المزامنة السحابية وقاعدة البيانات تعمل بكفاءة 100%' : 'Cloud Sync & Firestore Clusters: 100% Operational'}
+                  {language === 'ar' ? 'الخدمة السحابية متصلة وتعمل بكفاءة 100%' : 'Cloud Synchronization Service: 100% Operational'}
                 </span>
               </div>
-              <span className="text-xs font-mono text-pmp-success">PMP-ERP-MAIN-CLUSTER</span>
+              <span className="text-xs font-bold text-pmp-success">
+                {language === 'ar' ? 'متصل ومحدث لحظياً' : 'Live & Connected'}
+              </span>
             </div>
           </div>
 
@@ -197,7 +199,7 @@ export const SupportSection: React.FC = () => {
                       type="text"
                       value={formData.subject}
                       onChange={(e) => setFormData({ ...formData, subject: e.target.value })}
-                      placeholder={language === 'ar' ? 'مثال: طلب صلاحية مؤقتة للمخزن' : 'e.g. Temporary RBAC access request'}
+                      placeholder={language === 'ar' ? 'مثال: طلب صلاحية مؤقتة للمخزن' : 'e.g. Temporary warehouse access request'}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary"
                     />
                   </div>

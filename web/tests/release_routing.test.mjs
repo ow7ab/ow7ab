@@ -121,6 +121,15 @@ test('ReleaseService: never propagates 404 raw.githubusercontent.com APK links a
   const chosen = ReleaseService.selectBestStableRelease([fromLegacyManifest, newerGitHub]);
   assert.ok(chosen);
   assert.equal(chosen.versionCode, 95791);
+
+  assert.equal(
+    ReleaseService.sanitizeApkDownloadUrl('https://github.com/ow7ab/ow7ab/releases/download/v4.2/pmp-paints-v4.2-b17.apk'),
+    'https://github.com/ow7ab/ow7ab/releases/latest/download/pmp-paints-latest.apk'
+  );
+  assert.equal(
+    ReleaseService.sanitizeApkDownloadUrl('https://github.com/ow7ab/ow7ab/releases'),
+    'https://github.com/ow7ab/ow7ab/releases/latest/download/pmp-paints-latest.apk'
+  );
 });
 
 test('Routing: normalizes root and /ow7ab subpath routes cleanly without 404', () => {

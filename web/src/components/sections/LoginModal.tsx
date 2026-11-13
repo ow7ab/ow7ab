@@ -142,7 +142,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               {language === 'ar' ? 'اتصال سحابي آمن ومشفر' : 'Secure Encrypted Connection'}
             </span>
             <span className="text-theme-secondary">
-              {language === 'ar' ? 'مرتبط مباشرة بنظام الصلاحيات وقاعدة بيانات الفروع.' : 'Directly integrated with Firestore Enterprise RBAC.'}
+              {language === 'ar' ? 'مرتبط مباشرة بنظام الصلاحيات وحسابات الفروع.' : 'Directly connected to branch operations and staff accounts.'}
             </span>
           </div>
         </div>
@@ -364,22 +364,20 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         {/* Official Android App Download CTA */}
         <div className="pt-3 border-t border-theme space-y-2.5">
           <a
-            href={apkAvailable && latestRelease?.downloadUrl ? latestRelease.downloadUrl : APP_VERSION_CONTRACT.GITHUB_RELEASES_URL}
-            download={apkAvailable && latestRelease ? latestRelease.assetFileName : undefined}
-            target="_blank"
-            rel="noopener noreferrer"
+            href={latestRelease?.downloadUrl || APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL}
+            download={latestRelease?.assetFileName || APP_VERSION_CONTRACT.RELEASE_ASSET_NAME}
             className="w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl bg-emerald-600/15 hover:bg-emerald-600/25 border border-emerald-500/40 transition-all"
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <Download className="w-4 h-4 text-emerald-400 shrink-0" />
               <div className="text-start min-w-0">
                 <span className="text-xs font-extrabold text-theme-primary block truncate">
-                  {language === 'ar' ? 'تحميل تطبيق Android | Download Android App' : 'Download Android App | تحميل تطبيق Android'}
+                  {language === 'ar' ? 'تنزيل تطبيق الأندرويد مباشرة' : 'Direct Download Android App'}
                 </span>
                 <span className="text-[10px] text-emerald-400 font-semibold block truncate">
                   {latestRelease
                     ? `${latestRelease.versionName} • ${latestRelease.fileSizeMb} MB`
-                    : APP_VERSION_CONTRACT.GITHUB_RELEASES_URL}
+                    : language === 'ar' ? 'تحميل مباشر' : 'Direct Download'}
                 </span>
               </div>
             </div>
@@ -395,7 +393,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               }}
               className="w-full text-[11px] font-bold text-pmp-cyan hover:underline text-center py-1"
             >
-              {language === 'ar' ? 'الانتقال لصفحة التحميل والتحقق من SHA-256' : 'Open Official Download & Verification Page'}
+              {language === 'ar' ? 'الانتقال لصفحة التحميل المباشر لتطبيق الأندرويد' : 'Open Official Android Download Page'}
             </button>
           )}
         </div>

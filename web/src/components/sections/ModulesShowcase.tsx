@@ -156,16 +156,16 @@ export const ModulesShowcase: React.FC = () => {
     },
     {
       id: 'users',
-      nameAr: 'المستخدمين والأمان RBAC',
-      nameEn: 'Users & Enterprise RBAC',
+      nameAr: 'المستخدمين والأمان وصلاحيات الموظفين',
+      nameEn: 'Users & Staff Permissions',
       category: 'admin',
       icon: <Users size={24} color="var(--pmp-red-light)" />,
       badge: 'الأمان والرقابة',
       features: [
         'تحكم دقيق بـ 11 صلاحية تفصيلية لكل موظف',
-        'صلاحيات مؤقتة تلقائية الانتهاء (24h, 72h, 168h)',
-        'سجل تغييرات الصلاحيات (RBAC Change History)',
-        'عزل كامل للمسؤولين المخصصين وحماية حساب Admin'
+        'صلاحيات مؤقتة تلقائية الانتهاء حسب الحاجة',
+        'سجل متابعة تغييرات الصلاحيات والنشاط',
+        'عزل كامل للمسؤولين المخصصين وحماية الحساب الرئيسي'
       ],
       permissions: 'المستخدمين, إدارة المستخدمين'
     },
@@ -186,16 +186,16 @@ export const ModulesShowcase: React.FC = () => {
     },
     {
       id: 'settings',
-      nameAr: 'إعدادات النظام والتحديثات OTA',
-      nameEn: 'System Settings & OTA Updates',
+      nameAr: 'إعدادات النظام والتحديثات',
+      nameEn: 'System Settings & Updates',
       category: 'admin',
       icon: <Settings size={24} color="var(--pmp-gold)" />,
       badge: 'المنظومة والنظام',
       features: [
-        'تخصيص المظهر (الوضع المظلم الاحترافي True-Black)',
+        'تخصيص المظهر الليلي والنهاري وتفضيلات العرض',
         'اختيار العملة الافتراضية للمعاملات (SDG, EGP, USD)',
-        'إدارة التحديثات السحابية المباشرة وحزم APK الموقعة',
-        'ربط السيرفر السحابي وتشخيص صحة الاتصال بالشبكة'
+        'إدارة التحديثات المباشرة لتطبيق الأندرويد',
+        'متابعة حالة الاتصال والمزامنة بين الفروع'
       ],
       permissions: 'الإعدادات, الإعدادات الإدارية'
     }
@@ -229,7 +229,7 @@ export const ModulesShowcase: React.FC = () => {
           {language === 'ar' ? 'منظومة متكاملة تغطي كافة متطلبات مصانع الدهانات' : 'Complete Modules for Paint Manufacturing'}
         </h2>
         <p style={{ fontSize: '15px', color: 'var(--text-secondary)', maxWidth: '700px', margin: '0 auto' }}>
-          تم تصميم كل وحدة لتعمل باستقلالية تامة مع الربط اللحظي بقاعدة بيانات Google Cloud المركزية.
+          تم تصميم كل وحدة لتعمل باستقلالية تامة مع التزامن اللحظي عبر كافة الفروع والمخازن.
         </p>
       </div>
 

@@ -250,10 +250,32 @@ class ErpDataServiceImpl {
     await setDoc(docRef, payload, { merge: true });
   }
 
+  async saveRecord<T extends Record<string, any>>(
+    collectionName: string,
+    docId: string,
+    data: T,
+    _actorUsername?: string
+  ): Promise<void> {
+    return this.saveDocument(collectionName, docId, data);
+  }
+
   async deleteDocument(collectionName: string, docId: string): Promise<void> {
     const cleanDocId = safeId(docId, docId);
     const docRef = doc(firestore, this.collectionPath(collectionName), cleanDocId);
     await deleteDoc(docRef);
+  }
+
+  async deleteRecord(
+    collectionName: string,
+    docId: string,
+    _numericId?: number | string,
+    _actorUsername?: string
+  ): Promise<void> {
+    return this.deleteDocument(collectionName, docId);
+  }
+
+  subscribeTombstonesAndEpoch(): Unsubscribe {
+    return () => {};
   }
 
   async logAudit(username: string, action: string, detail: string): Promise<void> {

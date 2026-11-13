@@ -2,7 +2,7 @@ import React from 'react';
 import { useLanguage } from '../../context/LanguageContext';
 import { APP_VERSION_CONTRACT, resolveAssetUrl } from '../../config/appVersionContract';
 import { AppRoute } from '../../utils/routing';
-import { ShieldCheck, GitBranch, MapPin, ExternalLink, Activity, Smartphone } from 'lucide-react';
+import { ShieldCheck, MapPin, Download, Smartphone, Lock } from 'lucide-react';
 
 interface FooterProps {
   onNavigateRoute?: (route: AppRoute) => void;
@@ -30,7 +30,7 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateRoute }) => {
           marginBottom: '40px'
         }}
       >
-        {/* Col 1: Identity & Certificate */}
+        {/* Col 1: Brand Identity */}
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
             <img
@@ -53,17 +53,19 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateRoute }) => {
               borderRadius: '12px',
               background: 'var(--surface-elevated)',
               border: '1px solid var(--border-subtle)',
-              fontSize: '11px',
-              fontFamily: 'monospace',
-              color: 'var(--pmp-cyan-light)',
-              wordBreak: 'break-all'
+              fontSize: '12px',
+              color: 'var(--text-secondary)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', marginBottom: '4px', fontFamily: 'var(--font-family)' }}>
-              <ShieldCheck size={14} color="var(--pmp-green)" />
-              <span>SHA-256 Signing Certificate:</span>
-            </div>
-            {APP_VERSION_CONTRACT.SIGNING_CERT_SHA256}
+            <ShieldCheck size={16} color="var(--pmp-green)" />
+            <span>
+              {language === 'ar'
+                ? 'منظومة موحدة ومعتمدة لكافة فروع ومصانع الشركة'
+                : 'Verified unified platform for all company branches & factories'}
+            </span>
           </div>
         </div>
 
@@ -92,43 +94,44 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateRoute }) => {
           </ul>
         </div>
 
-        {/* Col 3: Cloud & Release Channels */}
+        {/* Col 3: Direct Download & Quick Access */}
         <div>
           <h4 style={{ fontSize: '15px', fontWeight: 800, marginBottom: '16px', color: 'var(--text-primary)' }}>
-            {language === 'ar' ? 'البنية السحابية والإصدارات' : 'Cloud Architecture & Channels'}
+            {language === 'ar' ? 'التحميل المباشر والوصول السريع' : 'Direct Download & Quick Access'}
           </h4>
-          <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-            <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Activity size={15} color="var(--pmp-green)" />
-              <span>Google Cloud Firestore Cluster: <strong style={{ color: 'var(--text-primary)' }}>PMP-ERP-MAIN-CLUSTER</strong></span>
+          <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '12px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+            <li>
+              <a
+                href={APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL}
+                download={APP_VERSION_CONTRACT.RELEASE_ASSET_NAME}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  background: 'rgba(16, 185, 129, 0.14)',
+                  border: '1px solid rgba(16, 185, 129, 0.35)',
+                  color: 'var(--pmp-green)',
+                  fontWeight: 800,
+                  textDecoration: 'none'
+                }}
+              >
+                <Download size={16} />
+                <span>
+                  {language === 'ar'
+                    ? 'تنزيل تطبيق الأندرويد مباشرة (APK)'
+                    : 'Direct Download Android App (APK)'}
+                </span>
+              </a>
             </li>
             <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Smartphone size={15} color="var(--pmp-cyan)" />
-              <span>Application ID: <strong style={{ color: 'var(--text-primary)' }}>{APP_VERSION_CONTRACT.APPLICATION_ID}</strong></span>
-            </li>
-            <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <GitBranch size={15} color="var(--pmp-gold)" />
-              <a
-                href={APP_VERSION_CONTRACT.GITHUB_REPO_URL}
-                target="_blank"
-                rel="noreferrer"
-                style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--pmp-cyan-light)', textDecoration: 'underline' }}
-              >
-                <span>مستودع GitHub الرسمي (ow7ab/ow7ab)</span>
-                <ExternalLink size={12} />
-              </a>
-            </li>
-            <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <ShieldCheck size={15} color="var(--pmp-red-light)" />
-              <a
-                href={APP_VERSION_CONTRACT.GITHUB_RELEASES_URL}
-                target="_blank"
-                rel="noreferrer"
-                style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--pmp-cyan-light)', textDecoration: 'underline' }}
-              >
-                <span>مركز الإصدارات وحزم APK الموقعة</span>
-                <ExternalLink size={12} />
-              </a>
+              <span>
+                {language === 'ar'
+                  ? `الإصدار الرسمي المعتمد: ${APP_VERSION_CONTRACT.VERSION_NAME}`
+                  : `Official Release: ${APP_VERSION_CONTRACT.VERSION_NAME}`}
+              </span>
             </li>
             {onNavigateRoute && (
               <li style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', paddingTop: '4px' }}>
@@ -145,15 +148,16 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateRoute }) => {
                   onClick={() => onNavigateRoute('/download')}
                   style={{ background: 'none', border: 'none', color: 'var(--pmp-green)', fontWeight: 700, fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }}
                 >
-                  {language === 'ar' ? 'تحميل APK' : 'Download APK'}
+                  {language === 'ar' ? 'صفحة التحميل' : 'Download Page'}
                 </button>
                 <span style={{ color: 'var(--text-muted)' }}>•</span>
                 <button
                   type="button"
                   onClick={() => onNavigateRoute('/login')}
-                  style={{ background: 'none', border: 'none', color: 'var(--pmp-cyan-light)', fontWeight: 700, fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }}
+                  style={{ background: 'none', border: 'none', color: 'var(--pmp-cyan-light)', fontWeight: 700, fontSize: '12px', cursor: 'pointer', textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                 >
-                  {language === 'ar' ? 'دخول الموظفين' : 'Staff Login'}
+                  <Lock size={12} />
+                  <span>{language === 'ar' ? 'دخول الموظفين' : 'Staff Login'}</span>
                 </button>
               </li>
             )}
@@ -178,7 +182,7 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateRoute }) => {
       >
         <div>{t('footer_rights')}</div>
         <div>
-          <span>{APP_VERSION_CONTRACT.RELEASE_TITLE} • Android 8.0+ (API 26+) & Modern Web Portal</span>
+          <span>{APP_VERSION_CONTRACT.RELEASE_TITLE}</span>
         </div>
       </div>
     </footer>

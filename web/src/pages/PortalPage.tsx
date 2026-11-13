@@ -170,7 +170,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
     {
       id: 'USERS',
       labelAr: 'المستخدمين',
-      labelEn: 'Users & RBAC',
+      labelEn: 'Users & Permissions',
       icon: <Users className="w-4 h-4" />,
       visible:
         canAccessModule('المستخدمين') ||
@@ -309,7 +309,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
             <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
             <span className="font-bold text-theme-primary">{userProfile.fullName}</span>
             <span className="text-theme-muted">|</span>
-            <span className="font-mono text-pmp-cyan font-bold">{ErpDataService.activeCluster}</span>
+            <span className="text-emerald-400 font-bold">{language === 'ar' ? 'متصل ومحدث لحظياً' : 'Live Sync'}</span>
           </div>
 
           {/* Right Toolbar */}
@@ -417,9 +417,9 @@ export const PortalPage: React.FC<PortalPageProps> = ({
                 <span className="text-theme-primary font-bold truncate max-w-[115px]">{userProfile.fullName}</span>
               </div>
               <div className="flex justify-between items-center gap-1">
-                <span>السيرفر:</span>
-                <span className="text-emerald-400 font-bold font-mono truncate max-w-[125px]">
-                  {ErpDataService.activeCluster}
+                <span>الحالة:</span>
+                <span className="text-emerald-400 font-bold truncate max-w-[125px]">
+                  {language === 'ar' ? 'متصل ومحدث لحظياً' : 'Connected'}
                 </span>
               </div>
               <div className="flex justify-between items-center gap-1">
@@ -491,8 +491,8 @@ export const PortalPage: React.FC<PortalPageProps> = ({
 
               {/* Drawer Footer Actions */}
               <div className="pt-4 border-t border-theme space-y-2">
-                <div className="text-[10px] text-theme-muted font-mono text-center pb-1">
-                  {ErpDataService.activeCluster}
+                <div className="text-[10px] text-emerald-400 font-bold text-center pb-1">
+                  {language === 'ar' ? 'متصل ومحدث لحظياً' : 'Live Connected'}
                 </div>
                 {onNavigateRoute && (
                   <button

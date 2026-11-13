@@ -311,7 +311,7 @@ export function computeDistinctCashboxesWithBalances(
     const cur = (m.currency || 'SDG').trim().toUpperCase();
     const key = `${normName}__${cur}`;
     const amt = Number(m.amount) || 0;
-    const isInflow = m.direction === 'وارد' || m.direction === 'IN';
+    const isInflow = m.direction === 'وارد' || (m.direction as string) === 'IN';
     const delta = isInflow ? amt : -amt;
     ledgerSums.set(key, (ledgerSums.get(key) || 0) + delta);
     ledgerCounts.set(key, (ledgerCounts.get(key) || 0) + 1);
@@ -572,16 +572,18 @@ export function computeCustomerDebts(
   customers: Customer[],
   invoices: SalesInvoice[],
   payments: InvoicePayment[]
-): Map<number, { totalInvoiced: number; totalPaid: number; remaining: number; currency: CurrencyCode }> {
-  const map = new Map<number, { totalInvoiced: number; totalPaid: number; remaining: number; currency: CurrencyCode }>();
+): Map<number, { totalInvoiced: number; totalPaid: number; remaining: number; currency: CurrencyCode; primaryCurrency: CurrencyCode }> {
+  const map = new Map<number, { totalInvoiced: number; totalPaid: number; remaining: number; currency: CurrencyCode; primaryCurrency: CurrencyCode }>();
   const uniqueInvoices = deduplicateCollectionRecords('invoices', invoices);
 
   customers.forEach((c) => {
+    const cur = (c.currency || 'SDG') as CurrencyCode;
     map.set(Number(c.id), {
       totalInvoiced: 0,
       totalPaid: 0,
       remaining: 0,
-      currency: (c.currency || 'SDG') as CurrencyCode
+      currency: cur,
+      primaryCurrency: cur
     });
   });
 
@@ -590,15 +592,19 @@ export function computeCustomerDebts(
     const cid = Number(inv.customerId);
     const fin = computeInvoiceFinancials(inv, payments);
     const invTotal = Number(inv.total ?? inv.finalAmount ?? 0);
+    const cur = (inv.currency || 'SDG') as CurrencyCode;
     const existing = map.get(cid) || {
       totalInvoiced: 0,
       totalPaid: 0,
       remaining: 0,
-      currency: (inv.currency || 'SDG') as CurrencyCode
+      currency: cur,
+      primaryCurrency: cur
     };
     existing.totalInvoiced += invTotal;
     existing.totalPaid += fin.paidAmount;
     existing.remaining += fin.remainingAmount;
+    existing.currency = cur;
+    existing.primaryCurrency = cur;
     map.set(cid, existing);
   });
 

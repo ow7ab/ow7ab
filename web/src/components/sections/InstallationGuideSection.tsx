@@ -89,12 +89,12 @@ export const InstallationGuideSection: React.FC = () => {
             </div>
             <div>
               <h4 className="text-base font-bold text-theme-primary">
-                {language === 'ar' ? 'التحديثات الهوائية التلقائية (OTA)' : 'Seamless In-App Over-The-Air (OTA) Updates'}
+                {language === 'ar' ? 'التحديثات التلقائية المباشرة' : 'Automatic App Updates'}
               </h4>
               <p className="text-xs sm:text-sm text-theme-secondary mt-0.5">
                 {language === 'ar'
-                  ? 'بعد التثبيت الأول، سيقوم التطبيق تلقائياً بفحص ملف version.json وتنبيهك فور توفر أي إصدار جديد للتحميل والتثبيت التلقائي بنقرة واحدة.'
-                  : 'Once installed, the app automatically checks version.json and alerts you to install updates with one tap.'}
+                  ? 'بعد التثبيت الأول، سيقوم التطبيق تلقائياً بتنبيهك فور توفر أي إصدار جديد لتحميله وتثبيته بنقرة واحدة.'
+                  : 'Once installed, the app automatically alerts you when a new version is ready to install with one tap.'}
               </p>
             </div>
           </div>

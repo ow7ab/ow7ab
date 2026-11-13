@@ -34,7 +34,7 @@ import {
 import { DistinctCashboxSummary, normalizeEntityKey } from '../../services/ErpCalculations';
 import { GRANULAR_ACTIONS, isSystemManager } from '../../services/SecurityService';
 import { CurrencyCode } from '../../types/erp';
-import { ReportExporter } from '../../utils/ReportExporter';
+import { ReportExporter } from '../../services/ReportExporter';
 
 /**
  * Exact 5 Android Treasury Sub-tabs from `TreasuryScreen.kt`:
@@ -56,7 +56,7 @@ export const TreasuryModuleView: React.FC = () => {
   const canAccessTransfers = canAccessModule('التحويلات') || canAccessTreasury;
   const isManager = isSystemManager(userProfile);
   const canCreate = canPerformAction(GRANULAR_ACTIONS.CREATE) || canPerformAction(GRANULAR_ACTIONS.FINANCIAL_OPS);
-  const canDeleteOrZero = isManager || canPerformAction(GRANULAR_ACTIONS.DELETE_RESET);
+  const canDeleteOrZero = isManager || canPerformAction(GRANULAR_ACTIONS.DELETE);
 
   const [activeSubTab, setActiveSubTab] = useState<TreasurySubTab>('MOVEMENT');
   const [defaultCurrency, setDefaultCurrency] = useState<CurrencyCode>('SDG');
@@ -450,6 +450,8 @@ export const TreasuryModuleView: React.FC = () => {
         difference: diff,
         notes: closeForm.notes.trim() || 'إقفال ومطابقة الجرد اليومي',
         preparedBy: userProfile?.fullName || userProfile?.username || 'المدير',
+        status: 'closed',
+        closedAt: now,
         createdAt: now
       };
 

@@ -114,6 +114,8 @@ export interface Cashbox {
   balance: number;
   currency: CurrencyCode;
   branch: string;
+  active?: boolean;
+  updatedAt?: number;
   lastUpdated?: string;
 }
 
@@ -167,6 +169,7 @@ export interface DailyClosing {
   preparedBy: string;
   status: 'closed' | 'reopened';
   closedAt: number;
+  createdAt?: number;
 }
 
 export interface Customer {
@@ -177,6 +180,7 @@ export interface Customer {
   notes: string;
   active: boolean;
   createdAt: number;
+  currency?: CurrencyCode;
   creditLimit?: number;
   currentBalance?: number;
 }
@@ -214,6 +218,8 @@ export interface SalesInvoice {
   payments?: InvoicePayment[];
   // Aliases
   invoiceNumber?: string;
+  invoiceType?: string;
+  warehouseName?: string;
   date?: string;
   totalAmount?: number;
   finalAmount?: number;
@@ -439,3 +445,31 @@ export interface ProductionBatch {
 
 // Aliases for other services
 export type RawMaterialItem = FactoryItem;
+export type TreasuryTransfer = InterTreasuryTransfer;
+export type Machine = FactoryMachine;
+export type ChemicalFormulation = LabFormulation;
+export type Supplier = Customer;
+
+export interface PurchaseInvoice {
+  id: number;
+  supplierId?: number;
+  invoiceNo?: string;
+  invoiceNumber?: string;
+  total?: number;
+  totalAmount?: number;
+  paidAmount?: number;
+  paymentStatus?: string;
+  currency?: CurrencyCode;
+  status?: string;
+  createdAt?: number;
+}
+
+export interface QualityInspection {
+  id: number;
+  inspectionNumber?: string;
+  batchNumber?: string;
+  productName?: string;
+  status?: string;
+  createdAt?: number;
+}
+

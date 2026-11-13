@@ -185,7 +185,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
                   <span style={{ fontSize: '11px', color: 'var(--pmp-green)' }}>● سحابة الإنتاج متصلة (Active)</span>
                 </div>
               </div>
-              <GlassBadge text="v18.0 M3 True-Black" variant="cyan" />
+              <GlassBadge text="الإصدار 18.0 المعتمد" variant="cyan" />
             </div>
 
             {/* Quick Live Stats Grid */}
@@ -256,7 +256,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
                   border: '1px solid var(--border-subtle)'
                 }}
               >
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>صلاحيات الموظفين RBAC</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>صلاحيات الموظفين والرقابة</div>
                 <div style={{ fontSize: '18px', fontWeight: 900, color: 'var(--pmp-green)', marginTop: '2px' }}>
                   11 صلاحية تفصيلية
                 </div>

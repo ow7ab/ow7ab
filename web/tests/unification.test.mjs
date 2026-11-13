@@ -210,4 +210,31 @@ test('ErpCalculations: safeId, cashboxDocId, posterPriceDocId and ledger aggrega
 
   const debts = ErpCalculations.computeCustomerDebts([{ id: 1 }], [inv], externalPayments);
   assert.equal(debts.get(1)?.remaining, 350);
+
+  // Deduplication of cashboxes and distinct multi-currency cashbox aggregation
+  const rawCashboxesWithDuplicates = [
+    { id: 1, name: 'خزنة الخرطوم', balance: 0, currency: 'SDG', branch: 'SD-001', active: true },
+    { id: 2, name: 'خزنة الخرطوم ', balance: 0, currency: 'EGP', branch: 'SD-001', active: true },
+    { id: 3, name: 'خزنة مصر', balance: 0, currency: 'EGP', branch: 'EG-001', active: true }
+  ];
+  const dedupedBoxes = ErpCalculations.deduplicateCollectionRecords('cashboxes', rawCashboxesWithDuplicates);
+  assert.equal(dedupedBoxes.length, 2);
+
+  const multiCurrencyMoves = [
+    { id: 10, cashbox: 'خزنة الخرطوم', currency: 'SDG', direction: 'وارد', amount: 500000 },
+    { id: 11, cashbox: 'خزنة الخرطوم', currency: 'USD', direction: 'وارد', amount: 1500 },
+    { id: 12, cashbox: 'خزنة الخرطوم', currency: 'EGP', direction: 'وارد', amount: 25000 },
+    { id: 13, cashbox: 'خزنة مصر', currency: 'EGP', direction: 'وارد', amount: 10000 }
+  ];
+  const distinctSummaries = ErpCalculations.computeDistinctCashboxesWithBalances(
+    rawCashboxesWithDuplicates,
+    multiCurrencyMoves
+  );
+  assert.equal(distinctSummaries.length, 2);
+  const khartoumBox = distinctSummaries.find((c) => c.name === 'خزنة الخرطوم');
+  assert.ok(khartoumBox);
+  assert.equal(khartoumBox.balances.SDG, 500000);
+  assert.equal(khartoumBox.balances.USD, 1500);
+  assert.equal(khartoumBox.balances.EGP, 25000);
 });
+

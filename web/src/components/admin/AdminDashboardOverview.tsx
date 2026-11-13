@@ -77,8 +77,8 @@ export const AdminDashboardOverview: React.FC<AdminDashboardOverviewProps> = ({ 
     return () => unsubs.forEach((u) => u());
   }, []);
 
-  const computedCashboxes = useMemo(
-    () => ErpDataService.computeCashboxBalances(cashboxes, movements),
+  const distinctCashboxes = useMemo(
+    () => ErpDataService.computeDistinctCashboxesWithBalances(cashboxes, movements),
     [cashboxes, movements]
   );
 
@@ -93,18 +93,18 @@ export const AdminDashboardOverview: React.FC<AdminDashboardOverviewProps> = ({ 
   );
 
   const totalSdgTreasury = useMemo(
-    () => computedCashboxes.filter((c) => c.currency === 'SDG').reduce((s, c) => s + c.balance, 0),
-    [computedCashboxes]
+    () => distinctCashboxes.reduce((s, c) => s + (c.balances.SDG || 0), 0),
+    [distinctCashboxes]
   );
 
   const totalEgpTreasury = useMemo(
-    () => computedCashboxes.filter((c) => c.currency === 'EGP').reduce((s, c) => s + c.balance, 0),
-    [computedCashboxes]
+    () => distinctCashboxes.reduce((s, c) => s + (c.balances.EGP || 0), 0),
+    [distinctCashboxes]
   );
 
   const totalUsdTreasury = useMemo(
-    () => computedCashboxes.filter((c) => c.currency === 'USD').reduce((s, c) => s + c.balance, 0),
-    [computedCashboxes]
+    () => distinctCashboxes.reduce((s, c) => s + (c.balances.USD || 0), 0),
+    [distinctCashboxes]
   );
 
   const totalFinishedStock = useMemo(() => {
@@ -162,12 +162,12 @@ export const AdminDashboardOverview: React.FC<AdminDashboardOverviewProps> = ({ 
                   ? 'لوحة القيادة التنفيذية الموحدة'
                   : 'Unified Executive ERP Dashboard'}
               </h2>
-              <GlassBadge variant="red">{ErpDataService.activeCluster}</GlassBadge>
+              <GlassBadge variant="green">{language === 'ar' ? 'متصل ومحدث لحظياً' : 'Live Sync'}</GlassBadge>
             </div>
             <p className="text-xs text-theme-secondary">
               {language === 'ar'
-                ? `مرحباً ${userProfile?.fullName || ''} — جميع الأرقام التالية محسوبة لحظياً من قاعدة بيانات Cloud Firestore المشتركة مع الأندرويد.`
-                : `Welcome ${userProfile?.fullName || ''} — All metrics are computed live from the unified Cloud Firestore database.`}
+                ? `مرحباً ${userProfile?.fullName || ''} — جميع الأرقام والمؤشرات التالية محدثة لحظياً عبر كافة الفروع والمخازن.`
+                : `Welcome ${userProfile?.fullName || ''} — All metrics are updated live across all branches and warehouses.`}
             </p>
           </div>
 
@@ -183,7 +183,7 @@ export const AdminDashboardOverview: React.FC<AdminDashboardOverviewProps> = ({ 
         <StatCard
           title={language === 'ar' ? 'رصيد الخزن (جنيه سوداني)' : 'Sudan Treasury (SDG)'}
           value={`${totalSdgTreasury.toLocaleString()} SDG`}
-          change={`${computedCashboxes.filter((c) => c.currency === 'SDG').length} خزنة سودانية`}
+          change={`${distinctCashboxes.length} خزنة معتمدة`}
           isPositive={totalSdgTreasury >= 0}
           icon={<DollarSign className="w-5 h-5 text-pmp-primary" />}
         />
@@ -191,7 +191,7 @@ export const AdminDashboardOverview: React.FC<AdminDashboardOverviewProps> = ({ 
         <StatCard
           title={language === 'ar' ? 'رصيد الخزن (جنيه مصري)' : 'Egypt Treasury (EGP)'}
           value={`${totalEgpTreasury.toLocaleString()} EGP`}
-          change={`${computedCashboxes.filter((c) => c.currency === 'EGP').length} خزنة مصرية`}
+          change={`${distinctCashboxes.length} خزنة معتمدة`}
           isPositive={totalEgpTreasury >= 0}
           icon={<DollarSign className="w-5 h-5 text-pmp-gold" />}
         />
@@ -242,7 +242,7 @@ export const AdminDashboardOverview: React.FC<AdminDashboardOverviewProps> = ({ 
         >
           <span className="text-[11px] text-theme-muted block">حركات الخزن</span>
           <span className="text-lg font-black text-theme-primary">{movements.length}</span>
-          <span className="text-[10px] text-emerald-400 block">{computedCashboxes.length} خزنة نشطة</span>
+          <span className="text-[10px] text-emerald-400 block">{distinctCashboxes.length} خزنة نشطة</span>
         </button>
 
         <button

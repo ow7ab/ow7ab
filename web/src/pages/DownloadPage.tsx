@@ -16,9 +16,7 @@ interface DownloadPageProps {
 }
 
 /**
- * Dedicated public /download route merging Project A (Official APK Download Website)
- * directly inside the unified PMP PAINTS ERP web shell.
- * Accessible without authentication; exposes zero private ERP records.
+ * Dedicated public /download route for direct Android APK download.
  */
 export const DownloadPage: React.FC<DownloadPageProps> = ({
   onNavigateRoute,
@@ -64,7 +62,7 @@ export const DownloadPage: React.FC<DownloadPageProps> = ({
           >
             <BackArrow className="w-4 h-4" />
             <span>
-              {language === 'ar' ? 'العودة إلى الرئيسية (منظومة ERP)' : 'Back to ERP Homepage'}
+              {language === 'ar' ? 'العودة إلى الصفحة الرئيسية' : 'Back to Homepage'}
             </span>
           </button>
 
@@ -72,8 +70,8 @@ export const DownloadPage: React.FC<DownloadPageProps> = ({
             <ShieldCheck className="w-4 h-4 shrink-0" />
             <span>
               {language === 'ar'
-                ? 'بوابة التحميل الرسمية — متصلة مباشرة بإصدارات GitHub المستقرة'
-                : 'Official Download Portal — Live Stable GitHub Releases'}
+                ? 'بوابة التحميل المباشر الرسمية — النسخة المعتمدة لأجهزة أندرويد'
+                : 'Official Direct Download Portal — Verified Android Release'}
             </span>
           </div>
         </div>

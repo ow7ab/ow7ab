@@ -152,31 +152,21 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     }
   };
 
-  const handleDownloadAndroidApp = (e: React.MouseEvent<HTMLAnchorElement>) => {
-    if (!apkAvailable || !latestRelease?.downloadUrl) {
-      e.preventDefault();
-      setDownloadNotice(
-        unavailableReason ||
-          (language === 'ar'
-            ? 'ملف APK غير متاح حالياً للتحميل المباشر. يمكنك فحص سجل الإصدارات عبر صفحة التحميل الرسمية.'
-            : 'APK download is temporarily unavailable. Check the official Download page or GitHub Releases.')
-      );
-      return;
-    }
+  const handleDownloadAndroidApp = () => {
     setDownloadNotice(null);
   };
 
   const versionMetaLabel = isReleaseLoading
     ? language === 'ar'
-      ? 'جاري جلب أحدث إصدار مستقر...'
-      : 'Checking latest stable release...'
+      ? 'جاري تجهيز التحميل المباشر...'
+      : 'Preparing direct download...'
     : latestRelease
-    ? `${latestRelease.versionName} (Build ${latestRelease.versionCode})${
+    ? `${latestRelease.versionName}${
         latestRelease.fileSizeMb > 0 ? ` • ${latestRelease.fileSizeMb} MB` : ''
-      }`
+      } • ${language === 'ar' ? 'تحميل مباشر' : 'Direct Download'}`
     : language === 'ar'
-    ? 'التحقق من توفر الإصدار...'
-    : 'Checking release availability';
+    ? 'تحميل مباشر لتطبيق الأندرويد'
+    : 'Direct Android APK Download';
 
   return (
     <div className="min-h-screen bg-theme-base text-theme-primary flex flex-col justify-between p-4 sm:p-6 selection:bg-pmp-primary selection:text-white">
@@ -250,8 +240,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             </h1>
             <p className="text-xs text-theme-secondary leading-relaxed">
               {language === 'ar'
-                ? 'سجّل الدخول بنفس حسابك المعتمد في تطبيق الأندرويد للوصول المباشر إلى بيانات السيرفر السحابي.'
-                : 'Sign in with your verified Android ERP employee account to access live cloud operations.'}
+                ? 'سجّل الدخول بنفس حسابك المعتمد في تطبيق الأندرويد للوصول المباشر إلى أعمال الفروع والمخازن.'
+                : 'Sign in with your verified Android ERP employee account to access live branch operations.'}
             </p>
           </div>
 
@@ -260,8 +250,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             <ShieldCheck className="w-4 h-4 text-pmp-primary shrink-0" />
             <span>
               {language === 'ar'
-                ? 'تحقق مشفر بنظام PBKDF2-HMAC-SHA256 وصلاحيات RBAC موحدة مع الأندرويد.'
-                : 'PBKDF2-HMAC-SHA256 verification synchronized with Android RBAC.'}
+                ? 'بوابة دخول آمنة وموحدة لمنسوبي الشركة وفروعها.'
+                : 'Secure unified login portal for company staff and branches.'}
             </span>
           </div>
 
@@ -509,10 +499,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           {/* Mandatory Official Android App Download Button on Login Screen */}
           <div className="pt-4 border-t border-theme space-y-3" data-testid="login-android-download-box">
             <a
-              href={apkAvailable && latestRelease?.downloadUrl ? latestRelease.downloadUrl : APP_VERSION_CONTRACT.GITHUB_RELEASES_URL}
-              download={apkAvailable && latestRelease ? latestRelease.assetFileName : undefined}
-              target="_blank"
-              rel="noopener noreferrer"
+              href={latestRelease?.downloadUrl || APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL}
+              download={latestRelease?.assetFileName || APP_VERSION_CONTRACT.RELEASE_ASSET_NAME}
               onClick={handleDownloadAndroidApp}
               data-testid="login-download-android-btn"
               className="w-full flex items-center justify-between gap-3 px-4 py-3.5 rounded-xl bg-emerald-600/15 hover:bg-emerald-600/25 border border-emerald-500/40 text-theme-primary transition-all shadow-md min-h-[54px] group"
@@ -524,8 +512,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 <div className="text-start min-w-0">
                   <span className="text-xs sm:text-sm font-extrabold text-theme-primary block truncate">
                     {language === 'ar'
-                      ? 'تحميل تطبيق Android | Download Android App'
-                      : 'Download Android App | تحميل تطبيق Android'}
+                      ? 'تنزيل تطبيق الأندرويد مباشرة'
+                      : 'Direct Download Android App'}
                   </span>
                   <span className="text-[11px] text-emerald-400 font-bold block truncate">
                     {versionMetaLabel}
@@ -548,11 +536,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 onClick={() => goTo('/download')}
                 className="text-pmp-cyan hover:underline font-bold inline-flex items-center gap-1"
               >
-                <ShieldCheck className="w-3.5 h-3.5" />
+                <Download className="w-3.5 h-3.5" />
                 <span>
                   {language === 'ar'
-                    ? 'صفحة التحميل والتحقق SHA-256'
-                    : 'Official Download & SHA-256 Page'}
+                    ? 'صفحة تحميل تطبيق الأندرويد'
+                    : 'Official Android App Download Page'}
                 </span>
               </button>
               <span className="text-theme-muted">•</span>
@@ -576,11 +564,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4">
           <span>
             {language === 'ar'
-              ? `عنقود السحابة النشط: ${ErpDataService.activeCluster}`
-              : `Active Cluster: ${ErpDataService.activeCluster}`}
+              ? 'منظومة PMP Paints لإدارة الفروع والمصانع'
+              : 'PMP Paints Branch & Factory Management'}
           </span>
-          <span>•</span>
-          <span>{language === 'ar' ? 'قاعدة البيانات: Cloud Firestore' : 'Database: Cloud Firestore'}</span>
           <span>•</span>
           <span>
             {language === 'ar' ? 'جميع الحقوق محفوظة لشركة PMP Paints © 2026' : 'All Rights Reserved © 2026 PMP Paints'}
