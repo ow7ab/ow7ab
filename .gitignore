@@ -31,8 +31,8 @@ public/assets/aistudio/
 *-debug.log
 web/node_modules/
 web/dist/
-!desktop/build/
-!desktop/build/**
+!desktop/assets/
+!desktop/assets/**
 desktop/node_modules/
 desktop/dist/
 desktop/renderer-dist/

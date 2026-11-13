@@ -30,15 +30,15 @@
     "copyright": "Copyright © 2026 PMP Paints for Chemical Industries & Coatings",
     "asar": true,
     "directories": {
-      "buildResources": "build",
+      "buildResources": "assets",
       "output": "dist"
     },
     "files": [
       "src/**/*",
       "renderer-dist/**/*",
-      "build/icon.ico",
-      "build/icon.png",
-      "build/tray-icon.png",
+      "assets/icon.ico",
+      "assets/icon.png",
+      "assets/tray-icon.png",
       "!tests/**"
     ],
     "extraMetadata": {
@@ -59,7 +59,7 @@
           ]
         }
       ],
-      "icon": "build/icon.ico",
+      "icon": "assets/icon.ico",
       "artifactName": "pmp-paints-desktop-${target}-${version}-${arch}.${ext}",
       "verifyUpdateCodeSignature": false
     },
@@ -71,10 +71,10 @@
       "createStartMenuShortcut": true,
       "shortcutName": "PMP PAINTS ERP",
       "uninstallDisplayName": "PMP PAINTS ERP",
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
-      "installerHeaderIcon": "build/icon.ico",
-      "include": "build/installer.nsh",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "include": "assets/installer.nsh",
       "deleteAppDataOnUninstall": false,
       "artifactName": "pmp-paints-desktop-setup-${version}-${arch}.${ext}"
     },
@@ -83,7 +83,7 @@
     },
     "mac": {
       "category": "public.app-category.business",
-      "icon": "build/icon.png",
+      "icon": "assets/icon.png",
       "target": [
         "dmg",
         "zip"
@@ -91,7 +91,7 @@
     },
     "linux": {
       "category": "Office",
-      "icon": "build/icon.png",
+      "icon": "assets/icon.png",
       "target": [
         "AppImage",
         "deb"

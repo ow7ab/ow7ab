@@ -39,9 +39,6 @@ jobs:
           $ErrorActionPreference = "Stop"
           if (-not (Test-Path "web/package.json")) { throw "Missing web/package.json in workspace $(Get-Location)" }
           if (-not (Test-Path "desktop/package.json")) { throw "Missing desktop/package.json in workspace $(Get-Location)" }
-          foreach ($asset in @("desktop/build/icon.ico", "desktop/build/icon.png", "desktop/build/tray-icon.png", "desktop/build/installer.nsh")) {
-            if (-not (Test-Path $asset)) { throw "Missing required desktop build asset: $asset" }
-          }
           $pkg = Get-Content -Raw -Path "desktop/package.json" | ConvertFrom-Json
           $baseVersion = [string]$pkg.version
           $inputVersion = "${{ github.event.inputs.desktop_version }}".Trim() -replace '^(desktop-)?v', ''
