@@ -1,5 +1,6 @@
 package com.example
 
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -8,11 +9,17 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -34,9 +41,29 @@ import com.example.util.UserSessionManager
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlurEffect
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -358,6 +385,28 @@ fun PmpAppContent(
     val updateAvailable by viewModel.updateAvailable.collectAsState()
     val availableUpdate by viewModel.availableUpdate.collectAsState()
     val effectiveVersionName by viewModel.effectiveVersionName.collectAsState()
+    val userAccounts by viewModel.userAccounts.collectAsState()
+    val products by viewModel.products.collectAsState()
+    val productStockBalances by viewModel.productStockBalances.collectAsState()
+
+    val navBadgeCounts = remember(updateAvailable, userAccounts, products, productStockBalances, currentUser) {
+        buildMap {
+            val pendingApprovals = if (currentUser.isSystemManager()) {
+                userAccounts.count { it.syncStatus == "PENDING_MANAGER_APPROVAL" }
+            } else 0
+            val settingsAlerts = (if (updateAvailable) 1 else 0) + pendingApprovals
+            if (settingsAlerts > 0) {
+                put(PmpScreen.SETTINGS, settingsAlerts)
+            }
+            val lowStockCount = products.count { prod ->
+                val bal = productStockBalances[prod.id] ?: 0.0
+                prod.active && prod.minimumStock > 0.0 && productStockBalances.containsKey(prod.id) && bal <= prod.minimumStock
+            }
+            if (lowStockCount > 0) {
+                put(PmpScreen.INVENTORY, lowStockCount)
+            }
+        }
+    }
 
     val notificationPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
@@ -518,40 +567,57 @@ fun PmpAppContent(
         }
     }
 
-    Scaffold(
+    val backdropGraphicsLayer = rememberGraphicsLayer()
+    var backdropContainerOffset by remember { mutableStateOf(Offset.Zero) }
+    var backdropDrawTick by remember { mutableLongStateOf(0L) }
+    val blurRefreshScrollObserver = remember {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (consumed.y != 0f || consumed.x != 0f) {
+                    backdropDrawTick++
+                }
+                return Offset.Zero
+            }
+        }
+    }
+
+    LaunchedEffect(currentScreen) {
+        backdropDrawTick++
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(GlassBackgroundBrush),
-        containerColor = Color.Transparent,
-        contentWindowInsets = WindowInsets.safeDrawing,
-        bottomBar = {
-            GlassBottomNavigationBar(
-                allowedScreens = orderedNavScreens,
-                currentScreen = currentScreen,
-                onScreenSelected = { screen ->
-                    if (screen in allowedScreens) {
-                        navigateWithBiometrics(screen) {
-                            currentScreen = screen
-                        }
-                    } else {
-                        viewModel.postMessage("عفواً، صلاحية قسم (${screen.title}) غير مخصصة لحسابك من قبل المدير", isError = true)
-                    }
-                }
-            )
-        }
-    ) { innerPadding ->
-        com.example.ui.components.OneUiPullDownContainer(
+            .background(GlassBackgroundBrush)
+    ) {
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(bottom = innerPadding.calculateBottomPadding()),
-            pageTitle = if (currentScreen == PmpScreen.DASHBOARD) "لوحة التحكم الرئيسية" else currentScreen.title,
-            screenKey = currentScreen.route,
-            onDeepPullTriggered = {
-                if (currentScreen == PmpScreen.DASHBOARD) {
-                    viewModel.syncAllErpDataToServer()
+                .nestedScroll(blurRefreshScrollObserver)
+                .onGloballyPositioned { coords ->
+                    backdropContainerOffset = coords.positionInRoot()
                 }
-            }
+                .drawWithContent {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && size.width > 0f && size.height > 0f) {
+                        backdropGraphicsLayer.record {
+                            this@drawWithContent.drawContent()
+                        }
+                        drawLayer(backdropGraphicsLayer)
+                    } else {
+                        drawContent()
+                    }
+                }
         ) {
+            com.example.ui.components.OneUiPullDownContainer(
+                modifier = Modifier.fillMaxSize(),
+                pageTitle = if (currentScreen == PmpScreen.DASHBOARD) "لوحة التحكم الرئيسية" else currentScreen.title,
+                screenKey = currentScreen.route,
+                onDeepPullTriggered = {
+                    if (currentScreen == PmpScreen.DASHBOARD) {
+                        viewModel.syncAllErpDataToServer()
+                    }
+                }
+            ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -876,8 +942,30 @@ fun PmpAppContent(
                 }
             }
                 }
+                }
             }
         }
+
+        GlassBottomNavigationBar(
+            allowedScreens = orderedNavScreens,
+            currentScreen = currentScreen,
+            badgeCounts = navBadgeCounts,
+            backdropGraphicsLayer = backdropGraphicsLayer,
+            backdropContainerOffset = backdropContainerOffset,
+            backdropInvalidateTick = backdropDrawTick,
+            onScreenSelected = { screen ->
+                if (screen in allowedScreens) {
+                    navigateWithBiometrics(screen) {
+                        currentScreen = screen
+                    }
+                } else {
+                    viewModel.postMessage("عفواً، صلاحية قسم (${screen.title}) غير مخصصة لحسابك من قبل المدير", isError = true)
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .zIndex(20f)
+        )
     }
     }
 
@@ -977,13 +1065,19 @@ fun PmpAppContent(
 fun GlassBottomNavigationBar(
     allowedScreens: List<PmpScreen>,
     currentScreen: PmpScreen,
-    onScreenSelected: (PmpScreen) -> Unit
+    onScreenSelected: (PmpScreen) -> Unit,
+    modifier: Modifier = Modifier,
+    badgeCounts: Map<PmpScreen, Int> = emptyMap(),
+    backdropGraphicsLayer: GraphicsLayer? = null,
+    backdropContainerOffset: Offset = Offset.Zero,
+    backdropInvalidateTick: Long = 0L
 ) {
     val listState = rememberLazyListState()
-
+    val haptic = LocalHapticFeedback.current
+    val isDark = PmpThemeController.isDarkModeActive
     val distinctScreens = remember(allowedScreens) { allowedScreens.distinctBy { it.route } }
 
-    // Auto-scroll to selected item only if it is outside the currently visible viewport
+    // Auto-scroll smoothly only when the active tab lies outside the visible viewport
     LaunchedEffect(currentScreen, distinctScreens) {
         val index = distinctScreens.indexOf(currentScreen)
         if (index >= 0) {
@@ -998,80 +1092,267 @@ fun GlassBottomNavigationBar(
         }
     }
 
-    BoxWithConstraints(
-        modifier = Modifier
+    val pillShape = remember { RoundedCornerShape(percent = 50) }
+    val activeOvalShape = remember { RoundedCornerShape(percent = 50) }
+    var barRootOffset by remember { mutableStateOf(Offset.Zero) }
+
+    val glassTintBrush = remember(isDark) {
+        if (isDark) {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color(0xFF1C1C26).copy(alpha = 0.72f),
+                    Color(0xFF12121A).copy(alpha = 0.62f),
+                    Color(0xFF191923).copy(alpha = 0.70f)
+                )
+            )
+        } else {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.72f),
+                    Color.White.copy(alpha = 0.54f),
+                    Color(0xFFF8F6FF).copy(alpha = 0.64f)
+                )
+            )
+        }
+    }
+
+    val glassBorderBrush = remember(isDark) {
+        if (isDark) {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.34f),
+                    Color.White.copy(alpha = 0.10f),
+                    Color(0xFFC4B5FD).copy(alpha = 0.28f)
+                )
+            )
+        } else {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.96f),
+                    Color.White.copy(alpha = 0.42f),
+                    Color.White.copy(alpha = 0.85f)
+                )
+            )
+        }
+    }
+
+    val purpleActiveColor = if (isDark) Color(0xFFC4B5FD) else Color(0xFF6D28D9)
+    val purpleActiveFill = if (isDark) Color(0xFF8B5CF6).copy(alpha = 0.24f) else Color(0xFF7C3AED).copy(alpha = 0.14f)
+    val purpleActiveBorder = if (isDark) Color(0xFFA78BFA).copy(alpha = 0.38f) else Color(0xFF7C3AED).copy(alpha = 0.22f)
+    val inactiveIconColor = if (isDark) Color(0xFFE4E4E7) else Color(0xFF18181B)
+    val inactiveTextColor = if (isDark) Color(0xFFD4D4D8) else Color(0xFF27272A)
+
+    Box(
+        modifier = modifier
             .fillMaxWidth()
-            .background(PmpWhiteSurface.copy(alpha = 0.98f))
-            .border(0.5.dp, GlassBorder, RoundedCornerShape(0.dp))
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(vertical = 4.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center
     ) {
-        val totalWidth = if (maxWidth != androidx.compose.ui.unit.Dp.Infinity && maxWidth.value.isFinite() && maxWidth > 0.dp) maxWidth else 360.dp
-        val visibleColumns = distinctScreens.size.coerceIn(1, 5)
-        val itemWidth = (totalWidth / visibleColumns.toFloat()).coerceAtLeast(64.dp)
-
-        LazyRow(
-            state = listState,
-            modifier = Modifier.fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+        BoxWithConstraints(
+            modifier = Modifier
+                .widthIn(max = 560.dp)
+                .fillMaxWidth()
+                .onGloballyPositioned { coords ->
+                    barRootOffset = coords.positionInRoot()
+                }
+                .shadow(
+                    elevation = 18.dp,
+                    shape = pillShape,
+                    ambientColor = Color(0xFF1E1B4B).copy(alpha = if (isDark) 0.48f else 0.16f),
+                    spotColor = Color(0xFF6D28D9).copy(alpha = if (isDark) 0.36f else 0.14f)
+                )
+                .clip(pillShape)
         ) {
-                items(
-                    items = distinctScreens,
-                    key = { it.route },
-                    contentType = { "nav_tab_item" }
-                ) { screen ->
-                    val selected = currentScreen == screen
-                    val color = if (selected) PmpBrandRed else TextSubtle
+            val barMaxWidth = maxWidth
+            // 1. Real-time hardware GPU Frosted Blur of live content passing behind the floating pill (API 31+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && backdropGraphicsLayer != null) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clip(pillShape)
+                        .graphicsLayer {
+                            clip = true
+                            shape = pillShape
+                            val blurRadiusPx = 26.dp.toPx()
+                            renderEffect = BlurEffect(blurRadiusPx, blurRadiusPx, TileMode.Mirror)
+                        }
+                        .drawBehind {
+                            @Suppress("UNUSED_EXPRESSION")
+                            backdropInvalidateTick
+                            if (backdropGraphicsLayer.size.width > 0 && backdropGraphicsLayer.size.height > 0) {
+                                val dx = backdropContainerOffset.x - barRootOffset.x
+                                val dy = backdropContainerOffset.y - barRootOffset.y
+                                translate(left = dx, top = dy) {
+                                    drawLayer(backdropGraphicsLayer)
+                                }
+                            }
+                        }
+                )
+            }
 
-                    Column(
-                        modifier = Modifier
-                            .width(itemWidth)
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable { onScreenSelected(screen) }
-                            .padding(vertical = 5.dp)
-                            .testTag("nav_tab_${screen.route}"),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
+            // 2. Semi-transparent Frosted White Liquid Glass Layer + Specular Rim + Glass Border
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(glassTintBrush, pillShape)
+                    .border(BorderStroke(1.2.dp, glassBorderBrush), pillShape)
+            ) {
+                // Top inner specular highlight edge for authentic iOS Liquid Glass sheen
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp)
+                        .height(1.2.dp)
+                        .align(Alignment.TopCenter)
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    Color.White.copy(alpha = if (isDark) 0.35f else 0.96f),
+                                    Color.Transparent
+                                )
+                            )
+                        )
+                )
+
+                val totalWidth = if (barMaxWidth != androidx.compose.ui.unit.Dp.Infinity && barMaxWidth.value.isFinite() && barMaxWidth > 0.dp) barMaxWidth else 340.dp
+                val innerWidth = (totalWidth - 16.dp).coerceAtLeast(220.dp)
+                val visibleColumns = when {
+                    distinctScreens.size <= 5 -> distinctScreens.size.coerceAtLeast(1)
+                    totalWidth >= 500.dp -> distinctScreens.size.coerceAtMost(6)
+                    totalWidth >= 380.dp -> 5
+                    else -> 4
+                }
+                val itemWidth = if (distinctScreens.size <= visibleColumns) {
+                    (innerWidth / visibleColumns.toFloat()).coerceAtLeast(48.dp)
+                } else {
+                    (innerWidth / visibleColumns.toFloat()).coerceAtLeast(64.dp)
+                }
+
+                LazyRow(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = if (distinctScreens.size <= visibleColumns) Arrangement.SpaceEvenly else Arrangement.Start,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    items(
+                        items = distinctScreens,
+                        key = { it.route },
+                        contentType = { "nav_tab_item" }
+                    ) { screen ->
+                        val selected = currentScreen == screen
+                        val badgeCount = badgeCounts[screen] ?: 0
+                        val interactionSource = remember { MutableInteractionSource() }
+                        val isPressed by interactionSource.collectIsPressedAsState()
+
+                        val pressScale by animateFloatAsState(
+                            targetValue = when {
+                                isPressed -> 0.91f
+                                selected -> 1.02f
+                                else -> 1.0f
+                            },
+                            animationSpec = spring(
+                                dampingRatio = 0.68f,
+                                stiffness = Spring.StiffnessMediumLow
+                            ),
+                            label = "NavTabScale_${screen.route}"
+                        )
+                        val iconTint by animateColorAsState(
+                            targetValue = if (selected) purpleActiveColor else inactiveIconColor,
+                            animationSpec = tween(durationMillis = 220),
+                            label = "NavIconTint_${screen.route}"
+                        )
+                        val labelTint by animateColorAsState(
+                            targetValue = if (selected) purpleActiveColor else inactiveTextColor,
+                            animationSpec = tween(durationMillis = 220),
+                            label = "NavLabelTint_${screen.route}"
+                        )
+                        val ovalFill by animateColorAsState(
+                            targetValue = if (selected) purpleActiveFill else Color.Transparent,
+                            animationSpec = tween(durationMillis = 240),
+                            label = "NavOvalFill_${screen.route}"
+                        )
+                        val ovalBorder by animateColorAsState(
+                            targetValue = if (selected) purpleActiveBorder else Color.Transparent,
+                            animationSpec = tween(durationMillis = 240),
+                            label = "NavOvalBorder_${screen.route}"
+                        )
+
                         Box(
                             modifier = Modifier
-                                .height(32.dp)
-                                .width(50.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(
-                                    if (selected) {
-                                        if (PmpThemeController.isDarkModeActive) PmpBrandRed.copy(alpha = 0.22f) else Color(0xFFFEE2E2)
-                                    } else {
-                                        Color.Transparent
-                                    }
-                                )
-                                .then(
-                                    if (selected) {
-                                        Modifier.border(
-                                            1.dp,
-                                            PmpBrandRed.copy(alpha = 0.35f),
-                                            RoundedCornerShape(12.dp)
-                                        )
-                                    } else Modifier
-                                ),
+                                .width(itemWidth)
+                                .heightIn(min = 54.dp)
+                                .scale(pressScale)
+                                .padding(horizontal = 2.dp)
+                                .clip(activeOvalShape)
+                                .background(ovalFill)
+                                .border(1.dp, ovalBorder, activeOvalShape)
+                                .clickable(
+                                    interactionSource = interactionSource,
+                                    indication = ripple(
+                                        bounded = true,
+                                        color = purpleActiveColor
+                                    )
+                                ) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    onScreenSelected(screen)
+                                }
+                                .padding(horizontal = 4.dp, vertical = 7.dp)
+                                .testTag("nav_tab_${screen.route}"),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = screen.icon,
-                                contentDescription = screen.title,
-                                tint = color,
-                                modifier = Modifier.size(20.dp)
-                            )
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Box(contentAlignment = Alignment.TopEnd) {
+                                    Icon(
+                                        imageVector = screen.icon,
+                                        contentDescription = screen.title,
+                                        tint = iconTint,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+
+                                    if (badgeCount > 0) {
+                                        Box(
+                                            modifier = Modifier
+                                                .offset(x = 7.dp, y = (-4).dp)
+                                                .defaultMinSize(minWidth = 16.dp, minHeight = 16.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(0xFF7C3AED))
+                                                .border(1.2.dp, Color.White, CircleShape)
+                                                .padding(horizontal = 3.5.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = if (badgeCount > 9) "9+" else badgeCount.toString(),
+                                                color = Color.White,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(2.5.dp))
+
+                                Text(
+                                    text = screen.title,
+                                    color = labelTint,
+                                    fontSize = 10.5.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
                         }
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = screen.title,
-                            color = color,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
-                        )
+                    }
                 }
             }
         }

@@ -2,34 +2,59 @@ package com.example.ui.screens
 
 import android.app.Activity
 import android.content.Context
+import android.os.Build
 import android.util.Log
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Login
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -42,7 +67,6 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
-import androidx.compose.foundation.clickable
 import com.example.R
 import com.example.data.local.UserAccountEntity
 import com.example.ui.components.*
@@ -194,654 +218,916 @@ fun LoginScreen(
     var reqBranch by remember { mutableStateOf(branchOptions[0]) }
 
     val pendingCodeFromVm by viewModel.pendingApprovalUserCode.collectAsState()
+    val focusManager = LocalFocusManager.current
+    val haptic = LocalHapticFeedback.current
+    val isDark = PmpThemeController.isDarkModeActive
+
+    val submitCredentialsLogin = {
+        focusManager.clearFocus()
+        errorMessage = null
+        pendingApprovalBanner = null
+        val resolvedIdentity = usernameInput.trim().ifBlank { emailInput.trim() }
+        isCredentialsSubmitting = true
+        viewModel.loginWithCredentials(
+            emailOrUsername = resolvedIdentity,
+            passwordOrPin = password,
+            onSuccess = {
+                isCredentialsSubmitting = false
+                onLoginSuccess()
+            },
+            onError = { err ->
+                isCredentialsSubmitting = false
+                errorMessage = err
+            }
+        )
+    }
+
+    val liquidGlassPanelBrush = remember(isDark) {
+        if (isDark) {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color(0xFF191923).copy(alpha = 0.80f),
+                    Color(0xFF111118).copy(alpha = 0.74f),
+                    Color(0xFF15151E).copy(alpha = 0.80f)
+                )
+            )
+        } else {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.78f),
+                    Color(0xFFF8FAFF).copy(alpha = 0.66f),
+                    Color.White.copy(alpha = 0.74f)
+                )
+            )
+        }
+    }
+
+    val liquidGlassBorderBrush = remember(isDark) {
+        if (isDark) {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.26f),
+                    Color.White.copy(alpha = 0.08f),
+                    Color(0xFF8B5CF6).copy(alpha = 0.24f)
+                )
+            )
+        } else {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.96f),
+                    Color.White.copy(alpha = 0.45f),
+                    Color(0xFFDDD6FE).copy(alpha = 0.75f)
+                )
+            )
+        }
+    }
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(GlassBackgroundBrush)
-            .drawBehind {
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            PmpBrandRed.copy(alpha = 0.12f),
-                            Color.Transparent
-                        ),
-                        center = Offset(size.width * 0.85f, size.height * 0.14f),
-                        radius = size.width * 0.55f
-                    ),
-                    radius = size.width * 0.55f,
-                    center = Offset(size.width * 0.85f, size.height * 0.14f)
-                )
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            PmpBrandNavy.copy(alpha = 0.10f),
-                            Color.Transparent
-                        ),
-                        center = Offset(size.width * 0.15f, size.height * 0.45f),
-                        radius = size.width * 0.60f
-                    ),
-                    radius = size.width * 0.60f,
-                    center = Offset(size.width * 0.15f, size.height * 0.45f)
-                )
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            PmpBrandOrange.copy(alpha = 0.09f),
-                            PmpBrandGreen.copy(alpha = 0.05f),
-                            Color.Transparent
-                        ),
-                        center = Offset(size.width * 0.80f, size.height * 0.85f),
-                        radius = size.width * 0.55f
-                    ),
-                    radius = size.width * 0.55f,
-                    center = Offset(size.width * 0.80f, size.height * 0.85f)
-                )
-            }
-            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .background(
+                if (isDark) {
+                    Brush.verticalGradient(
+                        colors = listOf(Color(0xFF05050A), Color(0xFF0B0B14), Color(0xFF06060B))
+                    )
+                } else {
+                    Brush.verticalGradient(
+                        colors = listOf(Color(0xFFEEF2FF), Color(0xFFF5F3FF), Color(0xFFE0F2FE))
+                    )
+                }
+            )
     ) {
+        // Diffused iOS Liquid Glass Mesh Aurora Backdrop (Blurred on API 31+)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Modifier.blur(48.dp) else Modifier)
+                .drawBehind {
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                Color(0xFF8B5CF6).copy(alpha = if (isDark) 0.26f else 0.24f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * 0.18f, size.height * 0.16f),
+                            radius = size.width * 0.65f
+                        ),
+                        radius = size.width * 0.65f,
+                        center = Offset(size.width * 0.18f, size.height * 0.16f)
+                    )
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                PmpBrandRed.copy(alpha = if (isDark) 0.22f else 0.16f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * 0.88f, size.height * 0.22f),
+                            radius = size.width * 0.55f
+                        ),
+                        radius = size.width * 0.55f,
+                        center = Offset(size.width * 0.88f, size.height * 0.22f)
+                    )
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                Color(0xFF38BDF8).copy(alpha = if (isDark) 0.18f else 0.22f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * 0.20f, size.height * 0.78f),
+                            radius = size.width * 0.62f
+                        ),
+                        radius = size.width * 0.62f,
+                        center = Offset(size.width * 0.20f, size.height * 0.78f)
+                    )
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                Color(0xFFA855F7).copy(alpha = if (isDark) 0.18f else 0.16f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * 0.84f, size.height * 0.84f),
+                            radius = size.width * 0.58f
+                        ),
+                        radius = size.width * 0.58f,
+                        center = Offset(size.width * 0.84f, size.height * 0.84f)
+                    )
+                }
+        )
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 16.dp),
+                .padding(horizontal = 20.dp, vertical = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // --- Brand Glass Header Card ---
-            GlassCard(
+            // --- Floating iOS Liquid Glass Brand Crest ---
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .widthIn(max = 480.dp),
-                cornerRadius = 26.dp,
-                glowAccentColor = PmpBrandRed
+                    .widthIn(max = 460.dp)
+                    .padding(bottom = 18.dp)
             ) {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(5.dp)
-                            .background(PmpLogoSwooshGradient)
-                    )
-
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 18.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(74.dp)
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(Color.White)
-                                .border(
-                                    BorderStroke(1.5.dp, PmpLogoSwooshGradient),
-                                    RoundedCornerShape(20.dp)
+                Box(
+                    modifier = Modifier
+                        .size(82.dp)
+                        .shadow(
+                            elevation = 18.dp,
+                            shape = RoundedCornerShape(26.dp),
+                            ambientColor = Color(0xFF5B21B6).copy(alpha = 0.22f),
+                            spotColor = PmpBrandRed.copy(alpha = 0.18f)
+                        )
+                        .clip(RoundedCornerShape(26.dp))
+                        .background(
+                            if (isDark) Color(0xFF1A1A24).copy(alpha = 0.88f)
+                            else Color.White.copy(alpha = 0.88f)
+                        )
+                        .border(
+                            BorderStroke(
+                                1.5.dp,
+                                Brush.linearGradient(
+                                    listOf(
+                                        Color.White.copy(alpha = 0.95f),
+                                        Color(0xFFC4B5FD).copy(alpha = 0.60f),
+                                        PmpBrandRed.copy(alpha = 0.35f)
+                                    )
                                 )
-                                .padding(6.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Image(
-                                painter = painterResource(id = R.drawable.ic_pmp_emblem),
-                                contentDescription = "شعار PMP Paints",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Fit
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        Text(
-                            text = "PMP PAINTS",
-                            color = PmpBrandNavy,
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 21.sp
+                            ),
+                            RoundedCornerShape(26.dp)
                         )
+                        .padding(8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_pmp_emblem),
+                        contentDescription = "شعار PMP Paints",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit
+                    )
+                }
 
-                        Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                        Text(
-                            text = if (selectedAuthTab == 0) "تسجيل الدخول إلى المنظومة" else "طلب حساب موظف جديد واعتماد الصلاحيات",
-                            color = TextMuted,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            textAlign = TextAlign.Center
-                        )
-                    }
+                Text(
+                    text = "PMP PAINTS",
+                    color = if (isDark) Color.White else Color(0xFF0F172A),
+                    fontWeight = FontWeight.Black,
+                    fontSize = 23.sp,
+                    letterSpacing = 0.6.sp
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                AnimatedContent(
+                    targetState = selectedAuthTab,
+                    transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(150)) },
+                    label = "HeroSubtitleTransition"
+                ) { tab ->
+                    Text(
+                        text = if (tab == 0) "تسجيل الدخول إلى المنظومة" else "طلب حساب موظف جديد",
+                        color = if (isDark) Color(0xFFCBD5E1) else Color(0xFF475569),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // --- Main Glass-Morphism Auth Card ---
-            GlassCard(
+            // --- Main iOS Liquid Glass Auth Panel ---
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .widthIn(max = 480.dp),
-                cornerRadius = 26.dp,
-                glowAccentColor = PmpBrandNavy
+                    .widthIn(max = 460.dp)
+                    .shadow(
+                        elevation = 24.dp,
+                        shape = RoundedCornerShape(30.dp),
+                        ambientColor = Color(0xFF312E81).copy(alpha = if (isDark) 0.45f else 0.14f),
+                        spotColor = Color(0xFF6D28D9).copy(alpha = if (isDark) 0.35f else 0.12f)
+                    )
+                    .clip(RoundedCornerShape(30.dp))
+                    .background(liquidGlassPanelBrush)
+                    .border(BorderStroke(1.2.dp, liquidGlassBorderBrush), RoundedCornerShape(30.dp))
             ) {
+                // Specular top-rim liquid highlight
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.5.dp)
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(
+                                    Color.Transparent,
+                                    Color.White.copy(alpha = if (isDark) 0.35f else 0.95f),
+                                    Color.Transparent
+                                )
+                            )
+                        )
+                )
+
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(22.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                        .padding(horizontal = 22.dp, vertical = 22.dp),
+                    verticalArrangement = Arrangement.spacedBy(15.dp)
                 ) {
-                    // Top Tabs: تسجيل الدخول vs طلب حساب جديد
-                    Row(
+                    // iOS Animated Sliding Segmented Control
+                    BoxWithConstraints(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFF1F5F9))
-                            .padding(3.dp)
+                            .height(46.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (isDark) Color.White.copy(alpha = 0.08f)
+                                else Color(0xFFE2E8F0).copy(alpha = 0.60f)
+                            )
+                            .border(
+                                1.dp,
+                                Color.White.copy(alpha = if (isDark) 0.12f else 0.70f),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .padding(3.5.dp)
                     ) {
+                        val segmentWidth = (maxWidth / 2f).coerceAtLeast(100.dp)
+                        val indicatorOffset by animateDpAsState(
+                            targetValue = if (selectedAuthTab == 0) 0.dp else segmentWidth,
+                            animationSpec = spring(
+                                dampingRatio = 0.78f,
+                                stiffness = Spring.StiffnessMediumLow
+                            ),
+                            label = "SegmentThumbOffset"
+                        )
+
+                        // Sliding Frosted Active Thumb
                         Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (selectedAuthTab == 0) Color.White else Color.Transparent)
-                                .clickable {
-                                    selectedAuthTab = 0
-                                    errorMessage = null
+                                .offset(x = indicatorOffset)
+                                .width(segmentWidth)
+                                .fillMaxHeight()
+                                .shadow(
+                                    elevation = 4.dp,
+                                    shape = RoundedCornerShape(13.dp),
+                                    ambientColor = Color.Black.copy(alpha = 0.10f)
+                                )
+                                .clip(RoundedCornerShape(13.dp))
+                                .background(
+                                    if (isDark) Color(0xFF272734).copy(alpha = 0.95f)
+                                    else Color.White.copy(alpha = 0.95f)
+                                )
+                                .border(
+                                    0.8.dp,
+                                    Color.White.copy(alpha = if (isDark) 0.18f else 0.95f),
+                                    RoundedCornerShape(13.dp)
+                                )
+                        )
+
+                        Row(modifier = Modifier.fillMaxSize()) {
+                            listOf("تسجيل الدخول", "طلب حساب جديد").forEachIndexed { idx, label ->
+                                val isSelected = selectedAuthTab == idx
+                                val textColor by animateColorAsState(
+                                    targetValue = if (isSelected) {
+                                        if (idx == 0) PmpBrandRed else Color(0xFF6D28D9)
+                                    } else {
+                                        if (isDark) Color(0xFFA1A1AA) else Color(0xFF475569)
+                                    },
+                                    animationSpec = tween(200),
+                                    label = "SegmentTextColor_$idx"
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(13.dp))
+                                        .clickable(
+                                            interactionSource = remember { MutableInteractionSource() },
+                                            indication = null
+                                        ) {
+                                            if (selectedAuthTab != idx) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                selectedAuthTab = idx
+                                                errorMessage = null
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = label,
+                                        color = textColor,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1
+                                    )
                                 }
-                                .padding(vertical = 9.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "تسجيل الدخول",
-                                color = if (selectedAuthTab == 0) PmpBrandRed else TextMuted,
-                                fontSize = 12.5.sp,
-                                fontWeight = if (selectedAuthTab == 0) FontWeight.Bold else FontWeight.Medium
-                            )
-                        }
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (selectedAuthTab == 1) Color.White else Color.Transparent)
-                                .clickable {
-                                    selectedAuthTab = 1
-                                    errorMessage = null
-                                }
-                                .padding(vertical = 9.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "طلب حساب جديد",
-                                color = if (selectedAuthTab == 1) PmpBrandNavy else TextMuted,
-                                fontSize = 12.5.sp,
-                                fontWeight = if (selectedAuthTab == 1) FontWeight.Bold else FontWeight.Medium
-                            )
+                            }
                         }
                     }
 
-                    if (selectedAuthTab == 0) {
-                        // --- TAB 0: LOGIN ---
+                    AnimatedContent(
+                        targetState = selectedAuthTab,
+                        transitionSpec = {
+                            fadeIn(tween(220)) togetherWith fadeOut(tween(150))
+                        },
+                        label = "AuthTabContent"
+                    ) { activeTab ->
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            if (activeTab == 0) {
+                                // --- TAB 0: LOGIN ---
+                                val inputUnfocusedBg = if (isDark) Color.White.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.62f)
+                                val inputFocusedBg = if (isDark) Color.White.copy(alpha = 0.11f) else Color.White.copy(alpha = 0.92f)
+                                val inputBorderColor = if (isDark) Color.White.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.85f)
 
-                        // Unified Email or Username Input Field
-                        Column {
-                            Text(
-                                text = "البريد الإلكتروني أو اسم المستخدم",
-                                color = TextDark,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(bottom = 6.dp)
-                            )
-                            OutlinedTextField(
-                                value = emailInput,
-                                onValueChange = {
-                                    emailInput = it
-                                    usernameInput = it
-                                    errorMessage = null
-                                    pendingApprovalBanner = null
-                                },
-                                placeholder = {
+                                // Unified Email or Username Input Field
+                                Column {
                                     Text(
-                                        text = "اكتب البريد الإلكتروني أو اسم المستخدم...",
-                                        color = TextSubtle,
-                                        fontSize = 12.sp
+                                        text = "البريد الإلكتروني أو اسم المستخدم",
+                                        color = TextDark,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.padding(bottom = 6.dp, start = 2.dp)
                                     )
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.AccountCircle,
-                                        contentDescription = "اسم المستخدم أو البريد الإلكتروني",
-                                        tint = PmpBrandNavy
-                                    )
-                                },
-                                trailingIcon = {
-                                    if (emailInput.isNotEmpty()) {
-                                        IconButton(onClick = { 
-                                            emailInput = "" 
-                                            usernameInput = ""
-                                        }) {
-                                            Icon(
-                                                imageVector = Icons.Default.Clear,
-                                                contentDescription = "مسح الحقل",
-                                                tint = TextSubtle,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        }
-                                    }
-                                },
-                                singleLine = true,
-                                shape = RoundedCornerShape(14.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedContainerColor = Color.White.copy(alpha = 0.95f),
-                                    unfocusedContainerColor = GlassInput,
-                                    focusedBorderColor = PmpBrandNavy,
-                                    unfocusedBorderColor = GlassBorder,
-                                    focusedTextColor = TextDark,
-                                    unfocusedTextColor = TextDark,
-                                    cursorColor = PmpBrandNavy
-                                ),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("login_email_input")
-                            )
-                        }
-
-                        // Password Input Field
-                        Column {
-                            Text(
-                                text = "كلمة المرور",
-                                color = TextDark,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(bottom = 6.dp)
-                            )
-                            OutlinedTextField(
-                                value = password,
-                                onValueChange = {
-                                    password = it
-                                    errorMessage = null
-                                    pendingApprovalBanner = null
-                                },
-                                placeholder = {
-                                    Text(
-                                        text = "أدخل كلمة المرور",
-                                        color = TextSubtle,
-                                        fontSize = 12.sp
-                                    )
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Lock,
-                                        contentDescription = "كلمة المرور",
-                                        tint = PmpBrandRed
-                                    )
-                                },
-                                trailingIcon = {
-                                    IconButton(
-                                        onClick = { passwordVisible = !passwordVisible },
-                                        modifier = Modifier.testTag("toggle_password_visibility")
-                                    ) {
-                                        Icon(
-                                            imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                            contentDescription = if (passwordVisible) "إخفاء كلمة المرور" else "إظهار كلمة المرور",
-                                            tint = TextMuted
-                                        )
-                                    }
-                                },
-                                visualTransformation = if (passwordVisible) {
-                                    VisualTransformation.None
-                                } else {
-                                    PasswordVisualTransformation()
-                                },
-                                singleLine = true,
-                                shape = RoundedCornerShape(14.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedContainerColor = Color.White.copy(alpha = 0.95f),
-                                    unfocusedContainerColor = GlassInput,
-                                    focusedBorderColor = PmpBrandRed,
-                                    unfocusedBorderColor = GlassBorder,
-                                    focusedTextColor = TextDark,
-                                    unfocusedTextColor = TextDark,
-                                    cursorColor = PmpBrandRed
-                                ),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("login_password_input")
-                            )
-
-                            // Forgot Password Link
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 4.dp),
-                                horizontalArrangement = Arrangement.End
-                            ) {
-                                Text(
-                                    text = "نسيت كلمة المرور؟",
-                                    color = PmpBrandNavy,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .clickable {
-                                            resetIdentityInput = usernameInput.ifBlank { emailInput }
-                                            resetStep = 1
-                                            resetErrorMessage = null
-                                            enteredResetCode = ""
-                                            newPasswordInput = ""
-                                            showForgotPasswordDialog = true
-                                        }
-                                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                                        .testTag("forgot_password_button")
-                                )
-                            }
-                        }
-
-                        // Pending Manager Approval Notice & Direct Check Button
-                        AnimatedVisibility(visible = pendingApprovalBanner != null || pendingCodeFromVm != null) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(Color(0xFFFFFBEB))
-                                    .border(1.2.dp, Color(0xFFD97706), RoundedCornerShape(14.dp))
-                                    .padding(14.dp)
-                                    .testTag("pending_approval_banner")
-                            ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Row(
-                                        verticalAlignment = Alignment.Top,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.HourglassTop,
-                                            contentDescription = null,
-                                            tint = Color(0xFFB45309),
-                                            modifier = Modifier.size(22.dp)
-                                        )
-                                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    OutlinedTextField(
+                                        value = emailInput,
+                                        onValueChange = {
+                                            emailInput = it
+                                            usernameInput = it
+                                            errorMessage = null
+                                            pendingApprovalBanner = null
+                                        },
+                                        placeholder = {
                                             Text(
-                                                text = "بانتظار موافقة حساب المدير وتحديد الصلاحيات",
-                                                color = Color(0xFF92400E),
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.Bold
+                                                text = "اسم المستخدم أو البريد الإلكتروني",
+                                                color = TextSubtle,
+                                                fontSize = 12.5.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
-                                            if (pendingCodeFromVm != null) {
-                                                Text(
-                                                    text = "كود الحساب المطلوب: $pendingCodeFromVm",
-                                                    color = Color(0xFFB45309),
-                                                    fontSize = 11.5.sp,
-                                                    fontWeight = FontWeight.Bold
+                                        },
+                                        leadingIcon = {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color(0xFF6D28D9).copy(alpha = 0.10f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.PersonOutline,
+                                                    contentDescription = "اسم المستخدم أو البريد الإلكتروني",
+                                                    tint = if (isDark) Color(0xFFC4B5FD) else Color(0xFF4C1D95),
+                                                    modifier = Modifier.size(19.dp)
                                                 )
                                             }
+                                        },
+                                        trailingIcon = {
+                                            if (emailInput.isNotEmpty()) {
+                                                IconButton(onClick = {
+                                                    emailInput = ""
+                                                    usernameInput = ""
+                                                }) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Clear,
+                                                        contentDescription = "مسح الحقل",
+                                                        tint = TextSubtle,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        singleLine = true,
+                                        shape = RoundedCornerShape(16.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedContainerColor = inputFocusedBg,
+                                            unfocusedContainerColor = inputUnfocusedBg,
+                                            focusedBorderColor = Color(0xFF7C3AED),
+                                            unfocusedBorderColor = inputBorderColor,
+                                            focusedTextColor = TextDark,
+                                            unfocusedTextColor = TextDark,
+                                            cursorColor = Color(0xFF7C3AED)
+                                        ),
+                                        keyboardOptions = KeyboardOptions(
+                                            keyboardType = KeyboardType.Email,
+                                            imeAction = ImeAction.Next
+                                        ),
+                                        keyboardActions = KeyboardActions(
+                                            onNext = { focusManager.moveFocus(FocusDirection.Down) }
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("login_email_input")
+                                    )
+                                }
+
+                                // Password Input Field
+                                Column {
+                                    Text(
+                                        text = "كلمة المرور",
+                                        color = TextDark,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.padding(bottom = 6.dp, start = 2.dp)
+                                    )
+                                    OutlinedTextField(
+                                        value = password,
+                                        onValueChange = {
+                                            password = it
+                                            errorMessage = null
+                                            pendingApprovalBanner = null
+                                        },
+                                        placeholder = {
                                             Text(
-                                                text = pendingApprovalBanner ?: "تم إرسال طلبك إلى سيرفر Google Cloud وسيظهر لدى حساب المدير لاعتماد الصلاحيات.",
-                                                color = Color(0xFFB45309),
-                                                fontSize = 11.5.sp,
-                                                lineHeight = 17.sp
+                                                text = "أدخل كلمة المرور",
+                                                color = TextSubtle,
+                                                fontSize = 12.5.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .clip(CircleShape)
+                                                    .background(PmpBrandRed.copy(alpha = 0.10f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Lock,
+                                                    contentDescription = "كلمة المرور",
+                                                    tint = PmpBrandRed,
+                                                    modifier = Modifier.size(19.dp)
+                                                )
+                                            }
+                                        },
+                                        trailingIcon = {
+                                            IconButton(
+                                                onClick = { passwordVisible = !passwordVisible },
+                                                modifier = Modifier.testTag("toggle_password_visibility")
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                                    contentDescription = if (passwordVisible) "إخفاء كلمة المرور" else "إظهار كلمة المرور",
+                                                    tint = TextMuted
+                                                )
+                                            }
+                                        },
+                                        visualTransformation = if (passwordVisible) {
+                                            VisualTransformation.None
+                                        } else {
+                                            PasswordVisualTransformation()
+                                        },
+                                        singleLine = true,
+                                        shape = RoundedCornerShape(16.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedContainerColor = inputFocusedBg,
+                                            unfocusedContainerColor = inputUnfocusedBg,
+                                            focusedBorderColor = PmpBrandRed,
+                                            unfocusedBorderColor = inputBorderColor,
+                                            focusedTextColor = TextDark,
+                                            unfocusedTextColor = TextDark,
+                                            cursorColor = PmpBrandRed
+                                        ),
+                                        keyboardOptions = KeyboardOptions(
+                                            keyboardType = KeyboardType.Password,
+                                            imeAction = ImeAction.Done
+                                        ),
+                                        keyboardActions = KeyboardActions(
+                                            onDone = {
+                                                if (!isCredentialsSubmitting) submitCredentialsLogin()
+                                            }
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("login_password_input")
+                                    )
+
+                                    // Forgot Password Link
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 6.dp),
+                                        horizontalArrangement = Arrangement.End
+                                    ) {
+                                        Text(
+                                            text = "نسيت كلمة المرور؟",
+                                            color = if (isDark) Color(0xFFC4B5FD) else Color(0xFF5B21B6),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    resetIdentityInput = usernameInput.ifBlank { emailInput }
+                                                    resetStep = 1
+                                                    resetErrorMessage = null
+                                                    enteredResetCode = ""
+                                                    newPasswordInput = ""
+                                                    showForgotPasswordDialog = true
+                                                }
+                                                .padding(horizontal = 6.dp, vertical = 3.dp)
+                                                .testTag("forgot_password_button")
+                                        )
+                                    }
+                                }
+
+                                // Pending Manager Approval Notice & Direct Check Button
+                                AnimatedVisibility(visible = pendingApprovalBanner != null || pendingCodeFromVm != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(16.dp))
+                                            .background(Color(0xFFFFFBEB).copy(alpha = 0.88f))
+                                            .border(1.2.dp, Color(0xFFD97706).copy(alpha = 0.7f), RoundedCornerShape(16.dp))
+                                            .padding(14.dp)
+                                            .testTag("pending_approval_banner")
+                                    ) {
+                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Row(
+                                                verticalAlignment = Alignment.Top,
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.HourglassTop,
+                                                    contentDescription = null,
+                                                    tint = Color(0xFFB45309),
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                                    Text(
+                                                        text = "بانتظار موافقة حساب المدير وتحديد الصلاحيات",
+                                                        color = Color(0xFF92400E),
+                                                        fontSize = 13.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                    if (pendingCodeFromVm != null) {
+                                                        Text(
+                                                            text = "مرجع الطلب: $pendingCodeFromVm",
+                                                            color = Color(0xFFB45309),
+                                                            fontSize = 11.5.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                    Text(
+                                                        text = pendingApprovalBanner ?: "تم إرسال طلبك بنجاح وبانتظار اعتماد الإدارة.",
+                                                        color = Color(0xFFB45309),
+                                                        fontSize = 11.5.sp,
+                                                        lineHeight = 17.sp
+                                                    )
+                                                }
+                                            }
+
+                                            GlassButton(
+                                                text = if (isCheckingApproval) "جاري التحقق..." else "فحص الموافقة والدخول الآن",
+                                                icon = Icons.Default.CloudSync,
+                                                gradient = PmpBrandRedGradient,
+                                                enabled = !isCheckingApproval,
+                                                onClick = {
+                                                    val resolvedIdentity = pendingCodeFromVm
+                                                        ?: usernameInput.trim().ifBlank { emailInput.trim() }
+                                                    if (resolvedIdentity.isBlank()) {
+                                                        errorMessage = "يرجى كتابة اسم المستخدم لفحص الموافقة"
+                                                        return@GlassButton
+                                                    }
+                                                    isCheckingApproval = true
+                                                    errorMessage = null
+                                                    viewModel.checkPendingAccountApprovalAndLogin(
+                                                        userCodeOrUsername = resolvedIdentity,
+                                                        passwordOrPin = password,
+                                                        onSuccess = {
+                                                            isCheckingApproval = false
+                                                            onLoginSuccess()
+                                                        },
+                                                        onStillPending = { stillPendingMsg ->
+                                                            isCheckingApproval = false
+                                                            pendingApprovalBanner = stillPendingMsg
+                                                        },
+                                                        onError = { err ->
+                                                            isCheckingApproval = false
+                                                            errorMessage = err
+                                                        }
+                                                    )
+                                                },
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(44.dp)
+                                                    .testTag("check_approval_login_btn")
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Error Message Banner
+                                AnimatedVisibility(visible = errorMessage != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(PmpRed.copy(alpha = 0.10f))
+                                            .border(1.dp, PmpRed.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.ErrorOutline,
+                                                contentDescription = null,
+                                                tint = PmpRed,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Text(
+                                                text = errorMessage.orEmpty(),
+                                                color = PmpRed,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Primary iOS-style Liquid Sign-In Pill Button
+                                val loginBtnInteraction = remember { MutableInteractionSource() }
+                                val isLoginBtnPressed by loginBtnInteraction.collectIsPressedAsState()
+                                val loginBtnScale by animateFloatAsState(
+                                    targetValue = if (isLoginBtnPressed) 0.97f else 1f,
+                                    animationSpec = spring(stiffness = Spring.StiffnessMedium),
+                                    label = "LoginButtonScale"
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(52.dp)
+                                        .scale(loginBtnScale)
+                                        .shadow(
+                                            elevation = 10.dp,
+                                            shape = RoundedCornerShape(18.dp),
+                                            ambientColor = PmpBrandRed.copy(alpha = 0.30f),
+                                            spotColor = PmpBrandRed.copy(alpha = 0.28f)
+                                        )
+                                        .clip(RoundedCornerShape(18.dp))
+                                        .background(PmpBrandRedGradient)
+                                        .border(
+                                            1.dp,
+                                            Color.White.copy(alpha = 0.45f),
+                                            RoundedCornerShape(18.dp)
+                                        )
+                                        .clickable(
+                                            interactionSource = loginBtnInteraction,
+                                            indication = LocalIndicationFallback(),
+                                            enabled = !isCredentialsSubmitting
+                                        ) {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            submitCredentialsLogin()
+                                        }
+                                        .testTag("login_submit_button"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.Center
+                                    ) {
+                                        if (isCredentialsSubmitting) {
+                                            CircularProgressIndicator(
+                                                color = Color.White,
+                                                strokeWidth = 2.2.dp,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "جاري التحقق...",
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 14.sp
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.Login,
+                                                contentDescription = null,
+                                                tint = Color.White,
+                                                modifier = Modifier.size(19.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "تسجيل الدخول",
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 14.5.sp
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Clean Quick Auth Divider
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 4.dp, bottom = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.weight(1f),
+                                        color = if (isDark) Color.White.copy(alpha = 0.14f) else Color(0xFFCBD5E1).copy(alpha = 0.70f)
+                                    )
+                                    Text(
+                                        text = "أو الدخول السريع",
+                                        color = TextSubtle,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    HorizontalDivider(
+                                        modifier = Modifier.weight(1f),
+                                        color = if (isDark) Color.White.copy(alpha = 0.14f) else Color(0xFFCBD5E1).copy(alpha = 0.70f)
+                                    )
+                                }
+
+                                // Symmetrical Circular Quick Sign-In Icons (Fingerprint Icon-Only Circle + Google Circle)
+                                val localContext = LocalContext.current
+                                val fragmentActivity = localContext as? androidx.fragment.app.FragmentActivity
+                                val bioInteraction = remember { MutableInteractionSource() }
+                                val isBioPressed by bioInteraction.collectIsPressedAsState()
+                                val bioScale by animateFloatAsState(
+                                    targetValue = if (isBioPressed) 0.91f else 1f,
+                                    animationSpec = spring(dampingRatio = 0.65f, stiffness = Spring.StiffnessMedium),
+                                    label = "BiometricCircleScale"
+                                )
+                                var isGoogleSigningIn by remember { mutableStateOf(false) }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterHorizontally),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // Circular Icon-Only Biometric Fingerprint Button (No account/code text exposed)
+                                    Surface(
+                                        onClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            val boundUser = com.example.util.BiometricPreferenceManager.getBoundUser(localContext)
+                                            if (boundUser == null) {
+                                                errorMessage = "يرجى تسجيل الدخول بكلمة المرور أولاً لتفعيل البصمة على هذا الجهاز."
+                                                return@Surface
+                                            }
+                                            if (fragmentActivity != null) {
+                                                errorMessage = null
+                                                BiometricAuthHelper.authenticate(
+                                                    activity = fragmentActivity,
+                                                    title = "تسجيل الدخول بالبصمة",
+                                                    subtitle = "التحقق من الهوية البيومترية",
+                                                    description = "ضع إصبعك على المستشعر للمتابعة",
+                                                    onSuccess = {
+                                                        viewModel.loginWithBiometrics(
+                                                            onSuccess = { onLoginSuccess() },
+                                                            onError = { err -> errorMessage = err }
+                                                        )
+                                                    },
+                                                    onError = { err -> errorMessage = err }
+                                                )
+                                            } else {
+                                                errorMessage = "ميزة البصمة غير متوفرة في بيئة الجهاز الحالية"
+                                            }
+                                        },
+                                        shape = CircleShape,
+                                        color = if (isDark) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.86f),
+                                        border = BorderStroke(
+                                            1.5.dp,
+                                            Brush.linearGradient(
+                                                listOf(
+                                                    Color(0xFF7C3AED).copy(alpha = 0.55f),
+                                                    Color.White.copy(alpha = 0.90f),
+                                                    Color(0xFF6D28D9).copy(alpha = 0.45f)
+                                                )
+                                            )
+                                        ),
+                                        shadowElevation = 8.dp,
+                                        interactionSource = bioInteraction,
+                                        modifier = Modifier
+                                            .size(60.dp)
+                                            .scale(bioScale)
+                                            .testTag("biometric_login_button")
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Fingerprint,
+                                                contentDescription = "تسجيل الدخول بالبصمة",
+                                                tint = if (isDark) Color(0xFFC4B5FD) else Color(0xFF6D28D9),
+                                                modifier = Modifier.size(30.dp)
                                             )
                                         }
                                     }
 
-                                    // Button to check manager approval and enter immediately
-                                    GlassButton(
-                                        text = if (isCheckingApproval) "جاري التحقق من موافقة المدير..." else "فحص موافقة المدير وتفعيل الدخول الآن",
-                                        icon = Icons.Default.CloudSync,
-                                        gradient = PmpBrandRedGradient,
-                                        enabled = !isCheckingApproval,
-                                        onClick = {
-                                            val resolvedIdentity = pendingCodeFromVm
-                                                ?: usernameInput.trim().ifBlank { emailInput.trim() }
-                                            if (resolvedIdentity.isBlank()) {
-                                                errorMessage = "يرجى كتابة اسم المستخدم أو كود الحساب لفحص الموافقة"
-                                                return@GlassButton
+                                    // Circular Google Identity Button
+                                    GoogleIdentityLogoButton(
+                                        onAuthSuccess = {
+                                            if (isGoogleSigningIn) return@GoogleIdentityLogoButton
+                                            isGoogleSigningIn = true
+                                            val fbUser = Firebase.auth.currentUser
+                                            if (fbUser != null) {
+                                                viewModel.bindFirebaseGoogleUser(
+                                                    uid = fbUser.uid,
+                                                    email = fbUser.email,
+                                                    displayName = fbUser.displayName,
+                                                    onApprovedSuccess = {
+                                                        isGoogleSigningIn = false
+                                                        onLoginSuccess()
+                                                    },
+                                                    onPendingApproval = { pendingMsg ->
+                                                        isGoogleSigningIn = false
+                                                        pendingApprovalBanner = pendingMsg
+                                                    }
+                                                )
+                                            } else {
+                                                isGoogleSigningIn = false
                                             }
-                                            isCheckingApproval = true
-                                            errorMessage = null
-                                            viewModel.checkPendingAccountApprovalAndLogin(
-                                                userCodeOrUsername = resolvedIdentity,
-                                                passwordOrPin = password,
-                                                onSuccess = {
-                                                    isCheckingApproval = false
-                                                    onLoginSuccess()
-                                                },
-                                                onStillPending = { stillPendingMsg ->
-                                                    isCheckingApproval = false
-                                                    pendingApprovalBanner = stillPendingMsg
-                                                },
-                                                onError = { err ->
-                                                    isCheckingApproval = false
-                                                    errorMessage = err
-                                                }
-                                            )
                                         },
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(44.dp)
-                                            .testTag("check_approval_login_btn")
+                                        onAuthError = { errMsg ->
+                                            isGoogleSigningIn = false
+                                            errorMessage = errMsg
+                                        }
                                     )
                                 }
-                            }
-                        }
 
-                        // Error Message Banner
-                        AnimatedVisibility(visible = errorMessage != null) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(PmpRed.copy(alpha = 0.10f))
-                                    .border(1.dp, PmpRed.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
-                                    .padding(horizontal = 12.dp, vertical = 10.dp)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.ErrorOutline,
-                                        contentDescription = null,
-                                        tint = PmpRed,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text(
-                                        text = errorMessage.orEmpty(),
-                                        color = PmpRed,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                            }
-                        }
-
-                        // Primary Sign-In Button
-                        GlassButton(
-                            text = if (isCredentialsSubmitting) "جاري التحقق من السيرفر..." else "تسجيل الدخول",
-                            icon = Icons.Default.Login,
-                            gradient = PmpBrandRedGradient,
-                            enabled = !isCredentialsSubmitting,
-                            onClick = {
-                                errorMessage = null
-                                pendingApprovalBanner = null
-                                val resolvedIdentity = usernameInput.trim().ifBlank { emailInput.trim() }
-                                isCredentialsSubmitting = true
-                                viewModel.loginWithCredentials(
-                                    emailOrUsername = resolvedIdentity,
-                                    passwordOrPin = password,
-                                    onSuccess = {
-                                        isCredentialsSubmitting = false
-                                        onLoginSuccess()
-                                    },
-                                    onError = { err ->
-                                        isCredentialsSubmitting = false
-                                        errorMessage = err
-                                    }
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(50.dp)
-                                .testTag("login_submit_button")
-                        )
-
-                        // Quick Biometric Sign-In (Fingerprint / Face Unlock) Button
-                        val localContext = LocalContext.current
-                        val fragmentActivity = localContext as? androidx.fragment.app.FragmentActivity
-                        var boundBiometricUser by remember { mutableStateOf(com.example.util.BiometricPreferenceManager.getBoundUser(localContext)) }
-
-                        LaunchedEffect(errorMessage, twoFactorPendingUser) {
-                            boundBiometricUser = com.example.util.BiometricPreferenceManager.getBoundUser(localContext)
-                        }
-
-                        GlassButton(
-                            text = if (boundBiometricUser != null) {
-                                "تسجيل الدخول بالبصمة (${boundBiometricUser?.fullName})"
                             } else {
-                                "تسجيل الدخول ببصمة الإصبع أو الوجه"
-                            },
-                            icon = Icons.Default.Fingerprint,
-                            gradient = GlassAccentGoldGradient,
-                            onClick = {
-                                boundBiometricUser = com.example.util.BiometricPreferenceManager.getBoundUser(localContext)
-                                if (boundBiometricUser == null) {
-                                    errorMessage = "لم يتم تفعيل البصمة لأي حساب على هذا الهاتف بعد. يرجى تسجيل الدخول باسم المستخدم وكلمة المرور أولاً لربط بصمتك بحسابك ومنع تداخل الحسابات."
-                                    return@GlassButton
-                                }
-                                if (fragmentActivity != null) {
-                                    errorMessage = null
-                                    val boundName = boundBiometricUser?.fullName ?: "الموظف"
-                                    val boundCode = boundBiometricUser?.userCode ?: ""
-                                    BiometricAuthHelper.authenticate(
-                                        activity = fragmentActivity,
-                                        title = "تسجيل الدخول بالبصمة",
-                                        subtitle = "التحقق من هوية: $boundName ($boundCode)",
-                                        description = "ضع إصبعك على المستشعر لتأكيد هويتك لحساب ($boundName) ومطابقة شهادة الجهاز",
-                                        onSuccess = {
-                                            viewModel.loginWithBiometrics(
-                                                onSuccess = { onLoginSuccess() },
-                                                onError = { err ->
-                                                    boundBiometricUser = com.example.util.BiometricPreferenceManager.getBoundUser(localContext)
-                                                    errorMessage = err
-                                                }
-                                            )
-                                        },
-                                        onError = { err -> errorMessage = err }
-                                    )
-                                } else {
-                                    errorMessage = "ميزة البصمة غير متوفرة في بيئة الجهاز الحالية"
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("biometric_login_button")
-                        )
+                                // --- TAB 1: REQUEST NEW EMPLOYEE ACCOUNT ---
 
-                        if (boundBiometricUser != null) {
-                            Text(
-                                text = "البصمة مرتبطة بحساب: ${boundBiometricUser?.fullName} (${boundBiometricUser?.userCode} • ${boundBiometricUser?.role}) • إلغاء الربط",
-                                color = PmpBrandNavy,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier
-                                    .clickable {
-                                        com.example.util.BiometricPreferenceManager.clearBinding(localContext)
-                                        boundBiometricUser = null
-                                        errorMessage = null
-                                    }
-                                    .padding(vertical = 4.dp)
-                            )
-                        }
-
-                        // Divider for Google Identity Logo Login
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            HorizontalDivider(
-                                modifier = Modifier.weight(1f),
-                                color = GlassBorder
-                            )
-                            Text(
-                                text = "أو الدخول عبر هوية Google",
-                                color = TextSubtle,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                            HorizontalDivider(
-                                modifier = Modifier.weight(1f),
-                                color = GlassBorder
-                            )
-                        }
-
-                        // Google Account Identity Logo Button
-                        var isGoogleSigningIn by remember { mutableStateOf(false) }
-                        Box(
-                            modifier = Modifier.fillMaxWidth(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            GoogleIdentityLogoButton(
-                                onAuthSuccess = {
-                                    if (isGoogleSigningIn) return@GoogleIdentityLogoButton
-                                    isGoogleSigningIn = true
-                                    val fbUser = Firebase.auth.currentUser
-                                    if (fbUser != null) {
-                                        viewModel.bindFirebaseGoogleUser(
-                                            uid = fbUser.uid,
-                                            email = fbUser.email,
-                                            displayName = fbUser.displayName,
-                                            onApprovedSuccess = {
-                                                isGoogleSigningIn = false
-                                                onLoginSuccess()
-                                            },
-                                            onPendingApproval = { pendingMsg ->
-                                                isGoogleSigningIn = false
-                                                pendingApprovalBanner = pendingMsg
-                                            }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(if (isDark) Color(0xFF1E1B4B).copy(alpha = 0.45f) else Color(0xFFEFF6FF).copy(alpha = 0.85f))
+                                        .border(
+                                            1.dp,
+                                            if (isDark) Color(0xFF6366F1).copy(alpha = 0.35f) else Color(0xFFBFDBFE),
+                                            RoundedCornerShape(14.dp)
                                         )
-                                    } else {
-                                        isGoogleSigningIn = false
+                                        .padding(12.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.Top,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Info,
+                                            contentDescription = null,
+                                            tint = if (isDark) Color(0xFFA5B4FC) else PmpBrandNavy,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Text(
+                                            text = "سيتم إرسال طلبك إلى الإدارة لمراجعته واعتماد الصلاحيات المناسبة لحسابك.",
+                                            color = if (isDark) Color(0xFFE0E7FF) else PmpBrandNavy,
+                                            fontSize = 11.5.sp,
+                                            lineHeight = 16.sp
+                                        )
                                     }
-                                },
-                                onAuthError = { errMsg ->
-                                    isGoogleSigningIn = false
-                                    errorMessage = errMsg
                                 }
-                            )
-                        }
-
-                    } else {
-                        // --- TAB 1: REQUEST NEW EMPLOYEE ACCOUNT ---
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFFEFF6FF))
-                                .border(1.dp, Color(0xFFBFDBFE), RoundedCornerShape(12.dp))
-                                .padding(12.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.Top,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Info,
-                                    contentDescription = null,
-                                    tint = PmpBrandNavy,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Text(
-                                    text = "عند إرسال الطلب، سيتم إرساله مباشرة لسيرفر Google Cloud المركزي ويظهر فوراً لهاتف مدير النظام لتحديد الصلاحيات والموافقة.",
-                                    color = PmpBrandNavy,
-                                    fontSize = 11.5.sp,
-                                    lineHeight = 16.sp
-                                )
-                            }
-                        }
 
                         // Full Name
                         Column {
@@ -1075,8 +1361,8 @@ fun LoginScreen(
 
                         // Submit Request Button
                         GlassButton(
-                            text = if (isCredentialsSubmitting) "جاري إرسال الطلب للسيرفر..." else "إرسال طلب الانضمام إلى مدير النظام",
-                            icon = Icons.Default.Send,
+                            text = if (isCredentialsSubmitting) "جاري إرسال الطلب..." else "إرسال طلب الانضمام",
+                            icon = Icons.AutoMirrored.Filled.Send,
                             gradient = PmpBrandRedGradient,
                             enabled = !isCredentialsSubmitting,
                             onClick = {
@@ -1092,7 +1378,7 @@ fun LoginScreen(
                                         isCredentialsSubmitting = false
                                         usernameInput = requestedUser.username
                                         password = reqPassword
-                                        pendingApprovalBanner = "تم إرسال طلبك بنجاح بكود (${requestedUser.userCode}) ووصل هاتف المدير لاعتماد الصلاحيات."
+                                        pendingApprovalBanner = "تم إرسال طلبك بنجاح وهو الآن قيد المراجعة."
                                         selectedAuthTab = 0
                                     },
                                     onError = { err ->
@@ -1106,6 +1392,8 @@ fun LoginScreen(
                                 .height(50.dp)
                                 .testTag("submit_employee_request_btn")
                         )
+                            }
+                        }
                     }
                 }
             }
@@ -1568,6 +1856,9 @@ fun LoginScreen(
 }
 
 @Composable
+private fun LocalIndicationFallback() = ripple()
+
+@Composable
 fun GoogleIdentityLogoButton(
     onAuthSuccess: () -> Unit,
     onAuthError: (String) -> Unit,
@@ -1576,80 +1867,80 @@ fun GoogleIdentityLogoButton(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
+    val haptic = LocalHapticFeedback.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.91f else 1f,
+        animationSpec = spring(dampingRatio = 0.65f, stiffness = Spring.StiffnessMedium),
+        label = "GoogleCircleScale"
+    )
+    val isDark = PmpThemeController.isDarkModeActive
     var isLoading by remember { mutableStateOf(false) }
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = modifier
-    ) {
-        Surface(
-            onClick = {
-                if (!isLoading) {
-                    isLoading = true
-                    onGoogleSignInClicked(
-                        context = context,
-                        credentialManager = credentialManager,
-                        onAuthSuccess = {
-                            isLoading = false
-                            onAuthSuccess()
-                        },
-                        onAuthError = { errorMsg ->
-                            isLoading = false
-                            onAuthError(errorMsg)
-                        },
-                        scope = coroutineScope,
-                        onAuthCancelled = {
-                            isLoading = false
-                        }
-                    )
-                }
-            },
-            enabled = !isLoading,
-            shape = CircleShape,
-            color = Color.White,
-            border = BorderStroke(
-                2.dp,
-                Brush.sweepGradient(
-                    listOf(
-                        Color(0xFF4285F4),
-                        Color(0xFF34A853),
-                        Color(0xFFFBBC05),
-                        Color(0xFFEA4335),
-                        Color(0xFF4285F4)
-                    )
+    Surface(
+        onClick = {
+            if (!isLoading) {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                isLoading = true
+                onGoogleSignInClicked(
+                    context = context,
+                    credentialManager = credentialManager,
+                    onAuthSuccess = {
+                        isLoading = false
+                        onAuthSuccess()
+                    },
+                    onAuthError = { errorMsg ->
+                        isLoading = false
+                        onAuthError(errorMsg)
+                    },
+                    scope = coroutineScope,
+                    onAuthCancelled = {
+                        isLoading = false
+                    }
                 )
-            ),
-            shadowElevation = 4.dp,
-            modifier = Modifier
-                .size(62.dp)
-                .testTag("google_sign_in_button")
+            }
+        },
+        enabled = !isLoading,
+        shape = CircleShape,
+        color = if (isDark) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.88f),
+        border = BorderStroke(
+            1.8.dp,
+            Brush.sweepGradient(
+                listOf(
+                    Color(0xFF4285F4),
+                    Color(0xFF34A853),
+                    Color(0xFFFBBC05),
+                    Color(0xFFEA4335),
+                    Color(0xFF4285F4)
+                )
+            )
+        ),
+        shadowElevation = 8.dp,
+        interactionSource = interactionSource,
+        modifier = modifier
+            .size(60.dp)
+            .scale(pressScale)
+            .testTag("google_sign_in_button")
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
         ) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(26.dp),
-                        color = Color(0xFF4285F4),
-                        strokeWidth = 2.5.dp
-                    )
-                } else {
-                    Text(
-                        text = "G",
-                        color = Color(0xFF4285F4),
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 28.sp
-                    )
-                }
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    color = Color(0xFF4285F4),
+                    strokeWidth = 2.5.dp
+                )
+            } else {
+                Text(
+                    text = "G",
+                    color = if (isDark) Color(0xFF93C5FD) else Color(0xFF4285F4),
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 26.sp
+                )
             }
         }
-        Text(
-            text = "Google",
-            color = TextMuted,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold
-        )
     }
 }

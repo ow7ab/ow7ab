@@ -207,7 +207,7 @@ fun SalesScreen(
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 16.dp, bottom = 90.dp),
+        contentPadding = PaddingValues(top = 16.dp, bottom = 112.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // Header

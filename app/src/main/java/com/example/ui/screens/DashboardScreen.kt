@@ -117,7 +117,7 @@ fun DashboardScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(top = 12.dp, bottom = 24.dp),
+            contentPadding = PaddingValues(top = 12.dp, bottom = 112.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // User Profile Card (Clean & Minimal, Server Status removed, Pull-to-Refresh active)

@@ -214,7 +214,7 @@ fun UsersScreen(
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(bottom = 24.dp)
+                    contentPadding = PaddingValues(bottom = 112.dp)
                 ) {
                     if (isInitialDataLoading && userAccounts.isEmpty()) {
                         item(key = "users_shimmer_skeleton") {
@@ -536,7 +536,7 @@ fun UsersScreen(
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
-                    contentPadding = PaddingValues(bottom = 28.dp)
+                    contentPadding = PaddingValues(bottom = 112.dp)
                 ) {
                     item {
                         GlassCard(modifier = Modifier.fillMaxWidth()) {
@@ -830,7 +830,7 @@ fun UsersScreen(
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(bottom = 28.dp)
+                    contentPadding = PaddingValues(bottom = 112.dp)
                 ) {
                     item {
                         GlassCard(

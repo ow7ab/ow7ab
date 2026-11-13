@@ -85,9 +85,8 @@ fun GlassDropTheme(
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            val barColor = if (useDark) Color(0xFF000000).toArgb() else Color(0xFFFFFFFF).toArgb()
-            window.statusBarColor = barColor
-            window.navigationBarColor = barColor
+            window.statusBarColor = android.graphics.Color.TRANSPARENT
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
             val insetsController = WindowCompat.getInsetsController(window, view)
             insetsController.isAppearanceLightStatusBars = !useDark
             insetsController.isAppearanceLightNavigationBars = !useDark

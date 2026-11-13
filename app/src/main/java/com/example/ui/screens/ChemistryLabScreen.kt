@@ -256,7 +256,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp),
-        contentPadding = PaddingValues(top = 12.dp, bottom = 80.dp),
+        contentPadding = PaddingValues(top = 12.dp, bottom = 112.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         // Formulation Selector & Action Header
@@ -1634,7 +1634,7 @@ fun PubChemTab(viewModel: PmpViewModel) {
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp),
-        contentPadding = PaddingValues(top = 12.dp, bottom = 80.dp),
+        contentPadding = PaddingValues(top = 12.dp, bottom = 112.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // Search Bar Card
@@ -1918,7 +1918,7 @@ fun GhsSafetyTab(viewModel: PmpViewModel) {
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp),
-        contentPadding = PaddingValues(top = 12.dp, bottom = 80.dp),
+        contentPadding = PaddingValues(top = 12.dp, bottom = 112.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // Safety Overview & Standard Header

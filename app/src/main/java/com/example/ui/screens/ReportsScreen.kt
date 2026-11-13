@@ -906,7 +906,7 @@ fun ReportsScreen(
                 .fillMaxSize()
                 .imePadding()
                 .padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(top = 12.dp, bottom = 36.dp),
+            contentPadding = PaddingValues(top = 12.dp, bottom = 112.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // Top Header + Tabs + Excel Export & Share Bar

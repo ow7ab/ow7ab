@@ -151,7 +151,7 @@ fun PosterPriceScreen(
         modifier = modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 12.dp, bottom = 40.dp),
+        contentPadding = PaddingValues(top = 12.dp, bottom = 112.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         // 1. Header Card - Pure info, high performance
