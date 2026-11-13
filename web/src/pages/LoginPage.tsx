@@ -10,21 +10,29 @@ import {
   CheckCircle,
   ExternalLink,
   KeyRound,
-  ShieldCheck
+  ShieldCheck,
+  Download,
+  Smartphone,
+  Home
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { useTheme } from '../context/ThemeContext';
 import { ErpDataService } from '../services/ErpDataService';
+import { APP_VERSION_CONTRACT, resolveAssetUrl } from '../config/appVersionContract';
+import { useLatestRelease } from '../hooks/useLatestRelease';
+import { AppRoute } from '../utils/routing';
 
 interface LoginPageProps {
   onLoginSuccess: () => void;
   onGoToPublicWebsite: () => void;
+  onNavigateRoute?: (route: AppRoute) => void;
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({
   onLoginSuccess,
-  onGoToPublicWebsite
+  onGoToPublicWebsite,
+  onNavigateRoute
 }) => {
   const { language, toggleLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
@@ -35,6 +43,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     requestPasswordReset,
     isAuthenticating
   } = useAuth();
+  const { latestRelease, apkAvailable, unavailableReason, isLoading: isReleaseLoading } = useLatestRelease();
 
   const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('pin');
   const [username, setUsername] = useState('');
@@ -43,6 +52,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [password, setPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
+
+  const goTo = (route: AppRoute) => {
+    if (onNavigateRoute) {
+      onNavigateRoute(route);
+    } else if (route === '/') {
+      onGoToPublicWebsite();
+    }
+  };
 
   const handlePinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,7 +76,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       );
       setTimeout(() => {
         onLoginSuccess();
-      }, 450);
+      }, 350);
     } catch (err: any) {
       setErrorMsg(
         err.message ||
@@ -79,7 +97,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       setSuccessMsg(language === 'ar' ? 'تم تسجيل الدخول بنجاح!' : 'Login successful!');
       setTimeout(() => {
         onLoginSuccess();
-      }, 450);
+      }, 350);
     } catch (err: any) {
       setErrorMsg(
         err.message ||
@@ -123,7 +141,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       );
       setTimeout(() => {
         onLoginSuccess();
-      }, 450);
+      }, 350);
     } catch (err: any) {
       setErrorMsg(
         err.message ||
@@ -134,13 +152,47 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     }
   };
 
+  const handleDownloadAndroidApp = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!apkAvailable || !latestRelease?.downloadUrl) {
+      e.preventDefault();
+      setDownloadNotice(
+        unavailableReason ||
+          (language === 'ar'
+            ? 'ملف APK غير متاح حالياً للتحميل المباشر. يمكنك فحص سجل الإصدارات عبر صفحة التحميل الرسمية.'
+            : 'APK download is temporarily unavailable. Check the official Download page or GitHub Releases.')
+      );
+      return;
+    }
+    setDownloadNotice(null);
+  };
+
+  const versionMetaLabel = isReleaseLoading
+    ? language === 'ar'
+      ? 'جاري جلب أحدث إصدار مستقر...'
+      : 'Checking latest stable release...'
+    : latestRelease
+    ? `${latestRelease.versionName} (Build ${latestRelease.versionCode})${
+        latestRelease.fileSizeMb > 0 ? ` • ${latestRelease.fileSizeMb} MB` : ''
+      }`
+    : language === 'ar'
+    ? 'التحقق من توفر الإصدار...'
+    : 'Checking release availability';
+
   return (
     <div className="min-h-screen bg-theme-base text-theme-primary flex flex-col justify-between p-4 sm:p-6 selection:bg-pmp-primary selection:text-white">
       {/* Top Header Toolbar */}
       <header className="max-w-6xl w-full mx-auto flex items-center justify-between py-2 gap-3">
-        <div className="flex items-center gap-3 min-w-0">
+        <button
+          type="button"
+          onClick={() => goTo('/')}
+          className="flex items-center gap-3 min-w-0 text-start hover:opacity-90 transition-opacity"
+        >
           <div className="w-10 h-10 rounded-xl bg-white border border-red-500/40 p-1 flex items-center justify-center shadow-lg shadow-red-600/20 shrink-0">
-            <img src="/assets/ic_pmp_emblem.png" alt="PMP Paints" className="w-full h-full object-contain" />
+            <img
+              src={resolveAssetUrl('assets/ic_pmp_emblem.png')}
+              alt="PMP Paints"
+              className="w-full h-full object-contain"
+            />
           </div>
           <div className="min-w-0">
             <span className="font-black text-sm tracking-tight block truncate">PMP PAINTS ERP</span>
@@ -148,9 +200,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               {language === 'ar' ? 'المنظومة السحابية الموحدة (أندرويد + ويب)' : 'Unified Enterprise Cloud ERP'}
             </span>
           </div>
-        </div>
+        </button>
 
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => goTo('/')}
+            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-theme-surface border border-theme text-xs font-bold text-theme-secondary hover:text-theme-primary transition-all min-h-[36px]"
+          >
+            <Home className="w-3.5 h-3.5" />
+            <span>{language === 'ar' ? 'الموقع الرئيسي' : 'Main Site'}</span>
+          </button>
+
           <button
             type="button"
             onClick={toggleLanguage}
@@ -170,8 +231,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         </div>
       </header>
 
-      {/* Main Login Card */}
-      <main className="max-w-md w-full mx-auto my-auto py-6 sm:py-8">
+      {/* Main Login Card + Official Android App Download CTA */}
+      <main className="max-w-md w-full mx-auto my-auto py-6 sm:py-8 space-y-4">
         <div className="bg-theme-surface/95 border border-theme rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl space-y-5">
           {/* Emblem & Lock Header */}
           <div className="text-center space-y-2">
@@ -297,7 +358,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               <button
                 type="submit"
                 disabled={isAuthenticating}
-                className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm shadow-lg shadow-red-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm shadow-lg shadow-red-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50 min-h-[48px]"
               >
                 <LogIn className="w-4 h-4" />
                 <span>
@@ -368,7 +429,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               <button
                 type="submit"
                 disabled={isAuthenticating}
-                className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm shadow-lg shadow-red-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm shadow-lg shadow-red-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50 min-h-[48px]"
               >
                 <LogIn className="w-4 h-4" />
                 <span>
@@ -411,16 +472,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     setTab('email');
                     setErrorMsg(null);
                   }}
-                  className="flex-1 py-2.5 rounded-xl bg-theme-base border border-theme text-xs font-bold text-theme-secondary hover:text-theme-primary"
+                  className="flex-1 py-2.5 rounded-xl bg-theme-base border border-theme text-xs font-bold text-theme-secondary hover:text-theme-primary min-h-[44px]"
                 >
                   {language === 'ar' ? 'رجوع' : 'Back'}
                 </button>
                 <button
                   type="submit"
                   disabled={isAuthenticating}
-                  className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-md disabled:opacity-50"
+                  className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-md disabled:opacity-50 min-h-[44px]"
                 >
-                  {language === 'ar' ? 'إرسال رابط الاستعادة' : 'Send Reset Link'}
+                  {language === 'ar' ? 'إرسال الرابط' : 'Send Link'}
                 </button>
               </div>
             </form>
@@ -433,7 +494,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 type="button"
                 onClick={handleGoogleSubmit}
                 disabled={isAuthenticating}
-                className="w-full py-2.5 rounded-xl bg-theme-base border border-theme hover:border-pmp-primary text-theme-primary font-bold text-xs transition-all flex items-center justify-center gap-2"
+                className="w-full py-2.5 rounded-xl bg-theme-base border border-theme hover:border-pmp-primary text-theme-primary font-bold text-xs transition-all flex items-center justify-center gap-2 min-h-[44px]"
               >
                 <img
                   src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
@@ -445,20 +506,67 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             </div>
           )}
 
-          {/* Public Website & APK Download Link */}
-          <div className="pt-4 border-t border-theme text-center">
-            <button
-              type="button"
-              onClick={onGoToPublicWebsite}
-              className="text-xs text-pmp-primary hover:underline font-bold inline-flex items-center gap-1.5"
+          {/* Mandatory Official Android App Download Button on Login Screen */}
+          <div className="pt-4 border-t border-theme space-y-3" data-testid="login-android-download-box">
+            <a
+              href={apkAvailable && latestRelease?.downloadUrl ? latestRelease.downloadUrl : APP_VERSION_CONTRACT.GITHUB_RELEASES_URL}
+              download={apkAvailable && latestRelease ? latestRelease.assetFileName : undefined}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={handleDownloadAndroidApp}
+              data-testid="login-download-android-btn"
+              className="w-full flex items-center justify-between gap-3 px-4 py-3.5 rounded-xl bg-emerald-600/15 hover:bg-emerald-600/25 border border-emerald-500/40 text-theme-primary transition-all shadow-md min-h-[54px] group"
             >
-              <ExternalLink className="w-3.5 h-3.5" />
-              <span>
-                {language === 'ar'
-                  ? 'تصفح الموقع التعريفي العام وتحميل ملف الـ APK للأندرويد'
-                  : 'Visit Public Showcase & Download Android APK'}
-              </span>
-            </button>
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 flex items-center justify-center shrink-0">
+                  <Download className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
+                </div>
+                <div className="text-start min-w-0">
+                  <span className="text-xs sm:text-sm font-extrabold text-theme-primary block truncate">
+                    {language === 'ar'
+                      ? 'تحميل تطبيق Android | Download Android App'
+                      : 'Download Android App | تحميل تطبيق Android'}
+                  </span>
+                  <span className="text-[11px] text-emerald-400 font-bold block truncate">
+                    {versionMetaLabel}
+                  </span>
+                </div>
+              </div>
+              <Smartphone className="w-5 h-5 text-emerald-400 shrink-0" />
+            </a>
+
+            {downloadNotice && (
+              <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-400 flex items-start gap-2 leading-relaxed">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{downloadNotice}</span>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-center gap-3 text-xs pt-1">
+              <button
+                type="button"
+                onClick={() => goTo('/download')}
+                className="text-pmp-cyan hover:underline font-bold inline-flex items-center gap-1"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>
+                  {language === 'ar'
+                    ? 'صفحة التحميل والتحقق SHA-256'
+                    : 'Official Download & SHA-256 Page'}
+                </span>
+              </button>
+              <span className="text-theme-muted">•</span>
+              <button
+                type="button"
+                onClick={() => goTo('/')}
+                className="text-pmp-primary hover:underline font-bold inline-flex items-center gap-1"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>
+                  {language === 'ar' ? 'تصفح الموقع الرئيسي' : 'Main ERP Website'}
+                </span>
+              </button>
+            </div>
           </div>
         </div>
       </main>

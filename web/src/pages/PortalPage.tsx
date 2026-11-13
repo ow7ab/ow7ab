@@ -20,7 +20,9 @@ import {
   Lock,
   Search,
   Menu,
-  X
+  X,
+  Download,
+  AlertTriangle
 } from 'lucide-react';
 import { GlassCard } from '../components/ui/GlassCard';
 import { GlassButton } from '../components/ui/GlassButton';
@@ -44,6 +46,8 @@ import {
   canConfigureEmployeePermissions,
   isSystemManager
 } from '../services/SecurityService';
+import { resolveAssetUrl } from '../config/appVersionContract';
+import { AppRoute } from '../utils/routing';
 
 export type PmpScreenRoute =
   | 'DASHBOARD'
@@ -59,19 +63,44 @@ export type PmpScreenRoute =
   | 'SETTINGS';
 
 interface PortalPageProps {
+  portalRoute?: '/dashboard' | '/admin' | '/employee';
+  onNavigateRoute?: (route: AppRoute) => void;
   onBackToWebsite: () => void;
   onLogoutToLogin?: () => void;
 }
 
-export const PortalPage: React.FC<PortalPageProps> = ({ onBackToWebsite, onLogoutToLogin }) => {
+export const PortalPage: React.FC<PortalPageProps> = ({
+  portalRoute = '/dashboard',
+  onNavigateRoute,
+  onBackToWebsite,
+  onLogoutToLogin
+}) => {
   const { language, toggleLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
   const { userProfile, isSuperAdmin, canAccessModule, signOut } = useAuth();
 
-  const [activeTab, setActiveTab] = useState<PmpScreenRoute>('DASHBOARD');
+  const hasSystemManagerAccess = isSystemManager(userProfile);
+  const canAccessAdminArea =
+    Boolean(userProfile) &&
+    (isSuperAdmin ||
+      hasSystemManagerAccess ||
+      canConfigureEmployeePermissions(userProfile) ||
+      canAccessModule('المستخدمين'));
+
+  const [activeTab, setActiveTab] = useState<PmpScreenRoute>(() =>
+    portalRoute === '/admin' && canAccessAdminArea ? 'USERS' : 'DASHBOARD'
+  );
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  useEffect(() => {
+    if (portalRoute === '/admin') {
+      setActiveTab(canAccessAdminArea ? 'USERS' : 'DASHBOARD');
+    } else if (portalRoute === '/employee' || portalRoute === '/dashboard') {
+      setActiveTab((prev) => (prev === 'USERS' ? 'DASHBOARD' : prev));
+    }
+  }, [portalRoute, canAccessAdminArea]);
 
   const handleSignOut = async () => {
     await signOut();
@@ -81,8 +110,6 @@ export const PortalPage: React.FC<PortalPageProps> = ({ onBackToWebsite, onLogou
       onBackToWebsite();
     }
   };
-
-  const hasSystemManagerAccess = isSystemManager(userProfile);
 
   /**
    * EXACT 11 Android Navigation Tabs matching `enum class PmpScreen` and `resolveAllowedScreens()` in `MainActivity.kt`
@@ -262,7 +289,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({ onBackToWebsite, onLogou
 
             <div className="flex items-center gap-2 min-w-0">
               <div className="w-8 h-8 rounded-lg bg-white border border-red-500/40 p-0.5 flex items-center justify-center shrink-0">
-                <img src="/assets/ic_pmp_emblem.png" alt="PMP Logo" className="w-full h-full object-contain" />
+                <img src={resolveAssetUrl('assets/ic_pmp_emblem.png')} alt="PMP Logo" className="w-full h-full object-contain" />
               </div>
               <div className="leading-tight min-w-0">
                 <span className="text-xs sm:text-sm font-black text-theme-primary block truncate">
@@ -296,6 +323,18 @@ export const PortalPage: React.FC<PortalPageProps> = ({ onBackToWebsite, onLogou
               <Search className="w-4 h-4 text-pmp-primary" />
               <span className="hidden md:inline font-bold">{language === 'ar' ? 'بحث' : 'Search'}</span>
             </button>
+
+            {onNavigateRoute && (
+              <button
+                type="button"
+                onClick={() => onNavigateRoute('/download')}
+                className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-600/15 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-600/25 text-xs min-h-[38px]"
+                title={language === 'ar' ? 'تحميل تطبيق Android' : 'Download Android APK'}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden lg:inline font-bold">{language === 'ar' ? 'تطبيق Android' : 'Android App'}</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -403,7 +442,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({ onBackToWebsite, onLogou
               <div className="space-y-4">
                 <div className="flex items-center justify-between pb-3 border-b border-theme">
                   <div className="flex items-center gap-2 min-w-0">
-                    <img src="/assets/ic_pmp_emblem.png" alt="PMP" className="w-6 h-6 object-contain shrink-0" />
+                    <img src={resolveAssetUrl('assets/ic_pmp_emblem.png')} alt="PMP" className="w-6 h-6 object-contain shrink-0" />
                     <div className="min-w-0">
                       <span className="font-black text-xs text-theme-primary block truncate">
                         {userProfile.fullName}
@@ -455,6 +494,19 @@ export const PortalPage: React.FC<PortalPageProps> = ({ onBackToWebsite, onLogou
                 <div className="text-[10px] text-theme-muted font-mono text-center pb-1">
                   {ErpDataService.activeCluster}
                 </div>
+                {onNavigateRoute && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onNavigateRoute('/download');
+                      setMobileDrawerOpen(false);
+                    }}
+                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-600/15 border border-emerald-500/30 text-xs font-bold text-emerald-400 flex items-center justify-center gap-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>{language === 'ar' ? 'تحميل تطبيق Android' : 'Download Android APK'}</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -482,6 +534,17 @@ export const PortalPage: React.FC<PortalPageProps> = ({ onBackToWebsite, onLogou
 
         {/* Main Content Workspace — EXACT 11 MODULE VIEWS */}
         <main className="flex-1 overflow-y-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6">
+          {portalRoute === '/admin' && !canAccessAdminArea && (
+            <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400 flex items-center gap-2 font-bold">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                {language === 'ar'
+                  ? 'مسار الإدارة (/admin) مخصص للمسؤولين والمدراء فقط. تم تقييد العرض بالوحدات المصرح بها لحسابك.'
+                  : 'Admin route (/admin) is restricted to authorized administrators. Showing only permitted modules for your account.'}
+              </span>
+            </div>
+          )}
+
           {activeTab === 'DASHBOARD' && (
             <AdminDashboardOverview onNavigateToModule={handleNavigateToModule} />
           )}
@@ -491,7 +554,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({ onBackToWebsite, onLogou
           {activeTab === 'INVENTORY' && <WarehousesModuleView />}
           {activeTab === 'FACTORY' && <FactoryModuleView />}
           {activeTab === 'CHEMISTRY_LAB' && <ChemistryLabModuleView />}
-          {activeTab === 'USERS' && <EmployeeManagementCenter />}
+          {activeTab === 'USERS' && canAccessAdminArea && <EmployeeManagementCenter />}
           {activeTab === 'POSTER' && <PricesModuleView />}
           {activeTab === 'REPORTS' && <ReportsCenterView />}
           {activeTab === 'SETTINGS' && <SettingsModuleView />}

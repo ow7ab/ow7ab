@@ -1,9 +1,14 @@
 import React from 'react';
 import { useLanguage } from '../../context/LanguageContext';
-import { APP_VERSION_CONTRACT } from '../../config/appVersionContract';
+import { APP_VERSION_CONTRACT, resolveAssetUrl } from '../../config/appVersionContract';
+import { AppRoute } from '../../utils/routing';
 import { ShieldCheck, GitBranch, MapPin, ExternalLink, Activity, Smartphone } from 'lucide-react';
 
-export const Footer: React.FC = () => {
+interface FooterProps {
+  onNavigateRoute?: (route: AppRoute) => void;
+}
+
+export const Footer: React.FC<FooterProps> = ({ onNavigateRoute }) => {
   const { t, language } = useLanguage();
 
   return (
@@ -29,7 +34,7 @@ export const Footer: React.FC = () => {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
             <img
-              src="/assets/ic_pmp_emblem.png"
+              src={resolveAssetUrl('assets/ic_pmp_emblem.png')}
               alt="PMP Logo"
               style={{ width: '32px', height: '32px', objectFit: 'contain' }}
             />
@@ -125,6 +130,33 @@ export const Footer: React.FC = () => {
                 <ExternalLink size={12} />
               </a>
             </li>
+            {onNavigateRoute && (
+              <li style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', paddingTop: '4px' }}>
+                <button
+                  type="button"
+                  onClick={() => onNavigateRoute('/')}
+                  style={{ background: 'none', border: 'none', color: 'var(--text-primary)', fontWeight: 700, fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }}
+                >
+                  {language === 'ar' ? 'الرئيسية' : 'Home'}
+                </button>
+                <span style={{ color: 'var(--text-muted)' }}>•</span>
+                <button
+                  type="button"
+                  onClick={() => onNavigateRoute('/download')}
+                  style={{ background: 'none', border: 'none', color: 'var(--pmp-green)', fontWeight: 700, fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }}
+                >
+                  {language === 'ar' ? 'تحميل APK' : 'Download APK'}
+                </button>
+                <span style={{ color: 'var(--text-muted)' }}>•</span>
+                <button
+                  type="button"
+                  onClick={() => onNavigateRoute('/login')}
+                  style={{ background: 'none', border: 'none', color: 'var(--pmp-cyan-light)', fontWeight: 700, fontSize: '12px', cursor: 'pointer', textDecoration: 'underline' }}
+                >
+                  {language === 'ar' ? 'دخول الموظفين' : 'Staff Login'}
+                </button>
+              </li>
+            )}
           </ul>
         </div>
       </div>

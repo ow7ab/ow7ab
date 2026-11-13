@@ -1,6 +1,7 @@
 import React from 'react';
 import { useLanguage } from '../../context/LanguageContext';
-import { APP_VERSION_CONTRACT } from '../../config/appVersionContract';
+import { APP_VERSION_CONTRACT, resolveAssetUrl } from '../../config/appVersionContract';
+import { useLatestRelease } from '../../hooks/useLatestRelease';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
 import { GlassButton } from '../ui/GlassButton';
@@ -28,6 +29,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
   onScrollToOverview
 }) => {
   const { t, language, direction } = useLanguage();
+  const { latestRelease } = useLatestRelease();
   const ChevronIcon = direction === 'rtl' ? ChevronLeft : ChevronRight;
 
   return (
@@ -128,7 +130,11 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <CheckCircle2 size={16} color="var(--pmp-green)" />
-              <span>{APP_VERSION_CONTRACT.RELEASE_TITLE}</span>
+              <span>
+                {latestRelease
+                  ? `${latestRelease.versionName} (Build ${latestRelease.versionCode})`
+                  : APP_VERSION_CONTRACT.RELEASE_TITLE}
+              </span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <ShieldCheck size={16} color="var(--pmp-cyan)" />
@@ -170,7 +176,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <img
-                  src="/assets/ic_pmp_emblem.png"
+                  src={resolveAssetUrl('assets/ic_pmp_emblem.png')}
                   alt="PMP Logo"
                   style={{ width: '38px', height: '38px', objectFit: 'contain' }}
                 />

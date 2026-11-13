@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PMP PAINTS ERP — Redirecting...</title>
+    <script>
+      (function () {
+        var l = window.location;
+        var p = l.pathname || '/';
+        var base = p === '/ow7ab' || p.indexOf('/ow7ab/') === 0 ? '/ow7ab' : '';
+        var route = base ? p.slice(base.length) || '/' : p;
+        var target =
+          l.protocol +
+          '//' +
+          l.hostname +
+          (l.port ? ':' + l.port : '') +
+          base +
+          '/?p=' +
+          encodeURIComponent(route + (l.search || '')) +
+          (l.hash || '');
+        l.replace(target);
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>

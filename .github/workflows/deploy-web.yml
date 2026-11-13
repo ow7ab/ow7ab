@@ -1,4 +1,4 @@
-name: PMP Paints - Cloudflare Pages & Web Production Deployment
+name: PMP Paints - Unified Web Platform Deployment (GitHub Pages & Cloudflare Pages)
 
 on:
   push:
@@ -13,6 +13,8 @@ on:
 permissions:
   contents: read
   deployments: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: pmp-web-deploy-${{ github.ref }}
@@ -20,8 +22,11 @@ concurrency:
 
 jobs:
   build-and-deploy-web:
-    name: Build & Verify Web Platform
+    name: Build, Test & Deploy Unified ERP Website
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pages_deploy.outputs.page_url }}
 
     steps:
       - name: Checkout Source Code
@@ -34,20 +39,66 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'web/package.json'
 
+      - name: Sync Official Release Metadata & Assets into Web Public
+        run: |
+          mkdir -p web/public/assets
+          if [ -d public/assets ]; then
+            cp -rn public/assets/* web/public/assets/ || true
+          fi
+          if [ -f public/releases-history.json ]; then
+            cp public/releases-history.json web/public/releases-history.json
+          fi
+
       - name: Install Web Dependencies
         run: |
           npm ci --prefix web
 
-      - name: Run Web Automated Tests
+      - name: Run All Web Automated Tests
         run: |
-          node --test web/tests/rbac.test.mjs
-          node --test web/tests/erp_operations.test.mjs
+          npm test --prefix web
 
-      - name: Build Web Production Bundle
+      - name: Build Root Bundle (Cloudflare Pages / Firebase Hosting / Cloud Run)
+        env:
+          VITE_BASE_PATH: /
         run: |
           npm run build --prefix web
-
-      - name: Verify Web Dist Integrity
-        run: |
           test -f web/dist/index.html
-          echo "Web distribution bundle verified successfully."
+          test -f web/dist/_redirects
+
+      - name: Deploy to Cloudflare Pages (if secrets configured)
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy web/dist --project-name=pmp-paints-erp --branch=main
+
+      - name: Build GitHub Pages Unified Bundle (/ow7ab/)
+        env:
+          VITE_BASE_PATH: /ow7ab/
+        run: |
+          npm run build --prefix web
+          test -f web/dist/index.html
+          test -f web/dist/404.html
+          if ls public/*.apk >/dev/null 2>&1; then
+            cp public/*.apk web/dist/
+          fi
+          if [ -f public/version.json ]; then
+            cp public/version.json web/dist/version.json
+          fi
+          if [ -f public/releases-history.json ]; then
+            cp public/releases-history.json web/dist/releases-history.json
+          fi
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Unified Web Artifact for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+      - name: Deploy Unified ERP & APK Portal to GitHub Pages
+        id: pages_deploy
+        continue-on-error: true
+        uses: actions/deploy-pages@v4

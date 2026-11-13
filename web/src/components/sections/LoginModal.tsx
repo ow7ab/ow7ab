@@ -1,20 +1,39 @@
 import React, { useState } from 'react';
-import { Lock, Mail, KeyRound, AlertCircle, CheckCircle, ShieldCheck, LogIn, ArrowRight } from 'lucide-react';
+import {
+  Lock,
+  Mail,
+  KeyRound,
+  AlertCircle,
+  CheckCircle,
+  ShieldCheck,
+  LogIn,
+  Download,
+  Smartphone
+} from 'lucide-react';
 import { Modal } from '../ui/Modal';
 import { GlassButton } from '../ui/GlassButton';
-import { GlassBadge } from '../ui/GlassBadge';
 import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
+import { APP_VERSION_CONTRACT } from '../../config/appVersionContract';
+import { useLatestRelease } from '../../hooks/useLatestRelease';
+import { AppRoute } from '../../utils/routing';
 
 interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
   onLoginSuccess?: () => void;
+  onNavigateRoute?: (route: AppRoute) => void;
 }
 
-export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onLoginSuccess }) => {
+export const LoginModal: React.FC<LoginModalProps> = ({
+  isOpen,
+  onClose,
+  onLoginSuccess,
+  onNavigateRoute
+}) => {
   const { language } = useLanguage();
   const { loginWithEmail, loginWithUsernamePin, loginWithGoogle, requestPasswordReset, isAuthenticating } = useAuth();
+  const { latestRelease, apkAvailable } = useLatestRelease();
 
   const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('pin');
   const [email, setEmail] = useState('');
@@ -341,6 +360,45 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onLogin
             </GlassButton>
           </>
         )}
+
+        {/* Official Android App Download CTA */}
+        <div className="pt-3 border-t border-theme space-y-2.5">
+          <a
+            href={apkAvailable && latestRelease?.downloadUrl ? latestRelease.downloadUrl : APP_VERSION_CONTRACT.GITHUB_RELEASES_URL}
+            download={apkAvailable && latestRelease ? latestRelease.assetFileName : undefined}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl bg-emerald-600/15 hover:bg-emerald-600/25 border border-emerald-500/40 transition-all"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Download className="w-4 h-4 text-emerald-400 shrink-0" />
+              <div className="text-start min-w-0">
+                <span className="text-xs font-extrabold text-theme-primary block truncate">
+                  {language === 'ar' ? 'تحميل تطبيق Android | Download Android App' : 'Download Android App | تحميل تطبيق Android'}
+                </span>
+                <span className="text-[10px] text-emerald-400 font-semibold block truncate">
+                  {latestRelease
+                    ? `${latestRelease.versionName} • ${latestRelease.fileSizeMb} MB`
+                    : APP_VERSION_CONTRACT.GITHUB_RELEASES_URL}
+                </span>
+              </div>
+            </div>
+            <Smartphone className="w-4 h-4 text-emerald-400 shrink-0" />
+          </a>
+
+          {onNavigateRoute && (
+            <button
+              type="button"
+              onClick={() => {
+                handleClose();
+                onNavigateRoute('/download');
+              }}
+              className="w-full text-[11px] font-bold text-pmp-cyan hover:underline text-center py-1"
+            >
+              {language === 'ar' ? 'الانتقال لصفحة التحميل والتحقق من SHA-256' : 'Open Official Download & Verification Page'}
+            </button>
+          )}
+        </div>
 
         <p className="text-[11px] text-center text-theme-muted leading-relaxed">
           {language === 'ar'

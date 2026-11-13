@@ -1,10 +1,9 @@
 {
   "versionCode": 17,
   "versionName": "v4.2",
-  "downloadUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v4.2-b17.apk",
-  "apkUrl": "https://ow7ab.github.io/ow7ab/pmp-paints-v4.2-b17.apk",
+  "downloadUrl": "https://github.com/ow7ab/ow7ab/releases/latest/download/pmp-paints-latest.apk",
+  "apkUrl": "https://github.com/ow7ab/ow7ab/releases/download/v4.2/pmp-paints-v4.2-b17.apk",
   "githubReleaseUrl": "https://github.com/ow7ab/ow7ab/releases/download/v4.2/pmp-paints-v4.2-b17.apk",
-  "rawPublicApkUrl": "https://raw.githubusercontent.com/ow7ab/ow7ab/main/public/pmp-paints-latest.apk",
   "releaseNotes": "• إصدار v4.2 (بناء 17): تفعيل ضغط وتعمية الكود عبر R8/ProGuard لتقليل حجم التطبيق وتعزيز الأمان، مع إضافة سجل تاريخ الإصدارات من Firestore على صفحة التحديثات الرسمية.\n• تحديث رسمي عبر مكتبة Google Play الشخصية (Google Play Personal Library) مع الحفاظ الكامل على البيانات.",
   "apkSha256": "115155cd57c7c17245fa8b3ce3e90b94a509ca2c2abcfbfcf82ba0193adf7620",
   "sha256": "115155cd57c7c17245fa8b3ce3e90b94a509ca2c2abcfbfcf82ba0193adf7620",

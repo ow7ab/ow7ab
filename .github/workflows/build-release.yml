@@ -893,14 +893,51 @@ jobs:
               print(f"::warning::Direct unauthenticated probe returned ({exc}); GitHub Pages deployment will also serve public assets.")
           PYEOF
 
-      - name: Upload Public Artifacts for GitHub Pages Hosting
+      - name: Set up Node.js for Unified Web Build
+        if: github.event_name != 'pull_request'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'web/package.json'
+
+      - name: Build Unified ERP & Official APK Download Website for GitHub Pages
+        if: github.event_name != 'pull_request'
+        env:
+          VITE_BASE_PATH: /ow7ab/
+        run: |
+          mkdir -p web/public/assets
+          if [ -d public/assets ]; then
+            cp -rn public/assets/* web/public/assets/ || true
+          fi
+          if [ -f public/releases-history.json ]; then
+            cp public/releases-history.json web/public/releases-history.json
+          fi
+          npm ci --prefix web
+          npm test --prefix web
+          npm run build --prefix web
+          if ls public/*.apk >/dev/null 2>&1; then
+            cp public/*.apk web/dist/
+          fi
+          if ls release_out/*.apk >/dev/null 2>&1; then
+            cp release_out/*.apk web/dist/
+          fi
+          if [ -f public/version.json ]; then
+            cp public/version.json web/dist/version.json
+          fi
+          if [ -f public/releases-history.json ]; then
+            cp public/releases-history.json web/dist/releases-history.json
+          fi
+
+      - name: Upload Unified Web Artifacts for GitHub Pages Hosting
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./public
+          path: web/dist
 
       - name: Deploy Official Website & Release Portal to GitHub Pages
         if: github.event_name != 'pull_request'
         id: deployment
         continue-on-error: true
         uses: actions/deploy-pages@v4
+

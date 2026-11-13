@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DIST_DIR = path.join(__dirname, 'dist');
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 const HOST = '0.0.0.0';
 
 const MIME_TYPES = {
@@ -23,14 +23,15 @@ const MIME_TYPES = {
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.ttf': 'font/ttf',
+  '.apk': 'application/vnd.android.package-archive',
   '.map': 'application/json'
 };
 
 const server = http.createServer((req, res) => {
-  // CORS & Security headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -38,8 +39,12 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const urlPath = req.url.split('?')[0];
-  let safePath = path.normalize(urlPath).replace(/^(\.\.[\/\\])+/, '');
+  let urlPath = (req.url || '/').split('?')[0];
+  if (urlPath === '/ow7ab' || urlPath.startsWith('/ow7ab/')) {
+    urlPath = urlPath.slice('/ow7ab'.length) || '/';
+  }
+
+  let safePath = path.normalize(urlPath).replace(/^(\.\.[/\\])+/, '');
   if (safePath === '/' || safePath === '') {
     safePath = '/index.html';
   }
@@ -48,14 +53,12 @@ const server = http.createServer((req, res) => {
 
   fs.stat(filePath, (err, stats) => {
     if (err || !stats.isFile()) {
-      // If asset file not found, but it has an extension (like .js, .css, .png), return 404
       const ext = path.extname(safePath).toLowerCase();
       if (ext && ext !== '.html') {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end(`File not found: ${safePath}`);
         return;
       }
-      // SPA Fallback: serve index.html for all other routes
       filePath = path.join(DIST_DIR, 'index.html');
     }
 
@@ -64,14 +67,15 @@ const server = http.createServer((req, res) => {
 
     fs.readFile(filePath, (readErr, content) => {
       if (readErr) {
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end(`Server Error: ${readErr.message}`);
         return;
       }
 
+      const noCache = ext === '.html' || ext === '.json';
       res.writeHead(200, {
         'Content-Type': contentType,
-        'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable'
+        'Cache-Control': noCache ? 'no-cache, no-store, must-revalidate' : 'public, max-age=31536000, immutable'
       });
       res.end(content);
     });
@@ -79,6 +83,6 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`PMP Paints ERP Web Server listening on http://${HOST}:${PORT}`);
+  console.log(`PMP Paints Unified ERP Web Server listening on http://${HOST}:${PORT}`);
   console.log(`Serving distribution directory: ${DIST_DIR}`);
 });

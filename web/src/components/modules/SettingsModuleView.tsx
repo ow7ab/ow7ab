@@ -25,6 +25,7 @@ import {
   ClusterHealthReport
 } from '../../services/ErpDataService';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
+import { fetchReleaseFeed } from '../../services/ReleaseService';
 import { AuditLog } from '../../types/erp';
 
 export const SettingsModuleView: React.FC = () => {
@@ -45,10 +46,15 @@ export const SettingsModuleView: React.FC = () => {
     const unsubAudit = ErpDataService.subscribeToCollection<AuditLog>('audit_logs', (logs) => {
       setAuditLogs([...logs].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)));
     });
-    fetch('/version.json')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data) setApkVersionInfo(data);
+    fetchReleaseFeed()
+      .then((res) => {
+        if (res.latest) {
+          setApkVersionInfo({
+            versionName: res.latest.versionName,
+            versionCode: res.latest.versionCode,
+            sha256: res.latest.apkSha256
+          });
+        }
       })
       .catch(() => {});
     return () => unsubAudit();

@@ -9,12 +9,14 @@ import { WhatsNewSection } from '../components/sections/WhatsNewSection';
 import { InstallationGuideSection } from '../components/sections/InstallationGuideSection';
 import { SupportSection } from '../components/sections/SupportSection';
 import { LoginModal } from '../components/sections/LoginModal';
+import { AppRoute } from '../utils/routing';
 
 interface HomePageProps {
   onEnterPortal: () => void;
+  onNavigateRoute: (route: AppRoute) => void;
 }
 
-export const HomePage: React.FC<HomePageProps> = ({ onEnterPortal }) => {
+export const HomePage: React.FC<HomePageProps> = ({ onEnterPortal, onNavigateRoute }) => {
   const [isLoginOpen, setIsLoginOpen] = useState(false);
 
   const scrollToSection = (id: string) => {
@@ -27,7 +29,13 @@ export const HomePage: React.FC<HomePageProps> = ({ onEnterPortal }) => {
   return (
     <div className="min-h-screen bg-theme-base text-theme-primary selection:bg-pmp-primary selection:text-white transition-colors duration-200">
       {/* Navigation */}
-      <Navbar onOpenLogin={() => setIsLoginOpen(true)} onOpenPortal={onEnterPortal} />
+      <Navbar
+        currentRoute="/"
+        onNavigateRoute={onNavigateRoute}
+        onOpenLogin={() => setIsLoginOpen(true)}
+        onOpenPortal={onEnterPortal}
+        onNavigateSection={scrollToSection}
+      />
 
       {/* Main Content Sections */}
       <main>
@@ -58,13 +66,14 @@ export const HomePage: React.FC<HomePageProps> = ({ onEnterPortal }) => {
       </main>
 
       {/* Footer */}
-      <Footer />
+      <Footer onNavigateRoute={onNavigateRoute} />
 
       {/* Auth Modal */}
       <LoginModal
         isOpen={isLoginOpen}
         onClose={() => setIsLoginOpen(false)}
         onLoginSuccess={onEnterPortal}
+        onNavigateRoute={onNavigateRoute}
       />
     </div>
   );

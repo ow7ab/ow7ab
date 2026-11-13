@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { useLanguage } from '../../context/LanguageContext';
 import { useTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
-import { APP_VERSION_CONTRACT } from '../../config/appVersionContract';
+import { APP_VERSION_CONTRACT, resolveAssetUrl } from '../../config/appVersionContract';
+import { AppRoute } from '../../utils/routing';
 import {
   Sun,
   Moon,
@@ -11,17 +12,24 @@ import {
   LogIn,
   Menu,
   X,
-  ShieldCheck,
   UserCheck
 } from 'lucide-react';
 
 interface NavbarProps {
+  currentRoute?: AppRoute;
+  onNavigateRoute?: (route: AppRoute) => void;
   onOpenLogin: () => void;
   onOpenPortal?: () => void;
   onNavigateSection?: (sectionId: string) => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onOpenPortal, onNavigateSection }) => {
+export const Navbar: React.FC<NavbarProps> = ({
+  currentRoute = '/',
+  onNavigateRoute,
+  onOpenLogin,
+  onOpenPortal,
+  onNavigateSection
+}) => {
   const { t, language, toggleLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
   const { linkedAccount, signOut } = useAuth();
@@ -62,7 +70,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onOpenPortal, onNav
       >
         {/* Brand identity */}
         <div
-          onClick={() => handleNavClick('home')}
+          onClick={() => (onNavigateRoute ? onNavigateRoute('/') : handleNavClick('home'))}
           style={{ display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer' }}
         >
           <div
@@ -81,11 +89,10 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onOpenPortal, onNav
             }}
           >
             <img
-              src="/assets/ic_pmp_emblem.png"
+              src={resolveAssetUrl('assets/ic_pmp_emblem.png')}
               alt="PMP Emblem"
               style={{ width: '34px', height: '34px', objectFit: 'contain' }}
               onError={(e) => {
-                // Fallback to text initials if image path varies
                 (e.target as HTMLElement).style.display = 'none';
               }}
             />
@@ -129,10 +136,23 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onOpenPortal, onNav
             {t('nav_modules')}
           </button>
           <button
-            onClick={() => handleNavClick('download')}
-            style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', fontWeight: 700, fontSize: '13.5px', cursor: 'pointer' }}
+            onClick={() => (onNavigateRoute ? onNavigateRoute('/download') : handleNavClick('download'))}
+            style={{
+              background: currentRoute === '/download' ? 'var(--pmp-red-soft, rgba(220,38,38,0.12))' : 'none',
+              border: currentRoute === '/download' ? '1px solid rgba(220,38,38,0.35)' : 'none',
+              borderRadius: '8px',
+              padding: currentRoute === '/download' ? '4px 10px' : '0',
+              color: currentRoute === '/download' ? 'var(--pmp-red-light)' : 'var(--text-secondary)',
+              fontWeight: 700,
+              fontSize: '13.5px',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '5px'
+            }}
           >
-            {t('nav_download')}
+            <Download size={14} />
+            <span>{t('nav_download')}</span>
           </button>
           <button
             onClick={() => handleNavClick('whats-new')}
@@ -303,8 +323,16 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onOpenPortal, onNav
           <button onClick={() => handleNavClick('modules')} style={{ textAlign: 'start', padding: '8px 0', background: 'none', border: 'none', color: 'var(--text-primary)', fontWeight: 700 }}>
             {t('nav_modules')}
           </button>
-          <button onClick={() => handleNavClick('download')} style={{ textAlign: 'start', padding: '8px 0', background: 'none', border: 'none', color: 'var(--text-primary)', fontWeight: 700 }}>
-            {t('nav_download')}
+          <button
+            onClick={() => {
+              setMobileMenuOpen(false);
+              if (onNavigateRoute) onNavigateRoute('/download');
+              else handleNavClick('download');
+            }}
+            style={{ textAlign: 'start', padding: '8px 0', background: 'none', border: 'none', color: 'var(--pmp-green)', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '6px' }}
+          >
+            <Download size={15} />
+            <span>{t('nav_download')}</span>
           </button>
           <button onClick={() => handleNavClick('whats-new')} style={{ textAlign: 'start', padding: '8px 0', background: 'none', border: 'none', color: 'var(--text-primary)', fontWeight: 700 }}>
             {t('nav_whats_new')}
@@ -315,6 +343,21 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLogin, onOpenPortal, onNav
           <button onClick={() => handleNavClick('support')} style={{ textAlign: 'start', padding: '8px 0', background: 'none', border: 'none', color: 'var(--text-primary)', fontWeight: 700 }}>
             {t('nav_support')}
           </button>
+          {onNavigateRoute && (
+            <button
+              onClick={() => {
+                setMobileMenuOpen(false);
+                onNavigateRoute(linkedAccount ? '/dashboard' : '/login');
+              }}
+              style={{ textAlign: 'start', padding: '8px 0', background: 'none', border: 'none', color: 'var(--pmp-cyan)', fontWeight: 800 }}
+            >
+              {linkedAccount
+                ? language === 'ar'
+                  ? 'لوحة التحكم ERP'
+                  : 'Open ERP Dashboard'
+                : t('nav_login')}
+            </button>
+          )}
         </div>
       )}
 
