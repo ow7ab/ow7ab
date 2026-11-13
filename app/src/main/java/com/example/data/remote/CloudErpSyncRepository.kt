@@ -55,7 +55,6 @@ class CloudErpSyncRepository(
     companion object {
         private const val TAG = "CloudErpSyncRepo"
         const val DEFAULT_CLUSTER = "PMP-ERP-MAIN-CLUSTER"
-        const val LEGACY_V16_CLUSTER = "PMP-ERP-V16-CLUSTER"
 
         fun create(context: Context): CloudErpSyncRepository {
             runCatching {
@@ -207,23 +206,10 @@ class CloudErpSyncRepository(
                 "serverUpdatedAt" to FieldValue.serverTimestamp()
             )
             cRef.collection("user_accounts").document(docId).set(data, SetOptions.merge()).await()
-            if (clusterCode != LEGACY_V16_CLUSTER) {
-                runCatching {
-                    clusterRef(LEGACY_V16_CLUSTER).collection("user_accounts").document(docId).set(data, SetOptions.merge()).await()
-                }
-            }
             if (user.syncStatus == "PENDING_MANAGER_APPROVAL") {
                 cRef.collection("pending_requests").document(docId).set(data, SetOptions.merge()).await()
-                if (clusterCode != LEGACY_V16_CLUSTER) {
-                    runCatching {
-                        clusterRef(LEGACY_V16_CLUSTER).collection("pending_requests").document(docId).set(data, SetOptions.merge()).await()
-                    }
-                }
             } else {
                 runCatching { cRef.collection("pending_requests").document(docId).delete().await() }
-                if (clusterCode != LEGACY_V16_CLUSTER) {
-                    runCatching { clusterRef(LEGACY_V16_CLUSTER).collection("pending_requests").document(docId).delete().await() }
-                }
             }
             docId
         }
@@ -240,10 +226,7 @@ class CloudErpSyncRepository(
             DeletedAccountsRegistry.registerDeleted(userCode, username, email)
             val clustersToPurge = linkedSetOf(
                 safeId(clusterCode, DEFAULT_CLUSTER),
-                DEFAULT_CLUSTER,
-                LEGACY_V16_CLUSTER,
-                "PMP-ERP-V15-CLUSTER",
-                "PMP-ERP-V1-CLUSTER"
+                DEFAULT_CLUSTER
             )
 
             val candidateDocIds = linkedSetOf<String>()
@@ -617,7 +600,7 @@ class CloudErpSyncRepository(
             val cleanIdentity = identity.trim().lowercase()
             val cleanSecret = passwordOrPin.trim()
 
-            val clustersToQuery = listOf(DEFAULT_CLUSTER, LEGACY_V16_CLUSTER, "PMP-ERP-V15-CLUSTER")
+            val clustersToQuery = listOf(DEFAULT_CLUSTER)
             var matchedDoc: com.google.firebase.firestore.DocumentSnapshot? = null
 
             for (cluster in clustersToQuery) {

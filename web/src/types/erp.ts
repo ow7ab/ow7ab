@@ -121,18 +121,21 @@ export interface Cashbox {
 
 export interface TreasuryMovement {
   id: number;
-  txDate: string;
+  txDate?: string;
   cashbox: string;
   currency: CurrencyCode;
-  direction: 'وارد' | 'منصرف';
+  direction?: 'وارد' | 'منصرف';
   amount: number;
-  description: string;
-  reference: string;
-  createdBy: string;
-  createdAt: number;
+  description?: string;
+  reference?: string;
+  createdBy?: string;
+  createdAt?: number;
   // Aliases for component convenience
-  type?: 'INCOME' | 'EXPENSE';
+  type?: 'INCOME' | 'EXPENSE' | 'IN' | 'OUT' | string;
   category?: string;
+  note?: string;
+  referenceNo?: string;
+  actor?: string;
   cashboxName?: string;
   employeeName?: string;
   date?: string;
@@ -186,12 +189,12 @@ export interface Customer {
 }
 
 export interface InvoiceItem {
-  id: number;
-  invoiceId: number;
+  id?: number;
+  invoiceId?: number;
   description: string;
   quantity: number;
   unitPrice: number;
-  lineTotal: number;
+  lineTotal?: number;
   productId?: number | null;
   warehouseId?: number | null;
 }
@@ -201,21 +204,27 @@ export interface SalesInvoice {
   invoiceNo: string;
   customerId: number;
   customerName: string;
-  invoiceDate: string;
+  invoiceDate?: string;
   currency: CurrencyCode;
   subtotal: number;
-  discount: number;
+  discount?: number;
+  discountAmount?: number;
+  taxAmount?: number;
   total: number;
   notes: string;
-  status: 'active' | 'cancelled';
+  status: 'active' | 'cancelled' | 'مدفوعة' | 'سداد جزئي' | 'غير مدفوعة' | 'ملغاة' | string;
   cancelReason?: string | null;
   createdBy: string;
-  createdAt: number;
+  createdAt?: number;
   paidAmount?: number;
   remainingAmount?: number;
   paymentType?: 'CASH' | 'INSTALLMENT' | 'TRANSFER';
   items?: InvoiceItem[];
+  itemsJson?: string;
   payments?: InvoicePayment[];
+  cashbox?: string;
+  branch?: string;
+  warehouseId?: number;
   // Aliases
   invoiceNumber?: string;
   invoiceType?: string;
@@ -229,23 +238,31 @@ export interface SalesInvoice {
 export interface InvoicePayment {
   id: number;
   invoiceId: number;
-  payDate: string;
+  customerId?: number;
+  payDate?: string;
   cashbox: string;
   amount: number;
+  currency?: CurrencyCode;
   note: string;
-  status: 'active' | 'reversed';
+  status?: 'active' | 'reversed';
   reversalReason?: string | null;
-  createdBy: string;
-  createdAt: number;
+  createdBy?: string;
+  receivedBy?: string;
+  createdAt?: number;
+  timestamp?: number;
 }
 
 export interface Warehouse {
   id: number;
   name: string;
   active: boolean;
-  currency: CurrencyCode;
-  linkedCashbox: string;
-  warehouseType: 'مبيعات' | 'داخل المصنع/إنتاج' | 'مواد خام';
+  currency?: CurrencyCode;
+  linkedCashbox?: string;
+  warehouseType?: 'مبيعات' | 'داخل المصنع/إنتاج' | 'مواد خام' | string;
+  code?: string;
+  branch?: string;
+  location?: string;
+  manager?: string;
 }
 
 export interface Product {
@@ -254,10 +271,13 @@ export interface Product {
   name: string;
   category: string;
   unit: string;
-  purchasePrice: number;
+  purchasePrice?: number;
+  costPrice?: number;
   salePrice: number; // SDG
   salePriceEgp: number; // EGP
-  minimumStock: number;
+  minimumStock?: number;
+  minLevel?: number;
+  unitsPerCarton?: number;
   packageWeight: '250' | '900' | '4000' | 'جالون' | 'ربع' | string;
   paintColor: 'أبيض' | 'ألوان' | 'فضي' | 'ذهبي' | 'ورنيش' | string;
   active: boolean;
@@ -269,13 +289,18 @@ export interface Product {
 export interface StockMove {
   id: number;
   warehouseId: number;
+  warehouseName?: string;
   productId: number;
+  productName?: string;
   quantity: number;
-  kind: 'IN' | 'OUT' | 'SALE' | 'RETURN' | 'RETURN_IN' | 'CANCEL' | string;
+  kind: 'IN' | 'OUT' | 'SALE' | 'RETURN' | 'RETURN_IN' | 'CANCEL' | 'ADJUST' | string;
   invoiceId?: number | null;
+  referenceNo?: string;
   note: string;
-  createdBy: string;
-  createdAt: number;
+  createdBy?: string;
+  actor?: string;
+  createdAt?: number;
+  timestamp?: number;
 }
 
 export interface FactoryItem {

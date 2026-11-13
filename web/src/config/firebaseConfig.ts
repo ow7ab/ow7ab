@@ -20,7 +20,6 @@ export const firebaseConfig = {
 
 export const DEFAULT_DATABASE_ID = "ai-studio-android-glassdro-d6052420-cbc0-47dd-8cdd-8caa5e6a7248";
 export const DEFAULT_CLUSTER_CODE = "PMP-ERP-MAIN-CLUSTER";
-export const LEGACY_CLUSTER_CODE = "PMP-ERP-V16-CLUSTER";
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);

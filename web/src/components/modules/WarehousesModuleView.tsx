@@ -1,104 +1,143 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Package,
+  Warehouse as WarehouseIcon,
+  ArrowUpDown,
   Plus,
   Search,
-  Building,
-  FileSpreadsheet,
   Printer,
+  FileSpreadsheet,
   Trash2,
-  ArrowUpDown,
-  CheckCircle2,
-  AlertCircle
+  AlertTriangle,
+  Edit3,
+  Filter
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
 import { GlassButton } from '../ui/GlassButton';
-import { Cashbox, CurrencyCode, Product, StockMove, Warehouse } from '../../types/erp';
-import { ErpDataService } from '../../services/ErpDataService';
+import { Modal } from '../ui/Modal';
+import { Product, StockMove, Warehouse } from '../../types/erp';
+import { ErpDataService, isStockInMoveKind } from '../../services/ErpDataService';
 import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
 
-type WarehouseSubTab = 'BALANCES' | 'NEW_PRODUCT_SUPPLY' | 'WAREHOUSES_DIR' | 'STOCK_MOVES';
+type InventorySubTab = 'BALANCES' | 'WAREHOUSES_DIR' | 'STOCK_MOVES' | 'ADD_PRODUCT';
 
 export const WarehousesModuleView: React.FC = () => {
   const { language } = useLanguage();
   const { canPerformAction, userProfile } = useAuth();
 
-  const [subTab, setSubTab] = useState<WarehouseSubTab>('BALANCES');
-  const [products, setProducts] = useState<Product[]>([]);
+  const [subTab, setSubTab] = useState<InventorySubTab>('BALANCES');
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [stockMoves, setStockMoves] = useState<StockMove[]>([]);
-  const [cashboxes, setCashboxes] = useState<Cashbox[]>([]);
-
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedWarehouseFilter, setSelectedWarehouseFilter] = useState<number>(0); // 0 = كل المخازن
+  const [selectedWeightFilter, setSelectedWeightFilter] = useState<string>('ALL');
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  // Sub-tab 2: New Product & Initial Supply
+  // Stock Move Form
+  const [moveProductId, setMoveProductId] = useState<number>(0);
+  const [moveWarehouseId, setMoveWarehouseId] = useState<number>(0);
+  const [moveKind, setMoveKind] = useState<'IN' | 'OUT' | 'SET'>('IN');
+  const [moveQty, setMoveQty] = useState('');
+  const [moveNote, setMoveNote] = useState('');
+  const [isQuickAdjustOpen, setIsQuickAdjustOpen] = useState(false);
+
+  // New Warehouse Form
+  const [whName, setWhName] = useState('');
+  const [whBranch, setWhBranch] = useState('الخرطوم');
+  const [whLocation, setWhLocation] = useState('');
+
+  // New Product Form
   const [prodForm, setProdForm] = useState({
-    name: '',
     sku: '',
-    category: 'بوهية',
-    unit: 'كرتونة',
-    paintColor: 'أبيض',
-    packageWeight: '900',
-    salePrice: '',
-    salePriceEgp: '',
-    purchasePrice: '',
-    minimumStock: '10',
-    initialQty: '0',
-    warehouseId: 0
-  });
-
-  // Quick Stock Adjustment Form
-  const [moveForm, setMoveForm] = useState({
-    warehouseId: 0,
-    productId: 0,
-    kind: 'IN' as 'IN' | 'OUT' | 'RETURN_IN',
-    quantity: '',
-    note: ''
-  });
-
-  // Sub-tab 3: New Warehouse Form
-  const [whForm, setWhForm] = useState({
     name: '',
-    currency: 'SDG' as CurrencyCode,
-    linkedCashbox: '',
-    warehouseType: 'مبيعات' as Warehouse['warehouseType']
+    category: 'معجون حراري',
+    paintColor: 'أبيض',
+    packageWeight: '900 جم',
+    unit: 'كرتونة',
+    unitsPerCarton: '12',
+    costPrice: '0',
+    salePrice: '0',
+    salePriceEgp: '0',
+    minLevel: '20',
+    initialStock: '0'
   });
 
   useEffect(() => {
-    const unsubs = [
-      ErpDataService.subscribeToCollection<Product>('products', setProducts),
-      ErpDataService.subscribeToCollection<Warehouse>('warehouses', setWarehouses),
-      ErpDataService.subscribeToCollection<StockMove>('stock_moves', setStockMoves),
-      ErpDataService.subscribeToCollection<Cashbox>('cashboxes', setCashboxes)
-    ];
-    return () => unsubs.forEach((u) => u());
+    const unsubWh = ErpDataService.subscribeToCollection<Warehouse>('warehouses', setWarehouses);
+    const unsubPr = ErpDataService.subscribeToCollection<Product>('products', setProducts);
+    const unsubSm = ErpDataService.subscribeToCollection<StockMove>('stock_moves', setStockMoves);
+    return () => {
+      unsubWh();
+      unsubPr();
+      unsubSm();
+    };
   }, []);
 
   useEffect(() => {
-    if (warehouses.length > 0 && prodForm.warehouseId === 0) {
-      setProdForm((f) => ({ ...f, warehouseId: Number(warehouses[0].id) }));
-      setMoveForm((f) => ({ ...f, warehouseId: Number(warehouses[0].id) }));
+    if (products.length > 0 && moveProductId === 0) {
+      setMoveProductId(Number(products[0].id));
     }
-    if (products.length > 0 && moveForm.productId === 0) {
-      setMoveForm((f) => ({ ...f, productId: Number(products[0].id) }));
+    if (warehouses.length > 0 && moveWarehouseId === 0) {
+      setMoveWarehouseId(Number(warehouses[0].id));
     }
-    if (cashboxes.length > 0 && !whForm.linkedCashbox) {
-      setWhForm((f) => ({ ...f, linkedCashbox: cashboxes[0].name }));
-    }
-  }, [warehouses, products, cashboxes]);
+  }, [products, warehouses]);
 
-  const productStocks = useMemo(
-    () => ErpDataService.computeProductStocks(products, stockMoves),
-    [products, stockMoves]
+  const activeWhFilterId = selectedWarehouseFilter > 0 ? selectedWarehouseFilter : null;
+
+  const computedProducts = useMemo(
+    () => ErpDataService.computeProductStocksList(products, stockMoves, activeWhFilterId),
+    [products, stockMoves, activeWhFilterId]
   );
 
-  const canModifyInventory =
-    canPerformAction(GRANULAR_ACTIONS.INVENTORY_OPS) || canPerformAction(GRANULAR_ACTIONS.CREATE);
+  const warehouseSummaries = useMemo(
+    () => ErpDataService.computeWarehouseStockSummary(warehouses, products, stockMoves),
+    [warehouses, products, stockMoves]
+  );
+
+  const colorWeightRows = useMemo(
+    () => ErpDataService.computeColorWeightStockRows(products, stockMoves, selectedWeightFilter, activeWhFilterId),
+    [products, stockMoves, selectedWeightFilter, activeWhFilterId]
+  );
+
+  // Per-product inQty and outQty for the selected warehouse filter
+  const productMoveBreakdown = useMemo(() => {
+    const map = new Map<number, { inQty: number; outQty: number }>();
+    const filteredMoves =
+      activeWhFilterId !== null
+        ? stockMoves.filter((m) => Number(m.warehouseId) === activeWhFilterId)
+        : stockMoves;
+
+    for (const m of filteredMoves) {
+      const pid = Number(m.productId);
+      const q = Math.abs(Number(m.quantity || 0));
+      const cur = map.get(pid) || { inQty: 0, outQty: 0 };
+      if (isStockInMoveKind(m.kind)) {
+        cur.inQty += q;
+      } else {
+        cur.outQty += q;
+      }
+      map.set(pid, cur);
+    }
+    return map;
+  }, [stockMoves, activeWhFilterId]);
+
+  const availableWeights = useMemo(() => {
+    const set = new Set<string>(['250 جم', '900 جم', '4000 جم']);
+    products.forEach((p) => {
+      if (p.packageWeight && String(p.packageWeight).trim()) {
+        set.add(String(p.packageWeight).trim());
+      }
+    });
+    return Array.from(set);
+  }, [products]);
+
+  const canCreate = canPerformAction(GRANULAR_ACTIONS.CREATE);
+  const canEdit = canPerformAction(GRANULAR_ACTIONS.EDIT);
   const canDelete = canPerformAction(GRANULAR_ACTIONS.DELETE);
 
   const showNotice = (type: 'ok' | 'err', text: string) => {
@@ -106,220 +145,270 @@ export const WarehousesModuleView: React.FC = () => {
     setTimeout(() => setNotice(null), 4000);
   };
 
-  const handleCreateProductAndSupply = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canModifyInventory || !prodForm.name.trim()) return;
-
-    const id = Date.now();
-    const initialQty = Number(prodForm.initialQty) || 0;
-    const actor = userProfile?.fullName || userProfile?.username || 'WEB_WAREHOUSE';
-
-    const newProd: Product = {
-      id,
-      sku: prodForm.sku.trim() || `PMP-${String(id).slice(-4)}`,
-      name: prodForm.name.trim(),
-      category: prodForm.category,
-      unit: prodForm.unit.trim() || 'كرتونة',
-      purchasePrice: Number(prodForm.purchasePrice) || 0,
-      salePrice: Number(prodForm.salePrice) || 0,
-      salePriceEgp: Number(prodForm.salePriceEgp) || 0,
-      minimumStock: Number(prodForm.minimumStock) || 10,
-      packageWeight: prodForm.packageWeight,
-      paintColor: prodForm.paintColor,
-      active: true,
-      currentStock: initialQty
-    };
-
-    try {
-      await ErpDataService.saveRecord('products', `PROD-${id}`, newProd, userProfile?.username);
-      if (initialQty > 0) {
-        const smId = id + 1;
-        const sm: StockMove = {
-          id: smId,
-          warehouseId: prodForm.warehouseId || 1,
-          productId: id,
-          quantity: initialQty,
-          kind: 'IN',
-          invoiceId: null,
-          note: 'رصيد افتتاحي / توريد مبدئي',
-          createdBy: actor,
-          createdAt: id
-        };
-        await ErpDataService.saveRecord('stock_moves', `SM-${smId}`, sm, userProfile?.username);
-      }
-      setProdForm((f) => ({
-        ...f,
-        name: '',
-        sku: '',
-        salePrice: '',
-        salePriceEgp: '',
-        purchasePrice: '',
-        initialQty: '0'
-      }));
-      showNotice('ok', `تمت إضافة "${newProd.name}" وتحديث رصيد المخزن`);
-      setSubTab('BALANCES');
-    } catch (err: any) {
-      showNotice('err', err?.message || 'تعذر حفظ الصنف');
-    }
-  };
-
   const handleRecordStockMove = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canModifyInventory) return;
-    const q = Number(moveForm.quantity);
-    if (!moveForm.productId || !Number.isFinite(q) || q <= 0) return;
-
-    const id = Date.now();
-    const sm: StockMove = {
-      id,
-      warehouseId: moveForm.warehouseId || warehouses[0]?.id || 1,
-      productId: Number(moveForm.productId),
-      quantity: q,
-      kind: moveForm.kind,
-      invoiceId: null,
-      note: moveForm.note.trim() || `حركة مخزنية (${moveForm.kind})`,
-      createdBy: userProfile?.fullName || userProfile?.username || 'WEB_WAREHOUSE',
-      createdAt: id
-    };
-
-    try {
-      await ErpDataService.saveRecord('stock_moves', `SM-${id}`, sm, userProfile?.username);
-      setMoveForm((f) => ({ ...f, quantity: '', note: '' }));
-      showNotice('ok', 'تم تسجيل الحركة المخزنية ومزامنتها');
-    } catch (err: any) {
-      showNotice('err', err?.message || 'تعذر تسجيل الحركة');
+    if (!canCreate && !canEdit) {
+      showNotice('err', 'لا تملك صلاحية تسجيل حركات المخزون');
+      return;
     }
-  };
+    const rawQty = Number(moveQty);
+    const prod = computedProducts.find((p) => Number(p.id) === Number(moveProductId)) || products.find((p) => Number(p.id) === Number(moveProductId));
+    const wh = warehouses.find((w) => Number(w.id) === Number(moveWarehouseId)) || warehouses[0];
+    if (!prod || !wh || isNaN(rawQty) || rawQty < 0 || (moveKind !== 'SET' && rawQty <= 0)) {
+      showNotice('err', 'يرجى تحديد الصنف والمستودع وإدخال كمية صحيحة');
+      return;
+    }
 
-  const handleCreateWarehouse = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canModifyInventory || !whForm.name.trim()) return;
-    const id = Date.now();
-    const wh: Warehouse = {
-      id,
-      name: whForm.name.trim(),
-      active: true,
-      currency: whForm.currency,
-      linkedCashbox: whForm.linkedCashbox,
-      warehouseType: whForm.warehouseType
+    let finalKind: 'IN' | 'OUT' = moveKind === 'OUT' ? 'OUT' : 'IN';
+    let finalDeltaQty = rawQty;
+
+    if (moveKind === 'SET') {
+      // Matches Android PmpViewModel.kt updateProductInventoryCount: computes exact delta against current stock in that warehouse
+      const whMoves = stockMoves.filter(
+        (m) => Number(m.productId) === Number(prod.id) && Number(m.warehouseId) === Number(wh.id)
+      );
+      let curIn = 0;
+      let curOut = 0;
+      for (const m of whMoves) {
+        const q = Math.abs(Number(m.quantity || 0));
+        if (isStockInMoveKind(m.kind)) curIn += q;
+        else curOut += q;
+      }
+      const currentWhStock = Math.max(0, curIn - curOut);
+      const diff = rawQty - currentWhStock;
+      if (Math.abs(diff) < 0.001) {
+        showNotice('ok', 'الرصيد الفعلي مطابق للرصيد الحالي بالفعل');
+        setIsQuickAdjustOpen(false);
+        return;
+      }
+      finalKind = diff > 0 ? 'IN' : 'OUT';
+      finalDeltaQty = Math.abs(diff);
+    }
+
+    const now = Date.now();
+    const move: StockMove = {
+      id: now,
+      productId: Number(prod.id),
+      productName: prod.name,
+      warehouseId: Number(wh.id),
+      warehouseName: wh.name,
+      kind: finalKind,
+      quantity: finalDeltaQty,
+      note:
+        moveNote.trim() ||
+        (moveKind === 'SET'
+          ? `تعديل جرد مباشر للرصيد الفعلي (${rawQty}) بواسطة ${userProfile?.fullName || 'المستخدم'}`
+          : finalKind === 'IN'
+          ? 'توريد مخزني'
+          : 'صرف مخزني'),
+      referenceNo: `SM-${now.toString().slice(-6)}`,
+      actor: userProfile?.fullName || userProfile?.username || 'أمين المخزن',
+      timestamp: now
     };
-    await ErpDataService.saveRecord('warehouses', `WH-${id}`, wh, userProfile?.username);
-    setWhForm((f) => ({ ...f, name: '' }));
-    showNotice('ok', `تم إنشاء المخزن "${wh.name}"`);
-  };
 
-  const handleDeleteProduct = async (p: Product) => {
-    if (!canDelete) return;
-    const docId = (p as any)._docId || `PROD-${p.id}`;
-    await ErpDataService.deleteRecord('products', docId, p.id, userProfile?.username);
-    showNotice('ok', `تم حذف الصنف ${p.name}`);
-  };
-
-  const handleDeleteStockMove = async (sm: StockMove) => {
-    if (!canDelete) return;
-    const docId = (sm as any)._docId || `SM-${sm.id}`;
-    await ErpDataService.deleteRecord('stock_moves', docId, sm.id, userProfile?.username);
-    showNotice('ok', 'تم حذف الحركة المخزنية');
-  };
-
-  const filteredProducts = useMemo(() => {
-    return products.filter(
-      (p) =>
-        !searchTerm ||
-        (p.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (p.sku || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (p.paintColor || '').toLowerCase().includes(searchTerm.toLowerCase())
+    await ErpDataService.upsertDocument('stock_moves', `SM-${now}`, move);
+    await ErpDataService.logAudit(
+      userProfile?.username || 'user',
+      moveKind === 'SET' ? 'INVENTORY_SET_STOCK' : `STOCK_${finalKind}`,
+      `${moveKind === 'SET' ? `تعديل رصيد فعلي إلى (${rawQty})` : finalKind === 'IN' ? 'وارد مخزني' : 'منصرف مخزني'} (${finalDeltaQty} ${prod.unit}) — ${prod.name} @ ${wh.name}`
     );
-  }, [products, searchTerm]);
 
-  const productNameMap = useMemo(() => {
-    const m = new Map<number, string>();
-    products.forEach((p) => m.set(Number(p.id), p.name));
-    return m;
-  }, [products]);
+    setMoveQty('');
+    setMoveNote('');
+    setIsQuickAdjustOpen(false);
+    showNotice('ok', 'تم تسجيل حركة المخزون وتحديث الرصيد الفوري بنجاح');
+  };
 
-  const warehouseNameMap = useMemo(() => {
-    const m = new Map<number, string>();
-    warehouses.forEach((w) => m.set(Number(w.id), w.name));
-    return m;
-  }, [warehouses]);
+  const openQuickAdjustModal = (prod: Product, defaultMode: 'IN' | 'OUT' | 'SET' = 'SET') => {
+    setMoveProductId(Number(prod.id));
+    setMoveWarehouseId(selectedWarehouseFilter > 0 ? selectedWarehouseFilter : Number(warehouses[0]?.id || 0));
+    setMoveKind(defaultMode);
+    setMoveQty(defaultMode === 'SET' ? String(prod.currentStock ?? 0) : '');
+    setMoveNote('');
+    setIsQuickAdjustOpen(true);
+  };
 
-  const sortedMoves = useMemo(
-    () => [...stockMoves].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
-    [stockMoves]
+  const handleAddWarehouse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canCreate || !whName.trim()) return;
+    const now = Date.now();
+    const wh: Warehouse = {
+      id: now,
+      code: `WH-${now.toString().slice(-4)}`,
+      name: whName.trim(),
+      branch: whBranch,
+      location: whLocation.trim() || whBranch,
+      manager: userProfile?.fullName || 'أمين المستودع',
+      active: true
+    };
+    await ErpDataService.upsertDocument('warehouses', `WH-${now}`, wh);
+    setWhName('');
+    setWhLocation('');
+    showNotice('ok', `تم إنشاء المستودع "${wh.name}"`);
+  };
+
+  const handleAddProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canCreate || !prodForm.name.trim()) return;
+    const now = Date.now();
+    const initQty = Number(prodForm.initialStock) || 0;
+    const newProd: Product = {
+      id: now,
+      sku: prodForm.sku.trim() || `SKU-${now.toString().slice(-5)}`,
+      name: prodForm.name.trim(),
+      category: prodForm.category,
+      paintColor: prodForm.paintColor,
+      packageWeight: prodForm.packageWeight,
+      unit: prodForm.unit,
+      unitsPerCarton: Number(prodForm.unitsPerCarton) || 12,
+      costPrice: Number(prodForm.costPrice) || 0,
+      salePrice: Number(prodForm.salePrice) || 0,
+      salePriceSdg: Number(prodForm.salePrice) || 0,
+      salePriceEgp: Number(prodForm.salePriceEgp) || 0,
+      minLevel: Number(prodForm.minLevel) || 10,
+      currentStock: initQty,
+      active: true
+    };
+
+    await ErpDataService.upsertDocument('products', `PRD-${now}`, newProd);
+
+    if (initQty > 0 && warehouses.length > 0) {
+      const targetWh =
+        warehouses.find((w) => Number(w.id) === Number(selectedWarehouseFilter)) || warehouses[0];
+      const sm: StockMove = {
+        id: now + 1,
+        productId: now,
+        productName: newProd.name,
+        warehouseId: Number(targetWh.id),
+        warehouseName: targetWh.name,
+        kind: 'IN',
+        quantity: initQty,
+        note: 'رصيد افتتاحي عند تعريف الصنف',
+        referenceNo: `INIT-${now.toString().slice(-5)}`,
+        actor: userProfile?.fullName || 'النظام',
+        timestamp: now
+      };
+      await ErpDataService.upsertDocument('stock_moves', `SM-${now + 1}`, sm);
+    }
+
+    setProdForm({
+      ...prodForm,
+      sku: '',
+      name: '',
+      initialStock: '0'
+    });
+    setSubTab('BALANCES');
+    showNotice('ok', `تمت إضافة الصنف "${newProd.name}" إلى الكتالوج والمخزون`);
+  };
+
+  const handleDeleteProduct = async (prod: Product) => {
+    if (!canDelete) return;
+    const docId = (prod as any)._docId || `PRD-${prod.id}`;
+    await ErpDataService.deleteDocument('products', docId);
+    showNotice('ok', `تم حذف الصنف "${prod.name}"`);
+  };
+
+  const filteredProducts = computedProducts.filter(
+    (p) =>
+      (selectedWeightFilter === 'ALL' || p.packageWeight === selectedWeightFilter) &&
+      (!searchTerm ||
+        p.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        p.paintColor?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        p.sku?.toLowerCase().includes(searchTerm.toLowerCase()))
   );
 
-  const handleExportCsv = () => {
-    const headers = ['الكود SKU', 'الاسم', 'النوع/اللون', 'الوزن', 'السعر (SDG)', 'السعر (EGP)', 'الرصيد المحسوب', 'حد الأمان'];
-    const rows = filteredProducts.map((p) => [
-      p.sku,
-      p.name,
-      `${p.paintColor} (${p.category})`,
-      `${p.packageWeight}جم`,
-      p.salePrice ?? p.salePriceSdg ?? 0,
-      p.salePriceEgp ?? 0,
-      productStocks.get(Number(p.id)) ?? 0,
-      p.minimumStock
-    ]);
-    ReportExporter.exportToCsv('pmp_inventory_balances', headers, rows);
+  const selectedWhObj = warehouses.find((w) => Number(w.id) === Number(selectedWarehouseFilter));
+  const selectedWhTitle = selectedWhObj ? selectedWhObj.name : 'كل المخازن والفروع';
+
+  const totalCartons = computedProducts.reduce((s, p) => s + Math.max(0, Number(p.currentStock || 0)), 0);
+  const totalInMoves = Array.from(productMoveBreakdown.values()).reduce((s, v) => s + v.inQty, 0);
+  const totalOutMoves = Array.from(productMoveBreakdown.values()).reduce((s, v) => s + v.outQty, 0);
+  const lowStockItems = computedProducts.filter((p) => Number(p.currentStock || 0) <= Number(p.minLevel || 10));
+
+  const handleExportInventoryPdf = () => {
+    ReportExporter.exportToPrint(
+      `تقرير أرصدة المخازن — ${selectedWhTitle}`,
+      `إجمالي الكراتين المتاحة: ${totalCartons.toLocaleString()} كرتونة | الوارد: ${totalInMoves.toLocaleString()} | المنصرف: ${totalOutMoves.toLocaleString()}`,
+      ['الكود', 'اسم الصنف', 'اللون', 'الوزن', 'إجمالي الوارد (+)', 'إجمالي المنصرف (-)', 'الرصيد الفعلي المتاح', 'حد الطلب', 'سعر الكرتونة (SDG)'],
+      filteredProducts.map((p) => {
+        const mv = productMoveBreakdown.get(Number(p.id)) || { inQty: 0, outQty: 0 };
+        return [
+          p.sku || `PRD-${p.id}`,
+          p.name,
+          p.paintColor || '-',
+          p.packageWeight || '-',
+          mv.inQty.toLocaleString(),
+          mv.outQty.toLocaleString(),
+          `${Number(p.currentStock || 0).toLocaleString()} ${p.unit || 'كرتونة'}`,
+          p.minLevel || 10,
+          Number(p.salePrice || p.salePriceSdg || 0).toLocaleString()
+        ];
+      })
+    );
   };
 
-  const handlePrint = () => {
-    const headers = ['SKU', 'الصنف', 'اللون/الوزن', 'الرصيد الفعلي', 'SDG', 'EGP'];
-    const rows = filteredProducts.map((p) => [
-      p.sku,
-      p.name,
-      `${p.paintColor} • ${p.packageWeight}جم`,
-      productStocks.get(Number(p.id)) ?? 0,
-      (p.salePrice ?? p.salePriceSdg ?? 0).toLocaleString(),
-      (p.salePriceEgp ?? 0).toLocaleString()
-    ]);
-    ReportExporter.exportToPrint('أرصدة المخازن والمنتج التام - PMP PAINTS', headers, rows);
+  const handleExportInventoryCsv = () => {
+    ReportExporter.exportToCsv(
+      `جرد_المخازن_${selectedWhTitle.replace(/\s+/g, '_')}`,
+      ['الكود', 'اسم الصنف', 'اللون', 'الوزن', 'إجمالي الوارد', 'إجمالي المنصرف', 'الرصيد الفعلي المتاح', 'الوحدة', 'حد الطلب', 'سعر الكرتونة SDG'],
+      filteredProducts.map((p) => {
+        const mv = productMoveBreakdown.get(Number(p.id)) || { inQty: 0, outQty: 0 };
+        return [
+          p.sku || `PRD-${p.id}`,
+          p.name,
+          p.paintColor || '-',
+          p.packageWeight || '-',
+          mv.inQty,
+          mv.outQty,
+          Number(p.currentStock || 0),
+          p.unit || 'كرتونة',
+          p.minLevel || 10,
+          Number(p.salePrice || p.salePriceSdg || 0)
+        ];
+      })
+    );
   };
 
   return (
     <div className="space-y-6">
-      <GlassCard className="p-5 sm:p-6">
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-4 border-b border-theme">
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-xl font-black text-theme-primary">
-                {language === 'ar' ? 'المخازن والمستودعات' : 'Warehouses & Inventory'}
-              </h2>
-              <GlassBadge variant="cyan">{products.length} صنف</GlassBadge>
-            </div>
-            <p className="text-xs text-theme-secondary mt-1">
-              نفس تبويبات الأندرويد الأربعة: أرصدة المخزون المحسوبة من stock_moves، التوريد، إدارة المخازن، وسجل الحركات.
-            </p>
+      {/* Header */}
+      <GlassCard className="p-5 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
+            <Package className="w-6 h-6" />
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <GlassButton variant="secondary" icon={<FileSpreadsheet className="w-4 h-4" />} onClick={handleExportCsv} className="text-xs">
-              Excel / CSV
-            </GlassButton>
-            <GlassButton variant="secondary" icon={<Printer className="w-4 h-4" />} onClick={handlePrint} className="text-xs">
-              طباعة
-            </GlassButton>
+          <div>
+            <h2 className="text-lg font-black text-theme-primary">
+              {language === 'ar'
+                ? 'إدارة المخازن، الأرصدة، وحركة الأصناف'
+                : 'Warehouses, Stock Balances & Movements'}
+            </h2>
+            <p className="text-xs text-theme-secondary">
+              إجمالي المخزون المتاح ({selectedWhTitle}):{' '}
+              <span className="font-mono font-bold text-cyan-400">{totalCartons.toLocaleString()}</span> كرتونة | تنبيهات النواقص:{' '}
+              <span className="font-mono font-bold text-amber-400">{lowStockItems.length}</span>
+            </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 mt-4 overflow-x-auto pb-1">
+        <div className="flex flex-wrap gap-2">
           {[
-            { id: 'BALANCES' as WarehouseSubTab, label: `أرصدة المخزون (${products.length})` },
-            { id: 'NEW_PRODUCT_SUPPLY' as WarehouseSubTab, label: '+ إضافة صنف وتوريد للمخزن' },
-            { id: 'WAREHOUSES_DIR' as WarehouseSubTab, label: `الأصناف والمخازن (${warehouses.length})` },
-            { id: 'STOCK_MOVES' as WarehouseSubTab, label: `سجل الحركات (${stockMoves.length})` }
+            { id: 'BALANCES' as const, label: 'أرصدة الأصناف والجرد', icon: <Package className="w-4 h-4" /> },
+            { id: 'WAREHOUSES_DIR' as const, label: 'دليل المستودعات', icon: <WarehouseIcon className="w-4 h-4" /> },
+            { id: 'STOCK_MOVES' as const, label: 'حركات الوارد والمنصرف', icon: <ArrowUpDown className="w-4 h-4" /> },
+            { id: 'ADD_PRODUCT' as const, label: 'إضافة صنف جديد', icon: <Plus className="w-4 h-4" /> }
           ].map((t) => (
             <button
               key={t.id}
-              type="button"
               onClick={() => setSubTab(t.id)}
-              className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all ${
                 subTab === t.id
-                  ? 'bg-pmp-primary text-white shadow-md'
-                  : 'bg-theme-base border border-theme text-theme-secondary hover:text-theme-primary'
+                  ? 'bg-red-600 text-white shadow-lg shadow-red-600/25'
+                  : 'bg-theme-surface text-theme-secondary hover:text-theme-primary border border-theme'
               }`}
             >
-              {t.label}
+              {t.icon}
+              <span>{t.label}</span>
             </button>
           ))}
         </div>
@@ -327,82 +416,319 @@ export const WarehousesModuleView: React.FC = () => {
 
       {notice && (
         <div
-          className={`p-3.5 rounded-xl border text-xs flex items-center gap-2 ${
+          className={`p-3.5 rounded-xl border text-xs font-bold ${
             notice.type === 'ok'
-              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-              : 'bg-red-500/10 border-red-500/30 text-red-400'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+              : 'bg-red-500/10 border-red-500/30 text-red-300'
           }`}
         >
-          {notice.type === 'ok' ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
-          <span>{notice.text}</span>
+          {notice.text}
         </div>
       )}
 
+      {/* SUB-TAB 1: BALANCES (Matches Android InventoryScreen.kt 1:1) */}
       {subTab === 'BALANCES' && (
-        <div className="space-y-4">
-          <GlassCard className="p-4">
-            <div className="relative">
-              <Search className="w-4 h-4 text-theme-muted absolute right-3 top-2.5" />
-              <input
-                type="text"
-                placeholder="بحث باسم الصنف، SKU، أو اللون..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pr-9 pl-3 py-2 rounded-lg bg-theme-base border border-theme text-theme-primary text-xs"
-              />
+        <div className="space-y-5">
+          {/* Warehouse Selector Bar (matching Android InventoryScreen.kt lines 210-238) */}
+          <GlassCard className="p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+              <div className="flex items-center gap-2 text-xs font-bold text-theme-primary">
+                <Filter className="w-4 h-4 text-cyan-400" />
+                <span>تصفية الأرصدة حسب المخزن (مطابق لتطبيق الأندرويد):</span>
+              </div>
+              <div className="flex gap-2">
+                <GlassButton
+                  size="sm"
+                  variant="secondary"
+                  icon={<Printer className="w-3.5 h-3.5" />}
+                  onClick={handleExportInventoryPdf}
+                >
+                  طباعة الجرد PDF
+                </GlassButton>
+                <GlassButton
+                  size="sm"
+                  variant="secondary"
+                  icon={<FileSpreadsheet className="w-3.5 h-3.5" />}
+                  onClick={handleExportInventoryCsv}
+                >
+                  تصدير Excel / CSV
+                </GlassButton>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setSelectedWarehouseFilter(0)}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all border ${
+                  selectedWarehouseFilter === 0
+                    ? 'bg-cyan-500/20 border-cyan-500 text-cyan-300 shadow-sm'
+                    : 'bg-theme-base border-theme text-theme-secondary hover:text-theme-primary'
+                }`}
+              >
+                <WarehouseIcon className="w-3.5 h-3.5" />
+                <span>كل المخازن ({warehouses.length})</span>
+              </button>
+
+              {warehouseSummaries.map((ws) => {
+                const isSelected = Number(selectedWarehouseFilter) === Number(ws.warehouse.id);
+                return (
+                  <button
+                    key={ws.warehouse.id}
+                    type="button"
+                    onClick={() => setSelectedWarehouseFilter(Number(ws.warehouse.id))}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all border ${
+                      isSelected
+                        ? 'bg-cyan-500/20 border-cyan-500 text-cyan-300 shadow-sm'
+                        : 'bg-theme-base border-theme text-theme-secondary hover:text-theme-primary'
+                    }`}
+                  >
+                    <span>{ws.warehouse.name}</span>
+                    <span className="px-1.5 py-0.5 rounded-md bg-black/30 font-mono text-[11px] text-cyan-400">
+                      {ws.netCartons.toLocaleString()} كرتونة
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </GlassCard>
 
-          <GlassCard className="p-0 overflow-hidden">
+          {/* Summary KPI Row */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <GlassCard className="p-4 border-r-4 border-r-cyan-500">
+              <p className="text-xs text-theme-muted">الرصيد الصافي المتاح ({selectedWhTitle})</p>
+              <p className="text-xl font-black text-cyan-400 font-mono mt-1">
+                {totalCartons.toLocaleString()} كرتونة
+              </p>
+            </GlassCard>
+            <GlassCard className="p-4 border-r-4 border-r-emerald-500">
+              <p className="text-xs text-theme-muted">إجمالي حركات الوارد (+)</p>
+              <p className="text-xl font-black text-emerald-400 font-mono mt-1">
+                +{totalInMoves.toLocaleString()} كرتونة
+              </p>
+            </GlassCard>
+            <GlassCard className="p-4 border-r-4 border-r-amber-500">
+              <p className="text-xs text-theme-muted">إجمالي حركات المنصرف والمبيعات (-)</p>
+              <p className="text-xl font-black text-amber-400 font-mono mt-1">
+                -{totalOutMoves.toLocaleString()} كرتونة
+              </p>
+            </GlassCard>
+            <GlassCard className="p-4 border-r-4 border-r-red-500">
+              <p className="text-xs text-theme-muted">أصناف دون حد الطلب</p>
+              <p className="text-xl font-black text-red-400 font-mono mt-1">
+                {lowStockItems.length} صنف
+              </p>
+            </GlassCard>
+          </div>
+
+          {/* Package Weight Filter & Android 3-Column Table (اللون | الوزن | العدد) */}
+          <GlassCard className="p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+              <div>
+                <h3 className="text-sm font-black text-theme-primary">
+                  جدول الجرد السريع حسب اللون والوزن (اللون | الوزن | العدد الفعلي)
+                </h3>
+                <p className="text-xs text-theme-secondary mt-0.5">
+                  مطابق لجدول المخزون في تطبيق الأندرويد — اضغط على أي صف لتعديل الرصيد الفعلي أو تسجيل وارد/منصرف.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedWeightFilter('ALL')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${
+                    selectedWeightFilter === 'ALL'
+                      ? 'bg-red-600 text-white border-red-600'
+                      : 'bg-theme-base border-theme text-theme-secondary'
+                  }`}
+                >
+                  كل الأوزان
+                </button>
+                {availableWeights.map((w) => (
+                  <button
+                    key={w}
+                    type="button"
+                    onClick={() => setSelectedWeightFilter(w)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${
+                      selectedWeightFilter === w
+                        ? 'bg-red-600 text-white border-red-600'
+                        : 'bg-theme-base border-theme text-theme-secondary'
+                    }`}
+                  >
+                    {w}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="overflow-x-auto">
-              <table className="w-full text-right border-collapse text-xs min-w-[650px]">
+              <table className="w-full text-xs text-right">
                 <thead>
-                  <tr className="bg-theme-surface/80 border-b border-theme text-theme-muted">
-                    <th className="py-3 px-4">الكود</th>
-                    <th className="py-3 px-4">المنتج</th>
-                    <th className="py-3 px-4">النوع / الوزن</th>
-                    <th className="py-3 px-4">الرصيد الفعلي</th>
-                    <th className="py-3 px-4">SDG</th>
-                    <th className="py-3 px-4">EGP</th>
-                    <th className="py-3 px-4">الحالة</th>
-                    {canDelete && <th className="py-3 px-4">حذف</th>}
+                  <tr className="border-b border-theme text-theme-muted">
+                    <th className="py-2.5 px-3">اللون</th>
+                    <th className="py-2.5 px-3">الوزن / العبوة</th>
+                    <th className="py-2.5 px-3">إجمالي الوارد (+)</th>
+                    <th className="py-2.5 px-3">إجمالي المنصرف (-)</th>
+                    <th className="py-2.5 px-3">العدد الفعلي المتاح</th>
+                    <th className="py-2.5 px-3">تحديث سريع</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-theme">
-                  {filteredProducts.map((p) => {
-                    const liveQty = productStocks.get(Number(p.id)) ?? 0;
-                    const priceSdg = p.salePrice ?? p.salePriceSdg ?? 0;
-                    return (
-                      <tr key={p.id} className="hover:bg-theme-surface/40">
-                        <td className="py-3 px-4 font-mono text-pmp-cyan font-bold">{p.sku}</td>
-                        <td className="py-3 px-4 font-bold text-theme-primary">{p.name}</td>
-                        <td className="py-3 px-4 text-theme-secondary">
-                          {p.paintColor} • {p.packageWeight}جم
-                        </td>
-                        <td className="py-3 px-4 font-mono font-black text-pmp-primary">
-                          {liveQty.toLocaleString()} {p.unit}
-                        </td>
-                        <td className="py-3 px-4 font-mono">{Number(priceSdg).toLocaleString()}</td>
-                        <td className="py-3 px-4 font-mono">{Number(p.salePriceEgp || 0).toLocaleString()}</td>
-                        <td className="py-3 px-4">
-                          <GlassBadge variant={liveQty > (p.minimumStock || 5) ? 'green' : 'gold'}>
-                            {liveQty > (p.minimumStock || 5) ? 'متوفر' : 'حد الطلب'}
-                          </GlassBadge>
-                        </td>
-                        {canDelete && (
-                          <td className="py-3 px-4">
+                <tbody className="divide-y divide-white/5">
+                  {colorWeightRows.map((row, idx) => (
+                    <tr key={`${row.colorName}-${idx}`} className="hover:bg-white/[0.02]">
+                      <td className="py-2.5 px-3 font-bold text-theme-primary">{row.colorName}</td>
+                      <td className="py-2.5 px-3 text-theme-secondary">{row.weightLabel}</td>
+                      <td className="py-2.5 px-3 font-mono text-emerald-400">+{row.inQty.toLocaleString()}</td>
+                      <td className="py-2.5 px-3 font-mono text-amber-400">-{row.outQty.toLocaleString()}</td>
+                      <td className="py-2.5 px-3 font-mono font-black text-cyan-400 text-sm">
+                        {row.netCount.toLocaleString()} كرتونة
+                      </td>
+                      <td className="py-2.5 px-3">
+                        {row.primaryProduct && (canCreate || canEdit) && (
+                          <div className="flex items-center gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleDeleteProduct(p)}
-                              className="p-1.5 text-red-400 hover:bg-red-500/10 rounded-lg"
+                              onClick={() => openQuickAdjustModal(row.primaryProduct!, 'SET')}
+                              className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30 text-[11px] font-bold flex items-center gap-1"
                             >
-                              <Trash2 className="w-4 h-4" />
+                              <Edit3 className="w-3 h-3" />
+                              <span>تعديل الرصيد</span>
                             </button>
-                          </td>
+                            <button
+                              type="button"
+                              onClick={() => openQuickAdjustModal(row.primaryProduct!, 'IN')}
+                              className="px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold"
+                            >
+                              + وارد
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openQuickAdjustModal(row.primaryProduct!, 'OUT')}
+                              className="px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[11px] font-bold"
+                            >
+                              - صرف
+                            </button>
+                          </div>
                         )}
+                      </td>
+                    </tr>
+                  ))}
+                  {colorWeightRows.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="py-6 text-center text-theme-muted">
+                        لا توجد أصناف مسجلة لهذا الوزن حالياً.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </GlassCard>
+
+          {/* Detailed Products Inventory Table */}
+          <GlassCard className="p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+              <div className="relative flex-1 max-w-md w-full">
+                <Search className="w-4 h-4 text-theme-muted absolute right-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="ابحث باسم الصنف، اللون، أو الكود..."
+                  className="w-full pr-9 pl-3 py-2 rounded-xl bg-theme-surface border border-theme text-xs text-theme-primary"
+                />
+              </div>
+              <span className="text-xs text-theme-secondary">
+                إجمالي الأصناف المعروضة: <strong>{filteredProducts.length}</strong>
+              </span>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs text-right">
+                <thead>
+                  <tr className="border-b border-theme text-theme-muted">
+                    <th className="py-3 px-3">الكود</th>
+                    <th className="py-3 px-3">الصنف</th>
+                    <th className="py-3 px-3">اللون / الوزن</th>
+                    <th className="py-3 px-3">الوارد (+)</th>
+                    <th className="py-3 px-3">المنصرف (-)</th>
+                    <th className="py-3 px-3">الرصيد المتاح</th>
+                    <th className="py-3 px-3">حد الطلب</th>
+                    <th className="py-3 px-3">سعر الكرتونة (SDG)</th>
+                    <th className="py-3 px-3">سعر الكرتونة (EGP)</th>
+                    <th className="py-3 px-3">الحالة</th>
+                    <th className="py-3 px-3">إجراء</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {filteredProducts.map((p) => {
+                    const stock = Number(p.currentStock || 0);
+                    const min = Number(p.minLevel || 10);
+                    const isLow = stock <= min;
+                    const mv = productMoveBreakdown.get(Number(p.id)) || { inQty: 0, outQty: 0 };
+                    return (
+                      <tr key={p.id} className="hover:bg-white/[0.02]">
+                        <td className="py-3 px-3 font-mono text-theme-muted">{p.sku || `PRD-${p.id}`}</td>
+                        <td className="py-3 px-3 font-bold text-theme-primary">{p.name}</td>
+                        <td className="py-3 px-3 text-theme-secondary">
+                          {p.paintColor || '-'} • {p.packageWeight || '-'}
+                        </td>
+                        <td className="py-3 px-3 font-mono text-emerald-400">+{mv.inQty.toLocaleString()}</td>
+                        <td className="py-3 px-3 font-mono text-amber-400">-{mv.outQty.toLocaleString()}</td>
+                        <td className="py-3 px-3 font-mono font-black text-cyan-400">
+                          {stock.toLocaleString()} {p.unit || 'كرتونة'}
+                        </td>
+                        <td className="py-3 px-3 font-mono text-theme-muted">{min}</td>
+                        <td className="py-3 px-3 font-mono text-emerald-400">
+                          {Number(p.salePrice || p.salePriceSdg || 0).toLocaleString()}
+                        </td>
+                        <td className="py-3 px-3 font-mono text-amber-400">
+                          {Number(p.salePriceEgp || 0).toLocaleString()}
+                        </td>
+                        <td className="py-3 px-3">
+                          {isLow ? (
+                            <GlassBadge variant="gold">
+                              <AlertTriangle className="w-3 h-3 ml-1 inline" />
+                              تحت حد الطلب
+                            </GlassBadge>
+                          ) : (
+                            <GlassBadge variant="green">متوفر</GlassBadge>
+                          )}
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="flex items-center gap-1.5">
+                            {(canCreate || canEdit) && (
+                              <button
+                                type="button"
+                                onClick={() => openQuickAdjustModal(p, 'SET')}
+                                className="p-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400"
+                                title="تعديل الرصيد الفعلي"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                            )}
+                            {canDelete && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteProduct(p)}
+                                className="p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400"
+                                title="حذف الصنف"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
                       </tr>
                     );
                   })}
+                  {filteredProducts.length === 0 && (
+                    <tr>
+                      <td colSpan={11} className="py-8 text-center text-theme-muted">
+                        لا توجد أصناف مطابقة للبحث
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -410,284 +736,406 @@ export const WarehousesModuleView: React.FC = () => {
         </div>
       )}
 
-      {subTab === 'NEW_PRODUCT_SUPPLY' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <GlassCard className="p-6 lg:col-span-7">
-            <h3 className="text-sm font-bold text-theme-primary mb-4 flex items-center gap-2">
-              <Plus className="w-4 h-4 text-pmp-primary" />
-              إضافة صنف منتج تام جديد + رصيد افتتاحي
-            </h3>
-            <form onSubmit={handleCreateProductAndSupply} className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="sm:col-span-2">
-                <label className="block font-bold text-theme-secondary mb-1">اسم الصنف *</label>
-                <input
-                  type="text"
-                  required
-                  value={prodForm.name}
-                  onChange={(e) => setProdForm({ ...prodForm, name: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-theme-secondary mb-1">SKU / الكود</label>
-                <input
-                  type="text"
-                  value={prodForm.sku}
-                  onChange={(e) => setProdForm({ ...prodForm, sku: e.target.value })}
-                  placeholder="تلقائي عند الترك فارغاً"
-                  className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary font-mono"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-theme-secondary mb-1">اللون والوزن</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <select
-                    value={prodForm.paintColor}
-                    onChange={(e) => setProdForm({ ...prodForm, paintColor: e.target.value })}
-                    className="px-2 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-                  >
-                    <option value="أبيض">أبيض</option>
-                    <option value="ألوان">ألوان</option>
-                    <option value="فضي">فضي</option>
-                    <option value="ذهبي">ذهبي</option>
-                    <option value="ورنيش">ورنيش</option>
-                  </select>
-                  <select
-                    value={prodForm.packageWeight}
-                    onChange={(e) => setProdForm({ ...prodForm, packageWeight: e.target.value })}
-                    className="px-2 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-                  >
-                    <option value="250">250جم</option>
-                    <option value="900">900جم</option>
-                    <option value="4000">4000جم</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block font-bold text-theme-secondary mb-1">سعر البيع (SDG)</label>
-                <input
-                  type="number"
-                  required
-                  value={prodForm.salePrice}
-                  onChange={(e) => setProdForm({ ...prodForm, salePrice: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary font-mono"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-theme-secondary mb-1">سعر البيع (EGP)</label>
-                <input
-                  type="number"
-                  required
-                  value={prodForm.salePriceEgp}
-                  onChange={(e) => setProdForm({ ...prodForm, salePriceEgp: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary font-mono"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-theme-secondary mb-1">الكمية الافتتاحية</label>
-                <input
-                  type="number"
-                  value={prodForm.initialQty}
-                  onChange={(e) => setProdForm({ ...prodForm, initialQty: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary font-mono"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-theme-secondary mb-1">حد إعادة الطلب</label>
-                <input
-                  type="number"
-                  value={prodForm.minimumStock}
-                  onChange={(e) => setProdForm({ ...prodForm, minimumStock: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary font-mono"
-                />
-              </div>
-              <div className="sm:col-span-2 flex justify-end pt-2">
-                <GlassButton type="submit" variant="primary" disabled={!canModifyInventory}>
-                  حفظ الصنف وتوريد الرصيد
-                </GlassButton>
-              </div>
-            </form>
-          </GlassCard>
+      {/* SUB-TAB 2: WAREHOUSES DIRECTORY */}
+      {subTab === 'WAREHOUSES_DIR' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {warehouseSummaries.map((ws) => {
+              const w = ws.warehouse;
+              return (
+                <GlassCard key={w.id} className="p-5 flex flex-col justify-between gap-3">
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <span className="text-[11px] font-mono text-cyan-400">{w.code}</span>
+                        <h3 className="text-base font-black text-theme-primary">{w.name}</h3>
+                      </div>
+                      <GlassBadge variant="cyan">{w.branch}</GlassBadge>
+                    </div>
+                    <p className="text-xs text-theme-secondary">الموقع: {w.location || w.branch}</p>
+                    <p className="text-xs text-theme-muted">المسؤول: {w.manager || 'أمين المستودع'}</p>
 
-          <GlassCard className="p-6 lg:col-span-5">
-            <h3 className="text-sm font-bold text-theme-primary mb-4 flex items-center gap-2">
-              <ArrowUpDown className="w-4 h-4 text-pmp-cyan" />
-              حركة توريد / صرف مخزني سريع
-            </h3>
-            <form onSubmit={handleRecordStockMove} className="space-y-3 text-xs">
-              <select
-                value={moveForm.productId}
-                onChange={(e) => setMoveForm({ ...moveForm, productId: Number(e.target.value) })}
-                className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-              >
-                {products.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} (الحالي: {productStocks.get(Number(p.id)) ?? 0})
-                  </option>
-                ))}
-              </select>
-              <select
-                value={moveForm.warehouseId}
-                onChange={(e) => setMoveForm({ ...moveForm, warehouseId: Number(e.target.value) })}
-                className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-              >
-                {warehouses.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name}
-                  </option>
-                ))}
-              </select>
-              <div className="grid grid-cols-2 gap-2">
-                <select
-                  value={moveForm.kind}
-                  onChange={(e) => setMoveForm({ ...moveForm, kind: e.target.value as any })}
-                  className="px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-                >
-                  <option value="IN">توريد للمخزن (IN)</option>
-                  <option value="OUT">صرف من المخزن (OUT)</option>
-                  <option value="RETURN_IN">مرتجع مبيعات (RETURN_IN)</option>
-                </select>
+                    <div className="grid grid-cols-3 gap-2 pt-2 border-t border-theme text-center">
+                      <div className="p-2 rounded-lg bg-theme-base">
+                        <div className="text-[10px] text-theme-muted">الرصيد المتاح</div>
+                        <div className="text-xs font-black font-mono text-cyan-400 mt-0.5">
+                          {ws.netCartons.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="p-2 rounded-lg bg-theme-base">
+                        <div className="text-[10px] text-theme-muted">الوارد (+)</div>
+                        <div className="text-xs font-bold font-mono text-emerald-400 mt-0.5">
+                          +{ws.inQty.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="p-2 rounded-lg bg-theme-base">
+                        <div className="text-[10px] text-theme-muted">المنصرف (-)</div>
+                        <div className="text-xs font-bold font-mono text-amber-400 mt-0.5">
+                          -{ws.outQty.toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <GlassButton
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      setSelectedWarehouseFilter(Number(w.id));
+                      setSubTab('BALANCES');
+                    }}
+                    className="w-full justify-center"
+                  >
+                    عرض جرد وأرصدة هذا المستودع ({ws.distinctProductsCount} صنف)
+                  </GlassButton>
+                </GlassCard>
+              );
+            })}
+          </div>
+
+          <GlassCard className="p-5">
+            <h3 className="text-sm font-black text-theme-primary mb-4">إضافة مستودع / مخزن فرعي جديد</h3>
+            <form onSubmit={handleAddWarehouse} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-theme-secondary mb-1">اسم المستودع</label>
                 <input
-                  type="number"
+                  type="text"
                   required
-                  placeholder="الكمية"
-                  value={moveForm.quantity}
-                  onChange={(e) => setMoveForm({ ...moveForm, quantity: e.target.value })}
-                  className="px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary font-mono"
+                  value={whName}
+                  onChange={(e) => setWhName(e.target.value)}
+                  placeholder="مثال: مخزن عطبرة الرئيسي"
+                  className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
                 />
               </div>
-              <input
-                type="text"
-                placeholder="ملاحظة الحركة"
-                value={moveForm.note}
-                onChange={(e) => setMoveForm({ ...moveForm, note: e.target.value })}
-                className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-              />
-              <GlassButton type="submit" variant="primary" className="w-full justify-center" disabled={!canModifyInventory}>
-                ترحيل الحركة المخزنية
+              <div>
+                <label className="block text-theme-secondary mb-1">الفرع</label>
+                <select
+                  value={whBranch}
+                  onChange={(e) => setWhBranch(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+                >
+                  <option value="الخرطوم">الخرطوم</option>
+                  <option value="القاهرة">القاهرة</option>
+                  <option value="وادي حلفا">وادي حلفا</option>
+                  <option value="عطبرة">عطبرة</option>
+                  <option value="بورتسودان">بورتسودان</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-theme-secondary mb-1">العنوان / الموقع التفصيلي</label>
+                <input
+                  type="text"
+                  value={whLocation}
+                  onChange={(e) => setWhLocation(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+                />
+              </div>
+              <GlassButton type="submit" variant="primary" className="w-full justify-center">
+                حفظ المستودع
               </GlassButton>
             </form>
           </GlassCard>
         </div>
       )}
 
-      {subTab === 'WAREHOUSES_DIR' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <GlassCard className="p-6 lg:col-span-5">
-            <h3 className="text-sm font-bold text-theme-primary mb-4 flex items-center gap-2">
-              <Building className="w-4 h-4 text-pmp-primary" />
-              إضافة مستودع / مخزن جديد
-            </h3>
-            <form onSubmit={handleCreateWarehouse} className="space-y-3 text-xs">
-              <input
-                type="text"
-                required
-                placeholder="اسم المخزن *"
-                value={whForm.name}
-                onChange={(e) => setWhForm({ ...whForm, name: e.target.value })}
-                className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-              />
-              <select
-                value={whForm.warehouseType}
-                onChange={(e) => setWhForm({ ...whForm, warehouseType: e.target.value as any })}
-                className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-              >
-                <option value="مبيعات">مخزن مبيعات</option>
-                <option value="داخل المصنع/إنتاج">داخل المصنع / إنتاج</option>
-                <option value="مواد خام">مخزن مواد خام</option>
-              </select>
-              <select
-                value={whForm.currency}
-                onChange={(e) => setWhForm({ ...whForm, currency: e.target.value as CurrencyCode })}
-                className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-              >
-                <option value="SDG">SDG</option>
-                <option value="EGP">EGP</option>
-                <option value="USD">USD</option>
-              </select>
-              <select
-                value={whForm.linkedCashbox}
-                onChange={(e) => setWhForm({ ...whForm, linkedCashbox: e.target.value })}
-                className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
-              >
-                <option value="">-- الخزنة المرتبطة --</option>
-                {cashboxes.map((c) => (
-                  <option key={c.name} value={c.name}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-              <GlassButton type="submit" variant="primary" className="w-full justify-center" disabled={!canModifyInventory}>
-                حفظ المخزن
+      {/* SUB-TAB 3: STOCK MOVES */}
+      {subTab === 'STOCK_MOVES' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <GlassCard className="p-5">
+            <h3 className="text-sm font-black text-theme-primary mb-4">تسجيل إذن وارد / منصرف / تعديل جرد</h3>
+            <form onSubmit={handleRecordStockMove} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-theme-secondary mb-1">الصنف</label>
+                <select
+                  value={moveProductId}
+                  onChange={(e) => setMoveProductId(Number(e.target.value))}
+                  className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+                >
+                  {computedProducts.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} — ({p.packageWeight}) [المتاح: {p.currentStock}]
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-theme-secondary mb-1">المستودع</label>
+                <select
+                  value={moveWarehouseId}
+                  onChange={(e) => setMoveWarehouseId(Number(e.target.value))}
+                  className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+                >
+                  {warehouses.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name} ({w.branch})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-theme-secondary mb-1">نوع الحركة</label>
+                  <select
+                    value={moveKind}
+                    onChange={(e) => setMoveKind(e.target.value as 'IN' | 'OUT' | 'SET')}
+                    className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+                  >
+                    <option value="IN">وارد للمخزن (+)</option>
+                    <option value="OUT">منصرف من المخزن (-)</option>
+                    <option value="SET">تثبيت الرصيد الفعلي (=)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-theme-secondary mb-1">
+                    {moveKind === 'SET' ? 'الرصيد الفعلي الجديد' : 'الكمية'}
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    required
+                    value={moveQty}
+                    onChange={(e) => setMoveQty(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary font-mono"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-theme-secondary mb-1">ملاحظات / رقم الإذن</label>
+                <input
+                  type="text"
+                  value={moveNote}
+                  onChange={(e) => setMoveNote(e.target.value)}
+                  placeholder="مثال: استلام من خط الإنتاج أو تسوية جرد"
+                  className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+                />
+              </div>
+              <GlassButton type="submit" variant="primary" className="w-full justify-center">
+                اعتماد حركة المخزون
               </GlassButton>
             </form>
           </GlassCard>
 
-          <GlassCard className="p-6 lg:col-span-7">
-            <h4 className="text-sm font-bold text-theme-primary mb-3">المخازن المسجلة ({warehouses.length})</h4>
-            <div className="space-y-2 text-xs">
-              {warehouses.map((w) => (
-                <div key={w.id} className="p-3 rounded-xl bg-theme-base border border-theme flex justify-between items-center">
-                  <div>
-                    <span className="font-bold text-theme-primary block">{w.name}</span>
-                    <span className="text-[11px] text-theme-muted">
-                      {w.warehouseType} • الخزنة: {w.linkedCashbox || '-'}
-                    </span>
-                  </div>
-                  <GlassBadge variant="cyan">{w.currency}</GlassBadge>
-                </div>
-              ))}
+          <GlassCard className="p-5 lg:col-span-2">
+            <h3 className="text-sm font-black text-theme-primary mb-4">سجل حركات المخزون الفوري</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs text-right">
+                <thead>
+                  <tr className="border-b border-theme text-theme-muted">
+                    <th className="py-2.5 px-3">التاريخ</th>
+                    <th className="py-2.5 px-3">الصنف</th>
+                    <th className="py-2.5 px-3">المستودع</th>
+                    <th className="py-2.5 px-3">النوع</th>
+                    <th className="py-2.5 px-3">الكمية</th>
+                    <th className="py-2.5 px-3">البيان</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {[...stockMoves]
+                    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+                    .map((m) => {
+                      const isIn = isStockInMoveKind(m.kind);
+                      return (
+                        <tr key={m.id} className="hover:bg-white/[0.02]">
+                          <td className="py-2.5 px-3 font-mono text-theme-muted">
+                            {new Date(m.timestamp || Date.now()).toLocaleDateString('ar-EG')}
+                          </td>
+                          <td className="py-2.5 px-3 font-bold text-theme-primary">{m.productName}</td>
+                          <td className="py-2.5 px-3 text-theme-secondary">{m.warehouseName}</td>
+                          <td className="py-2.5 px-3">
+                            <GlassBadge variant={isIn ? 'green' : 'gold'}>
+                              {isIn ? 'وارد (+)' : 'منصرف (-)'}
+                            </GlassBadge>
+                          </td>
+                          <td className="py-2.5 px-3 font-mono font-bold">
+                            {isIn ? '+' : '-'}
+                            {Math.abs(Number(m.quantity || 0)).toLocaleString()}
+                          </td>
+                          <td className="py-2.5 px-3 text-theme-secondary">{m.note}</td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
             </div>
           </GlassCard>
         </div>
       )}
 
-      {subTab === 'STOCK_MOVES' && (
-        <GlassCard className="p-0 overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-right border-collapse text-xs min-w-[600px]">
-              <thead>
-                <tr className="bg-theme-surface/80 border-b border-theme text-theme-muted">
-                  <th className="py-3 px-4">النوع</th>
-                  <th className="py-3 px-4">الصنف</th>
-                  <th className="py-3 px-4">المخزن</th>
-                  <th className="py-3 px-4">الكمية</th>
-                  <th className="py-3 px-4">البيان</th>
-                  <th className="py-3 px-4">بواسطة</th>
-                  {canDelete && <th className="py-3 px-4">حذف</th>}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-theme">
-                {sortedMoves.map((sm) => (
-                  <tr key={sm.id}>
-                    <td className="py-3 px-4">
-                      <GlassBadge variant={sm.kind === 'IN' || sm.kind === 'RETURN_IN' ? 'green' : 'red'}>
-                        {sm.kind}
-                      </GlassBadge>
-                    </td>
-                    <td className="py-3 px-4 font-bold">{productNameMap.get(Number(sm.productId)) || `#${sm.productId}`}</td>
-                    <td className="py-3 px-4 text-theme-secondary">{warehouseNameMap.get(Number(sm.warehouseId)) || `#${sm.warehouseId}`}</td>
-                    <td className="py-3 px-4 font-mono font-bold">{sm.quantity}</td>
-                    <td className="py-3 px-4 text-theme-muted">{sm.note}</td>
-                    <td className="py-3 px-4 text-theme-muted">{sm.createdBy}</td>
-                    {canDelete && (
-                      <td className="py-3 px-4">
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteStockMove(sm)}
-                          className="p-1.5 text-red-400 hover:bg-red-500/10 rounded-lg"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      {/* SUB-TAB 4: ADD PRODUCT */}
+      {subTab === 'ADD_PRODUCT' && (
+        <GlassCard className="p-6 max-w-2xl">
+          <h3 className="text-base font-black text-theme-primary mb-4">تعريف صنف جديد في كتالوج المنتجات</h3>
+          <form onSubmit={handleAddProduct} className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            <div>
+              <label className="block text-theme-secondary mb-1">اسم الصنف</label>
+              <input
+                type="text"
+                required
+                value={prodForm.name}
+                onChange={(e) => setProdForm({ ...prodForm, name: e.target.value })}
+                placeholder="مثال: معجون حراري PMP أبيض"
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+              />
+            </div>
+            <div>
+              <label className="block text-theme-secondary mb-1">كود الصنف (SKU)</label>
+              <input
+                type="text"
+                value={prodForm.sku}
+                onChange={(e) => setProdForm({ ...prodForm, sku: e.target.value })}
+                placeholder="اختياري — يولد تلقائياً"
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-theme-secondary mb-1">اللون</label>
+              <input
+                type="text"
+                value={prodForm.paintColor}
+                onChange={(e) => setProdForm({ ...prodForm, paintColor: e.target.value })}
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+              />
+            </div>
+            <div>
+              <label className="block text-theme-secondary mb-1">وزن العبوة</label>
+              <select
+                value={prodForm.packageWeight}
+                onChange={(e) => setProdForm({ ...prodForm, packageWeight: e.target.value })}
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+              >
+                <option value="250 جم">250 جم</option>
+                <option value="900 جم">900 جم</option>
+                <option value="4000 جم">4000 جم (جالون)</option>
+                <option value="18 كجم">18 كجم (بستلة)</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-theme-secondary mb-1">سعر الكرتونة (SDG)</label>
+              <input
+                type="number"
+                value={prodForm.salePrice}
+                onChange={(e) => setProdForm({ ...prodForm, salePrice: e.target.value })}
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-theme-secondary mb-1">سعر الكرتونة (EGP)</label>
+              <input
+                type="number"
+                value={prodForm.salePriceEgp}
+                onChange={(e) => setProdForm({ ...prodForm, salePriceEgp: e.target.value })}
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-theme-secondary mb-1">الرصيد الافتتاحي (كرتونة)</label>
+              <input
+                type="number"
+                value={prodForm.initialStock}
+                onChange={(e) => setProdForm({ ...prodForm, initialStock: e.target.value })}
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-theme-secondary mb-1">حد إعادة الطلب</label>
+              <input
+                type="number"
+                value={prodForm.minLevel}
+                onChange={(e) => setProdForm({ ...prodForm, minLevel: e.target.value })}
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary font-mono"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <GlassButton type="submit" variant="primary" className="w-full justify-center">
+                حفظ الصنف في الكتالوج السحابي
+              </GlassButton>
+            </div>
+          </form>
         </GlassCard>
       )}
+
+      {/* Quick Stock Adjustment Modal */}
+      <Modal
+        isOpen={isQuickAdjustOpen}
+        onClose={() => setIsQuickAdjustOpen(false)}
+        title="تحديث رصيد الصنف في المخزن"
+      >
+        <form onSubmit={handleRecordStockMove} className="space-y-3 text-xs">
+          <div>
+            <label className="block text-theme-secondary mb-1">الصنف المختار</label>
+            <select
+              value={moveProductId}
+              onChange={(e) => setMoveProductId(Number(e.target.value))}
+              className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+            >
+              {computedProducts.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.packageWeight}) — الرصيد الحالي: {p.currentStock}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-theme-secondary mb-1">المستودع</label>
+            <select
+              value={moveWarehouseId}
+              onChange={(e) => setMoveWarehouseId(Number(e.target.value))}
+              className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+            >
+              {warehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name} ({w.branch})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-theme-secondary mb-1">نوع العملية</label>
+              <select
+                value={moveKind}
+                onChange={(e) => setMoveKind(e.target.value as 'IN' | 'OUT' | 'SET')}
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+              >
+                <option value="SET">تثبيت الرصيد الفعلي الجديد (=)</option>
+                <option value="IN">إضافة كمية واردة (+)</option>
+                <option value="OUT">خصم كمية منصرفة (-)</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-theme-secondary mb-1">
+                {moveKind === 'SET' ? 'الرصيد الفعلي (كرتونة)' : 'الكمية (كرتونة)'}
+              </label>
+              <input
+                type="number"
+                min="0"
+                required
+                value={moveQty}
+                onChange={(e) => setMoveQty(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary font-mono"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-theme-secondary mb-1">البيان / السبب</label>
+            <input
+              type="text"
+              value={moveNote}
+              onChange={(e) => setMoveNote(e.target.value)}
+              placeholder="مثال: مطابقة الجرد الفعلي مع المستودع"
+              className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <GlassButton type="button" variant="secondary" onClick={() => setIsQuickAdjustOpen(false)}>
+              إلغاء
+            </GlassButton>
+            <GlassButton type="submit" variant="primary">
+              حفظ وتحديث الرصيد فوراً
+            </GlassButton>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 };

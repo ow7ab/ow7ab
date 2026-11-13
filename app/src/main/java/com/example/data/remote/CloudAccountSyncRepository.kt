@@ -66,7 +66,7 @@ data class LinkedAccountModel(
     val userCode: String = "",
     val ownerId: String = "",
     val linkedUid: String = "",
-    val clusterCode: String = "PMP-ERP-V16-CLUSTER",
+    val clusterCode: String = "PMP-ERP-MAIN-CLUSTER",
     val fullName: String = "",
     val username: String = "",
     val role: String = "",
@@ -142,7 +142,7 @@ class CloudAccountSyncRepository(
         permissions: String,
         serverSyncToken: String,
         linkedUid: String = "",
-        clusterCode: String = "PMP-ERP-V16-CLUSTER",
+        clusterCode: String = "PMP-ERP-MAIN-CLUSTER",
         active: Boolean = true
     ): Result<String> {
         val uid = currentUid ?: return Result.failure(IllegalStateException("يرجى تسجيل الدخول السحابي عبر Google أولاً لتفعيل المزامنة"))
@@ -156,7 +156,7 @@ class CloudAccountSyncRepository(
                 userCode = cleanCode,
                 ownerId = uid,
                 linkedUid = targetLinkedUid,
-                clusterCode = clusterCode.trim().ifBlank { "PMP-ERP-V16-CLUSTER" },
+                clusterCode = clusterCode.trim().ifBlank { "PMP-ERP-MAIN-CLUSTER" },
                 fullName = fullName.trim().take(120),
                 username = username.trim().take(60),
                 role = role.trim().take(80),
@@ -225,7 +225,7 @@ class CloudAccountSyncRepository(
     suspend fun syncLocalAccountToCloud(
         account: UserAccountEntity,
         targetLinkedUid: String = "",
-        clusterCode: String = "PMP-ERP-V16-CLUSTER"
+        clusterCode: String = "PMP-ERP-MAIN-CLUSTER"
     ): Result<String> {
         val uid = currentUid ?: return Result.failure(IllegalStateException("يرجى تسجيل الدخول السحابي عبر Google أولاً"))
         val cleanCode = account.userCode.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")

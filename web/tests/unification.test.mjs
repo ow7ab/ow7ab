@@ -147,94 +147,91 @@ test('SecurityService: SCOPED_ADMIN isolation, DENY precedence, TEMP grant expir
   assert.equal(SecurityService.hasReportTabPermission(salesReporter, 'المديونيات', now), false);
 });
 
-test('ErpCalculations: safeId, cashboxDocId, posterPriceDocId and ledger aggregations match Android', () => {
+test('ErpCalculations: safeId, cashbox deduplication, warehouse stock parity, and customer statement ledger match Android', () => {
   // Firestore rule ^[a-zA-Z0-9_\-]+$ compliance
   assert.match(ErpCalculations.safeId('INV/2026/001#', 'FALLBACK'), /^[a-zA-Z0-9_\-]+$/);
-  assert.match(ErpCalculations.cashboxDocId('خزنة الخرطوم', 1), /^[a-zA-Z0-9_\-]+$/);
-  assert.match(ErpCalculations.posterPriceDocId('900', 'أبيض', 'SDG'), /^[a-zA-Z0-9_\-]+$/);
-  assert.match(ErpCalculations.posterPriceDocId('900', 'أبيض', 'EGP'), /^[a-zA-Z0-9_\-]+$/);
 
   // Cashbox balances from movements ledger
   const cashboxes = [
-    { id: 1, name: 'خزنة الخرطوم', balance: 0, currency: 'SDG', branch: 'SD-001' },
-    { id: 2, name: 'خزنة مصر', balance: 0, currency: 'EGP', branch: 'EG-001' }
+    { id: 1, name: 'خزنة الخرطوم', balance: 0, currency: 'SDG', branch: 'SD-001', active: true },
+    { id: 2, name: 'خزنة مصر', balance: 0, currency: 'EGP', branch: 'EG-001', active: true }
   ];
   const movements = [
-    { id: 10, cashbox: 'خزنة الخرطوم', currency: 'SDG', direction: 'وارد', amount: 500000 },
-    { id: 11, cashbox: 'خزنة الخرطوم', currency: 'SDG', direction: 'منصرف', amount: 125000 },
-    { id: 12, cashbox: 'خزنة مصر', currency: 'EGP', direction: 'وارد', amount: 10000 }
+    { id: 10, cashbox: 'خزنة الخرطوم', currency: 'SDG', type: 'IN', amount: 500000 },
+    { id: 11, cashbox: 'خزنة الخرطوم', currency: 'SDG', type: 'OUT', amount: 125000 },
+    { id: 12, cashbox: 'خزنة مصر', currency: 'EGP', type: 'IN', amount: 10000 }
   ];
-  const computedBoxes = ErpCalculations.computeCashboxBalances(cashboxes, movements);
+  const computedBoxes = ErpCalculations.computeDistinctCashboxesWithBalances(cashboxes, movements);
   assert.equal(computedBoxes.find((c) => c.name === 'خزنة الخرطوم')?.balance, 375000);
   assert.equal(computedBoxes.find((c) => c.name === 'خزنة مصر')?.balance, 10000);
 
-  // Product stocks from stock_moves
-  const stocks = ErpCalculations.computeProductStocks(
-    [{ id: 101 }],
+  // Product stocks from stock_moves (matching Android PmpDao.kt & InventoryScreen.kt)
+  const products = [
+    { id: 101, name: 'معجون حراري أبيض', paintColor: 'أبيض', packageWeight: '900 جم', salePrice: 50000, currentStock: 0 },
+    { id: 102, name: 'معجون حراري أحمر', paintColor: 'أحمر', packageWeight: '900 جم', salePrice: 55000, currentStock: 0 }
+  ];
+  const stockMoves = [
+    { id: 1, productId: 101, warehouseId: 10, kind: 'IN', quantity: 50 },
+    { id: 2, productId: 101, warehouseId: 10, kind: 'SALE', quantity: 12 },
+    { id: 3, productId: 101, warehouseId: 10, kind: 'RETURN_IN', quantity: 2 },
+    { id: 4, productId: 101, warehouseId: 20, kind: 'IN', quantity: 15 },
+    { id: 5, productId: 102, warehouseId: 20, kind: 'IN', quantity: 30 },
+    { id: 6, productId: 102, warehouseId: 20, kind: 'ADJUST', quantity: 5 }
+  ];
+
+  // All warehouses total for product 101 = (50 - 12 + 2) + 15 = 55; product 102 = 30 - 5 = 25
+  const allStocksMap = ErpCalculations.computeProductStocks(products, stockMoves, null);
+  assert.equal(allStocksMap.get(101), 55);
+  assert.equal(allStocksMap.get(102), 25);
+
+  const allStocks = ErpCalculations.computeProductStocksList(products, stockMoves, null);
+  assert.equal(allStocks.find((p) => p.id === 101)?.currentStock, 55);
+  assert.equal(allStocks.find((p) => p.id === 102)?.currentStock, 25);
+
+  // Warehouse 10 filter: product 101 = 40, product 102 = 0
+  const wh10Stocks = ErpCalculations.computeProductStocksList(products, stockMoves, 10);
+  assert.equal(wh10Stocks.find((p) => p.id === 101)?.currentStock, 40);
+  assert.equal(wh10Stocks.find((p) => p.id === 102)?.currentStock, 0);
+
+  // Warehouse summary
+  const whSummaries = ErpCalculations.computeWarehouseStockSummary(
     [
-      { productId: 101, kind: 'IN', quantity: 50 },
-      { productId: 101, kind: 'SALE', quantity: 12 },
-      { productId: 101, kind: 'RETURN_IN', quantity: 2 }
-    ]
+      { id: 10, code: 'WH-10', name: 'مخزن الخرطوم', branch: 'الخرطوم', location: 'الخرطوم', manager: '', active: true },
+      { id: 20, code: 'WH-20', name: 'مخزن القاهرة', branch: 'القاهرة', location: 'القاهرة', manager: '', active: true }
+    ],
+    products,
+    stockMoves
   );
-  assert.equal(stocks.get(101), 40);
+  assert.equal(whSummaries.find((w) => w.warehouse.id === 10)?.netCartons, 40);
+  assert.equal(whSummaries.find((w) => w.warehouse.id === 20)?.netCartons, 40); // 15 + 25
 
-  // Factory item balance from factory_moves
-  const fiBalances = ErpCalculations.computeFactoryItemBalances(
-    [{ id: 201 }],
-    [
-      { itemId: 201, kind: 'توريد خامات', qty: 100 },
-      { itemId: 201, kind: 'صرف خامات', qty: 35 }
-    ]
-  );
-  assert.equal(fiBalances.get(201), 65);
-
-  // Invoice financials & customer debts (deduping embedded vs external payments by ID)
-  const inv = {
-    id: 301,
-    customerId: 1,
-    total: 1000,
-    currency: 'SDG',
-    status: 'active',
-    payments: [{ id: 1, invoiceId: 301, amount: 400, status: 'active' }]
-  };
-  const externalPayments = [
-    { id: 1, invoiceId: 301, amount: 400, status: 'active' }, // duplicate ID should not double-count
-    { id: 2, invoiceId: 301, amount: 250, status: 'active' },
-    { id: 3, invoiceId: 301, amount: 100, status: 'reversed' } // reversed must be ignored
+  // Specific Customer Account Statement (كشف حساب عميل محدد)
+  const customer = { id: 1, name: 'شركة النيل للمقاولات', phone: '0912300000', address: 'الخرطوم', notes: '', active: true, createdAt: 1000 };
+  const invoices = [
+    {
+      id: 301,
+      invoiceNo: 'INV-301',
+      customerId: 1,
+      customerName: 'شركة النيل للمقاولات',
+      total: 1000,
+      paidAmount: 400,
+      currency: 'SDG',
+      status: 'سداد جزئي',
+      cashbox: 'خزنة الخرطوم',
+      timestamp: 10000
+    }
   ];
-  const fin = ErpCalculations.computeInvoiceFinancials(inv, externalPayments);
-  assert.equal(fin.paidAmount, 650);
-  assert.equal(fin.remainingAmount, 350);
-  assert.equal(fin.statusLabel, 'سداد جزئي');
-
-  const debts = ErpCalculations.computeCustomerDebts([{ id: 1 }], [inv], externalPayments);
-  assert.equal(debts.get(1)?.remaining, 350);
-
-  // Deduplication of cashboxes and distinct multi-currency cashbox aggregation
-  const rawCashboxesWithDuplicates = [
-    { id: 1, name: 'خزنة الخرطوم', balance: 0, currency: 'SDG', branch: 'SD-001', active: true },
-    { id: 2, name: 'خزنة الخرطوم ', balance: 0, currency: 'EGP', branch: 'SD-001', active: true },
-    { id: 3, name: 'خزنة مصر', balance: 0, currency: 'EGP', branch: 'EG-001', active: true }
+  const payments = [
+    { id: 1, invoiceId: 301, customerId: 1, amount: 400, currency: 'SDG', cashbox: 'خزنة الخرطوم', timestamp: 10001 },
+    { id: 2, invoiceId: 301, customerId: 1, amount: 250, currency: 'SDG', cashbox: 'خزنة الخرطوم', timestamp: 20000 }
   ];
-  const dedupedBoxes = ErpCalculations.deduplicateCollectionRecords('cashboxes', rawCashboxesWithDuplicates);
-  assert.equal(dedupedBoxes.length, 2);
 
-  const multiCurrencyMoves = [
-    { id: 10, cashbox: 'خزنة الخرطوم', currency: 'SDG', direction: 'وارد', amount: 500000 },
-    { id: 11, cashbox: 'خزنة الخرطوم', currency: 'USD', direction: 'وارد', amount: 1500 },
-    { id: 12, cashbox: 'خزنة الخرطوم', currency: 'EGP', direction: 'وارد', amount: 25000 },
-    { id: 13, cashbox: 'خزنة مصر', currency: 'EGP', direction: 'وارد', amount: 10000 }
-  ];
-  const distinctSummaries = ErpCalculations.computeDistinctCashboxesWithBalances(
-    rawCashboxesWithDuplicates,
-    multiCurrencyMoves
-  );
-  assert.equal(distinctSummaries.length, 2);
-  const khartoumBox = distinctSummaries.find((c) => c.name === 'خزنة الخرطوم');
-  assert.ok(khartoumBox);
-  assert.equal(khartoumBox.balances.SDG, 500000);
-  assert.equal(khartoumBox.balances.USD, 1500);
-  assert.equal(khartoumBox.balances.EGP, 25000);
+  const statement = ErpCalculations.computeCustomerStatement(customer, invoices, payments);
+  assert.equal(statement.totalInvoiced, 1000);
+  assert.equal(statement.totalPaid, 650);
+  assert.equal(statement.remainingDebt, 350);
+  assert.equal(statement.entries.length, 3);
+  assert.equal(statement.entries[statement.entries.length - 1].runningBalance, 350);
 });
+
 

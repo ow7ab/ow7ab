@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  FileText,
   Plus,
   Search,
   Printer,
@@ -10,7 +9,8 @@ import {
   Trash2,
   XCircle,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  FileText
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
@@ -107,14 +107,24 @@ export const SalesModuleView: React.FC = () => {
   }, [customers, products, warehouses, cashboxes]);
 
   const productStocks = useMemo(
-    () => ErpDataService.computeProductStocks(products, stockMoves),
-    [products, stockMoves]
+    () => ErpDataService.computeProductStocksList(products, stockMoves, invWarehouseId > 0 ? invWarehouseId : null),
+    [products, stockMoves, invWarehouseId]
   );
 
   const customerDebts = useMemo(
-    () => ErpDataService.computeCustomerDebts(customers, invoices, payments),
+    () => ErpDataService.computeCustomerDebtsList(customers, invoices, payments),
     [customers, invoices, payments]
   );
+
+  const selectedLedgerCustomer = useMemo(
+    () => customers.find((c) => Number(c.id) === Number(ledgerCustomerId)) || customers[0] || null,
+    [customers, ledgerCustomerId]
+  );
+
+  const selectedCustomerStatement = useMemo(() => {
+    if (!selectedLedgerCustomer) return null;
+    return ErpDataService.computeCustomerStatement(selectedLedgerCustomer, invoices, payments);
+  }, [selectedLedgerCustomer, invoices, payments]);
 
   const canCreate = canPerformAction(GRANULAR_ACTIONS.CREATE);
   const canDelete = canPerformAction(GRANULAR_ACTIONS.DELETE);
@@ -124,11 +134,26 @@ export const SalesModuleView: React.FC = () => {
     setTimeout(() => setNotice(null), 4000);
   };
 
+  const handleExportSpecificCustomerPdf = (cust: Customer) => {
+    const stmt = ErpDataService.computeCustomerStatement(cust, invoices, payments);
+    ReportExporter.exportCustomerStatementToPrint(stmt);
+  };
+
+  const handleExportSpecificCustomerCsv = (cust: Customer) => {
+    const stmt = ErpDataService.computeCustomerStatement(cust, invoices, payments);
+    ReportExporter.exportCustomerStatementToCsv(stmt);
+  };
+
   const handleAddDraftLine = () => {
-    const prod = products.find((p) => Number(p.id) === Number(pickerProductId));
+    const prod =
+      productStocks.find((p) => Number(p.id) === Number(pickerProductId)) ||
+      products.find((p) => Number(p.id) === Number(pickerProductId));
     const q = Number(pickerQty) || 0;
     if (!prod || q <= 0) return;
-    const price = invCurrency === 'EGP' ? Number(prod.salePriceEgp || prod.salePrice) : Number(prod.salePrice || prod.salePriceSdg || 0);
+    const price =
+      invCurrency === 'EGP'
+        ? Number(prod.salePriceEgp || prod.salePrice)
+        : Number(prod.salePrice || prod.salePriceSdg || 0);
     setDraftLines((prev) => [
       ...prev,
       {
@@ -175,253 +200,255 @@ export const SalesModuleView: React.FC = () => {
         active: true,
         createdAt: now
       };
-      await ErpDataService.saveRecord('customers', `CUST-${finalCustId}`, newCust, userProfile?.username);
+      await ErpDataService.upsertDocument('customers', `CUST-${finalCustId}`, newCust);
     }
 
-    const invoiceNo = `INV-${new Date().getFullYear()}-${String(now).slice(-5)}`;
-    const today = new Date().toISOString().split('T')[0];
-    const actor = userProfile?.fullName || userProfile?.username || 'WEB_SALES';
-    const paidAmt = Math.min(draftNetTotal, Math.max(0, Number(invInitialPaid) || 0));
+    const paidInit = Math.min(draftNetTotal, Math.max(0, Number(invInitialPaid) || 0));
+    const status =
+      paidInit >= draftNetTotal && draftNetTotal > 0
+        ? 'مدفوعة'
+        : paidInit > 0
+        ? 'سداد جزئي'
+        : 'غير مدفوعة';
 
-    const invoiceItems: InvoiceItem[] = draftLines.map((l, idx) => ({
-      id: now + idx + 1,
-      invoiceId: now,
+    const invoiceNo = `INV-${now.toString().slice(-6)}`;
+    const itemsList: InvoiceItem[] = draftLines.map((l) => ({
+      productId: l.productId,
+      warehouseId: l.warehouseId,
       description: l.description,
       quantity: l.quantity,
-      unitPrice: l.unitPrice,
-      lineTotal: l.quantity * l.unitPrice,
-      productId: l.productId,
-      warehouseId: l.warehouseId || null
+      unitPrice: l.unitPrice
     }));
 
-    const initialPayments: InvoicePayment[] =
-      paidAmt > 0
-        ? [
-            {
-              id: now + 100,
-              invoiceId: now,
-              payDate: today,
-              cashbox: invCashbox || cashboxes[0]?.name || 'الخزنة الرئيسية',
-              amount: paidAmt,
-              note: 'دفعة مقدمة عند الإصدار',
-              status: 'active',
-              createdBy: actor,
-              createdAt: now
-            }
-          ]
-        : [];
+    const resolvedCashbox = invCashbox || cashboxes[0]?.name || 'خزنة المبيعات';
 
-    const invoiceDoc: SalesInvoice = {
+    const newInv: SalesInvoice = {
       id: now,
       invoiceNo,
       customerId: finalCustId,
       customerName: custName,
-      invoiceDate: today,
-      currency: invCurrency,
+      branch: userProfile?.branch || 'الخرطوم',
+      warehouseId: invWarehouseId,
       subtotal: draftSubtotal,
-      discount: Number(invDiscount) || 0,
+      discountAmount: Number(invDiscount) || 0,
+      taxAmount: 0,
       total: draftNetTotal,
+      paidAmount: paidInit,
+      currency: invCurrency,
+      status,
+      cashbox: resolvedCashbox,
       notes: invNotes.trim(),
-      status: 'active',
-      createdBy: actor,
-      createdAt: now,
-      paidAmount: paidAmt,
-      remainingAmount: Math.max(0, draftNetTotal - paidAmt),
-      items: invoiceItems,
-      payments: initialPayments
+      itemsJson: JSON.stringify(itemsList),
+      createdBy: userProfile?.fullName || userProfile?.username || 'مبيعات',
+      timestamp: now
     };
 
-    try {
-      const invDocId = safeId(invoiceNo, `INV-${now}`);
-      await ErpDataService.saveRecord('invoices', invDocId, invoiceDoc, userProfile?.username);
+    await ErpDataService.upsertDocument('invoices', invoiceNo, newInv);
 
-      // Deduct stock per line in `stock_moves`
-      await Promise.all(
-        invoiceItems.map((item, idx) => {
-          const smId = now + 200 + idx;
-          const move: StockMove = {
-            id: smId,
-            warehouseId: item.warehouseId || invWarehouseId || 1,
-            productId: Number(item.productId),
-            quantity: item.quantity,
-            kind: 'SALE',
-            invoiceId: now,
-            note: `بيع فاتورة ${invoiceNo}`,
-            createdBy: actor,
-            createdAt: now
-          };
-          return ErpDataService.saveRecord('stock_moves', `SM-${smId}`, move, userProfile?.username);
-        })
-      );
-
-      if (paidAmt > 0 && initialPayments[0]) {
-        const pay = initialPayments[0];
-        const movId = now + 300;
-        const mov: TreasuryMovement = {
-          id: movId,
-          txDate: today,
-          cashbox: pay.cashbox,
-          currency: invCurrency,
-          direction: 'وارد',
-          amount: paidAmt,
-          description: `تحصيل فاتورة ${invoiceNo} — ${custName}`,
-          reference: invoiceNo,
-          createdBy: actor,
-          createdAt: now
-        };
-        await Promise.all([
-          ErpDataService.saveRecord('invoice_payments', `PAY-${pay.id}`, pay, userProfile?.username),
-          ErpDataService.saveRecord('movements', `MOV-${movId}`, mov, userProfile?.username)
-        ]);
-      }
-
-      await ErpDataService.logAudit(
-        userProfile?.username || 'WEB',
-        'CREATE_SALES_INVOICE',
-        `فاتورة ${invoiceNo} للعميل ${custName} بقيمة ${draftNetTotal} ${invCurrency}`
-      );
-      setDraftLines([]);
-      setInvDiscount('0');
-      setInvInitialPaid('0');
-      setInvNotes('');
-      setQuickCustomerName('');
-      setSubTab('INVOICES');
-      showNotice('ok', `تم إصدار الفاتورة ${invoiceNo} وخصم المخزون وتحديث الخزينة`);
-    } catch (err: any) {
-      showNotice('err', err?.message || 'تعذر حفظ الفاتورة');
+    // Deduct stock moves per line
+    const whObj = warehouses.find((w) => Number(w.id) === Number(invWarehouseId));
+    for (let idx = 0; idx < draftLines.length; idx++) {
+      const line = draftLines[idx];
+      const sm: StockMove = {
+        id: now + idx + 1,
+        productId: line.productId,
+        productName: line.description,
+        warehouseId: line.warehouseId,
+        warehouseName: whObj?.name || 'المخزن الرئيسي',
+        kind: 'SALE',
+        quantity: line.quantity,
+        note: `فاتورة مبيعات رقم ${invoiceNo} — العميل: ${custName}`,
+        referenceNo: invoiceNo,
+        actor: userProfile?.fullName || 'مبيعات',
+        timestamp: now
+      };
+      await ErpDataService.upsertDocument('stock_moves', `SM-${now}-${idx}`, sm);
     }
+
+    // Record payment & treasury movement if paidInit > 0
+    if (paidInit > 0) {
+      const payDoc: InvoicePayment = {
+        id: now + 100,
+        invoiceId: now,
+        customerId: finalCustId,
+        amount: paidInit,
+        currency: invCurrency,
+        cashbox: resolvedCashbox,
+        note: `دفعة مقدمة عند إصدار الفاتورة ${invoiceNo}`,
+        receivedBy: userProfile?.fullName || 'أمين الخزنة',
+        timestamp: now
+      };
+      await ErpDataService.upsertDocument('invoice_payments', `PAY-${now + 100}`, payDoc);
+
+      const tm: TreasuryMovement = {
+        id: now + 101,
+        cashbox: resolvedCashbox,
+        type: 'IN',
+        amount: paidInit,
+        currency: invCurrency,
+        category: 'مبيعات نقدية',
+        note: `تحصيل فاتورة مبيعات ${invoiceNo} — ${custName}`,
+        referenceNo: invoiceNo,
+        actor: userProfile?.fullName || 'مبيعات',
+        timestamp: now
+      };
+      await ErpDataService.upsertDocument('movements', `MOV-${now + 101}`, tm);
+    }
+
+    await ErpDataService.logAudit(
+      userProfile?.username || 'sales',
+      'CREATE_INVOICE',
+      `إصدار فاتورة ${invoiceNo} للعميل ${custName} بقيمة ${draftNetTotal.toLocaleString()} ${invCurrency}`
+    );
+
+    setDraftLines([]);
+    setInvDiscount('0');
+    setInvInitialPaid('0');
+    setInvNotes('');
+    setQuickCustomerName('');
+    setSubTab('INVOICES');
+    showNotice('ok', `تم إصدار الفاتورة ${invoiceNo} وخصم المخزون وتحديث الخزنة`);
   };
 
   const handleCollectPayment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!payingInvoice || !canCreate) return;
+    if (!payingInvoice) return;
     const amt = Number(payAmount);
-    if (!Number.isFinite(amt) || amt <= 0) return;
+    if (isNaN(amt) || amt <= 0) {
+      showNotice('err', 'يرجى إدخال مبلغ تحصيل صحيح');
+      return;
+    }
 
     const now = Date.now();
-    const today = new Date().toISOString().split('T')[0];
-    const actor = userProfile?.fullName || userProfile?.username || 'WEB_SALES';
-    const invNo = payingInvoice.invoiceNo || payingInvoice.invoiceNumber || `INV-${payingInvoice.id}`;
+    const newPaid = Number(payingInvoice.paidAmount || 0) + amt;
+    const netTotal = Number(payingInvoice.total || 0);
+    const newStatus = newPaid >= netTotal ? 'مدفوعة' : 'سداد جزئي';
+    const invDocId = (payingInvoice as any)._docId || safeId(payingInvoice.invoiceNo, `INV-${payingInvoice.id}`);
 
-    const payment: InvoicePayment = {
+    const payDoc: InvoicePayment = {
       id: now,
-      invoiceId: payingInvoice.id,
-      payDate: today,
-      cashbox: payCashbox || cashboxes[0]?.name || 'الخزنة الرئيسية',
+      invoiceId: Number(payingInvoice.id),
+      customerId: Number(payingInvoice.customerId),
       amount: amt,
-      note: payNote.trim() || `تحصيل دفعة من فاتورة ${invNo}`,
-      status: 'active',
-      createdBy: actor,
-      createdAt: now
+      currency: payingInvoice.currency,
+      cashbox: payCashbox || payingInvoice.cashbox || 'خزنة المبيعات',
+      note: payNote.trim() || `تحصيل دفعة على فاتورة ${payingInvoice.invoiceNo}`,
+      receivedBy: userProfile?.fullName || 'أمين الخزنة',
+      timestamp: now
     };
 
-    const mov: TreasuryMovement = {
+    const tm: TreasuryMovement = {
       id: now + 1,
-      txDate: today,
-      cashbox: payment.cashbox,
-      currency: payingInvoice.currency || 'SDG',
-      direction: 'وارد',
+      cashbox: payDoc.cashbox,
+      type: 'IN',
       amount: amt,
-      description: `تحصيل مديونية فاتورة ${invNo} — ${payingInvoice.customerName}`,
-      reference: invNo,
-      createdBy: actor,
-      createdAt: now
+      currency: payingInvoice.currency,
+      category: 'تحصيل عملاء',
+      note: `تحصيل فاتورة ${payingInvoice.invoiceNo} — ${payingInvoice.customerName}`,
+      referenceNo: payingInvoice.invoiceNo,
+      actor: userProfile?.fullName || 'أمين الخزنة',
+      timestamp: now
     };
 
-    try {
-      const updatedInvPayments = [...(payingInvoice.payments || []), payment];
-      const invDocId = (payingInvoice as any)._docId || safeId(invNo, `INV-${payingInvoice.id}`);
-      await Promise.all([
-        ErpDataService.saveRecord('invoice_payments', `PAY-${payment.id}`, payment, userProfile?.username),
-        ErpDataService.saveRecord('movements', `MOV-${mov.id}`, mov, userProfile?.username),
-        ErpDataService.saveRecord('invoices', invDocId, { payments: updatedInvPayments }, userProfile?.username)
-      ]);
-      setPayingInvoice(null);
-      setPayAmount('');
-      setPayNote('');
-      showNotice('ok', `تم تحصيل ${amt.toLocaleString()} ${payingInvoice.currency} وإيداعها في الخزنة`);
-    } catch (err: any) {
-      showNotice('err', err?.message || 'تعذر تسجيل التحصيل');
-    }
+    await Promise.all([
+      ErpDataService.upsertDocument('invoices', invDocId, {
+        ...payingInvoice,
+        paidAmount: newPaid,
+        status: newStatus
+      }),
+      ErpDataService.upsertDocument('invoice_payments', `PAY-${now}`, payDoc),
+      ErpDataService.upsertDocument('movements', `MOV-${now + 1}`, tm)
+    ]);
+
+    setPayingInvoice(null);
+    setPayAmount('');
+    setPayNote('');
+    showNotice('ok', `تم تحصيل ${amt.toLocaleString()} ${payingInvoice.currency} وتحديث رصيد العميل والخزنة`);
   };
 
   const handleCancelInvoice = async (inv: SalesInvoice) => {
-    if (!canDelete || inv.status === 'cancelled') return;
-    const invDocId = (inv as any)._docId || safeId(inv.invoiceNo || `INV-${inv.id}`, `INV-${inv.id}`);
-    await ErpDataService.saveRecord(
-      'invoices',
-      invDocId,
-      { status: 'cancelled', cancelReason: `إلغاء بواسطة ${userProfile?.username || 'WEB'}` },
-      userProfile?.username
-    );
+    if (!canDelete || inv.status === 'ملغاة') return;
+    const invDocId = (inv as any)._docId || safeId(inv.invoiceNo, `INV-${inv.id}`);
+    await ErpDataService.upsertDocument('invoices', invDocId, {
+      ...inv,
+      status: 'ملغاة'
+    });
     showNotice('ok', `تم إلغاء الفاتورة ${inv.invoiceNo}`);
   };
 
   const handleSaveCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canCreate || !custForm.name.trim()) return;
-    const id = Date.now();
-    const record: Customer = {
-      id,
+    const now = Date.now();
+    const cust: Customer = {
+      id: now,
       name: custForm.name.trim(),
       phone: custForm.phone.trim(),
       address: custForm.address.trim(),
       notes: custForm.notes.trim(),
       active: true,
-      createdAt: id
+      createdAt: now
     };
-    await ErpDataService.saveRecord('customers', `CUST-${id}`, record, userProfile?.username);
+    await ErpDataService.upsertDocument('customers', `CUST-${now}`, cust);
     setCustForm({ name: '', phone: '', address: '', notes: '' });
-    showNotice('ok', `تمت إضافة العميل "${record.name}"`);
+    showNotice('ok', `تم حفظ العميل "${cust.name}" في الدليل السحابي`);
   };
 
   const filteredInvoices = useMemo(() => {
     return [...invoices]
-      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
       .filter((inv) => {
-        const invNo = inv.invoiceNo || inv.invoiceNumber || '';
-        const fin = ErpDataService.computeInvoiceFinancials(inv, payments);
-        const matchesSearch =
+        const matchSearch =
           !searchTerm ||
-          invNo.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          (inv.customerName || '').toLowerCase().includes(searchTerm.toLowerCase());
-        const matchesStatus = statusFilter === 'ALL' || fin.statusLabel === statusFilter;
-        return matchesSearch && matchesStatus;
+          inv.invoiceNo?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          inv.customerName?.toLowerCase().includes(searchTerm.toLowerCase());
+        const matchStatus = statusFilter === 'ALL' || inv.status === statusFilter;
+        return matchSearch && matchStatus;
       });
-  }, [invoices, payments, searchTerm, statusFilter]);
+  }, [invoices, searchTerm, statusFilter]);
 
-  const handleExportCsv = () => {
+  const handleExportInvoicesCsv = () => {
     const headers = ['رقم الفاتورة', 'التاريخ', 'العميل', 'الصافي', 'المدفوع', 'المتبقي', 'العملة', 'الحالة'];
     const rows = filteredInvoices.map((inv) => {
-      const fin = ErpDataService.computeInvoiceFinancials(inv, payments);
+      const total = Number(inv.total || 0);
+      const paid = Number(inv.paidAmount || 0);
+      const rem = Math.max(0, total - paid);
       return [
-        inv.invoiceNo || inv.invoiceNumber || '-',
-        inv.invoiceDate || inv.date || '-',
+        inv.invoiceNo,
+        new Date(inv.timestamp || Date.now()).toLocaleDateString('ar-EG'),
         inv.customerName,
-        Number(inv.total ?? inv.finalAmount ?? 0),
-        fin.paidAmount,
-        fin.remainingAmount,
+        total,
+        paid,
+        rem,
         inv.currency,
-        fin.statusLabel
+        inv.status
       ];
     });
-    ReportExporter.exportToCsv('pmp_sales_invoices', headers, rows);
+    ReportExporter.exportToCsv('سجل_فواتير_المبيعات', headers, rows);
   };
 
-  const handlePrint = () => {
-    const headers = ['الفاتورة', 'العميل', 'الصافي', 'المدفوع', 'المتبقي', 'الحالة'];
+  const handlePrintInvoices = () => {
+    const headers = ['رقم الفاتورة', 'التاريخ', 'العميل', 'الصافي', 'المدفوع', 'المتبقي', 'الحالة'];
     const rows = filteredInvoices.map((inv) => {
-      const fin = ErpDataService.computeInvoiceFinancials(inv, payments);
+      const total = Number(inv.total || 0);
+      const paid = Number(inv.paidAmount || 0);
+      const rem = Math.max(0, total - paid);
       return [
-        inv.invoiceNo || inv.invoiceNumber || '-',
+        inv.invoiceNo,
+        new Date(inv.timestamp || Date.now()).toLocaleDateString('ar-EG'),
         inv.customerName,
-        `${Number(inv.total ?? inv.finalAmount ?? 0).toLocaleString()} ${inv.currency}`,
-        fin.paidAmount.toLocaleString(),
-        fin.remainingAmount.toLocaleString(),
-        fin.statusLabel
+        `${total.toLocaleString()} ${inv.currency}`,
+        paid.toLocaleString(),
+        rem.toLocaleString(),
+        inv.status
       ];
     });
-    ReportExporter.exportToPrint('سجل فواتير المبيعات - PMP PAINTS', headers, rows);
+    ReportExporter.exportToPrint(
+      'سجل فواتير المبيعات — PMP PAINTS',
+      `إجمالي الفواتير: ${filteredInvoices.length}`,
+      headers,
+      rows
+    );
   };
 
   return (
@@ -436,15 +463,15 @@ export const SalesModuleView: React.FC = () => {
               <GlassBadge variant="red">{invoices.length} فاتورة</GlassBadge>
             </div>
             <p className="text-xs text-theme-secondary mt-1">
-              سجل الفواتير، إنشاء فاتورة جديدة بخصم المخزون، كشف حساب المديونيات، ودليل العملاء.
+              سجل الفواتير، إنشاء فاتورة جديدة بخصم المخزون، كشف حساب العميل وتصديره، ودليل العملاء.
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <GlassButton variant="secondary" icon={<FileSpreadsheet className="w-4 h-4" />} onClick={handleExportCsv} className="text-xs">
-              Excel / CSV
+            <GlassButton variant="secondary" icon={<FileSpreadsheet className="w-4 h-4" />} onClick={handleExportInvoicesCsv} className="text-xs">
+              تصدير الفواتير Excel
             </GlassButton>
-            <GlassButton variant="secondary" icon={<Printer className="w-4 h-4" />} onClick={handlePrint} className="text-xs">
-              طباعة
+            <GlassButton variant="secondary" icon={<Printer className="w-4 h-4" />} onClick={handlePrintInvoices} className="text-xs">
+              طباعة السجل
             </GlassButton>
           </div>
         </div>
@@ -454,7 +481,7 @@ export const SalesModuleView: React.FC = () => {
           {[
             { id: 'INVOICES' as SalesSubTab, label: `سجل الفواتير (${invoices.length})` },
             { id: 'NEW_INVOICE' as SalesSubTab, label: '+ فاتورة بيع جديدة' },
-            { id: 'CUSTOMER_LEDGER' as SalesSubTab, label: 'كشف حساب عميل ومديونيات' },
+            { id: 'CUSTOMER_LEDGER' as SalesSubTab, label: 'كشف حساب العميل وتصديره' },
             { id: 'CUSTOMERS' as SalesSubTab, label: `دليل العملاء (${customers.length})` }
           ].map((t) => (
             <button
@@ -463,7 +490,7 @@ export const SalesModuleView: React.FC = () => {
               onClick={() => setSubTab(t.id)}
               className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${
                 subTab === t.id
-                  ? 'bg-pmp-primary text-white shadow-md'
+                  ? 'bg-red-600 text-white shadow-md'
                   : 'bg-theme-base border border-theme text-theme-secondary hover:text-theme-primary'
               }`}
             >
@@ -475,7 +502,7 @@ export const SalesModuleView: React.FC = () => {
 
       {notice && (
         <div
-          className={`p-3.5 rounded-xl border text-xs flex items-center gap-2 ${
+          className={`p-3.5 rounded-xl border text-xs flex items-center gap-2 font-bold ${
             notice.type === 'ok'
               ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
               : 'bg-red-500/10 border-red-500/30 text-red-400'
@@ -532,53 +559,54 @@ export const SalesModuleView: React.FC = () => {
                 </thead>
                 <tbody className="divide-y divide-theme">
                   {filteredInvoices.map((inv) => {
-                    const fin = ErpDataService.computeInvoiceFinancials(inv, payments);
-                    const total = Number(inv.total ?? inv.finalAmount ?? 0);
+                    const total = Number(inv.total || 0);
+                    const paid = Number(inv.paidAmount || 0);
+                    const rem = Math.max(0, total - paid);
                     return (
                       <tr key={inv.id} className="hover:bg-theme-surface/40">
                         <td className="py-3 px-4 font-mono font-bold text-pmp-primary">
-                          {inv.invoiceNo || inv.invoiceNumber}
+                          {inv.invoiceNo}
                         </td>
                         <td className="py-3 px-4 font-bold text-theme-primary">{inv.customerName}</td>
                         <td className="py-3 px-4 font-mono font-bold">
                           {total.toLocaleString()} {inv.currency}
                         </td>
                         <td className="py-3 px-4 font-mono text-emerald-400">
-                          {fin.paidAmount.toLocaleString()}
+                          {paid.toLocaleString()}
                         </td>
                         <td className="py-3 px-4 font-mono text-amber-400">
-                          {fin.remainingAmount.toLocaleString()}
+                          {rem.toLocaleString()}
                         </td>
                         <td className="py-3 px-4">
                           <GlassBadge
                             variant={
-                              fin.statusLabel === 'مدفوعة'
+                              inv.status === 'مدفوعة'
                                 ? 'green'
-                                : fin.statusLabel === 'سداد جزئي'
+                                : inv.status === 'سداد جزئي'
                                 ? 'gold'
                                 : 'red'
                             }
                           >
-                            {fin.statusLabel}
+                            {inv.status}
                           </GlassBadge>
                         </td>
                         <td className="py-3 px-4 font-mono text-theme-muted">
-                          {inv.invoiceDate || inv.date}
+                          {new Date(inv.timestamp || Date.now()).toLocaleDateString('ar-EG')}
                         </td>
                         <td className="py-3 px-4 flex items-center gap-1.5">
-                          {fin.remainingAmount > 0 && inv.status !== 'cancelled' && canCreate && (
+                          {rem > 0 && inv.status !== 'ملغاة' && canCreate && (
                             <button
                               type="button"
                               onClick={() => {
                                 setPayingInvoice(inv);
-                                setPayAmount(String(fin.remainingAmount));
+                                setPayAmount(String(rem));
                               }}
-                              className="px-2 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 font-bold hover:bg-emerald-500/25"
+                              className="px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 font-bold hover:bg-emerald-500/25"
                             >
                               تحصيل
                             </button>
                           )}
-                          {canDelete && inv.status !== 'cancelled' && (
+                          {canDelete && inv.status !== 'ملغاة' && (
                             <button
                               type="button"
                               onClick={() => handleCancelInvoice(inv)}
@@ -592,6 +620,13 @@ export const SalesModuleView: React.FC = () => {
                       </tr>
                     );
                   })}
+                  {filteredInvoices.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="py-8 text-center text-theme-muted">
+                        لا توجد فواتير مطابقة للبحث
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -670,12 +705,11 @@ export const SalesModuleView: React.FC = () => {
                     onChange={(e) => setPickerProductId(Number(e.target.value))}
                     className="w-full px-3 py-2 rounded-lg bg-theme-surface border border-theme text-theme-primary"
                   >
-                    {products.map((p) => {
-                      const stk = productStocks.get(Number(p.id)) ?? 0;
+                    {productStocks.map((p) => {
                       const price = invCurrency === 'EGP' ? p.salePriceEgp : p.salePrice;
                       return (
                         <option key={p.id} value={p.id}>
-                          {p.name} — الرصيد: {stk} — السعر: {price} {invCurrency}
+                          {p.name} — الرصيد المتاح: {p.currentStock} — السعر: {price} {invCurrency}
                         </option>
                       );
                     })}
@@ -769,9 +803,9 @@ export const SalesModuleView: React.FC = () => {
                   ))}
                 </select>
               </div>
-              <div className="p-2.5 rounded-xl bg-pmp-primary/10 border border-pmp-primary/30 flex flex-col justify-center">
+              <div className="p-2.5 rounded-xl bg-red-600/10 border border-red-500/30 flex flex-col justify-center">
                 <span className="text-[10px] text-theme-muted">صافي الفاتورة</span>
-                <span className="text-base font-black text-pmp-primary font-mono">
+                <span className="text-base font-black text-red-400 font-mono">
                   {draftNetTotal.toLocaleString()} {invCurrency}
                 </span>
               </div>
@@ -786,60 +820,243 @@ export const SalesModuleView: React.FC = () => {
         </GlassCard>
       )}
 
-      {/* Sub-tab 3: Customer Ledger / Debts */}
+      {/* Sub-tab 3: Specific Customer Account Statement & Debts Ledger */}
       {subTab === 'CUSTOMER_LEDGER' && (
-        <GlassCard className="p-6 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h3 className="text-sm font-bold text-theme-primary flex items-center gap-2">
-              <Wallet className="w-4 h-4 text-pmp-gold" />
-              كشف حساب العملاء والمديونيات القائمة
-            </h3>
-            <select
-              value={ledgerCustomerId}
-              onChange={(e) => setLedgerCustomerId(Number(e.target.value))}
-              className="px-3 py-2 rounded-xl bg-theme-base border border-theme text-xs text-theme-primary"
-            >
-              {customers.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="space-y-6">
+          {/* Specific Customer Account Statement Card */}
+          <GlassCard className="p-6 space-y-5 border-r-4 border-r-red-500">
+            <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 pb-4 border-b border-theme">
+              <div className="space-y-1">
+                <h3 className="text-base font-black text-theme-primary flex items-center gap-2">
+                  <FileText className="w-5 h-5 text-red-500" />
+                  <span>كشف حساب عميل محدد وتصدير رسمي (PDF / Excel)</span>
+                </h3>
+                <p className="text-xs text-theme-secondary">
+                  اختر العميل لعرض جميع فواتيره المسحوبة ودفعاته المسددة والرصيد التراكمي وتصدير كشف حسابه المعتمد فوراً.
+                </p>
+              </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-right text-xs min-w-[500px]">
-              <thead>
-                <tr className="border-b border-theme text-theme-muted">
-                  <th className="py-2">العميل</th>
-                  <th className="py-2">إجمالي الفواتير</th>
-                  <th className="py-2">إجمالي المسدد</th>
-                  <th className="py-2">المديونية المتبقية</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-theme">
-                {customers.map((c) => {
-                  const debt = customerDebts.get(Number(c.id)) || {
-                    totalInvoiced: 0,
-                    totalPaid: 0,
-                    remaining: 0,
-                    primaryCurrency: 'SDG'
-                  };
-                  return (
-                    <tr key={c.id}>
-                      <td className="py-2.5 font-bold text-theme-primary">{c.name}</td>
-                      <td className="py-2.5 font-mono">{debt.totalInvoiced.toLocaleString()} {debt.primaryCurrency}</td>
-                      <td className="py-2.5 font-mono text-emerald-400">{debt.totalPaid.toLocaleString()}</td>
-                      <td className={`py-2.5 font-mono font-bold ${debt.remaining > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                        {debt.remaining.toLocaleString()} {debt.primaryCurrency}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </GlassCard>
+              <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto">
+                <select
+                  value={ledgerCustomerId}
+                  onChange={(e) => setLedgerCustomerId(Number(e.target.value))}
+                  className="px-3.5 py-2 rounded-xl bg-theme-base border border-theme text-xs font-bold text-theme-primary min-w-[220px]"
+                >
+                  {customers.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} {c.phone ? `— ${c.phone}` : ''}
+                    </option>
+                  ))}
+                </select>
+
+                {selectedCustomerStatement && (
+                  <>
+                    <GlassButton
+                      variant="primary"
+                      icon={<Printer className="w-4 h-4" />}
+                      onClick={() => ReportExporter.exportCustomerStatementToPrint(selectedCustomerStatement)}
+                      className="text-xs"
+                    >
+                      طباعة / تصدير كشف حساب العميل PDF
+                    </GlassButton>
+                    <GlassButton
+                      variant="secondary"
+                      icon={<FileSpreadsheet className="w-4 h-4" />}
+                      onClick={() => ReportExporter.exportCustomerStatementToCsv(selectedCustomerStatement)}
+                      className="text-xs"
+                    >
+                      تصدير كشف العميل Excel / CSV
+                    </GlassButton>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {selectedCustomerStatement ? (
+              <div className="space-y-5">
+                {/* Customer Info & 4 KPI Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="p-4 rounded-xl bg-theme-base border border-theme">
+                    <span className="text-[11px] text-theme-muted block">بيانات العميل المختار</span>
+                    <span className="text-sm font-black text-theme-primary block mt-1">
+                      {selectedCustomerStatement.customer.name}
+                    </span>
+                    <span className="text-[11px] text-theme-secondary block mt-0.5 font-mono">
+                      {selectedCustomerStatement.customer.phone || 'بدون هاتف'} •{' '}
+                      {selectedCustomerStatement.customer.address || 'العنوان غير محدد'}
+                    </span>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-theme-base border border-theme">
+                    <span className="text-[11px] text-theme-muted block">إجمالي الفواتير المسحوبة (مدين +)</span>
+                    <span className="text-lg font-black text-amber-400 font-mono block mt-1">
+                      {selectedCustomerStatement.totalInvoiced.toLocaleString()} {selectedCustomerStatement.currency}
+                    </span>
+                    <span className="text-[10px] text-theme-muted">
+                      عدد الفواتير: {selectedCustomerStatement.invoiceCount}
+                    </span>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-theme-base border border-theme">
+                    <span className="text-[11px] text-theme-muted block">إجمالي الدفعات المسددة (دائن -)</span>
+                    <span className="text-lg font-black text-emerald-400 font-mono block mt-1">
+                      {selectedCustomerStatement.totalPaid.toLocaleString()} {selectedCustomerStatement.currency}
+                    </span>
+                    <span className="text-[10px] text-theme-muted">
+                      عدد الدفعات: {selectedCustomerStatement.paymentCount}
+                    </span>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-red-600/10 border border-red-500/30">
+                    <span className="text-[11px] text-theme-secondary block">صافي المديونية المتبقية على العميل</span>
+                    <span className="text-lg font-black text-red-400 font-mono block mt-1">
+                      {selectedCustomerStatement.remainingDebt.toLocaleString()} {selectedCustomerStatement.currency}
+                    </span>
+                    <span className="text-[10px] text-theme-muted">
+                      {selectedCustomerStatement.remainingDebt > 0 ? 'مستحق السداد' : 'خالص الذمة المالية'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Chronological Ledger Table for Selected Customer */}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-right text-xs min-w-[700px]">
+                    <thead>
+                      <tr className="border-b border-theme text-theme-muted bg-theme-base/60">
+                        <th className="py-2.5 px-3">#</th>
+                        <th className="py-2.5 px-3">التاريخ</th>
+                        <th className="py-2.5 px-3">نوع الحركة</th>
+                        <th className="py-2.5 px-3">المرجع / الفاتورة</th>
+                        <th className="py-2.5 px-3">البيان والتفاصيل</th>
+                        <th className="py-2.5 px-3">مدين (+)</th>
+                        <th className="py-2.5 px-3">دائن (-)</th>
+                        <th className="py-2.5 px-3">الرصيد التراكمي</th>
+                        <th className="py-2.5 px-3">الحالة / الخزنة</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-theme">
+                      {selectedCustomerStatement.entries.map((entry, idx) => (
+                        <tr key={entry.id} className="hover:bg-white/[0.02]">
+                          <td className="py-2.5 px-3 font-mono text-theme-muted">{idx + 1}</td>
+                          <td className="py-2.5 px-3 font-mono text-theme-secondary">{entry.dateFormatted}</td>
+                          <td className="py-2.5 px-3">
+                            <GlassBadge variant={entry.kind === 'INVOICE' ? 'gold' : 'green'}>
+                              {entry.typeLabel}
+                            </GlassBadge>
+                          </td>
+                          <td className="py-2.5 px-3 font-mono font-bold text-theme-primary">{entry.referenceNo}</td>
+                          <td className="py-2.5 px-3 text-theme-secondary">{entry.description}</td>
+                          <td className="py-2.5 px-3 font-mono font-bold text-amber-400">
+                            {entry.debit > 0 ? `${entry.debit.toLocaleString()} ${entry.currency}` : '—'}
+                          </td>
+                          <td className="py-2.5 px-3 font-mono font-bold text-emerald-400">
+                            {entry.credit > 0 ? `${entry.credit.toLocaleString()} ${entry.currency}` : '—'}
+                          </td>
+                          <td className="py-2.5 px-3 font-mono font-black text-red-400">
+                            {entry.runningBalance.toLocaleString()} {entry.currency}
+                          </td>
+                          <td className="py-2.5 px-3 text-theme-muted">{entry.statusOrCashbox}</td>
+                        </tr>
+                      ))}
+                      {selectedCustomerStatement.entries.length === 0 && (
+                        <tr>
+                          <td colSpan={9} className="py-8 text-center text-theme-muted">
+                            لا توجد حركات مالية (فواتير أو دفعات سداد) مسجلة لهذا العميل حتى الآن.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="py-8 text-center text-xs text-theme-muted">
+                يرجى اختيار عميل لعرض وتصدير كشف الحساب التفصيلي.
+              </div>
+            )}
+          </GlassCard>
+
+          {/* All Customers Summary Table with 1-Click Statement Export per Customer */}
+          <GlassCard className="p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h3 className="text-sm font-bold text-theme-primary flex items-center gap-2">
+                <Wallet className="w-4 h-4 text-amber-400" />
+                <span>ملخص أرصدة ومديونيات جميع العملاء ({customerDebts.length})</span>
+              </h3>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-xs min-w-[640px]">
+                <thead>
+                  <tr className="border-b border-theme text-theme-muted">
+                    <th className="py-2.5 px-3">العميل</th>
+                    <th className="py-2.5 px-3">الهاتف</th>
+                    <th className="py-2.5 px-3">إجمالي الفواتير</th>
+                    <th className="py-2.5 px-3">إجمالي المسدد</th>
+                    <th className="py-2.5 px-3">المديونية المتبقية</th>
+                    <th className="py-2.5 px-3">تصدير كشف حساب العميل</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-theme">
+                  {customerDebts.map((c) => {
+                    const isSelected = Number(c.id) === Number(ledgerCustomerId);
+                    return (
+                      <tr
+                        key={c.id}
+                        className={isSelected ? 'bg-red-600/10' : 'hover:bg-white/[0.02]'}
+                      >
+                        <td className="py-2.5 px-3 font-bold text-theme-primary">{c.name}</td>
+                        <td className="py-2.5 px-3 font-mono text-theme-secondary">{c.phone || '-'}</td>
+                        <td className="py-2.5 px-3 font-mono">
+                          {c.totalInvoiced.toLocaleString()} {c.currency}
+                        </td>
+                        <td className="py-2.5 px-3 font-mono text-emerald-400">
+                          {c.totalPaid.toLocaleString()} {c.currency}
+                        </td>
+                        <td
+                          className={`py-2.5 px-3 font-mono font-bold ${
+                            c.remainingDebt > 0 ? 'text-amber-400' : 'text-emerald-400'
+                          }`}
+                        >
+                          {c.remainingDebt.toLocaleString()} {c.currency}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setLedgerCustomerId(Number(c.id))}
+                              className="px-2.5 py-1 rounded-lg bg-theme-base border border-theme text-theme-primary hover:border-red-500 text-[11px] font-bold"
+                            >
+                              عرض الكشف
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleExportSpecificCustomerPdf(c)}
+                              className="px-2.5 py-1 rounded-lg bg-red-600/15 hover:bg-red-600/25 text-red-400 border border-red-500/30 text-[11px] font-bold flex items-center gap-1"
+                              title="طباعة وتصدير كشف حساب هذا العميل PDF"
+                            >
+                              <Printer className="w-3 h-3" />
+                              <span>PDF</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleExportSpecificCustomerCsv(c)}
+                              className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 text-[11px] font-bold flex items-center gap-1"
+                              title="تصدير كشف حساب هذا العميل Excel / CSV"
+                            >
+                              <FileSpreadsheet className="w-3 h-3" />
+                              <span>Excel</span>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </GlassCard>
+        </div>
       )}
 
       {/* Sub-tab 4: Customers Directory */}
@@ -887,7 +1104,7 @@ export const SalesModuleView: React.FC = () => {
           </GlassCard>
 
           <GlassCard className="p-6 lg:col-span-8">
-            <h4 className="text-sm font-bold text-theme-primary mb-3">قائمة العملاء ({customers.length})</h4>
+            <h4 className="text-sm font-bold text-theme-primary mb-3">قائمة العملاء ({customerDebts.length})</h4>
             <div className="overflow-x-auto">
               <table className="w-full text-right text-xs">
                 <thead>
@@ -896,22 +1113,48 @@ export const SalesModuleView: React.FC = () => {
                     <th className="py-2">الهاتف</th>
                     <th className="py-2">العنوان</th>
                     <th className="py-2">المديونية</th>
+                    <th className="py-2">كشف الحساب</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-theme">
-                  {customers.map((c) => {
-                    const debt = customerDebts.get(Number(c.id));
-                    return (
-                      <tr key={c.id}>
-                        <td className="py-2.5 font-bold">{c.name}</td>
-                        <td className="py-2.5 font-mono text-theme-secondary">{c.phone || '-'}</td>
-                        <td className="py-2.5 text-theme-muted">{c.address || '-'}</td>
-                        <td className="py-2.5 font-mono text-amber-400">
-                          {(debt?.remaining || 0).toLocaleString()} {debt?.primaryCurrency || 'SDG'}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {customerDebts.map((c) => (
+                    <tr key={c.id}>
+                      <td className="py-2.5 font-bold">{c.name}</td>
+                      <td className="py-2.5 font-mono text-theme-secondary">{c.phone || '-'}</td>
+                      <td className="py-2.5 text-theme-muted">{c.address || '-'}</td>
+                      <td className="py-2.5 font-mono text-amber-400">
+                        {c.remainingDebt.toLocaleString()} {c.currency}
+                      </td>
+                      <td className="py-2.5">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLedgerCustomerId(Number(c.id));
+                              setSubTab('CUSTOMER_LEDGER');
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-theme-base border border-theme text-theme-primary hover:border-red-500 text-[11px] font-bold"
+                          >
+                            فتح الكشف
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExportSpecificCustomerPdf(c)}
+                            className="px-2 py-1 rounded-lg bg-red-600/15 text-red-400 border border-red-500/30 text-[11px] font-bold"
+                          >
+                            PDF
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExportSpecificCustomerCsv(c)}
+                            className="px-2 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[11px] font-bold"
+                          >
+                            Excel
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>

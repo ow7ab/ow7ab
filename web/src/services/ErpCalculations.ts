@@ -1,23 +1,197 @@
-/**
- * Pure, deterministic ERP calculation & ID normalization helpers shared between
- * `ErpDataService.ts`, UI modules, and automated Node.js unit tests.
- * Mirrors Android `PmpViewModel.kt` & `CloudErpSyncRepository.kt`.
- */
-
 import {
   Cashbox,
-  TreasuryMovement,
-  Product,
-  StockMove,
+  CurrencyCode,
+  Customer,
   FactoryItem,
   FactoryMove,
-  SalesInvoice,
   InvoicePayment,
-  Customer,
-  PurchaseInvoice,
-  Supplier,
-  CurrencyCode
+  Product,
+  SalesInvoice,
+  StockMove,
+  TreasuryMovement,
+  Warehouse
 } from '../types/erp';
+
+export function safeId(raw: string, fallback: string): string {
+  const cleaned = String(raw ?? '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned.length > 0 ? cleaned.slice(0, 100) : fallback;
+}
+
+export function cashboxDocId(name: string, id: number): string {
+  const map: Record<string, string> = {
+    'خزنة الخرطوم': 'CB-KHARTOUM',
+    'خزنة السودان': 'CB-SUDAN',
+    'خزنة مصر': 'CB-EGYPT',
+    'خزنة القاهرة': 'CB-CAIRO',
+    'خزنة حلفا': 'CB-HALFA',
+    'مخزن عطبرة': 'CB-ATBARA',
+    'خزنة الدولار': 'CB-USD'
+  };
+  const trimmed = String(name || '').trim();
+  if (map[trimmed]) return map[trimmed];
+  return safeId(`CB-${id || 1}`, `CB-${id || 1}`);
+}
+
+export function posterPriceDocId(weight: string, kind: string, currency: CurrencyCode = 'SDG'): string {
+  const w = safeId(weight, '900');
+  const k = encodeURIComponent(String(kind || '').trim()).replace(/%/g, '_');
+  const suffix = currency === 'EGP' ? '_EGP' : '';
+  return safeId(`PP_${w}_${k}${suffix}`, `PP_${w}_${currency}`);
+}
+
+export function normalizeArabicText(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .toLowerCase();
+}
+
+export function normalizeEntityKey(value: unknown): string {
+  return normalizeArabicText(value).replace(/[^a-z0-9\u0600-\u06ff]/g, '');
+}
+
+export function resolveCanonicalCurrency(rawCurrency: unknown, fallbackName?: unknown): CurrencyCode {
+  const clean = String(rawCurrency ?? '').trim().toUpperCase();
+  if (clean === 'USD' || clean.includes('دولار') || clean.includes('$')) return 'USD';
+  if (clean === 'EGP' || clean.includes('مصري')) return 'EGP';
+  if (clean === 'SDG' || clean.includes('سودان')) return 'SDG';
+
+  const nameHint = String(fallbackName ?? '').trim().toUpperCase();
+  if (nameHint.includes('USD') || nameHint.includes('دولار')) return 'USD';
+  if (nameHint.includes('EGP') || nameHint.includes('مصري') || nameHint.includes('قاهر') || nameHint.includes('مصر')) {
+    return 'EGP';
+  }
+  return 'SDG';
+}
+
+export function isStockInMoveKind(rawKind: unknown): boolean {
+  const kind = String(rawKind ?? '').trim().toUpperCase();
+  return (
+    kind === 'IN' ||
+    kind === 'RETURN' ||
+    kind === 'RETURN_IN' ||
+    kind === 'CANCEL' ||
+    kind === 'وارد' ||
+    kind === 'مرتجع' ||
+    kind === 'توريد' ||
+    kind === 'إضافة' ||
+    kind === 'اضافة'
+  );
+}
+
+/**
+ * Deduplicates Firestore collection documents so repeated seeding or legacy sync IDs
+ * never produce duplicate rows in UI tables or double-counted KPIs.
+ */
+export function deduplicateCollectionRecords<T = any>(collectionName: string, items: T[]): T[] {
+  if (!Array.isArray(items) || items.length <= 1) return items || [];
+
+  const map = new Map<string, T>();
+
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const raw = item as Record<string, any>;
+    let key = '';
+
+    switch (collectionName) {
+      case 'cashboxes': {
+        const nameKey = normalizeEntityKey(raw.name || `cashbox_${raw.id}`);
+        key = nameKey;
+        break;
+      }
+      case 'warehouses': {
+        if (raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== '') {
+          key = `id:${Number(raw.id)}`;
+        } else {
+          key = normalizeEntityKey(raw.name) || `wh_${raw._docId}`;
+        }
+        break;
+      }
+      case 'products': {
+        if (raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== '') {
+          key = `id:${Number(raw.id)}`;
+        } else {
+          const nameKey = normalizeEntityKey(raw.name);
+          const weightKey = normalizeEntityKey(raw.packageWeight);
+          const colorKey = normalizeEntityKey(raw.paintColor);
+          key = `${nameKey}__${weightKey}__${colorKey}` || `prod_${raw._docId}`;
+        }
+        break;
+      }
+      case 'stock_moves': {
+        if (raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== '') {
+          key = `id:${raw.id}`;
+        } else {
+          key = `${raw.productId ?? 0}__${raw.warehouseId ?? 0}__${raw.kind ?? ''}__${raw.quantity ?? 0}__${raw.createdAt ?? raw.timestamp ?? 0}`;
+        }
+        break;
+      }
+      case 'customers': {
+        if (raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== '') {
+          key = `id:${Number(raw.id)}`;
+        } else {
+          const nameKey = normalizeEntityKey(raw.name);
+          const phoneKey = String(raw.phone ?? '').replace(/\D/g, '');
+          key = nameKey ? `${nameKey}__${phoneKey}` : `cust_${raw._docId}`;
+        }
+        break;
+      }
+      case 'factory_items':
+      case 'raw_materials': {
+        if (raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== '') {
+          key = `id:${Number(raw.id)}`;
+        } else {
+          key = normalizeEntityKey(raw.name) || `fi_${raw._docId}`;
+        }
+        break;
+      }
+      case 'user_accounts': {
+        const unameKey = normalizeEntityKey(raw.username);
+        const codeKey = normalizeEntityKey(raw.userCode);
+        key = unameKey || codeKey || `usr_${raw.id ?? raw._docId}`;
+        break;
+      }
+      case 'invoices': {
+        const invKey = normalizeEntityKey(raw.invoiceNo || raw.invoiceNumber);
+        key = invKey || `inv_${raw.id ?? raw._docId}`;
+        break;
+      }
+      case 'movements': {
+        const idPart = raw.id !== undefined && raw.id !== null ? String(raw.id) : '';
+        const composite = `${normalizeEntityKey(raw.cashbox)}__${String(raw.direction || raw.type || '').toUpperCase()}__${Number(raw.amount || 0)}__${normalizeEntityKey(raw.description || raw.note)}__${raw.createdAt || raw.timestamp || 0}`;
+        key = idPart ? `id:${idPart}` : composite;
+        break;
+      }
+      default: {
+        key =
+          raw.id !== undefined && raw.id !== null
+            ? `id:${raw.id}`
+            : raw._docId
+            ? `doc:${raw._docId}`
+            : JSON.stringify(raw);
+      }
+    }
+
+    const existing = map.get(key) as Record<string, any> | undefined;
+    if (!existing) {
+      map.set(key, item);
+    } else {
+      const existingTs = Number(existing.updatedAt || existing.timestamp || existing.createdAt || 0);
+      const candidateTs = Number(raw.updatedAt || raw.timestamp || raw.createdAt || 0);
+      if (candidateTs >= existingTs) {
+        map.set(key, { ...existing, ...raw } as T);
+      }
+    }
+  }
+
+  return Array.from(map.values());
+}
 
 export interface DistinctCashboxSummary {
   id: number;
@@ -26,415 +200,212 @@ export interface DistinctCashboxSummary {
   active: boolean;
   primaryCurrency: CurrencyCode;
   primaryBalance: number;
-  balances: {
-    SDG: number;
-    EGP: number;
-    USD: number;
-  };
+  balance?: number;
+  balances: Record<CurrencyCode, number>;
+}
+
+function isMovementInflow(mv: Partial<TreasuryMovement> & Record<string, any>): boolean {
+  const dir = String(mv.direction ?? mv.type ?? '').trim().toUpperCase();
+  return (
+    dir === 'وارد' ||
+    dir === 'IN' ||
+    dir === 'INCOME' ||
+    dir === 'DEPOSIT' ||
+    dir === 'قبض' ||
+    dir === 'توريد' ||
+    dir === 'إيداع'
+  );
 }
 
 /**
- * Normalizes a display name or identifier into a canonical comparison key
- * to prevent duplicate cashboxes, warehouses, products, or accounts.
- */
-export function normalizeEntityKey(raw?: unknown): string {
-  return String(raw ?? '')
-    .trim()
-    .replace(/\s+/g, ' ')
-    .toLowerCase();
-}
-
-function resolveRecordTimestamp(rec: Record<string, any>): number {
-  const u = rec?.updatedAt ?? rec?.serverUpdatedAt ?? rec?.createdAt ?? 0;
-  if (typeof u === 'number' && Number.isFinite(u)) return u;
-  if (u && typeof u.seconds === 'number') return u.seconds * 1000;
-  return 0;
-}
-
-/**
- * Deterministically deduplicates raw Firestore collection documents on read,
- * matching Android `CloudErpSyncRepository.kt` deduplication rules.
- */
-export function deduplicateCollectionRecords<T>(collectionName: string, rawItems: T[]): T[] {
-  if (!Array.isArray(rawItems) || rawItems.length <= 1) return rawItems || [];
-
-  const col = (collectionName || '').trim().toLowerCase();
-
-  // Helper that merges items by a primary key (and optional secondary key), keeping the most recent / complete record
-  const dedupeByKeys = (
-    items: T[],
-    getKey1: (item: any) => string,
-    getKey2?: (item: any) => string
-  ): T[] => {
-    const map = new Map<string, T>();
-    const secondaryToPrimary = new Map<string, string>();
-
-    for (const item of items) {
-      if (!item || typeof item !== 'object') continue;
-      const k1 = getKey1(item);
-      const k2 = getKey2 ? getKey2(item) : '';
-      const resolvedKey = (k1 && map.has(k1))
-        ? k1
-        : (k2 && secondaryToPrimary.has(k2))
-        ? secondaryToPrimary.get(k2)!
-        : k1 || k2;
-
-      if (!resolvedKey) continue;
-
-      const existing = map.get(resolvedKey);
-      if (!existing) {
-        map.set(resolvedKey, item);
-        if (k2) secondaryToPrimary.set(k2, resolvedKey);
-      } else {
-        const existingTs = resolveRecordTimestamp(existing as Record<string, any>);
-        const newTs = resolveRecordTimestamp(item as Record<string, any>);
-        const existingId = Number((existing as any).id || 0);
-        const newId = Number((item as any).id || 0);
-        // Prefer record with newer timestamp, or smaller canonical ID (1..1000) over synthetic timestamp ID
-        const preferNew =
-          newTs > existingTs ||
-          (newTs === existingTs && newId > 0 && (existingId <= 0 || (newId < 100000 && existingId >= 100000)));
-        if (preferNew) {
-          map.set(resolvedKey, { ...existing, ...item });
-        }
-        if (k2) secondaryToPrimary.set(k2, resolvedKey);
-      }
-    }
-
-    return Array.from(map.values());
-  };
-
-  switch (col) {
-    case 'cashboxes':
-      return dedupeByKeys(
-        rawItems,
-        (b) => normalizeEntityKey(b.name),
-        (b) => (b.id !== undefined ? `id:${b.id}` : '')
-      );
-
-    case 'warehouses':
-      return dedupeByKeys(
-        rawItems,
-        (w) => normalizeEntityKey(w.name),
-        (w) => (w.id !== undefined ? `id:${w.id}` : '')
-      );
-
-    case 'products':
-      return dedupeByKeys(
-        rawItems,
-        (p) =>
-          `${normalizeEntityKey(p.name)}__${normalizeEntityKey(p.packageWeight)}__${normalizeEntityKey(
-            p.paintColor
-          )}`,
-        (p) => (p.sku ? `sku:${normalizeEntityKey(p.sku)}` : p.id !== undefined ? `id:${p.id}` : '')
-      );
-
-    case 'customers':
-    case 'suppliers':
-    case 'factory_items':
-    case 'machines':
-      return dedupeByKeys(
-        rawItems,
-        (x) => normalizeEntityKey(x.name),
-        (x) => (x.id !== undefined ? `id:${x.id}` : '')
-      );
-
-    case 'poster_prices':
-      return dedupeByKeys(
-        rawItems,
-        (p) =>
-          `${normalizeEntityKey(p.weightCode)}__${normalizeEntityKey(p.colorName)}__${normalizeEntityKey(
-            p.currency || 'SDG'
-          )}`,
-        (p) => (p.id !== undefined ? `id:${p.id}` : '')
-      );
-
-    case 'user_accounts':
-      return dedupeByKeys(
-        rawItems,
-        (u) => normalizeEntityKey(u.username || u.userCode),
-        (u) => normalizeEntityKey(u.userCode || u.id)
-      );
-
-    case 'movements':
-      return dedupeByKeys(
-        rawItems,
-        (m) => (m.id !== undefined ? `id:${m.id}` : ''),
-        (m) =>
-          m.reference
-            ? `${normalizeEntityKey(m.cashbox)}__${normalizeEntityKey(
-                m.currency || 'SDG'
-              )}__${normalizeEntityKey(m.direction)}__${Number(m.amount || 0)}__${normalizeEntityKey(
-                m.reference
-              )}__${normalizeEntityKey(m.txDate)}`
-            : ''
-      );
-
-    case 'transfers':
-      return dedupeByKeys(
-        rawItems,
-        (t) => (t.id !== undefined ? `id:${t.id}` : ''),
-        (t) =>
-          t.reference
-            ? `${normalizeEntityKey(t.sourceCashbox)}__${normalizeEntityKey(
-                t.destinationCashbox
-              )}__${Number(t.sourceAmount || 0)}__${normalizeEntityKey(t.reference)}`
-            : ''
-      );
-
-    case 'daily_closings':
-      return dedupeByKeys(
-        rawItems,
-        (c) => (c.id !== undefined ? `id:${c.id}` : ''),
-        (c) =>
-          `${normalizeEntityKey(c.cashbox)}__${normalizeEntityKey(c.currency || 'SDG')}__${normalizeEntityKey(
-            c.closeDate
-          )}`
-      );
-
-    case 'invoices':
-    case 'sales_invoices':
-    case 'purchases':
-    case 'purchase_invoices':
-      return dedupeByKeys(
-        rawItems,
-        (inv) => normalizeEntityKey(inv.invoiceNo || inv.invoiceNumber),
-        (inv) => (inv.id !== undefined ? `id:${inv.id}` : '')
-      );
-
-    case 'paint_batches':
-      return dedupeByKeys(
-        rawItems,
-        (b) => normalizeEntityKey(b.batchNumber),
-        (b) => (b.id !== undefined ? `id:${b.id}` : '')
-      );
-
-    case 'lab_formulations':
-      return dedupeByKeys(
-        rawItems,
-        (f) => normalizeEntityKey(f.formulaNo),
-        (f) => (f.id !== undefined ? `id:${f.id}` : '')
-      );
-
-    case 'qc_inspections':
-      return dedupeByKeys(
-        rawItems,
-        (q) => normalizeEntityKey(q.inspectionNumber),
-        (q) => (q.id !== undefined ? `id:${q.id}` : '')
-      );
-
-    default:
-      return dedupeByKeys(
-        rawItems,
-        (item) => (item?.id !== undefined ? `id:${item.id}` : JSON.stringify(item))
-      );
-  }
-}
-
-export function utf8HashHex(str: string): string {
-  let h1 = 0xdeadbeef ^ str.length;
-  let h2 = 0x41c6ce57 ^ str.length;
-  for (let i = 0, ch; i < str.length; i++) {
-    ch = str.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0');
-}
-
-/**
- * Mirrors `CloudErpSyncRepository.kt#safeId` producing Firestore-rule-compliant ASCII IDs (`^[a-zA-Z0-9_\-]+$`).
- */
-export function safeId(raw: string, fallback: string): string {
-  const cleaned = (raw || '')
-    .trim()
-    .replace(/[^a-zA-Z0-9_-]/g, '_')
-    .replace(/^_+|_+$/g, '');
-  const hasAlnum = /[a-zA-Z0-9]/.test(cleaned);
-  return hasAlnum && cleaned.length > 0 ? cleaned.slice(0, 96) : fallback;
-}
-
-export function cashboxDocId(name: string, id: number): string {
-  const cleanName = (name || '').trim();
-  return id > 0 ? `BOX-${id}` : safeId(cleanName, `BOX-H${utf8HashHex(cleanName)}`);
-}
-
-export function posterPriceDocId(weightCode: string, colorName: string, currency = 'SDG'): string {
-  const rawKey = `${weightCode.trim()}_${colorName.trim()}_${currency.trim().toUpperCase()}`;
-  const fallback = `PP-${safeId(weightCode, 'W')}-${utf8HashHex(rawKey)}-${safeId(currency, 'SDG')}`;
-  const candidate = safeId(`PP_${rawKey}`, fallback);
-  return candidate.split('_').filter(Boolean).length >= 3 ? candidate : fallback;
-}
-
-function inferPrimaryCurrencyForCashbox(name: string, explicitCurrency?: string): CurrencyCode {
-  const upper = String(explicitCurrency || '').trim().toUpperCase();
-  if (upper === 'SDG' || upper === 'EGP' || upper === 'USD') {
-    return upper as CurrencyCode;
-  }
-  const cleanName = (name || '').trim();
-  if (cleanName.includes('مصر') || cleanName.includes('القاهرة')) return 'EGP';
-  if (cleanName.includes('دولار') || cleanName.toUpperCase().includes('USD')) return 'USD';
-  return 'SDG';
-}
-
-/**
- * Computes one unified summary record per distinct cashbox name (matching Android's `TreasuryScreen.kt`),
- * with its SDG, EGP, and USD balances aggregated cleanly so cashboxes never duplicate in UI cards or dropdowns.
+ * Deduplicates cashboxes by normalized name and computes multi-currency balances (SDG, EGP, USD)
+ * from `movements` matching Android `PmpDao.kt` (`getAggregatedCashboxBalances`).
  */
 export function computeDistinctCashboxesWithBalances(
   cashboxes: Cashbox[],
   movements: TreasuryMovement[]
 ): DistinctCashboxSummary[] {
-  const uniqueBoxes = deduplicateCollectionRecords('cashboxes', cashboxes);
   const uniqueMovements = deduplicateCollectionRecords('movements', movements);
-
-  // Ledger totals keyed by `${normalizedBoxName}__${currency}`
-  const ledgerSums = new Map<string, number>();
-  const ledgerCounts = new Map<string, number>();
-  // Preserve first-seen display name for any cashbox referenced in movements
-  const displayNamesByNorm = new Map<string, string>();
-
-  uniqueBoxes.forEach((b) => {
-    const clean = (b.name || '').trim();
-    if (clean) displayNamesByNorm.set(normalizeEntityKey(clean), clean);
-  });
-
-  uniqueMovements.forEach((m) => {
-    const rawName = (m.cashbox || '').trim();
-    if (!rawName) return;
-    const normName = normalizeEntityKey(rawName);
-    if (!displayNamesByNorm.has(normName)) {
-      displayNamesByNorm.set(normName, rawName);
+  const grouped = new Map<
+    string,
+    {
+      id: number;
+      name: string;
+      branch: string;
+      active: boolean;
+      primaryCurrency: CurrencyCode;
+      seedBalances: Record<CurrencyCode, number>;
+      computedBalances: Record<CurrencyCode, number>;
+      hasMoves: Record<CurrencyCode, boolean>;
     }
-    const cur = (m.currency || 'SDG').trim().toUpperCase();
-    const key = `${normName}__${cur}`;
-    const amt = Number(m.amount) || 0;
-    const isInflow = m.direction === 'وارد' || (m.direction as string) === 'IN';
-    const delta = isInflow ? amt : -amt;
-    ledgerSums.set(key, (ledgerSums.get(key) || 0) + delta);
-    ledgerCounts.set(key, (ledgerCounts.get(key) || 0) + 1);
-  });
+  >();
 
-  const resultByNorm = new Map<string, DistinctCashboxSummary>();
+  for (const box of cashboxes) {
+    if (!box || !box.name) continue;
+    const nameKey = normalizeEntityKey(box.name);
+    if (!nameKey) continue;
+    const curr = resolveCanonicalCurrency(box.currency, box.name);
 
-  uniqueBoxes.forEach((b, idx) => {
-    const cleanName = (b.name || '').trim();
-    if (!cleanName) return;
-    const normName = normalizeEntityKey(cleanName);
-    const primaryCur = inferPrimaryCurrencyForCashbox(cleanName, b.currency);
+    const existing = grouped.get(nameKey);
+    if (!existing) {
+      const seedBalances: Record<CurrencyCode, number> = { SDG: 0, EGP: 0, USD: 0 };
+      seedBalances[curr] = Number(box.balance || 0);
+      grouped.set(nameKey, {
+        id: Number(box.id || Date.now()),
+        name: String(box.name).trim(),
+        branch: box.branch || 'SD-001',
+        active: box.active !== false,
+        primaryCurrency: curr,
+        seedBalances,
+        computedBalances: { SDG: 0, EGP: 0, USD: 0 },
+        hasMoves: { SDG: false, EGP: false, USD: false }
+      });
+    } else {
+      existing.seedBalances[curr] = Math.max(existing.seedBalances[curr], Number(box.balance || 0));
+    }
+  }
 
-    const getBal = (cur: CurrencyCode): number => {
-      const k = `${normName}__${cur}`;
-      if ((ledgerCounts.get(k) || 0) > 0) {
-        return ledgerSums.get(k) || 0;
-      }
-      return cur === primaryCur ? Number(b.balance) || 0 : 0;
+  for (const mv of uniqueMovements) {
+    if (!mv) continue;
+    const rawName = String(mv.cashbox || mv.cashboxName || '').trim();
+    const nameKey = normalizeEntityKey(rawName);
+    if (!nameKey) continue;
+    const curr = resolveCanonicalCurrency(mv.currency, rawName);
+
+    let entry = grouped.get(nameKey);
+    if (!entry) {
+      entry = {
+        id: Number(mv.id || Date.now()),
+        name: rawName,
+        branch: 'SD-001',
+        active: true,
+        primaryCurrency: curr,
+        seedBalances: { SDG: 0, EGP: 0, USD: 0 },
+        computedBalances: { SDG: 0, EGP: 0, USD: 0 },
+        hasMoves: { SDG: false, EGP: false, USD: false }
+      };
+      grouped.set(nameKey, entry);
+    }
+
+    entry.hasMoves[curr] = true;
+    const amt = Number(mv.amount || 0);
+    if (isMovementInflow(mv)) {
+      entry.computedBalances[curr] += amt;
+    } else {
+      entry.computedBalances[curr] -= amt;
+    }
+  }
+
+  const out: DistinctCashboxSummary[] = [];
+  for (const entry of grouped.values()) {
+    const finalBalances: Record<CurrencyCode, number> = {
+      SDG: entry.hasMoves.SDG ? entry.computedBalances.SDG : entry.seedBalances.SDG,
+      EGP: entry.hasMoves.EGP ? entry.computedBalances.EGP : entry.seedBalances.EGP,
+      USD: entry.hasMoves.USD ? entry.computedBalances.USD : entry.seedBalances.USD
     };
-
-    const balances = {
-      SDG: getBal('SDG'),
-      EGP: getBal('EGP'),
-      USD: getBal('USD')
-    };
-
-    const primaryBalance =
-      balances[primaryCur] !== 0
-        ? balances[primaryCur]
-        : balances.SDG !== 0
-        ? balances.SDG
-        : balances.EGP !== 0
-        ? balances.EGP
-        : balances.USD;
-
-    resultByNorm.set(normName, {
-      id: Number(b.id) || idx + 1,
-      name: cleanName,
-      branch: b.branch || (primaryCur === 'EGP' ? 'EG-001' : 'SD-001'),
-      active: b.active !== false,
-      primaryCurrency: primaryCur,
+    const primaryBalance = finalBalances[entry.primaryCurrency] || 0;
+    out.push({
+      id: entry.id,
+      name: entry.name,
+      branch: entry.branch,
+      active: entry.active,
+      primaryCurrency: entry.primaryCurrency,
       primaryBalance,
-      balances
+      balance: primaryBalance,
+      balances: finalBalances
     });
-  });
+  }
 
-  // Also include any cashbox referenced in movements that wasn't in `cashboxes` collection
-  let extraIdx = uniqueBoxes.length + 100;
-  displayNamesByNorm.forEach((displayName, normName) => {
-    if (resultByNorm.has(normName)) return;
-    const primaryCur = inferPrimaryCurrencyForCashbox(displayName);
-    const balances = {
-      SDG: ledgerSums.get(`${normName}__SDG`) || 0,
-      EGP: ledgerSums.get(`${normName}__EGP`) || 0,
-      USD: ledgerSums.get(`${normName}__USD`) || 0
-    };
-    const primaryBalance =
-      balances[primaryCur] !== 0
-        ? balances[primaryCur]
-        : balances.SDG !== 0
-        ? balances.SDG
-        : balances.EGP !== 0
-        ? balances.EGP
-        : balances.USD;
-
-    resultByNorm.set(normName, {
-      id: extraIdx++,
-      name: displayName,
-      branch: primaryCur === 'EGP' ? 'EG-001' : 'SD-001',
-      active: true,
-      primaryCurrency: primaryCur,
-      primaryBalance,
-      balances
-    });
-  });
-
-  return Array.from(resultByNorm.values());
+  return out;
 }
 
-/**
- * Mirrors Android `PmpViewModel.cashboxBalances`:
- * Computes live balance per (cashboxName, currency) from deduplicated `movements` ledger.
- * Only emits a secondary currency entry for a cashbox if that secondary currency has actual non-zero balance,
- * preventing duplicate empty cashbox entries.
- */
 export function computeCashboxBalances(
   cashboxes: Cashbox[],
   movements: TreasuryMovement[]
 ): Cashbox[] {
   const summaries = computeDistinctCashboxesWithBalances(cashboxes, movements);
-  const result: Cashbox[] = [];
+  return summaries.map((s) => ({
+    id: s.id,
+    name: s.name,
+    branch: s.branch,
+    currency: s.primaryCurrency,
+    balance: s.primaryBalance,
+    active: s.active
+  }));
+}
 
+export function computeCashboxBalancesByCurrency(
+  cashboxes: Cashbox[],
+  movements: TreasuryMovement[]
+): Record<CurrencyCode, number> {
+  const summaries = computeDistinctCashboxesWithBalances(cashboxes, movements);
+  const totals: Record<CurrencyCode, number> = { SDG: 0, EGP: 0, USD: 0 };
   for (const s of summaries) {
-    const currencies: CurrencyCode[] = ['SDG', 'EGP', 'USD'];
-    let emittedAny = false;
+    totals.SDG += Number(s.balances.SDG || 0);
+    totals.EGP += Number(s.balances.EGP || 0);
+    totals.USD += Number(s.balances.USD || 0);
+  }
+  return totals;
+}
 
-    for (const cur of currencies) {
-      const bal = s.balances[cur];
-      if (cur === s.primaryCurrency || bal !== 0) {
-        result.push({
-          id: s.id,
-          name: s.name,
-          currency: cur,
-          balance: bal,
-          branch: s.branch,
-          active: s.active,
-          updatedAt: Date.now()
-        });
-        emittedAny = true;
-      }
+/**
+ * Computes product stock balances as a `Map<number, number>` (`productId -> netQuantity`)
+ * matching Android `PmpDao.kt` (`getAggregatedProductStockBalances`) and `InventoryScreen.kt` 1:1:
+ * - Inflow kinds: `['IN', 'RETURN', 'RETURN_IN', 'CANCEL', 'وارد', 'مرتجع', 'توريد', 'إضافة']` -> +quantity
+ * - All other kinds (`'OUT'`, `'SALE'`, `'ADJUST'`, `'ISSUE'`, `'صرف'`, `'مبيعات'`, etc.) -> -quantity
+ * - Clamped at `>= 0` (`Math.max(0, netBalance)`).
+ */
+export function computeProductStocks(
+  products: Array<Partial<Product> & { id: number }>,
+  stockMoves: Array<Partial<StockMove> & { productId: number; kind: string; quantity: number }>,
+  warehouseIdFilter?: number | null
+): Map<number, number> {
+  const uniqueProducts = deduplicateCollectionRecords('products', products);
+  const uniqueMoves = deduplicateCollectionRecords('stock_moves', stockMoves);
+
+  const filterWhId =
+    warehouseIdFilter !== undefined && warehouseIdFilter !== null && Number(warehouseIdFilter) > 0
+      ? Number(warehouseIdFilter)
+      : null;
+
+  const filteredMoves =
+    filterWhId !== null
+      ? uniqueMoves.filter((sm) => Number(sm.warehouseId) === filterWhId)
+      : uniqueMoves;
+
+  const deltaByProd = new Map<number, { inQty: number; outQty: number; count: number }>();
+
+  for (const sm of filteredMoves) {
+    const pid = Number(sm.productId);
+    if (!pid && pid !== 0) continue;
+    const qty = Math.abs(Number(sm.quantity || 0));
+    const cur = deltaByProd.get(pid) || { inQty: 0, outQty: 0, count: 0 };
+    if (isStockInMoveKind(sm.kind)) {
+      cur.inQty += qty;
+    } else {
+      cur.outQty += qty;
     }
+    cur.count += 1;
+    deltaByProd.set(pid, cur);
+  }
 
-    if (!emittedAny) {
-      result.push({
-        id: s.id,
-        name: s.name,
-        currency: s.primaryCurrency,
-        balance: 0,
-        branch: s.branch,
-        active: s.active,
-        updatedAt: Date.now()
-      });
+  const result = new Map<number, number>();
+
+  for (const p of uniqueProducts) {
+    const pid = Number(p.id);
+    const stats = deltaByProd.get(pid);
+    const net = stats
+      ? Math.max(0, stats.inQty - stats.outQty)
+      : filterWhId === null && uniqueMoves.length === 0
+      ? Math.max(0, Number(p.currentStock || 0))
+      : 0;
+    result.set(pid, net);
+  }
+
+  // Also include any productId present in stockMoves even if not yet in products array
+  for (const [pid, stats] of deltaByProd.entries()) {
+    if (!result.has(pid)) {
+      result.set(pid, Math.max(0, stats.inQty - stats.outQty));
     }
   }
 
@@ -442,207 +413,553 @@ export function computeCashboxBalances(
 }
 
 /**
- * Mirrors Android `PmpViewModel.productStocks`:
- * Aggregates `stock_moves` per `productId`.
+ * Returns `Product[]` with `currentStock` populated from `computeProductStocks(products, stockMoves, warehouseIdFilter)`.
  */
-export function computeProductStocks(
-  products: Pick<Product, 'id' | 'currentStock'>[],
-  stockMoves: Pick<StockMove, 'productId' | 'kind' | 'quantity'>[]
-): Map<number, number> {
-  const uniqueMoves = deduplicateCollectionRecords('stock_moves', stockMoves as any[]);
-  const moveSums = new Map<number, number>();
-  const moveCounts = new Map<number, number>();
+export function computeProductStocksList(
+  products: Product[],
+  stockMoves: StockMove[],
+  warehouseIdFilter?: number | null
+): Product[] {
+  const uniqueProducts = deduplicateCollectionRecords('products', products);
+  const stockMap = computeProductStocks(uniqueProducts, stockMoves, warehouseIdFilter);
 
-  uniqueMoves.forEach((sm) => {
-    const pid = Number(sm.productId);
-    if (!pid) return;
-    const qty = Number(sm.quantity) || 0;
-    const k = (sm.kind || '').trim().toUpperCase();
-    const isOut =
-      k === 'OUT' ||
-      k === 'SALE' ||
-      k === 'ISSUE' ||
-      k === 'صرف' ||
-      k === 'مبيعات' ||
-      k === 'تحويل صادر';
-    const delta = isOut ? -qty : qty;
-    moveSums.set(pid, (moveSums.get(pid) || 0) + delta);
-    moveCounts.set(pid, (moveCounts.get(pid) || 0) + 1);
-  });
-
-  const stockMap = new Map<number, number>();
-  products.forEach((p) => {
+  const mergedBySignature = new Map<string, Product>();
+  for (const p of uniqueProducts) {
     const pid = Number(p.id);
-    const hasMoves = (moveCounts.get(pid) || 0) > 0;
-    stockMap.set(pid, hasMoves ? (moveSums.get(pid) || 0) : (Number(p.currentStock) || 0));
-  });
-
-  moveSums.forEach((val, pid) => {
-    if (!stockMap.has(pid)) {
-      stockMap.set(pid, val);
+    const computedStock = stockMap.get(pid) ?? 0;
+    const sig = `${normalizeEntityKey(p.name)}__${normalizeEntityKey(p.paintColor)}__${normalizeEntityKey(p.packageWeight)}`;
+    const existing = mergedBySignature.get(sig);
+    if (!existing) {
+      mergedBySignature.set(sig, {
+        ...p,
+        currentStock: computedStock
+      });
+    } else {
+      mergedBySignature.set(sig, {
+        ...existing,
+        currentStock: Number(existing.currentStock || 0) + computedStock
+      });
     }
-  });
+  }
 
-  return stockMap;
+  return Array.from(mergedBySignature.values());
 }
 
-/**
- * Mirrors Android `PmpViewModel.factoryItemBalances`:
- * Aggregates `factory_moves` per `itemId`.
- */
-export function computeFactoryItemBalances(
-  items: Pick<FactoryItem, 'id' | 'actualBalance'>[],
-  moves: Pick<FactoryMove, 'itemId' | 'kind' | 'qty'>[]
-): Map<number, number> {
-  const uniqueMoves = deduplicateCollectionRecords('factory_moves', moves as any[]);
-  const moveSums = new Map<number, number>();
-  const moveCounts = new Map<number, number>();
+export interface WarehouseStockSummaryItem {
+  warehouse: Warehouse;
+  inQty: number;
+  outQty: number;
+  netCartons: number;
+  distinctProductsCount: number;
+  totalValueSdg: number;
+}
 
-  uniqueMoves.forEach((fm) => {
-    const itemId = Number(fm.itemId);
-    if (!itemId) return;
-    const qty = Number(fm.qty) || 0;
-    const k = (fm.kind || '').trim();
-    const isAddition =
-      k === 'RAW_PURCHASE' ||
-      k === 'PURCHASE' ||
-      k === 'IN' ||
-      k === 'RETURN' ||
-      k.includes('توريد') ||
-      k.includes('شراء') ||
-      k.includes('إضافة') ||
-      k.includes('وارد') ||
-      k.includes('مرتجع');
-    const delta = isAddition ? qty : -qty;
-    moveSums.set(itemId, (moveSums.get(itemId) || 0) + delta);
-    moveCounts.set(itemId, (moveCounts.get(itemId) || 0) + 1);
-  });
+export function computeWarehouseStockSummary(
+  warehouses: Warehouse[],
+  products: Product[],
+  stockMoves: StockMove[]
+): WarehouseStockSummaryItem[] {
+  const uniqueWarehouses = deduplicateCollectionRecords('warehouses', warehouses);
+  const uniqueProducts = deduplicateCollectionRecords('products', products);
+  const uniqueMoves = deduplicateCollectionRecords('stock_moves', stockMoves);
 
-  const result = new Map<number, number>();
-  items.forEach((item) => {
-    const id = Number(item.id);
-    const hasMoves = (moveCounts.get(id) || 0) > 0;
-    result.set(id, hasMoves ? (moveSums.get(id) || 0) : (Number(item.actualBalance) || 0));
-  });
+  const productById = new Map<number, Product>();
+  for (const p of uniqueProducts) {
+    productById.set(Number(p.id), p);
+  }
 
-  moveSums.forEach((val, id) => {
-    if (!result.has(id)) {
-      result.set(id, val);
+  return uniqueWarehouses.map((wh) => {
+    const whId = Number(wh.id);
+    const whMoves = uniqueMoves.filter((m) => Number(m.warehouseId) === whId);
+
+    let inQty = 0;
+    let outQty = 0;
+    const perProdNet = new Map<number, number>();
+
+    for (const m of whMoves) {
+      const pid = Number(m.productId);
+      const qty = Math.abs(Number(m.quantity || 0));
+      if (isStockInMoveKind(m.kind)) {
+        inQty += qty;
+        perProdNet.set(pid, (perProdNet.get(pid) || 0) + qty);
+      } else {
+        outQty += qty;
+        perProdNet.set(pid, (perProdNet.get(pid) || 0) - qty);
+      }
     }
+
+    let netCartons = 0;
+    let distinctProductsCount = 0;
+    let totalValueSdg = 0;
+
+    for (const [pid, rawNet] of perProdNet.entries()) {
+      const clamped = Math.max(0, rawNet);
+      if (clamped > 0) {
+        distinctProductsCount += 1;
+        netCartons += clamped;
+        const prod = productById.get(pid);
+        const unitPrice = Number(prod?.salePrice || prod?.salePriceSdg || prod?.purchasePrice || 0);
+        totalValueSdg += clamped * unitPrice;
+      }
+    }
+
+    return {
+      warehouse: wh,
+      inQty,
+      outQty,
+      netCartons,
+      distinctProductsCount,
+      totalValueSdg
+    };
   });
+}
+
+export interface ColorWeightStockRow {
+  colorName: string;
+  weightLabel: string;
+  inQty: number;
+  outQty: number;
+  netCount: number;
+  primaryProduct: Product | null;
+}
+
+export function computeColorWeightStockRows(
+  products: Product[],
+  stockMoves: StockMove[],
+  selectedWeight: string,
+  warehouseIdFilter?: number | null
+): ColorWeightStockRow[] {
+  const uniqueProducts = deduplicateCollectionRecords('products', products);
+  const uniqueMoves = deduplicateCollectionRecords('stock_moves', stockMoves);
+
+  const filterWhId =
+    warehouseIdFilter !== undefined && warehouseIdFilter !== null && Number(warehouseIdFilter) > 0
+      ? Number(warehouseIdFilter)
+      : null;
+
+  const filteredMoves =
+    filterWhId !== null
+      ? uniqueMoves.filter((sm) => Number(sm.warehouseId) === filterWhId)
+      : uniqueMoves;
+
+  const cleanWeight = normalizeEntityKey(selectedWeight.replace(/جم|كجم/g, ''));
+
+  const matchesSelectedWeight = (pw: unknown) => {
+    if (selectedWeight === 'ALL') return true;
+    const normPw = normalizeEntityKey(String(pw ?? '').replace(/جم|كجم/g, ''));
+    return normPw === cleanWeight || normalizeArabicText(pw) === normalizeArabicText(selectedWeight);
+  };
+
+  const weightProds = uniqueProducts.filter((p) => matchesSelectedWeight(p.packageWeight));
+
+  const distinctColors = Array.from(
+    new Set(
+      (weightProds.length > 0 ? weightProds : uniqueProducts)
+        .map((p) => String(p.paintColor || p.name || '').trim())
+        .filter(Boolean)
+    )
+  );
+
+  return distinctColors.map((colorName) => {
+    const matchingProducts = uniqueProducts.filter(
+      (p) =>
+        normalizeArabicText(p.paintColor || p.name) === normalizeArabicText(colorName) &&
+        matchesSelectedWeight(p.packageWeight)
+    );
+    const matchingIds = new Set(matchingProducts.map((p) => Number(p.id)));
+    const prodMoves = filteredMoves.filter((m) => matchingIds.has(Number(m.productId)));
+
+    let inQty = 0;
+    let outQty = 0;
+    for (const m of prodMoves) {
+      const q = Math.abs(Number(m.quantity || 0));
+      if (isStockInMoveKind(m.kind)) {
+        inQty += q;
+      } else {
+        outQty += q;
+      }
+    }
+
+    const netCount =
+      prodMoves.length > 0
+        ? Math.max(0, inQty - outQty)
+        : filterWhId === null && uniqueMoves.length === 0
+        ? matchingProducts.reduce((s, p) => s + Math.max(0, Number(p.currentStock || 0)), 0)
+        : 0;
+
+    return {
+      colorName,
+      weightLabel: selectedWeight === 'ALL' ? matchingProducts[0]?.packageWeight || 'قياسي' : selectedWeight,
+      inQty,
+      outQty,
+      netCount,
+      primaryProduct: matchingProducts[0] || null
+    };
+  });
+}
+
+export function computeFactoryItemBalances(
+  factoryItems: Array<Partial<FactoryItem> & { id: number }>,
+  factoryMoves: Array<Partial<FactoryMove> & { itemId: number; kind: string; qty: number }>
+): Map<number, number> {
+  const result = new Map<number, number>();
+  for (const item of factoryItems) {
+    result.set(Number(item.id), Number(item.actualBalance || 0));
+  }
+
+  const moveDelta = new Map<number, { inQty: number; outQty: number; count: number }>();
+  for (const m of factoryMoves) {
+    const iid = Number(m.itemId);
+    const qty = Math.abs(Number(m.qty || 0));
+    const cur = moveDelta.get(iid) || { inQty: 0, outQty: 0, count: 0 };
+    const k = String(m.kind || '').trim();
+    if (k.includes('توريد') || k.includes('إنتاج') || k.includes('وارد') || k.toUpperCase() === 'IN') {
+      cur.inQty += qty;
+    } else {
+      cur.outQty += qty;
+    }
+    cur.count += 1;
+    moveDelta.set(iid, cur);
+  }
+
+  for (const [iid, stats] of moveDelta.entries()) {
+    if (stats.count > 0) {
+      result.set(iid, Math.max(0, stats.inQty - stats.outQty));
+    }
+  }
 
   return result;
 }
 
-/**
- * Computes invoice paid & remaining balance from `invoice_payments` + embedded `invoice.payments`.
- */
 export function computeInvoiceFinancials(
-  invoice: SalesInvoice,
-  externalPayments: InvoicePayment[]
-): { paidAmount: number; remainingAmount: number; statusLabel: 'مدفوعة' | 'سداد جزئي' | 'غير مدفوعة' } {
-  const invTotal = Number(invoice.total ?? invoice.finalAmount ?? 0);
-  const embedded = Array.isArray(invoice.payments) ? invoice.payments : [];
-  const matchingExternal = externalPayments.filter((p) => Number(p.invoiceId) === Number(invoice.id));
+  inv: Partial<SalesInvoice> & Record<string, any>,
+  externalPayments: InvoicePayment[] = []
+): {
+  paidAmount: number;
+  remainingAmount: number;
+  statusLabel: 'مدفوعة' | 'سداد جزئي' | 'غير مدفوعة' | 'ملغاة';
+} {
+  const total = Number(inv.total ?? inv.finalAmount ?? inv.totalAmount ?? 0);
+  const rawStatus = String(inv.status || '').trim().toLowerCase();
+  if (rawStatus === 'cancelled' || rawStatus === 'ملغاة') {
+    return { paidAmount: 0, remainingAmount: 0, statusLabel: 'ملغاة' };
+  }
 
-  const byId = new Map<number, InvoicePayment>();
-  [...embedded, ...matchingExternal].forEach((p, idx) => {
-    if ((p.status || 'active') === 'reversed') return;
-    const key = Number(p.id) || idx + 1;
-    byId.set(key, p);
-  });
+  const paymentMap = new Map<string, number>();
+  const embedded: any[] = Array.isArray(inv.payments) ? inv.payments : [];
+  for (const p of embedded) {
+    if (!p || p.status === 'reversed') continue;
+    const pid = String(p.id ?? `${p.invoiceId}_${p.amount}_${p.payDate || p.createdAt || ''}`);
+    paymentMap.set(pid, Number(p.amount || 0));
+  }
 
-  const computedPaid =
-    byId.size > 0
-      ? Array.from(byId.values()).reduce((acc, p) => acc + (Number(p.amount) || 0), 0)
-      : Number(invoice.paidAmount) || 0;
+  for (const p of externalPayments) {
+    if (!p || p.status === 'reversed') continue;
+    if (Number(p.invoiceId) !== Number(inv.id)) continue;
+    const pid = String(p.id ?? `${p.invoiceId}_${p.amount}_${p.payDate || p.createdAt || ''}`);
+    paymentMap.set(pid, Number(p.amount || 0));
+  }
 
-  const remaining = Math.max(0, invTotal - computedPaid);
-  const statusLabel: 'مدفوعة' | 'سداد جزئي' | 'غير مدفوعة' =
-    remaining <= 0.01 && invTotal > 0
+  let sumPayments = 0;
+  for (const amt of paymentMap.values()) {
+    sumPayments += amt;
+  }
+
+  const paidAmount = Math.max(sumPayments, Number(inv.paidAmount || 0));
+  const remainingAmount = Math.max(0, total - paidAmount);
+  const statusLabel =
+    paidAmount >= total && total > 0
       ? 'مدفوعة'
-      : computedPaid > 0
+      : paidAmount > 0
       ? 'سداد جزئي'
       : 'غير مدفوعة';
 
-  return { paidAmount: computedPaid, remainingAmount: remaining, statusLabel };
+  return { paidAmount, remainingAmount, statusLabel };
 }
 
+/**
+ * Returns `Map<number, { totalInvoiced, totalPaid, remaining, primaryCurrency }>` keyed by `customer.id`.
+ */
 export function computeCustomerDebts(
+  customers: Array<Partial<Customer> & { id: number }>,
+  invoices: SalesInvoice[],
+  payments: InvoicePayment[]
+): Map<
+  number,
+  {
+    totalInvoiced: number;
+    totalPaid: number;
+    remaining: number;
+    primaryCurrency: CurrencyCode;
+  }
+> {
+  const uniqueInvoices = deduplicateCollectionRecords('invoices', invoices);
+  const uniquePayments = deduplicateCollectionRecords('invoice_payments', payments);
+  const map = new Map<
+    number,
+    {
+      totalInvoiced: number;
+      totalPaid: number;
+      remaining: number;
+      primaryCurrency: CurrencyCode;
+    }
+  >();
+
+  for (const c of customers) {
+    const cid = Number(c.id);
+    const custNameKey = normalizeEntityKey(c.name);
+    const custInvoices = uniqueInvoices.filter((inv) => {
+      const st = String(inv.status || '').toLowerCase();
+      if (st === 'cancelled' || st === 'ملغاة') return false;
+      return (
+        Number(inv.customerId) === cid ||
+        Boolean(custNameKey && normalizeEntityKey(inv.customerName) === custNameKey)
+      );
+    });
+
+    let totalInvoiced = 0;
+    let totalPaid = 0;
+    for (const inv of custInvoices) {
+      const fin = computeInvoiceFinancials(inv, uniquePayments);
+      totalInvoiced += Number(inv.total ?? inv.finalAmount ?? 0);
+      totalPaid += fin.paidAmount;
+    }
+
+    const remaining = Math.max(0, totalInvoiced - totalPaid);
+    const primaryCurrency: CurrencyCode = custInvoices[0]?.currency || c.currency || 'SDG';
+    map.set(cid, {
+      totalInvoiced,
+      totalPaid,
+      remaining,
+      primaryCurrency
+    });
+  }
+
+  return map;
+}
+
+export function computeCustomerDebtsList(
   customers: Customer[],
   invoices: SalesInvoice[],
   payments: InvoicePayment[]
-): Map<number, { totalInvoiced: number; totalPaid: number; remaining: number; currency: CurrencyCode; primaryCurrency: CurrencyCode }> {
-  const map = new Map<number, { totalInvoiced: number; totalPaid: number; remaining: number; currency: CurrencyCode; primaryCurrency: CurrencyCode }>();
-  const uniqueInvoices = deduplicateCollectionRecords('invoices', invoices);
+): Array<Customer & { totalInvoiced: number; totalPaid: number; remainingDebt: number; currency: CurrencyCode }> {
+  const uniqueCustomers = deduplicateCollectionRecords('customers', customers);
+  const debtMap = computeCustomerDebts(uniqueCustomers, invoices, payments);
 
-  customers.forEach((c) => {
-    const cur = (c.currency || 'SDG') as CurrencyCode;
-    map.set(Number(c.id), {
+  return uniqueCustomers.map((c) => {
+    const d = debtMap.get(Number(c.id)) || {
       totalInvoiced: 0,
       totalPaid: 0,
       remaining: 0,
-      currency: cur,
-      primaryCurrency: cur
-    });
-  });
-
-  uniqueInvoices.forEach((inv) => {
-    if ((inv.status || 'active') === 'cancelled') return;
-    const cid = Number(inv.customerId);
-    const fin = computeInvoiceFinancials(inv, payments);
-    const invTotal = Number(inv.total ?? inv.finalAmount ?? 0);
-    const cur = (inv.currency || 'SDG') as CurrencyCode;
-    const existing = map.get(cid) || {
-      totalInvoiced: 0,
-      totalPaid: 0,
-      remaining: 0,
-      currency: cur,
-      primaryCurrency: cur
+      primaryCurrency: (c.currency || 'SDG') as CurrencyCode
     };
-    existing.totalInvoiced += invTotal;
-    existing.totalPaid += fin.paidAmount;
-    existing.remaining += fin.remainingAmount;
-    existing.currency = cur;
-    existing.primaryCurrency = cur;
-    map.set(cid, existing);
+    return {
+      ...c,
+      totalInvoiced: d.totalInvoiced,
+      totalPaid: d.totalPaid,
+      remainingDebt: d.remaining,
+      currency: d.primaryCurrency
+    };
   });
-
-  return map;
 }
 
-export function computeSupplierBalances(
-  suppliers: Supplier[],
-  purchases: PurchaseInvoice[]
-): Map<number, { totalPurchases: number; totalPaid: number; remaining: number; currency: CurrencyCode }> {
-  const map = new Map<number, { totalPurchases: number; totalPaid: number; remaining: number; currency: CurrencyCode }>();
-  const uniquePurchases = deduplicateCollectionRecords('purchases', purchases);
+export interface CustomerStatementLedgerEntry {
+  id: string;
+  timestamp: number;
+  dateFormatted: string;
+  kind: 'INVOICE' | 'PAYMENT';
+  typeLabel: string;
+  referenceNo: string;
+  description: string;
+  debit: number;      // مدين (+) - فاتورة مبيعات
+  credit: number;     // دائن (-) - دفعة / تحصيل
+  runningBalance: number;
+  currency: CurrencyCode;
+  statusOrCashbox: string;
+  actor: string;
+}
 
-  suppliers.forEach((s) => {
-    map.set(Number(s.id), {
-      totalPurchases: 0,
-      totalPaid: 0,
-      remaining: 0,
-      currency: (s.currency || 'SDG') as CurrencyCode
+export interface CustomerStatementResult {
+  customer: Customer;
+  totalInvoiced: number;
+  totalPaid: number;
+  remainingDebt: number;
+  invoiceCount: number;
+  paymentCount: number;
+  currency: CurrencyCode;
+  entries: CustomerStatementLedgerEntry[];
+}
+
+/**
+ * Builds a complete chronological Customer Account Statement (كشف حساب عميل تفصيلي)
+ * matching Android `SalesScreen.kt` Tab 2 (`StatementPdfAndExcelExporter`) 1:1.
+ */
+export function computeCustomerStatement(
+  customer: Customer,
+  invoices: SalesInvoice[],
+  payments: InvoicePayment[]
+): CustomerStatementResult {
+  const uniqueInvoices = deduplicateCollectionRecords('invoices', invoices);
+  const uniquePayments = deduplicateCollectionRecords('invoice_payments', payments);
+
+  const custNameKey = normalizeEntityKey(customer.name);
+  const custInvoices = uniqueInvoices.filter((inv) => {
+    const st = String(inv.status || '').toLowerCase();
+    if (st === 'cancelled' || st === 'ملغاة') return false;
+    return (
+      Number(inv.customerId) === Number(customer.id) ||
+      Boolean(custNameKey && normalizeEntityKey(inv.customerName) === custNameKey)
+    );
+  });
+
+  const invoiceIds = new Set(custInvoices.map((i) => Number(i.id)));
+  const invoiceById = new Map<number, SalesInvoice>();
+  for (const inv of custInvoices) {
+    invoiceById.set(Number(inv.id), inv);
+  }
+
+  // Deduplicate embedded invoice payments and external payment documents
+  const mergedPaymentDocs = new Map<string, InvoicePayment & Record<string, any>>();
+  for (const inv of custInvoices) {
+    const embedded: any[] = Array.isArray(inv.payments) ? inv.payments : [];
+    for (const p of embedded) {
+      if (!p || p.status === 'reversed') continue;
+      const key = String(p.id ?? `${inv.id}_${p.amount}_${p.payDate || p.createdAt || ''}`);
+      mergedPaymentDocs.set(key, { ...p, invoiceId: Number(inv.id) });
+    }
+  }
+  for (const pay of uniquePayments) {
+    const rawPay = pay as InvoicePayment & Record<string, any>;
+    if (!rawPay || rawPay.status === 'reversed') continue;
+    if (Number(rawPay.customerId) === Number(customer.id) || invoiceIds.has(Number(rawPay.invoiceId))) {
+      const key = String(rawPay.id ?? `${rawPay.invoiceId}_${rawPay.amount}_${rawPay.payDate || rawPay.createdAt || ''}`);
+      mergedPaymentDocs.set(key, rawPay);
+    }
+  }
+
+  const custPayments = Array.from(mergedPaymentDocs.values());
+  const rawEvents: Array<Omit<CustomerStatementLedgerEntry, 'runningBalance'>> = [];
+
+  // 1. Add all invoices as Debit (مدين +)
+  let sumInvoicePaidField = 0;
+  for (const inv of custInvoices) {
+    const rawInv = inv as SalesInvoice & Record<string, any>;
+    const ts = Number(rawInv.createdAt || rawInv.timestamp || Date.now());
+    const netTotal = Number(rawInv.total ?? rawInv.finalAmount ?? 0);
+    sumInvoicePaidField += Number(rawInv.paidAmount || 0);
+
+    let itemsDesc = '';
+    if (Array.isArray(rawInv.items) && rawInv.items.length > 0) {
+      itemsDesc = rawInv.items
+        .map((it: any) => `${it.description || 'صنف'} (${it.quantity || 1})`)
+        .join(' + ');
+    } else if (typeof rawInv.itemsJson === 'string' && rawInv.itemsJson) {
+      try {
+        const parsed = JSON.parse(rawInv.itemsJson);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          itemsDesc = parsed
+            .map((it: any) => `${it.description || it.productName || 'صنف'} (${it.quantity || 1})`)
+            .join(' + ');
+        }
+      } catch {
+        // ignore JSON parse issues
+      }
+    }
+
+    const fin = computeInvoiceFinancials(inv, custPayments);
+    rawEvents.push({
+      id: `INV-${inv.id}`,
+      timestamp: ts,
+      dateFormatted: inv.invoiceDate || new Date(ts).toLocaleDateString('ar-EG'),
+      kind: 'INVOICE',
+      typeLabel: 'فاتورة مبيعات (مدين)',
+      referenceNo: inv.invoiceNo || inv.invoiceNumber || `INV-${inv.id}`,
+      description: itemsDesc || inv.notes || 'فاتورة مبيعات معتمدة',
+      debit: netTotal,
+      credit: 0,
+      currency: inv.currency || 'SDG',
+      statusOrCashbox: fin.statusLabel,
+      actor: inv.createdBy || 'مبيعات'
     });
-  });
+  }
 
-  uniquePurchases.forEach((po) => {
-    const sid = Number(po.supplierId);
-    const total = Number(po.total ?? po.totalAmount ?? 0);
-    const paid = Number(po.paidAmount ?? (po.paymentStatus === 'مدفوعة' ? total : 0));
-    const rem = Math.max(0, total - paid);
-    const existing = map.get(sid) || {
-      totalPurchases: 0,
-      totalPaid: 0,
-      remaining: 0,
-      currency: (po.currency || 'SDG') as CurrencyCode
+  // 2. Add payment records as Credit (دائن -)
+  let sumPaymentRecords = 0;
+  for (const pay of custPayments) {
+    const ts = Number(pay.createdAt || pay.timestamp || Date.now());
+    const amt = Number(pay.amount || 0);
+    sumPaymentRecords += amt;
+    const linkedInv = invoiceById.get(Number(pay.invoiceId));
+    rawEvents.push({
+      id: `PAY-${pay.id}`,
+      timestamp: ts,
+      dateFormatted: pay.payDate || new Date(ts).toLocaleDateString('ar-EG'),
+      kind: 'PAYMENT',
+      typeLabel: 'سند تحصيل / دفعة سداد (دائن)',
+      referenceNo: linkedInv?.invoiceNo ? `سداد ${linkedInv.invoiceNo}` : `PAY-${pay.id}`,
+      description: pay.note || `توريد نقدي إلى ${pay.cashbox || 'الخزنة'}`,
+      debit: 0,
+      credit: amt,
+      currency: (pay.currency as CurrencyCode) || linkedInv?.currency || 'SDG',
+      statusOrCashbox: pay.cashbox || 'الخزنة الرئيسية',
+      actor: pay.createdBy || pay.receivedBy || 'أمين الخزنة'
+    });
+  }
+
+  // If an invoice had initial paidAmount greater than recorded payment docs, add the difference
+  if (sumInvoicePaidField > sumPaymentRecords) {
+    for (const inv of custInvoices) {
+      const rawInv = inv as SalesInvoice & Record<string, any>;
+      const invPaid = Number(rawInv.paidAmount || 0);
+      if (invPaid <= 0) continue;
+      const recordedForInv = custPayments
+        .filter((p) => Number(p.invoiceId) === Number(inv.id))
+        .reduce((s, p) => s + Number(p.amount || 0), 0);
+      const diff = invPaid - recordedForInv;
+      if (diff > 0) {
+        const ts = Number(rawInv.createdAt || rawInv.timestamp || Date.now()) + 1;
+        rawEvents.push({
+          id: `INVPAY-${inv.id}`,
+          timestamp: ts,
+          dateFormatted: inv.invoiceDate || new Date(ts).toLocaleDateString('ar-EG'),
+          kind: 'PAYMENT',
+          typeLabel: 'دفعة مقدمة مع الفاتورة (دائن)',
+          referenceNo: inv.invoiceNo || `INV-${inv.id}`,
+          description: `سداد نقدي مباشر عند إصدار الفاتورة (${rawInv.cashbox || 'الخزنة'})`,
+          debit: 0,
+          credit: diff,
+          currency: inv.currency || 'SDG',
+          statusOrCashbox: String(rawInv.cashbox || 'الخزنة الرئيسية'),
+          actor: inv.createdBy || 'مبيعات'
+        });
+      }
+    }
+  }
+
+  rawEvents.sort((a, b) => a.timestamp - b.timestamp);
+
+  let running = 0;
+  const entries: CustomerStatementLedgerEntry[] = rawEvents.map((ev) => {
+    running = Math.max(0, running + ev.debit - ev.credit);
+    return {
+      ...ev,
+      runningBalance: running
     };
-    existing.totalPurchases += total;
-    existing.totalPaid += paid;
-    existing.remaining += rem;
-    map.set(sid, existing);
   });
 
-  return map;
+  const totalInvoiced = custInvoices.reduce((s, i) => s + Number(i.total ?? i.finalAmount ?? 0), 0);
+  const totalPaid = Math.max(sumInvoicePaidField, sumPaymentRecords);
+  const remainingDebt = Math.max(0, totalInvoiced - totalPaid);
+  const currency: CurrencyCode = custInvoices[0]?.currency || customer.currency || 'SDG';
+
+  return {
+    customer,
+    totalInvoiced,
+    totalPaid,
+    remainingDebt,
+    invoiceCount: custInvoices.length,
+    paymentCount: entries.filter((e) => e.kind === 'PAYMENT').length,
+    currency,
+    entries
+  };
 }

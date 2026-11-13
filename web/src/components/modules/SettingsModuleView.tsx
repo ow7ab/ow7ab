@@ -20,8 +20,6 @@ import { useTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
 import {
   ErpDataService,
-  PRIMARY_CLUSTER,
-  LEGACY_V16_CLUSTER,
   ClusterHealthReport
 } from '../../services/ErpDataService';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
@@ -45,7 +43,6 @@ export const SettingsModuleView: React.FC = () => {
 
   const canManageSystemSettings = isSuperAdmin || canPerformAction(GRANULAR_ACTIONS.ADMIN_SETTINGS);
 
-  const [activeCluster, setActiveCluster] = useState<string>(ErpDataService.activeCluster);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [syncStatus, setSyncStatus] = useState<'IDLE' | 'SYNCING' | 'SUCCESS' | 'ERROR'>('IDLE');
   const [healthReport, setHealthReport] = useState<ClusterHealthReport | null>(null);
@@ -67,24 +64,7 @@ export const SettingsModuleView: React.FC = () => {
       })
       .catch(() => {});
     return () => unsubAudit();
-  }, [activeCluster]);
-
-  const handleSwitchCluster = async (clusterCode: string) => {
-    if (!canManageSystemSettings) return;
-    ErpDataService.setActiveCluster(clusterCode);
-    setActiveCluster(ErpDataService.activeCluster);
-    const label = clusterCode === PRIMARY_CLUSTER ? 'البيئة الرئيسية المعتمدة' : 'بيئة الأرشيف السابقة';
-    await ErpDataService.logAudit(
-      userProfile?.username || 'admin',
-      'تبديل بيئة العمل',
-      `تبديل بيئة المزامنة النشطة إلى ${label}`
-    );
-    setFeedback({
-      type: 'success',
-      text: `تم التبديل بنجاح إلى ${label}.`
-    });
-    setTimeout(() => setFeedback(null), 4500);
-  };
+  }, []);
 
   const handleRunHealthCheck = async () => {
     setSyncStatus('SYNCING');
@@ -253,37 +233,16 @@ export const SettingsModuleView: React.FC = () => {
             <GlassCard className="p-6">
               <h3 className="text-sm font-bold text-theme-primary mb-3 flex items-center gap-2">
                 <HardDrive className="w-4 h-4 text-pmp-gold" />
-                <span>بيئة العمل والمزامنة</span>
+                <span>بيئة المزامنة الموحدة</span>
               </h3>
-              <p className="text-xs text-theme-secondary mb-3">
-                يمكنك اختيار البيئة الرئيسية المعتمدة للفروع أو التبديل إلى بيئة الأرشيف السابقة عند الحاجة.
-              </p>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {[
-                  { code: PRIMARY_CLUSTER, title: 'البيئة الرئيسية المعتمدة', subtitle: 'البيئة النشطة لتطبيق الأندرويد والويب' },
-                  { code: LEGACY_V16_CLUSTER, title: 'بيئة الأرشيف السابقة', subtitle: 'سجلات الإصدارات السابقة' }
-                ].map((envItem) => {
-                  const isSelected = activeCluster === envItem.code;
-                  return (
-                    <button
-                      key={envItem.code}
-                      type="button"
-                      onClick={() => handleSwitchCluster(envItem.code)}
-                      className={`p-3 rounded-xl border text-right transition-all ${
-                        isSelected
-                          ? 'bg-red-600/10 border-red-500 text-theme-primary'
-                          : 'bg-theme-base border-theme text-theme-secondary hover:border-theme-hover'
-                      }`}
-                    >
-                      <div className="flex justify-between items-center">
-                        <span className="font-bold text-xs">{envItem.title}</span>
-                        {isSelected && <CheckCircle className="w-4 h-4 text-emerald-400" />}
-                      </div>
-                      <span className="text-[10px] text-theme-muted block mt-1">{envItem.subtitle}</span>
-                    </button>
-                  );
-                })}
+              <div className="p-3.5 rounded-xl bg-red-600/10 border border-red-500/40 text-right">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-xs text-theme-primary">البيئة الرئيسية الموحدة (تطبيق الأندرويد والويب)</span>
+                  <CheckCircle className="w-4 h-4 text-emerald-400" />
+                </div>
+                <span className="text-[11px] text-theme-secondary block mt-1">
+                  جميع فروع الخرطوم والقاهرة وحلفا والمخازن متصلة وموحدة لحظياً على قاعدة بيانات واحدة معتمدة.
+                </span>
               </div>
             </GlassCard>
           )}

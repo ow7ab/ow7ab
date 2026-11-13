@@ -27,7 +27,6 @@ import { hashPassword } from './PasswordSecurity';
 import {
   ErpDataService,
   PRIMARY_CLUSTER,
-  LEGACY_V16_CLUSTER,
   safeId,
   deduplicateCollectionRecords
 } from './ErpDataService';
@@ -173,10 +172,10 @@ export const AccountService = {
   },
 
   /**
-   * Fetches all employees from active cluster (falling back to LEGACY_V16_CLUSTER only if active has 0 records).
+   * Fetches all employees from active cluster.
    */
   async getAllEmployees(clusterOverride?: string): Promise<UserAccount[]> {
-    const targetCluster = clusterOverride || ErpDataService.activeCluster;
+    const targetCluster = clusterOverride || PRIMARY_CLUSTER;
     const deletedSet = await this.fetchDeletedUserTokens(targetCluster);
     const snap = await getDocs(collection(firestore, `erp_clusters/${targetCluster}/user_accounts`));
 
@@ -190,11 +189,6 @@ export const AccountService = {
       }
     });
 
-    if (list.length === 0 && !clusterOverride) {
-      const fallbackCluster = targetCluster === PRIMARY_CLUSTER ? LEGACY_V16_CLUSTER : PRIMARY_CLUSTER;
-      return this.getAllEmployees(fallbackCluster);
-    }
-
     return deduplicateCollectionRecords('user_accounts', list);
   },
 
@@ -205,26 +199,20 @@ export const AccountService = {
     const clean = (identifier || '').trim().toLowerCase();
     if (!clean) return null;
 
-    const clustersToSearch =
-      ErpDataService.activeCluster === PRIMARY_CLUSTER
-        ? [PRIMARY_CLUSTER, LEGACY_V16_CLUSTER]
-        : [ErpDataService.activeCluster, PRIMARY_CLUSTER];
-
-    for (const cluster of clustersToSearch) {
-      const deletedSet = await this.fetchDeletedUserTokens(cluster);
-      const snap = await getDocs(collection(firestore, `erp_clusters/${cluster}/user_accounts`));
-      let idx = 1;
-      for (const docSnap of snap.docs) {
-        const raw = docSnap.data() || {};
-        const acc = mapFirestoreDocToUserAccount(docSnap.id, raw, idx++);
-        if (this.isUserDeleted(acc, deletedSet)) continue;
-        if (
-          acc.username.trim().toLowerCase() === clean ||
-          acc.userCode.trim().toLowerCase() === clean ||
-          acc.phoneOrEmail.trim().toLowerCase() === clean
-        ) {
-          return acc;
-        }
+    const cluster = PRIMARY_CLUSTER;
+    const deletedSet = await this.fetchDeletedUserTokens(cluster);
+    const snap = await getDocs(collection(firestore, `erp_clusters/${cluster}/user_accounts`));
+    let idx = 1;
+    for (const docSnap of snap.docs) {
+      const raw = docSnap.data() || {};
+      const acc = mapFirestoreDocToUserAccount(docSnap.id, raw, idx++);
+      if (this.isUserDeleted(acc, deletedSet)) continue;
+      if (
+        acc.username.trim().toLowerCase() === clean ||
+        acc.userCode.trim().toLowerCase() === clean ||
+        acc.phoneOrEmail.trim().toLowerCase() === clean
+      ) {
+        return acc;
       }
     }
 
@@ -393,12 +381,6 @@ export const AccountService = {
     await setDoc(doc(firestore, `erp_clusters/${cluster}/user_accounts`, docId), payload, {
       merge: true
     });
-
-    // Mirror to secondary cluster silently
-    const otherCluster = cluster === PRIMARY_CLUSTER ? LEGACY_V16_CLUSTER : PRIMARY_CLUSTER;
-    setDoc(doc(firestore, `erp_clusters/${otherCluster}/user_accounts`, docId), payload, {
-      merge: true
-    }).catch(() => {});
 
     // Sync /linked_accounts only if Firebase Auth user is signed in and matches uid (per firestore.rules)
     const fbUser = auth.currentUser;
