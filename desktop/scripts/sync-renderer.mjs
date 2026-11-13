@@ -27,8 +27,21 @@ function copyDirRecursive(src, dst) {
 }
 
 console.log('[Desktop Sync] Step 1/3: Ensuring official PMP Paints brand assets are synced to web/public/assets...');
+fs.mkdirSync(WEB_PUBLIC_ASSETS_DIR, { recursive: true });
+const DRAWABLE_DIR = path.join(REPO_ROOT, 'app', 'src', 'main', 'res', 'drawable');
+for (const assetName of [
+  'ic_pmp_emblem.png',
+  'ic_pmp_emblem_solid.png',
+  'pmp_brand_logo.jpg',
+  'pmp_brand_poster.jpg',
+  'pmp_reference_poster.jpg'
+]) {
+  const fromDrawable = path.join(DRAWABLE_DIR, assetName);
+  if (fs.existsSync(fromDrawable) && fs.statSync(fromDrawable).isFile()) {
+    fs.copyFileSync(fromDrawable, path.join(WEB_PUBLIC_ASSETS_DIR, assetName));
+  }
+}
 if (fs.existsSync(PUBLIC_ASSETS_DIR)) {
-  fs.mkdirSync(WEB_PUBLIC_ASSETS_DIR, { recursive: true });
   for (const file of fs.readdirSync(PUBLIC_ASSETS_DIR)) {
     const src = path.join(PUBLIC_ASSETS_DIR, file);
     if (fs.statSync(src).isFile()) {

@@ -11,9 +11,8 @@
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
 .DS_Store
-build
-build/
 /build
+/build/
 app/build/
 .build-outputs/
 /captures
