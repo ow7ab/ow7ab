@@ -22,19 +22,19 @@ The **PMP PAINTS ERP Desktop Edition** wraps the existing React + TypeScript + F
 
 ## 2. Building Locally
 
-```bash
-# 1. Install dependencies
-npm ci --prefix web
-npm install --prefix desktop
+```powershell
+# 1. Install dependencies & run web tests
+cd web
+npm ci
+npm test
 
-# 2. Run verification tests
-npm test --prefix web
-npm run sync:renderer --prefix desktop
-npm test --prefix desktop
-
-# 3. Build Windows x64 Installer (.exe) + Portable (.exe)
-# Note: Run on Windows 10/11 (or via .github/workflows/build-desktop.yml on windows-latest)
-npm run dist:win --prefix desktop
+# 2. Install desktop dependencies, sync renderer, run desktop tests & build Windows x64 (.exe)
+# Note: Windows .exe packaging runs natively on Windows 10/11 (or via .github/workflows/build-desktop.yml)
+cd ..\desktop
+npm install
+npm run sync:renderer
+npm test
+npm run dist:win
 ```
 
 Generated artifacts in `desktop/dist/`:

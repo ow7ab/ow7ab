@@ -32,11 +32,13 @@ jobs:
         with:
           node-version: 22
 
-      - name: Resolve Desktop Version & Release Tag
+      - name: Verify Repository Layout & Resolve Desktop Version
         id: version
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          if (-not (Test-Path "web/package.json")) { throw "Missing web/package.json in workspace $(Get-Location)" }
+          if (-not (Test-Path "desktop/package.json")) { throw "Missing desktop/package.json in workspace $(Get-Location)" }
           $pkg = Get-Content -Raw -Path "desktop/package.json" | ConvertFrom-Json
           $baseVersion = [string]$pkg.version
           $inputVersion = "${{ github.event.inputs.desktop_version }}".Trim() -replace '^(desktop-)?v', ''
@@ -49,38 +51,54 @@ jobs:
           }
           "version=$resolvedVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag_name=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Node: $(node --version) | npm: $(npm --version)"
           Write-Host "Resolved Desktop version: $resolvedVersion (tag: $tagName)"
 
-      - name: Install Web & Desktop Dependencies
+      - name: Install Web Dependencies
+        working-directory: web
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Write-Host "Using Node $(node --version) and npm $(npm --version)"
-          npm ci --prefix web --no-audit --no-fund
+          npm ci --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm install --prefix desktop --no-audit --no-fund
+
+      - name: Install Desktop Dependencies
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm install --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Apply Desktop Version Override (If Requested)
         if: github.event.inputs.desktop_version != ''
+        working-directory: desktop
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          npm --prefix desktop version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify Web ERP Tests & Desktop Security Tests
+      - name: Verify Web ERP Tests
+        working-directory: web
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          npm test --prefix web
+          npm test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node desktop/scripts/sync-renderer.mjs
+
+      - name: Build Shared Renderer & Verify Desktop Security Tests
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          node scripts/sync-renderer.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm test --prefix desktop
+          npm test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Windows x64 NSIS Installer & Portable Executable
+        working-directory: desktop
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -88,15 +106,8 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
-          node desktop/scripts/sync-renderer.mjs
+          node node_modules/electron-builder/cli.js --win nsis portable --x64 --publish never
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Push-Location desktop
-          try {
-            node node_modules/electron-builder/cli.js --win nsis portable --x64 --publish never
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } finally {
-            Pop-Location
-          }
 
       - name: Verify Generated Windows Artifacts & SHA-256 Checksums
         shell: pwsh
