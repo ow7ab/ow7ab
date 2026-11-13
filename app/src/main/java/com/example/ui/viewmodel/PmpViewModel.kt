@@ -2360,12 +2360,16 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun launchApkInstallation(context: android.content.Context, apkFile: File? = null) {
+        val pendingUpdate = _availableUpdate.value
+        if (!updateManager.hasDeclaredRequestInstallPackagesPermission()) {
+            openGooglePlayOrWebUpdatePage(context, pendingUpdate?.downloadUrl)
+            return
+        }
         val target = apkFile ?: _downloadedApkFile.value
         if (target == null || !target.exists()) {
             postMessage("يرجى تنزيل التحديث أولاً قبل التثبيت.", isError = true)
             return
         }
-        val pendingUpdate = _availableUpdate.value
         val res = updateManager.installApk(context, target, pendingUpdate)
         res.onSuccess {
             updateManager.refreshInstalledVersionState()
@@ -2381,12 +2385,35 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun hasDeclaredInstallPackagesPermission(): Boolean {
+        return updateManager.hasDeclaredRequestInstallPackagesPermission()
+    }
+
     fun canRequestPackageInstalls(apkFile: File? = _downloadedApkFile.value): Boolean {
         return updateManager.canRequestPackageInstalls()
     }
 
+    fun openGooglePlayOrWebUpdatePage(
+        context: android.content.Context,
+        fallbackWebUrl: String? = _availableUpdate.value?.downloadUrl
+    ): Boolean {
+        val opened = updateManager.openGooglePlayOrWebUpdatePage(
+            activityContext = context,
+            fallbackWebUrl = fallbackWebUrl?.takeIf { it.isNotBlank() } ?: UpdateManager.DEFAULT_APK_DOWNLOAD_URL
+        )
+        if (opened) {
+            postMessage("تم فتح صفحة التحديث الرسمية لإكمال التثبيت بأمان.")
+        } else {
+            postMessage("تعذر فتح متجر Google Play أو صفحة التحديث الرسمية.", isError = true)
+        }
+        return opened
+    }
+
     fun openInstallPermissionSettings(context: android.content.Context) {
-        updateManager.openInstallPermissionSettings(context)
+        updateManager.openInstallPermissionSettings(
+            activityContext = context,
+            fallbackWebUrl = _availableUpdate.value?.downloadUrl?.takeIf { it.isNotBlank() } ?: UpdateManager.DEFAULT_APK_DOWNLOAD_URL
+        )
     }
 
     fun updateServerSyncReadiness(endpoint: String, clusterCode: String) {

@@ -782,7 +782,7 @@ fun SettingsScreen(
                                 gradient = PmpBrandRedGradient,
                                 enabled = true,
                                 onClick = {
-                                    if (viewModel.canRequestPackageInstalls(downloadedApkFile)) {
+                                    if (viewModel.hasDeclaredInstallPackagesPermission() && viewModel.canRequestPackageInstalls(downloadedApkFile)) {
                                         viewModel.launchApkInstallation(context, downloadedApkFile)
                                     } else {
                                         showUpdateInstallDialog = true
@@ -1736,7 +1736,8 @@ fun SettingsScreen(
     if (showUpdateInstallDialog) {
         val targetApk = downloadedApkFile
         val updateName = availableUpdate?.versionName ?: "الجديد"
-        val hasInstallPermission = viewModel.canRequestPackageInstalls(targetApk)
+        val canDirectSideload = viewModel.hasDeclaredInstallPackagesPermission()
+        val hasInstallPermission = canDirectSideload && viewModel.canRequestPackageInstalls(targetApk)
 
         AlertDialog(
             onDismissRequest = { showUpdateInstallDialog = false },
@@ -1754,11 +1755,15 @@ fun SettingsScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "تم تنزيل التحديث بنجاح والتحقق من سلامته. عند المتابعة ستفتح نافذة التثبيت الرسمية لترقية التطبيق مع الحفاظ الكامل على بياناتك.",
+                        text = if (canDirectSideload) {
+                            "تم تنزيل التحديث بنجاح والتحقق من سلامته. عند المتابعة ستفتح نافذة التثبيت الرسمية لترقية التطبيق مع الحفاظ الكامل على بياناتك."
+                        } else {
+                            "تم التحقق من توفر الإصدار الجديد ($updateName). التزاماً بسياسات الأمان ومتجر Google Play، سيتم نقلك إلى صفحة التحديث الرسمية لإكمال التثبيت مع الحفاظ الكامل على بياناتك."
+                        },
                         color = TextWhite,
                         fontSize = 13.sp
                     )
-                    if (!hasInstallPermission) {
+                    if (canDirectSideload && !hasInstallPermission) {
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "ملاحظة: يرجى السماح بتثبيت التحديثات من هذا المصدر في إعدادات النظام للمتابعة.",
@@ -1771,14 +1776,25 @@ fun SettingsScreen(
             },
             confirmButton = {
                 GlassButton(
-                    text = if (hasInstallPermission) "تثبيت التحديث" else "السماح بالتثبيت من الإعدادات",
+                    text = when {
+                        !canDirectSideload -> "التحديث عبر الصفحة الرسمية"
+                        hasInstallPermission -> "تثبيت التحديث"
+                        else -> "السماح بالتثبيت من الإعدادات"
+                    },
                     gradient = PmpBrandRedGradient,
                     onClick = {
-                        if (!hasInstallPermission) {
-                            viewModel.openInstallPermissionSettings(context)
-                        } else {
-                            showUpdateInstallDialog = false
-                            viewModel.launchApkInstallation(context, targetApk)
+                        when {
+                            !canDirectSideload -> {
+                                showUpdateInstallDialog = false
+                                viewModel.openGooglePlayOrWebUpdatePage(context, availableUpdate?.downloadUrl)
+                            }
+                            !hasInstallPermission -> {
+                                viewModel.openInstallPermissionSettings(context)
+                            }
+                            else -> {
+                                showUpdateInstallDialog = false
+                                viewModel.launchApkInstallation(context, targetApk)
+                            }
                         }
                     }
                 )

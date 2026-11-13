@@ -2388,14 +2388,25 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
+     * التحقق من وجود تصريح REQUEST_INSTALL_PACKAGES فعلياً في AndroidManifest.xml
+     * قبل استدعاء واجهات النظام المقيدة لتجنب SecurityException على أندرويد 11+
+     */
+    fun hasDeclaredRequestInstallPackagesPermission(): Boolean {
+        return runCatching {
+            val info = getInstalledPackageInfo(PackageManager.GET_PERMISSIONS)
+            info.requestedPermissions?.contains(android.Manifest.permission.REQUEST_INSTALL_PACKAGES) == true
+        }.getOrDefault(false)
+    }
+
+    /**
      * هل يملك التطبيق صلاحية تثبيت الحزم من مصادر غير معروفة (Android 8.0+)
      */
     fun canRequestPackageInstalls(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+        if (!hasDeclaredRequestInstallPackagesPermission()) return false
+        return runCatching {
             appContext.packageManager.canRequestPackageInstalls()
-        } else {
-            true
-        }
+        }.getOrDefault(false)
     }
 
     /**
@@ -2420,9 +2431,13 @@ class UpdateManager(private val context: Context) {
         }.getOrDefault(false)
         if (launchedPlay) return true
 
+        val safeWebUrl = fallbackWebUrl.trim()
+            .takeIf { it.startsWith("https://", ignoreCase = true) }
+            ?: com.example.core.architecture.PmpAppVersionContract.GOOGLE_PLAY_STORE_URL
+
         val webIntent = Intent(
             Intent.ACTION_VIEW,
-            Uri.parse(fallbackWebUrl.ifBlank { com.example.core.architecture.PmpAppVersionContract.GOOGLE_PLAY_STORE_URL })
+            Uri.parse(safeWebUrl)
         ).apply {
             if (activityContext !is android.app.Activity) {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -2435,10 +2450,13 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * فتح شاشة إعدادات السماح بتثبيت التطبيقات غير المعروفة الخاصة بالتطبيق أو التوجيه لمتجر Google Play
+     * فتح شاشة إعدادات السماح بتثبيت التطبيقات غير المعروفة الخاصة بالتطبيق أو التوجيه لمتجر Google Play / البوابة الرسمية
      */
-    fun openInstallPermissionSettings(activityContext: Context = appContext) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+    fun openInstallPermissionSettings(
+        activityContext: Context = appContext,
+        fallbackWebUrl: String = DEFAULT_APK_DOWNLOAD_URL
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && hasDeclaredRequestInstallPackagesPermission()) {
             val intent = Intent(
                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                 Uri.parse("package:${appContext.packageName}")
@@ -2452,8 +2470,10 @@ class UpdateManager(private val context: Context) {
                 true
             }.getOrDefault(false)
             if (!openedSettings) {
-                openGooglePlayOrWebUpdatePage(activityContext)
+                openGooglePlayOrWebUpdatePage(activityContext, fallbackWebUrl)
             }
+        } else {
+            openGooglePlayOrWebUpdatePage(activityContext, fallbackWebUrl)
         }
     }
 
@@ -2515,8 +2535,23 @@ class UpdateManager(private val context: Context) {
             return Result.failure(IllegalStateException(rejectMsg))
         }
 
+        if (!hasDeclaredRequestInstallPackagesPermission()) {
+            val openedExternal = openGooglePlayOrWebUpdatePage(
+                activityContext = activityContext,
+                fallbackWebUrl = targetInfo.downloadUrl
+            )
+            val portalMsg = if (openedExternal) {
+                "تم فتح صفحة التحديث الرسمية لإكمال التثبيت بأمان."
+            } else {
+                "تعذر فتح متجر Google Play أو صفحة التحديث الرسمية."
+            }
+            _installStatusMessage.value = portalMsg to openedExternal
+            _downloadState.value = DownloadState.ReadyToInstall(apkFile, targetInfo)
+            return Result.failure(IllegalStateException(portalMsg))
+        }
+
         if (!canRequestPackageInstalls()) {
-            openInstallPermissionSettings(activityContext)
+            openInstallPermissionSettings(activityContext, targetInfo.downloadUrl)
             val permMsg = "يرجى السماح بتثبيت التحديثات من هذا المصدر للمتابعة، ثم الضغط على «تثبيت التحديث»."
             _installStatusMessage.value = permMsg to false
             return Result.failure(SecurityException(permMsg))
