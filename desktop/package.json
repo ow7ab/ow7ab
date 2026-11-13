@@ -1,0 +1,110 @@
+{
+  "name": "pmp-paints-desktop",
+  "productName": "PMP PAINTS ERP",
+  "version": "18.0.0",
+  "description": "PMP PAINTS Enterprise Cloud ERP — Official Windows Desktop Edition",
+  "author": "PMP Paints Industrial & Financial Systems",
+  "license": "ISC",
+  "main": "src/main.cjs",
+  "scripts": {
+    "sync:renderer": "node scripts/sync-renderer.mjs",
+    "dev": "npm run sync:renderer && electron .",
+    "start": "electron .",
+    "test": "node --test tests/*.test.mjs",
+    "pack:dir": "npm run sync:renderer && electron-builder --dir",
+    "dist:win": "npm run sync:renderer && electron-builder --win nsis portable --x64 --publish never",
+    "dist:portable": "npm run sync:renderer && electron-builder --win portable --x64 --publish never",
+    "dist:mac": "npm run sync:renderer && electron-builder --mac dmg zip --publish never",
+    "dist:linux": "npm run sync:renderer && electron-builder --linux AppImage deb --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  },
+  "devDependencies": {
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.aistudio.pmppaints.erp.desktop",
+    "productName": "PMP PAINTS ERP",
+    "copyright": "Copyright © 2026 PMP Paints for Chemical Industries & Coatings",
+    "asar": true,
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "renderer-dist/**/*",
+      "build/icon.ico",
+      "build/icon.png",
+      "build/tray-icon.png",
+      "!tests/**"
+    ],
+    "extraMetadata": {
+      "main": "src/main.cjs"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "pmp-paints-desktop-${target}-${version}-${arch}.${ext}",
+      "verifyUpdateCodeSignature": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PMP PAINTS ERP",
+      "uninstallDisplayName": "PMP PAINTS ERP",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "include": "build/installer.nsh",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "pmp-paints-desktop-setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "pmp-paints-desktop-portable-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "category": "public.app-category.business",
+      "icon": "build/icon.png",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "linux": {
+      "category": "Office",
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ow7ab",
+        "repo": "ow7ab",
+        "releaseType": "release",
+        "vPrefixedTagName": false
+      }
+    ]
+  }
+}

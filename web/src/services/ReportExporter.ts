@@ -1,5 +1,12 @@
 import { CustomerStatementResult } from './ErpCalculations';
 
+function getInlineDesktopBridge(): any {
+  if (typeof window !== 'undefined' && (window as any).pmpDesktop?.isDesktop) {
+    return (window as any).pmpDesktop;
+  }
+  return null;
+}
+
 export function escapeHtml(value: unknown): string {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -9,7 +16,11 @@ export function escapeHtml(value: unknown): string {
     .replace(/'/g, '&#39;');
 }
 
-function triggerPrintHtml(html: string): void {
+function triggerPrintHtml(html: string, title = 'مستند رسمي — PMP PAINTS ERP'): void {
+  if (getInlineDesktopBridge() && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('pmp:desktop-print-request', { detail: { title, html } }));
+    return;
+  }
   const printWindow = typeof window !== 'undefined' ? window.open('', '_blank', 'width=1080,height=850') : null;
   if (printWindow) {
     printWindow.document.open();
@@ -79,11 +90,47 @@ export const ReportExporter = {
         )
       ].join('\n');
 
+    const defaultFileName = `${filename.replace(/\.csv$/i, '')}_${new Date().toISOString().slice(0, 10)}.csv`;
+    const desktopBridge = getInlineDesktopBridge();
+    if (desktopBridge) {
+      void desktopBridge
+        .saveFile({
+          title: 'حفظ ملف Excel / CSV — PMP PAINTS ERP',
+          defaultFilename: defaultFileName,
+          content: csvContent,
+          encoding: 'utf8',
+          filters: [
+            { name: 'Excel CSV (UTF-8)', extensions: ['csv'] },
+            { name: 'All Files', extensions: ['*'] }
+          ]
+        })
+        .then((res: { canceled?: boolean; filePath?: string }) => {
+          if (!res.canceled && res.filePath) {
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(
+                new CustomEvent('pmp:desktop-export-notice', {
+                  detail: {
+                    filePath: res.filePath,
+                    label: 'تم حفظ ملف التقرير (Excel / CSV) بنجاح'
+                  }
+                })
+              );
+            }
+            void desktopBridge.notify({
+              title: 'PMP PAINTS ERP',
+              body: `تم حفظ التقرير بنجاح: ${res.filePath}`
+            });
+          }
+        })
+        .catch(() => {});
+      return;
+    }
+
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `${filename.replace(/\.csv$/i, '')}_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.setAttribute('download', defaultFileName);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -233,7 +280,7 @@ export const ReportExporter = {
       </html>
     `;
 
-    triggerPrintHtml(html);
+    triggerPrintHtml(html, title);
   },
 
   /**
@@ -532,7 +579,7 @@ export const ReportExporter = {
       </html>
     `;
 
-    triggerPrintHtml(html);
+    triggerPrintHtml(html, `كشف_حساب_عميل_${cust.name || 'عميل'}`);
   },
 
   /**
@@ -700,7 +747,7 @@ export const ReportExporter = {
       </body>
       </html>
     `;
-    triggerPrintHtml(html);
+    triggerPrintHtml(html, `كشف_حساب_خزنة_${params.cashboxName || 'الخزنة'}`);
   }
 };
 

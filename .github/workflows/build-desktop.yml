@@ -1,0 +1,104 @@
+name: PMP Paints - Windows Desktop Installer & Auto-Update Release
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+    inputs:
+      desktop_version:
+        description: "Desktop Release Version (e.g. 18.0.0)"
+        required: false
+        default: ""
+      publish_release:
+        description: "Publish Windows installer & portable .exe to GitHub Releases"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-desktop:
+    name: Build & Verify Windows x64 Desktop Installer (.exe) + Portable
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Web & Desktop Dependencies
+        shell: bash
+        run: |
+          npm ci --prefix web
+          npm install --prefix desktop --no-audit --no-fund
+
+      - name: Verify Web ERP Tests & Desktop Security Tests
+        shell: bash
+        run: |
+          npm test --prefix web
+          npm run sync:renderer --prefix desktop
+          npm test --prefix desktop
+
+      - name: Set Desktop Version (Optional Dispatch Override)
+        if: github.event.inputs.desktop_version != ''
+        shell: bash
+        run: |
+          npm --prefix desktop version "${{ github.event.inputs.desktop_version }}" --no-git-tag-version
+
+      - name: Build Windows x64 NSIS Installer & Portable Executable
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: |
+          npm run dist:win --prefix desktop
+
+      - name: Verify Generated Windows Artifacts & SHA-256 Checksums
+        shell: pwsh
+        run: |
+          $distDir = "desktop/dist"
+          $setupExe = Get-ChildItem -Path $distDir -Filter "*setup*.exe" | Select-Object -First 1
+          $portableExe = Get-ChildItem -Path $distDir -Filter "*portable*.exe" | Select-Object -First 1
+          if (-not $setupExe) { throw "Missing Windows NSIS installer (.exe) in $distDir" }
+          if (-not $portableExe) { throw "Missing Windows Portable executable (.exe) in $distDir" }
+          Get-ChildItem -Path $distDir -File | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
+            Write-Host "$($_.Name) -> $($_.Length) bytes -> SHA256: $hash"
+          }
+
+      - name: Upload Windows Desktop Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmp-paints-desktop-win-x64
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/*.yml
+            desktop/dist/*.blockmap
+          if-no-files-found: error
+
+      - name: Publish Separate Desktop Release on GitHub Releases
+        if: startsWith(github.ref, 'refs/tags/desktop-v') || github.event.inputs.publish_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || format('desktop-v{0}', github.event.inputs.desktop_version || '18.0.0') }}
+          name: "PMP PAINTS ERP Desktop (${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || format('desktop-v{0}', github.event.inputs.desktop_version || '18.0.0') }})"
+          body: |
+            ### PMP PAINTS ERP — Windows x64 Desktop Release
+            - Dedicated desktop channel (separate from Android `.apk` releases).
+            - Connects 1:1 to the unified production Firebase database and accounts.
+            - Includes NSIS Installer (`setup`) and Standalone Portable (`portable`) binaries.
+          draft: false
+          prerelease: false
+          files: |
+            desktop/dist/*.exe
+            desktop/dist/*.yml
+            desktop/dist/*.blockmap
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

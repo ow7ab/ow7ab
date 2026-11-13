@@ -25,6 +25,12 @@ import {
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { fetchReleaseFeed } from '../../services/ReleaseService';
 import { AuditLog } from '../../types/erp';
+import {
+  getDesktopBridge,
+  DesktopAppInfo,
+  DesktopPreferences,
+  DesktopUpdateState
+} from '../../utils/desktopBridge';
 
 const COLLECTION_ARABIC_LABELS: Record<string, string> = {
   user_accounts: 'حسابات الموظفين',
@@ -49,6 +55,15 @@ export const SettingsModuleView: React.FC = () => {
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [apkVersionInfo, setApkVersionInfo] = useState<{ versionName?: string; versionCode?: number } | null>(null);
 
+  const desktopBridge = getDesktopBridge();
+  const [desktopInfo, setDesktopInfo] = useState<DesktopAppInfo | null>(null);
+  const [desktopPrefs, setDesktopPrefs] = useState<DesktopPreferences>({
+    openAtLogin: false,
+    minimizeToTray: false,
+    confirmBeforeExit: false
+  });
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateState | null>(null);
+
   useEffect(() => {
     const unsubAudit = ErpDataService.subscribeToCollection<AuditLog>('audit_logs', (logs) => {
       setAuditLogs([...logs].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)));
@@ -63,7 +78,21 @@ export const SettingsModuleView: React.FC = () => {
         }
       })
       .catch(() => {});
-    return () => unsubAudit();
+
+    let unsubDesktopUpd: (() => void) | undefined;
+    if (desktopBridge) {
+      desktopBridge.getAppInfo().then((info) => {
+        setDesktopInfo(info);
+        setDesktopUpdate(info.updateState);
+      }).catch(() => {});
+      desktopBridge.getPreferences().then(setDesktopPrefs).catch(() => {});
+      unsubDesktopUpd = desktopBridge.onUpdateStatus(setDesktopUpdate);
+    }
+
+    return () => {
+      unsubAudit();
+      if (unsubDesktopUpd) unsubDesktopUpd();
+    };
   }, []);
 
   const handleRunHealthCheck = async () => {
@@ -182,6 +211,130 @@ export const SettingsModuleView: React.FC = () => {
           </div>
         </div>
       </GlassCard>
+
+      {desktopBridge && (
+        <GlassCard className="p-6 border-pmp-primary/30 space-y-4">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-black text-theme-primary">
+                  {language === 'ar'
+                    ? 'تطبيق سطح المكتب (Windows Desktop) والتحديثات التلقائية'
+                    : 'Windows Desktop Edition & Auto-Updates'}
+                </h3>
+                <GlassBadge variant="green">
+                  v{desktopInfo?.version || desktopUpdate?.currentVersion || '18.0.0'}
+                </GlassBadge>
+              </div>
+              <p className="text-xs text-theme-secondary mt-1">
+                {language === 'ar'
+                  ? 'قناة تحديثات سطح المكتب مستقلة تماماً عن ملفات APK الخاصة بالأندرويد، وتحفظ إعداداتك تلقائياً.'
+                  : 'Dedicated desktop release channel (separate from Android APK updates) preserving local user preferences.'}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0 flex-wrap">
+              <GlassButton
+                variant="secondary"
+                onClick={() => void desktopBridge.checkForDesktopUpdates()}
+                disabled={desktopUpdate?.status === 'checking' || desktopUpdate?.status === 'downloading'}
+                icon={<RefreshCw className={`w-4 h-4 ${desktopUpdate?.status === 'checking' ? 'animate-spin' : ''}`} />}
+                className="text-xs"
+              >
+                {desktopUpdate?.status === 'checking'
+                  ? 'جاري الفحص...'
+                  : language === 'ar'
+                  ? 'فحص تحديثات سطح المكتب'
+                  : 'Check Desktop Updates'}
+              </GlassButton>
+
+              {desktopUpdate?.status === 'available' && (
+                <GlassButton
+                  variant="primary"
+                  onClick={() => void desktopBridge.downloadDesktopUpdate()}
+                  className="text-xs"
+                >
+                  تنزيل التحديث (v{desktopUpdate.availableVersion})
+                </GlassButton>
+              )}
+
+              {desktopUpdate?.status === 'downloaded' && (
+                <GlassButton
+                  variant="primary"
+                  onClick={() => void desktopBridge.installDesktopUpdateAndRestart()}
+                  className="text-xs"
+                >
+                  تثبيت وإعادة التشغيل الآن
+                </GlassButton>
+              )}
+            </div>
+          </div>
+
+          {desktopUpdate?.message && (
+            <div className="p-3 rounded-xl bg-theme-base border border-theme text-xs flex flex-col gap-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-theme-primary">{desktopUpdate.message}</span>
+                {desktopUpdate.status === 'downloading' && (
+                  <span className="font-mono font-bold text-pmp-cyan">{desktopUpdate.progressPercent}%</span>
+                )}
+              </div>
+              {desktopUpdate.status === 'downloading' && (
+                <div className="w-full h-1.5 rounded-full bg-theme-surface overflow-hidden">
+                  <div
+                    className="h-full bg-pmp-primary transition-all"
+                    style={{ width: `${desktopUpdate.progressPercent}%` }}
+                  />
+                </div>
+              )}
+              {desktopUpdate.releaseNotes && (
+                <p className="text-[11px] text-theme-muted whitespace-pre-line">{desktopUpdate.releaseNotes}</p>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+            <label className="p-3.5 rounded-xl bg-theme-base border border-theme flex items-center justify-between gap-2 cursor-pointer">
+              <div>
+                <div className="font-bold text-theme-primary">تشغيل تلقائي مع Windows</div>
+                <div className="text-[11px] text-theme-muted mt-0.5">فتح المنظومة عند بدء تشغيل الجهاز</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={desktopPrefs.openAtLogin}
+                onChange={(e) => {
+                  const nextVal = e.target.checked;
+                  void desktopBridge.setPreferences({ openAtLogin: nextVal }).then(setDesktopPrefs);
+                }}
+                className="w-4 h-4 accent-red-600"
+              />
+            </label>
+
+            <label className="p-3.5 rounded-xl bg-theme-base border border-theme flex items-center justify-between gap-2 cursor-pointer">
+              <div>
+                <div className="font-bold text-theme-primary">التصغير لشريط النظام (Tray)</div>
+                <div className="text-[11px] text-theme-muted mt-0.5">إبقاء التطبيق في الخلفية عند الإغلاق</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={desktopPrefs.minimizeToTray}
+                onChange={(e) => {
+                  const nextVal = e.target.checked;
+                  void desktopBridge.setPreferences({ minimizeToTray: nextVal }).then(setDesktopPrefs);
+                }}
+                className="w-4 h-4 accent-red-600"
+              />
+            </label>
+
+            <div className="p-3.5 rounded-xl bg-theme-base border border-theme flex items-center justify-between gap-2">
+              <div>
+                <div className="font-bold text-theme-primary">حفظ مقاس وموقع النافذة</div>
+                <div className="text-[11px] text-theme-muted mt-0.5">يُستعاد تلقائياً عند كل تشغيل</div>
+              </div>
+              <GlassBadge variant="green">مفعّل</GlassBadge>
+            </div>
+          </div>
+        </GlassCard>
+      )}
 
       {/* Admin Sync Overview & Activity Log */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">

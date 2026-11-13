@@ -12,6 +12,8 @@ import {
   normalizeAppRoute,
   resolveInitialRouteFromLocation
 } from './utils/routing';
+import { DesktopWindowChrome } from './components/layout/DesktopWindowChrome';
+import { isDesktopApp } from './utils/desktopBridge';
 
 const AppContent: React.FC = () => {
   const { userProfile } = useAuth();
@@ -35,6 +37,16 @@ const AppContent: React.FC = () => {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  // Desktop opens directly into ERP Portal (/dashboard if authenticated, /login otherwise)
+  useEffect(() => {
+    if (!isDesktopApp()) return;
+    if (currentRoute === '/') {
+      navigateRoute(userProfile ? '/dashboard' : '/login');
+    } else if (userProfile && currentRoute === '/login') {
+      navigateRoute('/dashboard');
+    }
+  }, [userProfile, currentRoute, navigateRoute]);
 
   // Redirect logged-in user away from /login straight into /dashboard
   useEffect(() => {
@@ -108,7 +120,9 @@ export const App: React.FC = () => {
     <ThemeProvider>
       <LanguageProvider>
         <AuthProvider>
-          <AppContent />
+          <DesktopWindowChrome>
+            <AppContent />
+          </DesktopWindowChrome>
         </AuthProvider>
       </LanguageProvider>
     </ThemeProvider>

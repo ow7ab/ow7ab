@@ -48,6 +48,7 @@ import {
 } from '../services/SecurityService';
 import { resolveAssetUrl } from '../config/appVersionContract';
 import { AppRoute } from '../utils/routing';
+import { getDesktopBridge, isDesktopApp } from '../utils/desktopBridge';
 
 export type PmpScreenRoute =
   | 'DASHBOARD'
@@ -101,6 +102,18 @@ export const PortalPage: React.FC<PortalPageProps> = ({
       setActiveTab((prev) => (prev === 'USERS' ? 'DASHBOARD' : prev));
     }
   }, [portalRoute, canAccessAdminArea]);
+
+  useEffect(() => {
+    const bridge = getDesktopBridge();
+    if (!bridge) return;
+    return bridge.onShortcutAction((action) => {
+      if (action === 'GLOBAL_SEARCH') {
+        setIsSearchOpen(true);
+      } else if (action === 'PRINT_REPORT' && typeof window !== 'undefined') {
+        window.print();
+      }
+    });
+  }, []);
 
   const handleSignOut = async () => {
     await signOut();
@@ -208,6 +221,35 @@ export const PortalPage: React.FC<PortalPageProps> = ({
       setActiveTab('DASHBOARD');
     }
   }, [userProfile?.permissions, userProfile?.role, activeTab]);
+
+  // Desktop enterprise keyboard shortcuts (Ctrl+K search, Ctrl+1..9 module jump, Ctrl+Shift+T/L)
+  useEffect(() => {
+    if (!isDesktopApp()) return;
+    const visibleItems = navMenuItems.filter((m) => m.visible);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === 'k') {
+        e.preventDefault();
+        setIsSearchOpen(true);
+      } else if (e.shiftKey && key === 't') {
+        e.preventDefault();
+        toggleTheme();
+      } else if (e.shiftKey && key === 'l') {
+        e.preventDefault();
+        toggleLanguage();
+      } else if (/^[1-9]$/.test(key) && !e.shiftKey && !e.altKey) {
+        const idx = Number(key) - 1;
+        const target = visibleItems[idx];
+        if (target) {
+          e.preventDefault();
+          setActiveTab(target.id);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [userProfile?.permissions, userProfile?.role, toggleTheme, toggleLanguage]);
 
   if (!userProfile) {
     return (

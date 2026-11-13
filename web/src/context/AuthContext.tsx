@@ -24,6 +24,7 @@ import {
   verifySessionIntegritySeal,
   LoginRateLimiter
 } from '../services/PasswordSecurity';
+import { getDesktopBridge } from '../utils/desktopBridge';
 
 const SESSION_STORAGE_KEY = 'pmp_web_portal_user';
 
@@ -101,21 +102,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         issuedAt
       })
         .then((seal) => {
-          localStorage.setItem(
-            SESSION_STORAGE_KEY,
-            JSON.stringify({
-              ...sanitized,
-              _issuedAt: issuedAt,
-              _integritySeal: seal
-            })
-          );
+          const payloadStr = JSON.stringify({
+            ...sanitized,
+            _issuedAt: issuedAt,
+            _integritySeal: seal
+          });
+          localStorage.setItem(SESSION_STORAGE_KEY, payloadStr);
+          const desktopBridge = getDesktopBridge();
+          if (desktopBridge) {
+            void desktopBridge.secureStorageSet(SESSION_STORAGE_KEY, payloadStr).catch(() => {});
+          }
         })
         .catch(() => {
           localStorage.removeItem(SESSION_STORAGE_KEY);
+          const desktopBridge = getDesktopBridge();
+          if (desktopBridge) {
+            void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
+          }
         });
     } else {
       setLinkedAccount(null);
       localStorage.removeItem(SESSION_STORAGE_KEY);
+      const desktopBridge = getDesktopBridge();
+      if (desktopBridge) {
+        void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
+      }
     }
   };
 
@@ -124,7 +135,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let cancelled = false;
     (async () => {
       try {
-        const saved = localStorage.getItem(SESSION_STORAGE_KEY);
+        let saved = localStorage.getItem(SESSION_STORAGE_KEY);
+        const desktopBridge = getDesktopBridge();
+        if (!saved && desktopBridge) {
+          saved = await desktopBridge.secureStorageGet(SESSION_STORAGE_KEY).catch(() => null);
+        }
         if (saved) {
           const parsed = JSON.parse(saved);
           const sealOk = await verifySessionIntegritySeal(parsed);
@@ -136,6 +151,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setLinkedAccount(cleanAccount);
           } else {
             localStorage.removeItem(SESSION_STORAGE_KEY);
+            if (desktopBridge) {
+              void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
+            }
           }
         }
       } catch {
