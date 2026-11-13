@@ -86,9 +86,14 @@ test('Desktop Print & Update Isolation: strips auto window.print() and rejects A
 });
 
 test('Desktop Assets & Hardening: verifies official icons and secure BrowserWindow flags', () => {
-  assert.ok(fs.existsSync(path.join(DESKTOP_ROOT, 'assets', 'icon.ico')));
-  assert.ok(fs.existsSync(path.join(DESKTOP_ROOT, 'assets', 'icon.png')));
-  assert.ok(fs.existsSync(path.join(DESKTOP_ROOT, 'assets', 'tray-icon.png')));
+  const icoPath = path.join(DESKTOP_ROOT, 'build', 'icon.ico');
+  assert.ok(fs.existsSync(icoPath));
+  assert.ok(fs.existsSync(path.join(DESKTOP_ROOT, 'build', 'icon.png')));
+  assert.ok(fs.existsSync(path.join(DESKTOP_ROOT, 'build', 'tray-icon.png')));
+  const icoBytes = fs.readFileSync(icoPath);
+  assert.ok(icoBytes.length > 22);
+  assert.equal(icoBytes.readUInt16LE(0), 0);
+  assert.equal(icoBytes.readUInt16LE(2), 1);
 
   const mainSource = fs.readFileSync(path.join(DESKTOP_ROOT, 'src', 'main.cjs'), 'utf8');
   assert.ok(mainSource.includes('contextIsolation: true'));

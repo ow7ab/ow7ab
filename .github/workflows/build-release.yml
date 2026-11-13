@@ -102,6 +102,7 @@ jobs:
                       or f.startswith("web/")
                       or f.startswith("desktop/")
                       or f in (
+                          "package.json",
                           "README.md",
                           "DEPLOYMENT.md",
                           "DESKTOP.md",

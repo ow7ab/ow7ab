@@ -27,9 +27,9 @@ const {
 
 const PREFERRED_PORT = 47821;
 const RENDERER_DIST_DIR = path.resolve(__dirname, '../renderer-dist');
-const ICON_PNG_PATH = path.resolve(__dirname, '../assets/icon.png');
-const ICON_ICO_PATH = path.resolve(__dirname, '../assets/icon.ico');
-const TRAY_ICON_PATH = path.resolve(__dirname, '../assets/tray-icon.png');
+const ICON_PNG_PATH = path.resolve(__dirname, '../build/icon.png');
+const ICON_ICO_PATH = path.resolve(__dirname, '../build/icon.ico');
+const TRAY_ICON_PATH = path.resolve(__dirname, '../build/tray-icon.png');
 
 let mainWindow = null;
 let tray = null;

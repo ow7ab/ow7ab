@@ -32,13 +32,41 @@ jobs:
         with:
           node-version: 22
 
-      - name: Verify Repository Layout & Resolve Desktop Version
+      - name: Pre-Build Verify Directory Structure, Path Mapping & Desktop Assets
         id: version
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (-not (Test-Path "web/package.json")) { throw "Missing web/package.json in workspace $(Get-Location)" }
-          if (-not (Test-Path "desktop/package.json")) { throw "Missing desktop/package.json in workspace $(Get-Location)" }
+          $repoRoot = (Get-Location).Path
+          Write-Host "Workspace Root: $repoRoot"
+          Write-Host "Node: $(node --version) | npm: $(npm --version)"
+
+          $requiredFiles = @(
+            "package.json",
+            "web/package.json",
+            "desktop/package.json",
+            "desktop/src/main.cjs",
+            "desktop/src/preload.cjs",
+            "desktop/scripts/ensure-desktop-assets.mjs",
+            "desktop/scripts/sync-renderer.mjs"
+          )
+          foreach ($relPath in $requiredFiles) {
+            if (-not (Test-Path $relPath)) {
+              throw "Pre-build path mapping check failed: missing '$relPath' under $repoRoot"
+            }
+            Write-Host "[OK] Mapped: $relPath -> $((Resolve-Path $relPath).Path)"
+          }
+
+          node desktop/scripts/ensure-desktop-assets.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          foreach ($asset in @("desktop/build/icon.ico", "desktop/build/icon.png", "desktop/build/tray-icon.png", "desktop/build/installer.nsh")) {
+            if (-not (Test-Path $asset)) {
+              throw "Required desktop build asset missing after provisioning: $asset"
+            }
+            Write-Host "[OK] Asset ready: $asset ($((Get-Item $asset).Length) bytes)"
+          }
+
           $pkg = Get-Content -Raw -Path "desktop/package.json" | ConvertFrom-Json
           $baseVersion = [string]$pkg.version
           $inputVersion = "${{ github.event.inputs.desktop_version }}".Trim() -replace '^(desktop-)?v', ''
@@ -51,8 +79,14 @@ jobs:
           }
           "version=$resolvedVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag_name=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Node: $(node --version) | npm: $(npm --version)"
           Write-Host "Resolved Desktop version: $resolvedVersion (tag: $tagName)"
+
+      - name: Verify Root Package Manifest (npm install)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm install --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install Web Dependencies
         working-directory: web

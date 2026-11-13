@@ -1,0 +1,14 @@
+{
+  "name": "pmp-paints-erp-workspace",
+  "private": true,
+  "version": "18.0.0",
+  "description": "PMP PAINTS Enterprise Cloud ERP — Unified Web & Windows Desktop Orchestrator",
+  "scripts": {
+    "install:all": "npm ci --prefix web --no-audit --no-fund && npm install --prefix desktop --no-audit --no-fund",
+    "test:web": "npm test --prefix web",
+    "test:desktop": "node desktop/scripts/ensure-desktop-assets.mjs && node desktop/scripts/sync-renderer.mjs && npm test --prefix desktop",
+    "build": "node -e \"const fs=require('fs'),cp=require('child_process');if(!fs.existsSync('web/node_modules'))cp.execSync('npm ci --prefix web --no-audit --no-fund',{stdio:'inherit'});\" && npm run build --prefix web",
+    "desktop:sync": "node desktop/scripts/sync-renderer.mjs",
+    "desktop:dist:win": "node desktop/scripts/sync-renderer.mjs && npm run dist:win --prefix desktop"
+  }
+}
