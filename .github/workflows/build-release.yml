@@ -100,13 +100,17 @@ jobs:
                   if changed_files and all(
                       f.startswith("public/")
                       or f.startswith("web/")
+                      or f.startswith("desktop/")
                       or f in (
                           "README.md",
                           "DEPLOYMENT.md",
+                          "DESKTOP.md",
                           "firebase.json",
                           "wrangler.toml",
+                          ".gitignore",
                           ".github/workflows/deploy-web.yml",
                           ".github/workflows/build-release.yml",
+                          ".github/workflows/build-desktop.yml",
                       )
                       for f in changed_files
                   ):

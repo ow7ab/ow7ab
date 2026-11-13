@@ -32,37 +32,76 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install Web & Desktop Dependencies
-        shell: bash
+      - name: Resolve Desktop Version & Release Tag
+        id: version
+        shell: pwsh
         run: |
-          npm ci --prefix web
+          $ErrorActionPreference = "Stop"
+          $pkg = Get-Content -Raw -Path "desktop/package.json" | ConvertFrom-Json
+          $baseVersion = [string]$pkg.version
+          $inputVersion = "${{ github.event.inputs.desktop_version }}".Trim() -replace '^(desktop-)?v', ''
+          $resolvedVersion = if ($inputVersion) { $inputVersion } else { $baseVersion }
+          if ("${{ github.ref }}".StartsWith("refs/tags/desktop-v")) {
+            $tagName = "${{ github.ref_name }}"
+            $resolvedVersion = $tagName -replace '^desktop-v', ''
+          } else {
+            $tagName = "desktop-v$resolvedVersion"
+          }
+          "version=$resolvedVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag_name=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Resolved Desktop version: $resolvedVersion (tag: $tagName)"
+
+      - name: Install Web & Desktop Dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Using Node $(node --version) and npm $(npm --version)"
+          npm ci --prefix web --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm install --prefix desktop --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Apply Desktop Version Override (If Requested)
+        if: github.event.inputs.desktop_version != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm --prefix desktop version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify Web ERP Tests & Desktop Security Tests
-        shell: bash
+        shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           npm test --prefix web
-          npm run sync:renderer --prefix desktop
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node desktop/scripts/sync-renderer.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm test --prefix desktop
-
-      - name: Set Desktop Version (Optional Dispatch Override)
-        if: github.event.inputs.desktop_version != ''
-        shell: bash
-        run: |
-          npm --prefix desktop version "${{ github.event.inputs.desktop_version }}" --no-git-tag-version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Windows x64 NSIS Installer & Portable Executable
-        shell: bash
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
         run: |
-          npm run dist:win --prefix desktop
+          $ErrorActionPreference = "Stop"
+          node desktop/scripts/sync-renderer.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location desktop
+          try {
+            node node_modules/electron-builder/cli.js --win nsis portable --x64 --publish never
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
 
       - name: Verify Generated Windows Artifacts & SHA-256 Checksums
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $distDir = "desktop/dist"
           $setupExe = Get-ChildItem -Path $distDir -Filter "*setup*.exe" | Select-Object -First 1
           $portableExe = Get-ChildItem -Path $distDir -Filter "*portable*.exe" | Select-Object -First 1
@@ -87,8 +126,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/desktop-v') || github.event.inputs.publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || format('desktop-v{0}', github.event.inputs.desktop_version || '18.0.0') }}
-          name: "PMP PAINTS ERP Desktop (${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || format('desktop-v{0}', github.event.inputs.desktop_version || '18.0.0') }})"
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: "PMP PAINTS ERP Desktop (${{ steps.version.outputs.tag_name }})"
           body: |
             ### PMP PAINTS ERP — Windows x64 Desktop Release
             - Dedicated desktop channel (separate from Android `.apk` releases).

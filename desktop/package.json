@@ -8,14 +8,14 @@
   "main": "src/main.cjs",
   "scripts": {
     "sync:renderer": "node scripts/sync-renderer.mjs",
-    "dev": "npm run sync:renderer && electron .",
-    "start": "electron .",
+    "dev": "node scripts/sync-renderer.mjs && node node_modules/electron/cli.js .",
+    "start": "node node_modules/electron/cli.js .",
     "test": "node --test tests/*.test.mjs",
-    "pack:dir": "npm run sync:renderer && electron-builder --dir",
-    "dist:win": "npm run sync:renderer && electron-builder --win nsis portable --x64 --publish never",
-    "dist:portable": "npm run sync:renderer && electron-builder --win portable --x64 --publish never",
-    "dist:mac": "npm run sync:renderer && electron-builder --mac dmg zip --publish never",
-    "dist:linux": "npm run sync:renderer && electron-builder --linux AppImage deb --publish never"
+    "pack:dir": "node scripts/sync-renderer.mjs && node node_modules/electron-builder/cli.js --dir",
+    "dist:win": "node scripts/sync-renderer.mjs && node node_modules/electron-builder/cli.js --win nsis portable --x64 --publish never",
+    "dist:portable": "node scripts/sync-renderer.mjs && node node_modules/electron-builder/cli.js --win portable --x64 --publish never",
+    "dist:mac": "node scripts/sync-renderer.mjs && node node_modules/electron-builder/cli.js --mac dmg zip --publish never",
+    "dist:linux": "node scripts/sync-renderer.mjs && node node_modules/electron-builder/cli.js --linux AppImage deb --publish never"
   },
   "dependencies": {
     "electron-updater": "^6.8.11"

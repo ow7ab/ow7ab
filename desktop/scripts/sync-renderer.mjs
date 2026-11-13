@@ -38,11 +38,21 @@ if (fs.existsSync(PUBLIC_ASSETS_DIR)) {
 }
 
 console.log('[Desktop Sync] Step 2/3: Building unified ERP web application (VITE_BASE_PATH=/)...');
-const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-execFileSync(npmCmd, ['run', 'build'], {
+const tscBin = path.join(WEB_DIR, 'node_modules', 'typescript', 'bin', 'tsc');
+const viteBin = path.join(WEB_DIR, 'node_modules', 'vite', 'bin', 'vite.js');
+
+if (!fs.existsSync(tscBin) || !fs.existsSync(viteBin)) {
+  throw new Error(`Web build tools missing under ${path.join(WEB_DIR, 'node_modules')}. Run "npm ci --prefix web" first.`);
+}
+
+execFileSync(process.execPath, [tscBin], {
+  cwd: WEB_DIR,
+  stdio: 'inherit'
+});
+
+execFileSync(process.execPath, [viteBin, 'build'], {
   cwd: WEB_DIR,
   stdio: 'inherit',
-  shell: process.platform === 'win32',
   env: {
     ...process.env,
     VITE_BASE_PATH: '/'
