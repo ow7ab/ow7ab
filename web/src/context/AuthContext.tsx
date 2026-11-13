@@ -1,10 +1,25 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { User, onAuthStateChanged, signOut as fbSignOut, signInWithEmailAndPassword, signInWithPopup, sendPasswordResetEmail } from 'firebase/auth';
-import { doc, getDoc, collection, query, where, getDocs, updateDoc, serverTimestamp } from 'firebase/firestore';
+import {
+  User,
+  onAuthStateChanged,
+  signOut as fbSignOut,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  sendPasswordResetEmail
+} from 'firebase/auth';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { auth, firestore, googleAuthProvider } from '../config/firebaseConfig';
 import { UserAccount, LinkedAccountDoc, UserRoleType } from '../types/erp';
-import { resolveUserRoleType, checkActionPermission, checkModuleAccess } from '../services/SecurityService';
+import {
+  resolveUserRoleType,
+  checkActionPermission,
+  checkModuleAccess
+} from '../services/SecurityService';
 import { AccountService } from '../services/AccountService';
+import { ErpDataService, safeId } from '../services/ErpDataService';
+import { verifyPassword, needsUpgradeToPbkdf2 } from '../services/PasswordSecurity';
+
+const SESSION_STORAGE_KEY = 'pmp_web_portal_user';
 
 interface AuthContextType {
   currentUser: User | null;
@@ -23,7 +38,6 @@ interface AuthContextType {
   loginWithGoogle: () => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
-  switchSimulatedUser: (account: UserAccount) => void;
   updateCurrentUserProfile: (data: Partial<UserAccount>) => Promise<void>;
 }
 
@@ -44,33 +58,65 @@ const AuthContext = createContext<AuthContextType>({
   loginWithGoogle: async () => {},
   requestPasswordReset: async () => {},
   signOut: async () => {},
-  switchSimulatedUser: () => {},
   updateCurrentUserProfile: async () => {}
 });
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [linkedAccount, setLinkedAccount] = useState<UserAccount | null>(() => {
-    const saved = localStorage.getItem('pmp_web_portal_user');
+    const saved = localStorage.getItem(SESSION_STORAGE_KEY);
     if (saved) {
       try {
-        return JSON.parse(saved);
-      } catch (e) {
-        return null;
+        const parsed = JSON.parse(saved) as UserAccount;
+        if (parsed && parsed.userCode && parsed.active !== false) {
+          parsed.roleType = resolveUserRoleType(parsed);
+          return parsed;
+        }
+      } catch {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
       }
     }
-    // Return default Super Admin for quick initial review if no session exists
-    return AccountService.getDefaultEmployees()[0];
+    return null;
   });
 
   const [isLoading, setIsLoading] = useState(true);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
 
+  const persistSession = (account: UserAccount | null) => {
+    if (account) {
+      const sanitized: UserAccount = {
+        ...account,
+        pinOrPassword: undefined, // Never persist secret hashes into localStorage
+        roleType: resolveUserRoleType(account)
+      };
+      setLinkedAccount(sanitized);
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sanitized));
+    } else {
+      setLinkedAccount(null);
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+    }
+  };
+
+  // Start global tombstone & epoch sync for the active cluster
+  useEffect(() => {
+    const unsubTomb = ErpDataService.subscribeTombstonesAndEpoch();
+    return () => unsubTomb();
+  }, []);
+
+  // Firebase Auth listener + live verification against linked_accounts when Firebase Auth is present
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
-      if (user) {
+      if (user && !linkedAccount) {
         try {
+          if (user.email) {
+            const matched = await AccountService.findAccountForLogin(user.email);
+            if (matched && matched.active && matched.syncStatus !== 'PENDING_MANAGER_APPROVAL') {
+              persistSession(matched);
+              setIsLoading(false);
+              return;
+            }
+          }
           const docRef = doc(firestore, 'linked_accounts', user.uid);
           const docSnap = await getDoc(docRef);
           if (docSnap.exists()) {
@@ -82,24 +128,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               username: data.username,
               phoneOrEmail: user.email || '',
               role: data.role,
-              roleType: resolveUserRoleType({
-                ...data,
-                id: 1,
-                phoneOrEmail: user.email || '',
-                syncStatus: 'APPROVED_BY_MANAGER',
-                roleType: 'EMPLOYEE'
-              }),
+              roleType: 'EMPLOYEE',
               branch: data.branch,
               permissions: data.permissions,
               serverSyncToken: data.serverSyncToken,
               syncStatus: 'APPROVED_BY_MANAGER',
-              active: data.active
+              active: data.active !== false
             };
-            setLinkedAccount(mapped);
-            localStorage.setItem('pmp_web_portal_user', JSON.stringify(mapped));
+            mapped.roleType = resolveUserRoleType(mapped);
+            if (mapped.active) {
+              persistSession(mapped);
+            }
           }
-        } catch (e) {
-          console.warn('Note: Linked account query:', e);
+        } catch (err) {
+          console.warn('Linked account sync note:', err);
         }
       }
       setIsLoading(false);
@@ -107,6 +149,50 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     return () => unsubscribe();
   }, []);
+
+  // Live session security listener: watches Firestore user_accounts doc so suspended/deleted users or role/permission edits sync immediately
+  useEffect(() => {
+    if (!linkedAccount?.userCode) return;
+    const cluster = ErpDataService.activeCluster;
+    const docId = safeId(linkedAccount.userCode, `USR-${linkedAccount.id}`);
+    const userRef = doc(firestore, `erp_clusters/${cluster}/user_accounts`, docId);
+
+    const unsub = onSnapshot(
+      userRef,
+      (snap) => {
+        if (!snap.exists()) return;
+        const d = snap.data() || {};
+        if (d.active === false || d.syncStatus === 'PENDING_MANAGER_APPROVAL') {
+          persistSession(null);
+          return;
+        }
+        const refreshed: UserAccount = {
+          ...linkedAccount,
+          fullName: d.fullName || linkedAccount.fullName,
+          username: d.username || linkedAccount.username,
+          phoneOrEmail: d.phoneOrEmail ?? linkedAccount.phoneOrEmail,
+          role: d.role || linkedAccount.role,
+          branch: d.branch || linkedAccount.branch,
+          permissions: d.permissions ?? linkedAccount.permissions,
+          syncStatus: d.syncStatus || 'APPROVED_BY_MANAGER',
+          active: d.active !== false
+        };
+        refreshed.roleType = resolveUserRoleType(refreshed);
+        // Only update state if permissions, role, branch, or name changed
+        if (
+          refreshed.permissions !== linkedAccount.permissions ||
+          refreshed.role !== linkedAccount.role ||
+          refreshed.branch !== linkedAccount.branch ||
+          refreshed.fullName !== linkedAccount.fullName
+        ) {
+          persistSession(refreshed);
+        }
+      },
+      () => {}
+    );
+
+    return () => unsub();
+  }, [linkedAccount?.userCode]);
 
   const userRoleType: UserRoleType = resolveUserRoleType(linkedAccount);
   const isSuperAdmin = userRoleType === 'SUPER_ADMIN';
@@ -121,81 +207,137 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return checkActionPermission(linkedAccount, actionToken);
   };
 
-  const loginWithEmail = async (emailVal: string, passVal: string) => {
-    setIsAuthenticating(true);
-    try {
-      const cred = await signInWithEmailAndPassword(auth, emailVal, passVal);
-      const docRef = doc(firestore, 'linked_accounts', cred.user.uid);
-      const docSnap = await getDoc(docRef);
-      if (docSnap.exists()) {
-        const data = docSnap.data() as LinkedAccountDoc;
-        const mapped: UserAccount = {
-          id: 1,
-          userCode: data.userCode,
-          fullName: data.fullName,
-          username: data.username,
-          phoneOrEmail: cred.user.email || '',
-          role: data.role,
-          roleType: resolveUserRoleType({
-            ...data,
-            id: 1,
-            phoneOrEmail: cred.user.email || '',
-            syncStatus: 'APPROVED_BY_MANAGER',
-            roleType: 'EMPLOYEE'
-          }),
-          branch: data.branch,
-          permissions: data.permissions,
-          serverSyncToken: data.serverSyncToken,
-          syncStatus: 'APPROVED_BY_MANAGER',
-          active: data.active
-        };
-        setLinkedAccount(mapped);
-        localStorage.setItem('pmp_web_portal_user', JSON.stringify(mapped));
-      } else {
-        // Fallback matched to predefined employees
-        const defaults = AccountService.getDefaultEmployees();
-        const found = defaults.find(e => e.phoneOrEmail.toLowerCase() === emailVal.toLowerCase()) || defaults[0];
-        setLinkedAccount(found);
-        localStorage.setItem('pmp_web_portal_user', JSON.stringify(found));
-      }
-    } catch (err: any) {
-      // If Firebase Auth throws (e.g. offline or unprovisioned password in cloud auth),
-      // match against verified enterprise directory
-      const defaults = AccountService.getDefaultEmployees();
-      const found = defaults.find(e => e.phoneOrEmail.toLowerCase() === emailVal.toLowerCase() || e.username.toLowerCase() === emailVal.toLowerCase());
-      if (found) {
-        setLinkedAccount(found);
-        localStorage.setItem('pmp_web_portal_user', JSON.stringify(found));
-        return;
-      }
-      throw err;
-    } finally {
-      setIsAuthenticating(false);
+  const validateAccountAccessState = (account: UserAccount) => {
+    if (account.syncStatus === 'PENDING_MANAGER_APPROVAL') {
+      throw new Error('حسابك بانتظار موافقة مدير النظام وتفعيل الصلاحيات.');
+    }
+    if (!account.active) {
+      throw new Error('تم تجميد هذا الحساب من قبل الإدارة. يرجى مراجعة مدير النظام.');
     }
   };
 
   const loginWithUsernamePin = async (userVal: string, pinVal: string) => {
     setIsAuthenticating(true);
     try {
-      const cleanUser = userVal.trim().toLowerCase();
-      const defaults = AccountService.getDefaultEmployees();
-      const matched = defaults.find(e => e.username.toLowerCase() === cleanUser || e.userCode.toLowerCase() === cleanUser);
+      const cleanUser = userVal.trim();
+      const cleanPin = pinVal.trim();
+      if (!cleanUser || !cleanPin) {
+        throw new Error('يرجى إدخال اسم المستخدم والرمز السري / كلمة المرور.');
+      }
 
+      const matched = await AccountService.findAccountForLogin(cleanUser);
       if (!matched) {
-        throw new Error('اسم المستخدم غير مسجل في منظومة PMP');
+        throw new Error('اسم المستخدم غير مسجل في قاعدة بيانات PMP السحابية.');
       }
 
-      if (!matched.active) {
-        throw new Error('تم تجميد هذا الحساب من قبل الإدارة. يرجى مراجعة المسؤول.');
+      validateAccountAccessState(matched);
+
+      const storedSecret = (matched.pinOrPassword || '').trim();
+      if (!storedSecret) {
+        throw new Error('لم يتم تعيين رمز سري لهذا الحساب. يرجى ضبط كلمة المرور من إدارة المستخدمين أو الدخول عبر Google.');
       }
 
-      // Check PIN: '1234' is accepted for default setup or custom matching
-      if (pinVal !== '1234' && pinVal !== '0000' && pinVal.length < 4) {
-        throw new Error('الرمز السري غير صحيح. الرجاء التأكد من الرمز المدخل.');
+      const verified = await verifyPassword(cleanPin, storedSecret);
+      if (!verified) {
+        await ErpDataService.logAudit(cleanUser, 'WEB_LOGIN_FAILED', 'محاولة دخول برمز سري غير صحيح');
+        throw new Error('الرمز السري أو كلمة المرور غير صحيحة.');
       }
 
-      setLinkedAccount(matched);
-      localStorage.setItem('pmp_web_portal_user', JSON.stringify(matched));
+      // Transparent upgrade from legacy SHA-256 / plaintext PIN to PBKDF2-HMAC-SHA256
+      if (needsUpgradeToPbkdf2(storedSecret)) {
+        AccountService.updateEmployee(
+          matched,
+          matched,
+          'ترقية تشفير كلمة المرور تلقائياً إلى PBKDF2-HMAC-SHA256',
+          cleanPin
+        ).catch(() => {});
+      }
+
+      await ErpDataService.logAudit(
+        matched.username,
+        'WEB_LOGIN_SUCCESS',
+        `دخول ناجح للويب (${matched.role} - ${matched.branch})`
+      );
+      persistSession(matched);
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const loginWithEmail = async (emailVal: string, passVal: string) => {
+    setIsAuthenticating(true);
+    try {
+      const cleanEmail = emailVal.trim().toLowerCase();
+      const cleanPass = passVal.trim();
+      if (!cleanEmail || !cleanPass) {
+        throw new Error('يرجى إدخال البريد الإلكتروني وكلمة المرور.');
+      }
+
+      // 1. Check Firebase Auth if configured for this corporate email
+      let fbCredUser: User | null = null;
+      let fbAuthError: any = null;
+      try {
+        const cred = await signInWithEmailAndPassword(auth, cleanEmail, cleanPass);
+        fbCredUser = cred.user;
+      } catch (err: any) {
+        fbAuthError = err;
+      }
+
+      // 2. Look up matching employee profile in Firestore `user_accounts`
+      const matched = await AccountService.findAccountForLogin(cleanEmail);
+      if (matched) {
+        validateAccountAccessState(matched);
+        // If Firebase Auth already verified the password, allow login; otherwise verify against Firestore PBKDF2 hash
+        if (!fbCredUser) {
+          const storedSecret = (matched.pinOrPassword || '').trim();
+          const ok = storedSecret ? await verifyPassword(cleanPass, storedSecret) : false;
+          if (!ok) {
+            await ErpDataService.logAudit(cleanEmail, 'WEB_EMAIL_LOGIN_FAILED', 'كلمة مرور غير صحيحة');
+            throw new Error('البريد الإلكتروني أو كلمة المرور غير صحيحة.');
+          }
+          if (needsUpgradeToPbkdf2(storedSecret)) {
+            AccountService.updateEmployee(matched, matched, 'ترقية تشفير كلمة المرور إلى PBKDF2', cleanPass).catch(
+              () => {}
+            );
+          }
+        }
+
+        await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${cleanEmail}`);
+        persistSession(matched);
+        return;
+      }
+
+      // 3. If Firebase Auth signed in and `/linked_accounts/{uid}` exists, map it
+      if (fbCredUser) {
+        const snap = await getDoc(doc(firestore, 'linked_accounts', fbCredUser.uid));
+        if (snap.exists()) {
+          const data = snap.data() as LinkedAccountDoc;
+          const mapped: UserAccount = {
+            id: 1,
+            userCode: data.userCode,
+            fullName: data.fullName,
+            username: data.username,
+            phoneOrEmail: fbCredUser.email || cleanEmail,
+            role: data.role,
+            roleType: 'EMPLOYEE',
+            branch: data.branch,
+            permissions: data.permissions,
+            serverSyncToken: data.serverSyncToken,
+            syncStatus: 'APPROVED_BY_MANAGER',
+            active: data.active !== false
+          };
+          validateAccountAccessState(mapped);
+          persistSession(mapped);
+          return;
+        }
+        throw new Error('تم التحقق من البريد ولكن الحساب غير مرتبط بسجل موظف معتمد في المنظومة.');
+      }
+
+      throw new Error(
+        fbAuthError?.code === 'auth/wrong-password' || fbAuthError?.code === 'auth/invalid-credential'
+          ? 'بيانات الدخول غير صحيحة.'
+          : fbAuthError?.message || 'لا يوجد حساب موظف مطابق لهذا البريد الإلكتروني.'
+      );
     } finally {
       setIsAuthenticating(false);
     }
@@ -205,49 +347,48 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsAuthenticating(true);
     try {
       const res = await signInWithPopup(auth, googleAuthProvider);
-      if (res.user) {
-        const defaults = AccountService.getDefaultEmployees();
-        const found = defaults.find(e => e.phoneOrEmail.toLowerCase() === (res.user.email || '').toLowerCase()) || defaults[0];
-        setLinkedAccount(found);
-        localStorage.setItem('pmp_web_portal_user', JSON.stringify(found));
+      const fbUser = res.user;
+      const email = (fbUser?.email || '').trim().toLowerCase();
+      if (!email) {
+        throw new Error('لم يتم استلام البريد الإلكتروني من حساب Google.');
       }
-    } catch (err: any) {
-      console.warn('Google sign-in exception:', err);
-      // Fallback to default Super Admin for authorized session
-      const superAdmin = AccountService.getDefaultEmployees()[0];
-      setLinkedAccount(superAdmin);
-      localStorage.setItem('pmp_web_portal_user', JSON.stringify(superAdmin));
+
+      const matched = await AccountService.findAccountForLogin(email);
+      if (matched) {
+        validateAccountAccessState(matched);
+        await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_GOOGLE', `تسجيل دخول عبر Google (${email})`);
+        persistSession(matched);
+        return;
+      }
+
+      // Not yet approved in user_accounts -> submit pending request matching Android Google Sign-In flow
+      await AccountService.submitPendingGoogleRequest(email, fbUser.displayName || email.split('@')[0]);
+      await fbSignOut(auth).catch(() => {});
+      throw new Error(
+        'تم تسجيل طلب ربط حساب Google بنجاح. الحساب حالياً بانتظار موافقة مدير النظام وتحديد الصلاحيات.'
+      );
     } finally {
       setIsAuthenticating(false);
     }
   };
 
   const requestPasswordReset = async (emailVal: string) => {
-    try {
-      await sendPasswordResetEmail(auth, emailVal);
-    } catch (e) {
-      console.warn('Password reset note:', e);
-      // Fallback confirmation message for enterprise staff
-    }
+    const cleanEmail = emailVal.trim();
+    if (!cleanEmail) throw new Error('يرجى إدخال البريد الإلكتروني أولاً.');
+    await sendPasswordResetEmail(auth, cleanEmail);
   };
 
   const signOut = async () => {
     await fbSignOut(auth).catch(() => {});
-    setLinkedAccount(null);
-    localStorage.removeItem('pmp_web_portal_user');
-  };
-
-  const switchSimulatedUser = (account: UserAccount) => {
-    setLinkedAccount(account);
-    localStorage.setItem('pmp_web_portal_user', JSON.stringify(account));
+    persistSession(null);
   };
 
   const updateCurrentUserProfile = async (data: Partial<UserAccount>) => {
     if (!linkedAccount) return;
-    const updated = { ...linkedAccount, ...data };
-    setLinkedAccount(updated);
-    localStorage.setItem('pmp_web_portal_user', JSON.stringify(updated));
-    await AccountService.updateEmployee(updated, updated, 'تحديث الملف الشخصي للموظف');
+    const updated: UserAccount = { ...linkedAccount, ...data };
+    updated.roleType = resolveUserRoleType(updated);
+    persistSession(updated);
+    await AccountService.updateEmployee(updated, updated, 'تحديث بيانات الحساب الشخصي');
   };
 
   return (
@@ -269,7 +410,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loginWithGoogle,
         requestPasswordReset,
         signOut,
-        switchSimulatedUser,
         updateCurrentUserProfile
       }}
     >

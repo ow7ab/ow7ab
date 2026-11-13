@@ -1,321 +1,613 @@
 /**
  * PMP PAINTS Enterprise Cloud Account Service
- * Directly interfaces with Firestore `/linked_accounts`, `/audit_logs`,
- * and `/erp_clusters/PMP-ERP-V16-CLUSTER/user_accounts`.
+ * Unified 1:1 with Android `CloudErpSyncRepository.kt` collections inside `/erp_clusters/{clusterCode}`:
+ * - `user_accounts` (docId = safeId(userCode, "USR-${id}"))
+ * - `pending_requests` (docId = safeId(email/userCode))
+ * - `deleted_users` (tombstone IDs preventing resurrection)
+ * - `permission_audit_logs` & `audit_logs`
  */
 
 import {
   collection,
   doc,
-  getDoc,
   getDocs,
   setDoc,
-  updateDoc,
-  query,
-  where,
-  orderBy,
-  limit,
-  addDoc,
-  serverTimestamp
+  deleteDoc,
+  onSnapshot,
+  serverTimestamp,
+  Unsubscribe
 } from 'firebase/firestore';
-import { firestore } from '../config/firebaseConfig';
-import { UserAccount, LinkedAccountDoc, PermissionChangeAuditEntry, LoginActivityLog } from '../types/erp';
+import { auth, firestore } from '../config/firebaseConfig';
+import {
+  UserAccount,
+  PermissionChangeAuditEntry
+} from '../types/erp';
 import { resolveUserRoleType } from './SecurityService';
+import { hashPassword } from './PasswordSecurity';
+import {
+  ErpDataService,
+  PRIMARY_CLUSTER,
+  LEGACY_V16_CLUSTER,
+  safeId
+} from './ErpDataService';
 
-const CLUSTER_CODE = 'PMP-ERP-V16-CLUSTER';
+function mapFirestoreDocToUserAccount(docId: string, raw: Record<string, any>, fallbackIndex: number): UserAccount {
+  const numericId =
+    typeof raw.id === 'number'
+      ? raw.id
+      : typeof raw.id === 'string' && /^\d+$/.test(raw.id)
+      ? Number(raw.id)
+      : fallbackIndex;
+
+  const account: UserAccount = {
+    id: numericId,
+    userCode: String(raw.userCode || docId),
+    fullName: String(raw.fullName || raw.username || 'موظف PMP'),
+    username: String(raw.username || docId),
+    phoneOrEmail: String(raw.phoneOrEmail || ''),
+    pinOrPassword: raw.pinOrPassword ? String(raw.pinOrPassword) : undefined,
+    role: String(raw.role || 'موظف'),
+    roleType: 'EMPLOYEE',
+    branch: String(raw.branch || 'الخرطوم'),
+    permissions: String(raw.permissions || ''),
+    serverSyncToken: String(raw.serverSyncToken || ''),
+    remoteServerId: raw.remoteServerId ? String(raw.remoteServerId) : undefined,
+    syncStatus: (raw.syncStatus as UserAccount['syncStatus']) || 'APPROVED_BY_MANAGER',
+    active: raw.active !== false,
+    createdAt: raw.createdAt
+      ? typeof raw.createdAt === 'number'
+        ? new Date(raw.createdAt).toLocaleDateString('ar-EG')
+        : raw.createdAt?.seconds
+        ? new Date(raw.createdAt.seconds * 1000).toLocaleDateString('ar-EG')
+        : String(raw.createdAt)
+      : ''
+  };
+
+  account.roleType = resolveUserRoleType(account);
+  return account;
+}
 
 export const AccountService = {
-  /**
-   * Fetches all registered enterprise employees from `/linked_accounts`
-   */
-  async getAllEmployees(): Promise<UserAccount[]> {
+  async fetchDeletedUserTokens(cluster: string): Promise<Set<string>> {
+    const deleted = new Set<string>();
     try {
-      const colRef = collection(firestore, 'linked_accounts');
-      const snap = await getDocs(colRef);
-      if (snap.empty) {
-        return this.getDefaultEmployees();
-      }
-
-      const list: UserAccount[] = [];
-      let index = 1;
-      snap.forEach(docSnap => {
-        const d = docSnap.data() as LinkedAccountDoc;
-        const mapped: UserAccount = {
-          id: index++,
-          userCode: d.userCode || docSnap.id,
-          fullName: d.fullName || 'موظف PMP',
-          username: d.username || docSnap.id,
-          phoneOrEmail: '',
-          role: d.role || 'موظف',
-          roleType: d.roleType || resolveUserRoleType({ ...d, id: index, phoneOrEmail: '', syncStatus: 'APPROVED_BY_MANAGER', roleType: 'EMPLOYEE' }),
-          branch: d.branch || 'SD-001',
-          permissions: d.permissions || 'عرض',
-          serverSyncToken: d.serverSyncToken || 'SYNC_OK',
-          syncStatus: 'APPROVED_BY_MANAGER',
-          active: d.active !== false,
-          createdAt: d.createdAt ? new Date(d.createdAt.seconds ? d.createdAt.seconds * 1000 : d.createdAt).toLocaleDateString('ar-EG') : '2026-11-12'
-        };
-        list.push(mapped);
+      const snap = await getDocs(collection(firestore, `erp_clusters/${cluster}/deleted_users`));
+      snap.forEach((d) => {
+        const data = d.data() || {};
+        if (data.userCode) deleted.add(String(data.userCode).trim().toLowerCase());
+        if (data.username) deleted.add(String(data.username).trim().toLowerCase());
+        if (data.phoneOrEmail) deleted.add(String(data.phoneOrEmail).trim().toLowerCase());
+        deleted.add(d.id.replace(/^DEL-/i, '').trim().toLowerCase());
       });
-      return list;
-    } catch (err) {
-      console.warn('Note: using cloud fallback for employee list:', err);
-      return this.getDefaultEmployees();
+    } catch {
+      // Ignore tombstone read issues
     }
+    return deleted;
+  },
+
+  isUserDeleted(acc: { userCode?: string; username?: string; phoneOrEmail?: string }, deletedSet: Set<string>): boolean {
+    if (deletedSet.size === 0) return false;
+    const code = (acc.userCode || '').trim().toLowerCase();
+    const uname = (acc.username || '').trim().toLowerCase();
+    const email = (acc.phoneOrEmail || '').trim().toLowerCase();
+    return Boolean(
+      (code && deletedSet.has(code)) ||
+      (uname && deletedSet.has(uname)) ||
+      (email && deletedSet.has(email))
+    );
   },
 
   /**
-   * Default initial employee records matching the Android database
+   * Real-time subscription to `/erp_clusters/{activeCluster}/user_accounts` (filtered by `deleted_users`).
    */
-  getDefaultEmployees(): UserAccount[] {
-    return [
-      {
-        id: 1,
-        userCode: 'USR-ADMIN',
-        fullName: 'المدير التنفيذي (Super Admin)',
-        username: 'admin',
-        phoneOrEmail: 'admin@pmppaints.com',
-        role: 'مدير النظام (كامل الصلاحيات)',
-        roleType: 'SUPER_ADMIN',
-        branch: 'SD-001 (الخرطوم - الإدارة العامة)',
-        permissions: 'عرض,إنشاء,تعديل,حذف,اعتماد,تصدير,طباعة,عمليات مالية,حركات مخازن,إدارة المستخدمين,الإعدادات الإدارية,المصنع,المخازن,الإنتاج,مواد الإنتاج,التعبئة والتغليف,المحاسبة,الخزن,المبيعات,التحويلات,الموردين,المشتريات,المختبر الكيميائي,الأسعار,التقارير,المستخدمين,الإعدادات',
-        serverSyncToken: 'SUPER_ADMIN_TOKEN',
-        syncStatus: 'APPROVED_BY_MANAGER',
-        active: true,
-        createdAt: '2026-10-01'
+  subscribeEmployees(
+    onUpdate: (users: UserAccount[]) => void,
+    onError?: (err: Error) => void
+  ): Unsubscribe {
+    const cluster = ErpDataService.activeCluster;
+    let deletedSet = new Set<string>();
+
+    const unsubDel = onSnapshot(
+      collection(firestore, `erp_clusters/${cluster}/deleted_users`),
+      (snap) => {
+        deletedSet = new Set<string>();
+        snap.forEach((d) => {
+          const data = d.data() || {};
+          if (data.userCode) deletedSet.add(String(data.userCode).trim().toLowerCase());
+          if (data.username) deletedSet.add(String(data.username).trim().toLowerCase());
+          if (data.phoneOrEmail) deletedSet.add(String(data.phoneOrEmail).trim().toLowerCase());
+        });
       },
-      {
-        id: 2,
-        userCode: 'MGR-EG-001',
-        fullName: 'م. إبراهيم خليل (مدير مصنع مصر)',
-        username: 'ibrahim_mgr',
-        phoneOrEmail: 'ibrahim@pmppaints.com',
-        role: 'مدير فرع ومصنع مصر',
-        roleType: 'MANAGER',
-        branch: 'EG-001 (مصنع مصر)',
-        permissions: 'عرض,إنشاء,تعديل,اعتماد,تصدير,طباعة,عمليات مالية,حركات مخازن,المصنع,المخازن,الإنتاج,مواد الإنتاج,التعبئة والتغليف,الخزن,المبيعات,الموردين,المشتريات,المختبر الكيميائي,الأسعار,التقارير',
-        serverSyncToken: 'MGR_TOKEN_EG',
-        syncStatus: 'APPROVED_BY_MANAGER',
-        active: true,
-        createdAt: '2026-10-05'
+      () => {}
+    );
+
+    const unsubUsers = onSnapshot(
+      collection(firestore, `erp_clusters/${cluster}/user_accounts`),
+      (snap) => {
+        const list: UserAccount[] = [];
+        let idx = 1;
+        snap.forEach((docSnap) => {
+          const raw = docSnap.data() || {};
+          const acc = mapFirestoreDocToUserAccount(docSnap.id, raw, idx++);
+          if (!this.isUserDeleted(acc, deletedSet)) {
+            list.push(acc);
+          }
+        });
+        onUpdate(list);
       },
-      {
-        id: 3,
-        userCode: 'EMP-ACC-002',
-        fullName: 'أحمد عثمان (المحاسب المالي)',
-        username: 'ahmed_acc',
-        phoneOrEmail: 'ahmed@pmppaints.com',
-        role: 'محاسب الخزينة والمبيعات',
-        roleType: 'EMPLOYEE',
-        branch: 'SD-001 (فرع السودان)',
-        permissions: 'عرض,إنشاء,تعديل,طباعة,تصدير,عمليات مالية,المحاسبة,الخزن,المبيعات,التحويلات,التقارير',
-        serverSyncToken: 'ACC_TOKEN_SD',
-        syncStatus: 'APPROVED_BY_MANAGER',
-        active: true,
-        createdAt: '2026-10-12'
-      },
-      {
-        id: 4,
-        userCode: 'EMP-WH-003',
-        fullName: 'خالد السر (أمين مستودع حلفا)',
-        username: 'khaled_wh',
-        phoneOrEmail: 'khaled@pmppaints.com',
-        role: 'أمين مخزن وترحيل بضاعة العبور',
-        roleType: 'EMPLOYEE',
-        branch: 'HF-001 (مستودع حلفا اللوجستي)',
-        permissions: 'عرض,إنشاء,حركات مخازن,طباعة,المخازن,بضاعة العبور ومخزن حلفا',
-        serverSyncToken: 'WH_TOKEN_HF',
-        syncStatus: 'APPROVED_BY_MANAGER',
-        active: true,
-        createdAt: '2026-10-18'
-      },
-      {
-        id: 5,
-        userCode: 'EMP-LAB-004',
-        fullName: 'د. سارة المنصور (كيميائية الجودة)',
-        username: 'sara_chem',
-        phoneOrEmail: 'sara@pmppaints.com',
-        role: 'مسؤول المختبر الكيميائي وفحص الجودة',
-        roleType: 'EMPLOYEE',
-        branch: 'EG-001 (مصنع مصر)',
-        permissions: 'عرض,إنشاء,تعديل,اعتماد,المختبر الكيميائي,مواد الإنتاج,المصنع',
-        serverSyncToken: 'LAB_TOKEN_EG',
-        syncStatus: 'APPROVED_BY_MANAGER',
-        active: true,
-        createdAt: '2026-10-22'
+      (err) => {
+        console.error('user_accounts subscription error:', err);
+        if (onError) onError(err);
       }
-    ];
+    );
+
+    return () => {
+      unsubDel();
+      unsubUsers();
+    };
   },
 
   /**
-   * Updates an employee account, saving changes and recording an audit trail entry
+   * Real-time subscription to `/erp_clusters/{activeCluster}/pending_requests`.
+   */
+  subscribePendingRequests(onUpdate: (requests: UserAccount[]) => void): Unsubscribe {
+    const cluster = ErpDataService.activeCluster;
+    return onSnapshot(
+      collection(firestore, `erp_clusters/${cluster}/pending_requests`),
+      (snap) => {
+        const list: UserAccount[] = [];
+        let idx = 1000;
+        snap.forEach((docSnap) => {
+          const raw = docSnap.data() || {};
+          const mapped = mapFirestoreDocToUserAccount(docSnap.id, raw, idx++);
+          if (mapped.syncStatus === 'PENDING_MANAGER_APPROVAL' || !raw.syncStatus) {
+            mapped.syncStatus = 'PENDING_MANAGER_APPROVAL';
+            list.push(mapped);
+          }
+        });
+        onUpdate(list);
+      },
+      () => {}
+    );
+  },
+
+  /**
+   * Fetches all employees from active cluster (falling back to LEGACY_V16_CLUSTER only if active has 0 records).
+   */
+  async getAllEmployees(clusterOverride?: string): Promise<UserAccount[]> {
+    const targetCluster = clusterOverride || ErpDataService.activeCluster;
+    const deletedSet = await this.fetchDeletedUserTokens(targetCluster);
+    const snap = await getDocs(collection(firestore, `erp_clusters/${targetCluster}/user_accounts`));
+
+    const list: UserAccount[] = [];
+    let idx = 1;
+    snap.forEach((docSnap) => {
+      const raw = docSnap.data() || {};
+      const acc = mapFirestoreDocToUserAccount(docSnap.id, raw, idx++);
+      if (!this.isUserDeleted(acc, deletedSet)) {
+        list.push(acc);
+      }
+    });
+
+    if (list.length === 0 && !clusterOverride) {
+      const fallbackCluster = targetCluster === PRIMARY_CLUSTER ? LEGACY_V16_CLUSTER : PRIMARY_CLUSTER;
+      return this.getAllEmployees(fallbackCluster);
+    }
+
+    return list;
+  },
+
+  /**
+   * Looks up a user account in Firestore by username, userCode, or phoneOrEmail for authentication.
+   */
+  async findAccountForLogin(identifier: string): Promise<UserAccount | null> {
+    const clean = (identifier || '').trim().toLowerCase();
+    if (!clean) return null;
+
+    const clustersToSearch =
+      ErpDataService.activeCluster === PRIMARY_CLUSTER
+        ? [PRIMARY_CLUSTER, LEGACY_V16_CLUSTER]
+        : [ErpDataService.activeCluster, PRIMARY_CLUSTER];
+
+    for (const cluster of clustersToSearch) {
+      const deletedSet = await this.fetchDeletedUserTokens(cluster);
+      const snap = await getDocs(collection(firestore, `erp_clusters/${cluster}/user_accounts`));
+      let idx = 1;
+      for (const docSnap of snap.docs) {
+        const raw = docSnap.data() || {};
+        const acc = mapFirestoreDocToUserAccount(docSnap.id, raw, idx++);
+        if (this.isUserDeleted(acc, deletedSet)) continue;
+        if (
+          acc.username.trim().toLowerCase() === clean ||
+          acc.userCode.trim().toLowerCase() === clean ||
+          acc.phoneOrEmail.trim().toLowerCase() === clean
+        ) {
+          return acc;
+        }
+      }
+    }
+
+    return null;
+  },
+
+  /**
+   * Submits a Google Workspace SSO registration request to `pending_requests` & `user_accounts`
+   * matching Android `CloudErpSyncRepository.submitPendingUserRequestToCloud`.
+   */
+  async submitPendingGoogleRequest(email: string, displayName: string): Promise<UserAccount> {
+    const cleanEmail = email.trim().toLowerCase();
+    const docId = safeId(cleanEmail, `PEND-${Date.now()}`);
+    const userCode = `REQ-${Date.now().toString().slice(-6)}`;
+    const usernamePart = cleanEmail.split('@')[0] || userCode.toLowerCase();
+
+    const payload = {
+      id: Date.now(),
+      userCode,
+      fullName: displayName || usernamePart,
+      username: usernamePart,
+      phoneOrEmail: cleanEmail,
+      pinOrPassword: '',
+      role: 'موظف',
+      branch: 'الخرطوم',
+      permissions: 'صلاحية العرض',
+      serverSyncToken: `REQ_${Date.now()}`,
+      remoteServerId: `CLOUD-${userCode}`,
+      syncStatus: 'PENDING_MANAGER_APPROVAL',
+      serverEndpoint: ErpDataService.activeCluster,
+      active: false,
+      createdAt: Date.now(),
+      serverUpdatedAt: serverTimestamp()
+    };
+
+    const cluster = ErpDataService.activeCluster;
+    await setDoc(doc(firestore, `erp_clusters/${cluster}/pending_requests`, docId), payload, {
+      merge: true
+    });
+    await setDoc(doc(firestore, `erp_clusters/${cluster}/user_accounts`, safeId(userCode, docId)), payload, {
+      merge: true
+    });
+
+    return mapFirestoreDocToUserAccount(docId, payload, Number(payload.id));
+  },
+
+  /**
+   * Approves a pending request and activates the account across Firestore.
+   */
+  async approvePendingRequest(
+    requestAccount: UserAccount,
+    actorAccount: UserAccount,
+    assignedRole: string,
+    assignedPermissions: string,
+    assignedBranch: string
+  ): Promise<UserAccount> {
+    const cluster = ErpDataService.activeCluster;
+    const approvedCode = requestAccount.userCode.startsWith('REQ-')
+      ? `EMP-${Date.now().toString().slice(-5)}`
+      : requestAccount.userCode;
+    const userDocId = safeId(approvedCode, `USR-${requestAccount.id}`);
+
+    const updated: UserAccount = {
+      ...requestAccount,
+      userCode: approvedCode,
+      role: assignedRole || requestAccount.role,
+      branch: assignedBranch || requestAccount.branch,
+      permissions: assignedPermissions || 'صلاحية العرض',
+      syncStatus: 'APPROVED_BY_MANAGER',
+      active: true
+    };
+    updated.roleType = resolveUserRoleType(updated);
+
+    await setDoc(
+      doc(firestore, `erp_clusters/${cluster}/user_accounts`, userDocId),
+      {
+        id: updated.id,
+        userCode: updated.userCode,
+        fullName: updated.fullName,
+        username: updated.username,
+        phoneOrEmail: updated.phoneOrEmail,
+        pinOrPassword: updated.pinOrPassword || '',
+        role: updated.role,
+        branch: updated.branch,
+        permissions: updated.permissions,
+        serverSyncToken: updated.serverSyncToken || `SYNC_${Date.now()}`,
+        remoteServerId: updated.remoteServerId || `CLOUD-${updated.userCode}`,
+        syncStatus: 'APPROVED_BY_MANAGER',
+        serverEndpoint: cluster,
+        active: true,
+        serverUpdatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    // Clean pending_requests entry
+    if (requestAccount.phoneOrEmail) {
+      await deleteDoc(
+        doc(firestore, `erp_clusters/${cluster}/pending_requests`, safeId(requestAccount.phoneOrEmail, userDocId))
+      ).catch(() => {});
+    }
+    if (requestAccount.userCode !== approvedCode) {
+      await deleteDoc(
+        doc(firestore, `erp_clusters/${cluster}/user_accounts`, safeId(requestAccount.userCode, userDocId))
+      ).catch(() => {});
+    }
+
+    await this.logAuditEntry({
+      entryId: `RBAC-LOG-${Date.now()}`,
+      targetUserCode: updated.userCode,
+      targetUsername: updated.username,
+      targetFullName: updated.fullName,
+      actorUsername: actorAccount.username,
+      actorRole: actorAccount.role,
+      previousRole: 'PENDING',
+      newRole: updated.role,
+      addedPermissions: updated.permissions.split(',').filter(Boolean),
+      removedPermissions: [],
+      reason: 'اعتماد حساب موظف معلق وتفعيل الصلاحيات',
+      changedAtMillis: Date.now(),
+      formattedDate: new Date().toLocaleString('ar-EG')
+    });
+
+    return updated;
+  },
+
+  /**
+   * Updates an employee account directly in `/erp_clusters/{activeCluster}/user_accounts`
+   * matching Android schema.
    */
   async updateEmployee(
     updatedAccount: UserAccount,
     actorAccount: UserAccount,
-    reason: string = 'تحديث الصلاحيات وبيانات الحساب'
+    reason: string = 'تحديث الصلاحيات وبيانات الحساب',
+    rawNewPassword?: string
   ): Promise<boolean> {
-    try {
-      const docRef = doc(firestore, 'linked_accounts', updatedAccount.userCode);
-      await setDoc(docRef, {
-        userCode: updatedAccount.userCode,
-        fullName: updatedAccount.fullName,
-        username: updatedAccount.username,
-        role: updatedAccount.role,
-        roleType: updatedAccount.roleType,
-        branch: updatedAccount.branch,
-        permissions: updatedAccount.permissions,
-        serverSyncToken: updatedAccount.serverSyncToken,
-        active: updatedAccount.active,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
+    const cluster = ErpDataService.activeCluster;
+    const docId = safeId(updatedAccount.userCode, `USR-${updatedAccount.id}`);
 
-      // Log in audit trail
-      await this.logAuditEntry({
-        entryId: `AUD-${Date.now()}`,
-        targetUserCode: updatedAccount.userCode,
-        targetUsername: updatedAccount.username,
-        targetFullName: updatedAccount.fullName,
-        actorUsername: actorAccount.username,
-        actorRole: actorAccount.role,
-        previousRole: '',
-        newRole: updatedAccount.role,
-        addedPermissions: [],
-        removedPermissions: [],
-        reason,
-        changedAtMillis: Date.now(),
-        formattedDate: new Date().toLocaleString('ar-EG')
-      });
-
-      return true;
-    } catch (err) {
-      console.warn('Note: Fallback local update for employee:', err);
-      return true;
+    let passwordHash = updatedAccount.pinOrPassword;
+    if (rawNewPassword && rawNewPassword.trim().length > 0) {
+      passwordHash = await hashPassword(rawNewPassword.trim());
     }
+
+    const payload: Record<string, any> = {
+      id: updatedAccount.id,
+      userCode: updatedAccount.userCode,
+      fullName: updatedAccount.fullName,
+      username: updatedAccount.username,
+      phoneOrEmail: updatedAccount.phoneOrEmail || '',
+      role: updatedAccount.role,
+      branch: updatedAccount.branch,
+      permissions: updatedAccount.permissions,
+      serverSyncToken: updatedAccount.serverSyncToken || `SYNC_${Date.now()}`,
+      remoteServerId: updatedAccount.remoteServerId || `CLOUD-${updatedAccount.userCode}`,
+      syncStatus: updatedAccount.syncStatus || 'APPROVED_BY_MANAGER',
+      serverEndpoint: cluster,
+      active: updatedAccount.active,
+      serverUpdatedAt: serverTimestamp()
+    };
+
+    if (passwordHash !== undefined) {
+      payload.pinOrPassword = passwordHash;
+    }
+
+    await setDoc(doc(firestore, `erp_clusters/${cluster}/user_accounts`, docId), payload, {
+      merge: true
+    });
+
+    // Mirror to secondary cluster silently
+    const otherCluster = cluster === PRIMARY_CLUSTER ? LEGACY_V16_CLUSTER : PRIMARY_CLUSTER;
+    setDoc(doc(firestore, `erp_clusters/${otherCluster}/user_accounts`, docId), payload, {
+      merge: true
+    }).catch(() => {});
+
+    // Sync /linked_accounts only if Firebase Auth user is signed in and matches uid (per firestore.rules)
+    const fbUser = auth.currentUser;
+    if (fbUser && fbUser.uid === docId) {
+      setDoc(
+        doc(firestore, 'linked_accounts', fbUser.uid),
+        {
+          userCode: updatedAccount.userCode,
+          ownerId: fbUser.uid,
+          linkedUid: fbUser.uid,
+          fullName: updatedAccount.fullName,
+          username: updatedAccount.username,
+          role: updatedAccount.role,
+          branch: updatedAccount.branch,
+          permissions: updatedAccount.permissions,
+          active: updatedAccount.active,
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
+
+    await this.logAuditEntry({
+      entryId: `RBAC-LOG-${Date.now()}`,
+      targetUserCode: updatedAccount.userCode,
+      targetUsername: updatedAccount.username,
+      targetFullName: updatedAccount.fullName,
+      actorUsername: actorAccount.username,
+      actorRole: actorAccount.role,
+      previousRole: '',
+      newRole: updatedAccount.role,
+      addedPermissions: [],
+      removedPermissions: [],
+      reason,
+      changedAtMillis: Date.now(),
+      formattedDate: new Date().toLocaleString('ar-EG')
+    });
+
+    await ErpDataService.logAudit(
+      actorAccount.username,
+      'UPDATE_USER_RBAC',
+      `${reason} — المستهدف: ${updatedAccount.fullName} (@${updatedAccount.username})`
+    );
+
+    return true;
   },
 
   /**
-   * Creates a new employee account in `/linked_accounts`
+   * Creates a new employee account in `/erp_clusters/{activeCluster}/user_accounts`
+   * with PBKDF2-HMAC-SHA256 hashed password/PIN compatible with Android PasswordSecurityUtil.
    */
-  async createEmployee(newAccount: Partial<UserAccount>, actorAccount: UserAccount): Promise<UserAccount> {
-    const userCode = newAccount.userCode || `EMP-${Date.now().toString().slice(-4)}`;
+  async createEmployee(
+    newAccount: Partial<UserAccount> & { rawPassword?: string },
+    actorAccount: UserAccount
+  ): Promise<UserAccount> {
+    const cluster = ErpDataService.activeCluster;
+    const id = Date.now();
+    const userCode = (newAccount.userCode || `EMP-${String(id).slice(-4)}`).trim();
+    const docId = safeId(userCode, `USR-${id}`);
+    const rawPass = (newAccount.rawPassword || newAccount.pinOrPassword || '').trim();
+    if (!rawPass || rawPass.length < 4) {
+      throw new Error('كلمة المرور أو رمز PIN يجب أن لا يقل عن 4 خانات');
+    }
+
+    const hashedSecret = await hashPassword(rawPass);
+
     const fullAccount: UserAccount = {
-      id: Date.now(),
+      id,
       userCode,
-      fullName: newAccount.fullName || '',
-      username: newAccount.username || userCode.toLowerCase(),
-      phoneOrEmail: newAccount.phoneOrEmail || '',
+      fullName: (newAccount.fullName || '').trim(),
+      username: (newAccount.username || userCode.toLowerCase()).trim(),
+      phoneOrEmail: (newAccount.phoneOrEmail || '').trim(),
+      pinOrPassword: hashedSecret,
       role: newAccount.role || 'موظف',
-      roleType: newAccount.roleType || 'EMPLOYEE',
-      branch: newAccount.branch || 'SD-001',
-      permissions: newAccount.permissions || 'عرض',
-      serverSyncToken: `SYNC_${Date.now()}`,
+      roleType: 'EMPLOYEE',
+      branch: newAccount.branch || 'الخرطوم',
+      permissions: newAccount.permissions || 'صلاحية العرض',
+      serverSyncToken: `SYNC_${id}`,
+      remoteServerId: `CLOUD-${userCode}`,
       syncStatus: 'APPROVED_BY_MANAGER',
-      active: true,
+      active: newAccount.active !== false,
       createdAt: new Date().toLocaleDateString('ar-EG')
     };
+    fullAccount.roleType = resolveUserRoleType(fullAccount);
 
-    try {
-      const docRef = doc(firestore, 'linked_accounts', userCode);
-      await setDoc(docRef, {
-        userCode: fullAccount.userCode,
-        ownerId: actorAccount.userCode,
-        linkedUid: fullAccount.userCode,
-        fullName: fullAccount.fullName,
-        username: fullAccount.username,
-        role: fullAccount.role,
-        roleType: fullAccount.roleType,
-        branch: fullAccount.branch,
-        permissions: fullAccount.permissions,
-        serverSyncToken: fullAccount.serverSyncToken,
-        active: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
+    const payload = {
+      id: fullAccount.id,
+      userCode: fullAccount.userCode,
+      fullName: fullAccount.fullName,
+      username: fullAccount.username,
+      phoneOrEmail: fullAccount.phoneOrEmail,
+      pinOrPassword: hashedSecret,
+      role: fullAccount.role,
+      branch: fullAccount.branch,
+      permissions: fullAccount.permissions,
+      serverSyncToken: fullAccount.serverSyncToken,
+      remoteServerId: fullAccount.remoteServerId,
+      syncStatus: 'APPROVED_BY_MANAGER',
+      serverEndpoint: cluster,
+      active: fullAccount.active,
+      createdAt: id,
+      serverUpdatedAt: serverTimestamp()
+    };
 
-      await this.logAuditEntry({
-        entryId: `AUD-${Date.now()}`,
-        targetUserCode: fullAccount.userCode,
-        targetUsername: fullAccount.username,
-        targetFullName: fullAccount.fullName,
-        actorUsername: actorAccount.username,
-        actorRole: actorAccount.role,
-        previousRole: 'NONE',
-        newRole: fullAccount.role,
-        addedPermissions: fullAccount.permissions.split(','),
-        removedPermissions: [],
-        reason: 'إنشاء حساب موظف جديد واعتماد الصلاحيات',
-        changedAtMillis: Date.now(),
-        formattedDate: new Date().toLocaleString('ar-EG')
-      });
-    } catch (err) {
-      console.warn('Note: Fallback for new employee account creation:', err);
-    }
+    await setDoc(doc(firestore, `erp_clusters/${cluster}/user_accounts`, docId), payload, {
+      merge: true
+    });
+
+    // Clear any prior deleted_users tombstone if re-creating
+    await deleteDoc(doc(firestore, `erp_clusters/${cluster}/deleted_users`, safeId(`DEL-${userCode}`, `DEL-${id}`))).catch(
+      () => {}
+    );
+
+    await this.logAuditEntry({
+      entryId: `RBAC-LOG-${Date.now()}`,
+      targetUserCode: fullAccount.userCode,
+      targetUsername: fullAccount.username,
+      targetFullName: fullAccount.fullName,
+      actorUsername: actorAccount.username,
+      actorRole: actorAccount.role,
+      previousRole: 'NONE',
+      newRole: fullAccount.role,
+      addedPermissions: fullAccount.permissions.split(',').filter(Boolean),
+      removedPermissions: [],
+      reason: 'إنشاء حساب موظف جديد واعتماد الصلاحيات',
+      changedAtMillis: Date.now(),
+      formattedDate: new Date().toLocaleString('ar-EG')
+    });
+
+    await ErpDataService.logAudit(
+      actorAccount.username,
+      'CREATE_USER',
+      `إنشاء حساب @${fullAccount.username} (${fullAccount.userCode}) بدور ${fullAccount.role}`
+    );
 
     return fullAccount;
   },
 
   /**
-   * Logs an entry into `/permission_audit_logs` or `/audit_logs`
+   * Deletes/archives a user account and writes a `deleted_users` tombstone matching Android.
+   */
+  async deleteEmployee(targetAccount: UserAccount, actorAccount: UserAccount): Promise<boolean> {
+    if (targetAccount.username.toLowerCase() === 'admin') {
+      throw new Error('لا يمكن حذف الحساب الرئيسي لمدير النظام admin');
+    }
+    const cluster = ErpDataService.activeCluster;
+    const docId = safeId(targetAccount.userCode, `USR-${targetAccount.id}`);
+    const tombId = safeId(`DEL-${targetAccount.userCode}`, `DEL-${targetAccount.id}`);
+
+    await deleteDoc(doc(firestore, `erp_clusters/${cluster}/user_accounts`, docId));
+    await setDoc(
+      doc(firestore, `erp_clusters/${cluster}/deleted_users`, tombId),
+      {
+        userCode: targetAccount.userCode,
+        username: targetAccount.username,
+        phoneOrEmail: targetAccount.phoneOrEmail || '',
+        deletedBy: actorAccount.username,
+        deletedAt: Date.now(),
+        serverUpdatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    await this.logAuditEntry({
+      entryId: `RBAC-LOG-${Date.now()}`,
+      targetUserCode: targetAccount.userCode,
+      targetUsername: targetAccount.username,
+      targetFullName: targetAccount.fullName,
+      actorUsername: actorAccount.username,
+      actorRole: actorAccount.role,
+      previousRole: targetAccount.role,
+      newRole: 'DELETED',
+      addedPermissions: [],
+      removedPermissions: [],
+      reason: 'حذف / إزالة حساب الموظف من المنظومة السحابية',
+      changedAtMillis: Date.now(),
+      formattedDate: new Date().toLocaleString('ar-EG')
+    });
+
+    return true;
+  },
+
+  /**
+   * Logs an RBAC audit entry into `/erp_clusters/{activeCluster}/permission_audit_logs`.
    */
   async logAuditEntry(entry: PermissionChangeAuditEntry): Promise<void> {
     try {
-      const colRef = collection(firestore, 'permission_audit_logs');
-      await addDoc(colRef, {
+      const cluster = ErpDataService.activeCluster;
+      const docId = safeId(entry.entryId, `AUD-${Date.now()}`);
+      await setDoc(doc(firestore, `erp_clusters/${cluster}/permission_audit_logs`, docId), {
         ...entry,
         createdAt: serverTimestamp()
       });
     } catch (err) {
-      console.warn('Audit logging note:', err);
+      console.warn('Permission audit log write note:', err);
     }
   },
 
   /**
-   * Fetches latest audit logs
+   * Fetches latest permission change audit entries from Firestore.
    */
-  async getAuditLogs(limitCount: number = 20): Promise<PermissionChangeAuditEntry[]> {
-    try {
-      const colRef = collection(firestore, 'permission_audit_logs');
-      const q = query(colRef, orderBy('createdAt', 'desc'), limit(limitCount));
-      const snap = await getDocs(q);
-      const logs: PermissionChangeAuditEntry[] = [];
-      snap.forEach(d => {
-        logs.push(d.data() as PermissionChangeAuditEntry);
-      });
-      return logs;
-    } catch (err) {
-      return [
-        {
-          entryId: 'AUD-001',
-          targetUserCode: 'MGR-EG-001',
-          targetUsername: 'ibrahim_mgr',
-          targetFullName: 'م. إبراهيم خليل',
-          actorUsername: 'admin',
-          actorRole: 'مدير النظام',
-          previousRole: 'مهندس إنتاج',
-          newRole: 'مدير فرع ومصنع مصر',
-          addedPermissions: ['اعتماد المستندات', 'العمليات المالية'],
-          removedPermissions: [],
-          reason: 'ترقية إلى مدير فرع ومصنع مصر',
-          changedAtMillis: Date.now() - 3600000,
-          formattedDate: 'اليوم، 10:30 ص'
-        },
-        {
-          entryId: 'AUD-002',
-          targetUserCode: 'EMP-ACC-002',
-          targetUsername: 'ahmed_acc',
-          targetFullName: 'أحمد عثمان',
-          actorUsername: 'admin',
-          actorRole: 'مدير النظام',
-          previousRole: 'محاسب',
-          newRole: 'محاسب الخزينة والمبيعات',
-          addedPermissions: ['تصدير PDF', 'طباعة المستندات'],
-          removedPermissions: [],
-          reason: 'منح صلاحيات التصدير والطباعة',
-          changedAtMillis: Date.now() - 86400000,
-          formattedDate: 'أمس، 04:15 م'
-        }
-      ];
-    }
+  async getAuditLogs(limitCount: number = 30): Promise<PermissionChangeAuditEntry[]> {
+    const cluster = ErpDataService.activeCluster;
+    const snap = await getDocs(collection(firestore, `erp_clusters/${cluster}/permission_audit_logs`));
+    const logs: PermissionChangeAuditEntry[] = [];
+    snap.forEach((d) => {
+      logs.push(d.data() as PermissionChangeAuditEntry);
+    });
+    return logs
+      .sort((a, b) => (b.changedAtMillis || 0) - (a.changedAtMillis || 0))
+      .slice(0, limitCount);
   }
 };

@@ -95,7 +95,7 @@ export const Footer: React.FC = () => {
           <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '13px', color: 'var(--text-secondary)' }}>
             <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Activity size={15} color="var(--pmp-green)" />
-              <span>Google Cloud Firestore Central Cluster: <strong style={{ color: 'var(--text-primary)' }}>PMP-ERP-V16</strong></span>
+              <span>Google Cloud Firestore Cluster: <strong style={{ color: 'var(--text-primary)' }}>PMP-ERP-MAIN-CLUSTER</strong></span>
             </li>
             <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Smartphone size={15} color="var(--pmp-cyan)" />

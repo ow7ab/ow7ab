@@ -140,19 +140,19 @@ export const ModulesShowcase: React.FC = () => {
       permissions: 'الأسعار, المبيعات'
     },
     {
-      id: 'transit',
-      nameAr: 'ترحيل وبوالص حلفا',
-      nameEn: 'Halfa Border Transit & Invoicing',
-      category: 'commercial',
+      id: 'dashboard',
+      nameAr: 'لوحة القيادة الرئيسية والمزامنة اللحظية',
+      nameEn: 'Main Executive Dashboard & Cloud Sync',
+      category: 'admin',
       icon: <Truck size={24} color="var(--pmp-green)" />,
-      badge: 'اللوجستيات والحدود',
+      badge: 'المركز الموحد',
       features: [
-        'إصدار بوالص ترحيل البضائع بين الفروع والمخازن',
-        'فواتير حلفا المخصصة للشحن والمعابر الحدودية',
-        'تتبع تفريغ واستلام كراتين البوهية في مخزن حلفا',
-        'حساب مصاريف النقل والجمارك والتفريغ'
+        'مراقبة لحظية لأرصدة الخزن (SDG / EGP / USD) والمخازن',
+        'متابعة خطوط الإنتاج ومبيعات وبوالص حلفا والخرطوم ومصر',
+        'تنبيهات نواقص المواد الخام وحد إعادة الطلب المباشرة',
+        'مزامنة ثنائية لحظية 1:1 بين تطبيق الأندرويد والويب'
       ],
-      permissions: 'المخازن, المبيعات, التحويلات'
+      permissions: 'الرئيسية, المراقبة الحية'
     },
     {
       id: 'users',

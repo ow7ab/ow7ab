@@ -4,10 +4,13 @@ import { GlassCard } from '../ui/GlassCard';
 import { GlassButton } from '../ui/GlassButton';
 import { GlassBadge } from '../ui/GlassBadge';
 import { useLanguage } from '../../context/LanguageContext';
+import { ErpDataService } from '../../services/ErpDataService';
 
 export const SupportSection: React.FC = () => {
   const { language } = useLanguage();
   const [submitted, setSubmitted] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     branch: 'SD-001',
@@ -15,14 +18,25 @@ export const SupportSection: React.FC = () => {
     message: ''
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.name || !formData.message) return;
-    setSubmitted(true);
-    setTimeout(() => {
-      setSubmitted(false);
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await ErpDataService.logAudit(
+        formData.name.trim(),
+        'WEB_SUPPORT_TICKET',
+        `[${formData.branch}] ${formData.subject || 'بلاغ فني'}: ${formData.message.trim()}`
+      );
+      setSubmitted(true);
       setFormData({ name: '', branch: 'SD-001', subject: '', message: '' });
-    }, 4000);
+      setTimeout(() => setSubmitted(false), 4500);
+    } catch (err: any) {
+      setSubmitError(err?.message || 'تعذر إرسال التذكرة للسحابة، يرجى المحاولة لاحقاً.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const branches = [
@@ -117,7 +131,7 @@ export const SupportSection: React.FC = () => {
                   {language === 'ar' ? 'خوادم المزامنة السحابية وقاعدة البيانات تعمل بكفاءة 100%' : 'Cloud Sync & Firestore Clusters: 100% Operational'}
                 </span>
               </div>
-              <span className="text-xs font-mono text-pmp-success">PMP-ERP-V16</span>
+              <span className="text-xs font-mono text-pmp-success">PMP-ERP-MAIN-CLUSTER</span>
             </div>
           </div>
 
@@ -202,13 +216,20 @@ export const SupportSection: React.FC = () => {
                     />
                   </div>
 
+                  {submitError && (
+                    <div className="p-2.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
+                      {submitError}
+                    </div>
+                  )}
+
                   <GlassButton
                     type="submit"
                     variant="primary"
+                    isLoading={submitting}
                     className="w-full justify-center shadow-md"
                     icon={<Send className="w-4 h-4" />}
                   >
-                    {language === 'ar' ? 'إرسال التذكرة الفنية' : 'Submit Ticket'}
+                    {language === 'ar' ? 'إرسال التذكرة للسيرفر السحابي' : 'Submit Cloud Ticket'}
                   </GlassButton>
                 </form>
               )}

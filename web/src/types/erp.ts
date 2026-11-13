@@ -1,6 +1,6 @@
 /**
- * PMP PAINTS Enterprise ERP — Complete TypeScript Data Models & Schemas
- * Directly mirrors the Android Room entities, Firestore collections, and RBAC contracts.
+ * PMP PAINTS Enterprise ERP — Complete Unified Data Models
+ * Strictly mirrors the Android Room entities (Entities.kt) and Cloud Firestore cluster collections.
  */
 
 export type CurrencyCode = 'SDG' | 'EGP' | 'USD';
@@ -10,6 +10,7 @@ export type UserRoleType = 'SUPER_ADMIN' | 'MANAGER' | 'EMPLOYEE';
 export type JobRole =
   | 'مدير النظام'
   | 'المدير'
+  | 'مدير فرع ومصنع مصر'
   | 'مسؤول نظام مخصص'
   | 'المحاسب'
   | 'محاسب خزنة ومبيعات'
@@ -21,6 +22,7 @@ export type JobRole =
   | 'مهندس الإنتاج'
   | 'مهندس إنتاج - المصنع'
   | 'مسؤول الجودة'
+  | 'كيميائي الجودة'
   | 'مراجع مالي وتقارير'
   | string;
 
@@ -30,16 +32,16 @@ export interface UserAccount {
   fullName: string;
   username: string;
   phoneOrEmail: string;
+  pinOrPassword?: string;
   role: JobRole;
   roleType: UserRoleType;
   branch: string;
   permissions: string;
   serverSyncToken: string;
   remoteServerId?: string;
-  syncStatus: 'APPROVED_BY_MANAGER' | 'PENDING_MANAGER_APPROVAL' | 'REJECTED';
+  syncStatus: 'APPROVED_BY_MANAGER' | 'PENDING_MANAGER_APPROVAL' | 'REJECTED' | 'READY_FOR_SYNC';
   active: boolean;
   isCurrentSession?: boolean;
-  passwordHash?: string;
   createdAt?: string;
   updatedAt?: string;
   lastLoginAt?: string;
@@ -57,7 +59,6 @@ export interface LinkedAccountDoc {
   branch: string;
   permissions: string;
   serverSyncToken: string;
-  passwordHash?: string;
   active: boolean;
   createdAt: any;
   updatedAt: any;
@@ -74,197 +75,6 @@ export interface TemporaryPermissionGrant {
   grantedAtMillis: number;
   expiresAtMillis: number;
   reason: string;
-}
-
-export interface Cashbox {
-  id: number;
-  name: string;
-  balance: number;
-  currency: CurrencyCode;
-  branch: string;
-  lastUpdated: string;
-}
-
-export interface TreasuryMovement {
-  id: number;
-  type: 'INCOME' | 'EXPENSE';
-  category: string;
-  amount: number;
-  currency: CurrencyCode;
-  cashboxName: string;
-  description: string;
-  employeeName: string;
-  referenceNo?: string;
-  date: string;
-  timestamp: number;
-}
-
-export interface InterTreasuryTransfer {
-  id: number;
-  transferNumber: string;
-  fromCashbox: string;
-  toCashbox: string;
-  amountSent: number;
-  currencySent: CurrencyCode;
-  amountReceived: number;
-  currencyReceived: CurrencyCode;
-  exchangeRate: number;
-  transferFee: number;
-  status: 'PENDING' | 'COMPLETED' | 'CANCELLED';
-  createdBy: string;
-  date: string;
-  timestamp: number;
-}
-
-export interface DailyClosing {
-  id: number;
-  closingNumber: string;
-  cashboxName: string;
-  closingBalance: number;
-  systemBalance: number;
-  difference: number;
-  currency: CurrencyCode;
-  closingDate: string;
-  closedBy: string;
-  notes?: string;
-  timestamp: number;
-}
-
-export interface Customer {
-  id: number;
-  name: string;
-  phone: string;
-  address: string;
-  branch: string;
-  creditLimit: number;
-  currentBalance: number;
-  currency: CurrencyCode;
-  notes?: string;
-}
-
-export interface Product {
-  id: number;
-  name: string;
-  paintColor: string;
-  category: string;
-  packageWeight: '250' | '900' | '4000'; // grams
-  salePriceSdg: number;
-  salePriceEgp: number;
-  currentStock: number;
-  minimumStock: number;
-  unit: string;
-}
-
-export interface InvoiceItem {
-  id: number;
-  invoiceId: number;
-  productId: number;
-  productName: string;
-  packageWeight: string;
-  quantity: number;
-  unitPrice: number;
-  totalPrice: number;
-  currency: CurrencyCode;
-}
-
-export interface SalesInvoice {
-  id: number;
-  invoiceNumber: string;
-  customerId: number;
-  customerName: string;
-  totalAmount: number;
-  discount: number;
-  finalAmount: number;
-  paidAmount: number;
-  remainingAmount: number;
-  currency: CurrencyCode;
-  paymentType: 'CASH' | 'INSTALLMENT' | 'TRANSFER';
-  status: 'PAID' | 'PARTIAL' | 'UNPAID';
-  createdBy: string;
-  date: string;
-  timestamp: number;
-  items?: InvoiceItem[];
-}
-
-export interface RawMaterialItem {
-  id: number;
-  materialCode: string;
-  name: string;
-  materialType: 'BINDER' | 'PIGMENT' | 'SOLVENT' | 'ADDITIVE' | 'PACKAGING' | string;
-  unit: string;
-  actualBalance: number;
-  reservedBalance: number;
-  reorderLevel: number;
-  unitCostEgp: number;
-  branch: string;
-}
-
-export interface PurchaseOrder {
-  id: number;
-  poNumber: string;
-  supplierName: string;
-  materialName: string;
-  orderedQty: number;
-  receivedQty: number;
-  unit: string;
-  unitPrice: number;
-  currency: CurrencyCode;
-  totalCost: number;
-  status: 'APPROVED' | 'PARTIAL' | 'COMPLETED' | 'CANCELLED';
-  createdBy: string;
-  date: string;
-}
-
-export interface GoodsReceiptNote {
-  id: number;
-  grnNumber: string;
-  poNumber: string;
-  supplierName: string;
-  materialName: string;
-  expectedQty: number;
-  actualReceivedQty: number;
-  acceptedQty: number;
-  rejectedQty: number;
-  discrepancyReason?: string;
-  status: 'UNDER_INSPECTION' | 'ACCEPTED' | 'REJECTED' | 'COMPLETED';
-  storekeeperName: string;
-  date: string;
-}
-
-export interface ProductionOrder {
-  id: number;
-  orderNumber: string;
-  paintColor: string;
-  formulaName: string;
-  packageWeightGrams: 250 | 900 | 4000;
-  targetWeightKg: number;
-  targetCartons: number;
-  actualProducedCans: number;
-  goodApprovedCans: number;
-  status: 'DRAFT' | 'APPROVED' | 'IN_PRODUCTION' | 'QC_PENDING' | 'COMPLETED';
-  productionEngineer: string;
-  date: string;
-}
-
-export interface LabFormulation {
-  id: number;
-  formulaNo: string;
-  formulaName: string;
-  paintType: string;
-  colorHex: string;
-  viscosityTarget: string;
-  densityTarget: string;
-  rawMaterialCount: number;
-  isActive: boolean;
-}
-
-export interface PosterPrice {
-  id: string;
-  weight: string;
-  kind: string;
-  price: number;
-  priceEgp: number;
-  currency: CurrencyCode;
 }
 
 export interface PermissionChangeAuditEntry {
@@ -297,3 +107,335 @@ export interface LoginActivityLog {
   status: 'SUCCESS' | 'FAILED' | 'LOCKED_OUT';
   details?: string;
 }
+
+export interface Cashbox {
+  id: number;
+  name: string;
+  balance: number;
+  currency: CurrencyCode;
+  branch: string;
+  lastUpdated?: string;
+}
+
+export interface TreasuryMovement {
+  id: number;
+  txDate: string;
+  cashbox: string;
+  currency: CurrencyCode;
+  direction: 'وارد' | 'منصرف';
+  amount: number;
+  description: string;
+  reference: string;
+  createdBy: string;
+  createdAt: number;
+  // Aliases for component convenience
+  type?: 'INCOME' | 'EXPENSE';
+  category?: string;
+  cashboxName?: string;
+  employeeName?: string;
+  date?: string;
+  timestamp?: number;
+}
+
+export interface InterTreasuryTransfer {
+  id: number;
+  reference: string;
+  txDate: string;
+  sourceCashbox: string;
+  destinationCashbox: string;
+  sourceCurrency: CurrencyCode;
+  destinationCurrency: CurrencyCode;
+  sourceAmount: number;
+  rate: number;
+  destinationAmount: number;
+  description: string;
+  halfaInvoiceId?: number | null;
+  halfaAmount?: number | null;
+  createdBy: string;
+  createdAt: number;
+}
+
+export interface DailyClosing {
+  id: number;
+  closeDate: string;
+  cashbox: string;
+  currency: CurrencyCode;
+  bookBalance: number;
+  countedBalance: number;
+  difference: number;
+  notes: string;
+  preparedBy: string;
+  status: 'closed' | 'reopened';
+  closedAt: number;
+}
+
+export interface Customer {
+  id: number;
+  name: string;
+  phone: string;
+  address: string;
+  notes: string;
+  active: boolean;
+  createdAt: number;
+  creditLimit?: number;
+  currentBalance?: number;
+}
+
+export interface InvoiceItem {
+  id: number;
+  invoiceId: number;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  productId?: number | null;
+  warehouseId?: number | null;
+}
+
+export interface SalesInvoice {
+  id: number;
+  invoiceNo: string;
+  customerId: number;
+  customerName: string;
+  invoiceDate: string;
+  currency: CurrencyCode;
+  subtotal: number;
+  discount: number;
+  total: number;
+  notes: string;
+  status: 'active' | 'cancelled';
+  cancelReason?: string | null;
+  createdBy: string;
+  createdAt: number;
+  paidAmount?: number;
+  remainingAmount?: number;
+  paymentType?: 'CASH' | 'INSTALLMENT' | 'TRANSFER';
+  items?: InvoiceItem[];
+  payments?: InvoicePayment[];
+  // Aliases
+  invoiceNumber?: string;
+  date?: string;
+  totalAmount?: number;
+  finalAmount?: number;
+  timestamp?: number;
+}
+
+export interface InvoicePayment {
+  id: number;
+  invoiceId: number;
+  payDate: string;
+  cashbox: string;
+  amount: number;
+  note: string;
+  status: 'active' | 'reversed';
+  reversalReason?: string | null;
+  createdBy: string;
+  createdAt: number;
+}
+
+export interface Warehouse {
+  id: number;
+  name: string;
+  active: boolean;
+  currency: CurrencyCode;
+  linkedCashbox: string;
+  warehouseType: 'مبيعات' | 'داخل المصنع/إنتاج' | 'مواد خام';
+}
+
+export interface Product {
+  id: number;
+  sku: string;
+  name: string;
+  category: string;
+  unit: string;
+  purchasePrice: number;
+  salePrice: number; // SDG
+  salePriceEgp: number; // EGP
+  minimumStock: number;
+  packageWeight: '250' | '900' | '4000' | 'جالون' | 'ربع' | string;
+  paintColor: 'أبيض' | 'ألوان' | 'فضي' | 'ذهبي' | 'ورنيش' | string;
+  active: boolean;
+  currentStock: number;
+  // Aliases
+  salePriceSdg?: number;
+}
+
+export interface StockMove {
+  id: number;
+  warehouseId: number;
+  productId: number;
+  quantity: number;
+  kind: 'IN' | 'OUT' | 'SALE' | 'RETURN' | 'RETURN_IN' | 'CANCEL' | string;
+  invoiceId?: number | null;
+  note: string;
+  createdBy: string;
+  createdAt: number;
+}
+
+export interface FactoryItem {
+  id: number;
+  name: string;
+  unit: string;
+  category: 'raw' | 'finished' | 'empty' | 'خامات إنتاج' | 'مواد تعبئة وتغليف' | 'مذيبات ومخففات' | 'إضافات كيميائية' | string;
+  linkedToEgypt?: boolean;
+  defaultCurrency?: CurrencyCode;
+  unitCostEgp?: number;
+  actualBalance?: number;
+  reorderLevel?: number;
+}
+
+export interface FactoryMachine {
+  id: number;
+  name: string;
+  note: string;
+  active: boolean;
+}
+
+export interface FactoryMove {
+  id: number;
+  moveDate: string;
+  kind: 'توريد خامات' | 'صرف خامات' | 'إنتاج تام' | 'تالف ومعالجة' | string;
+  itemId: number;
+  itemName: string;
+  qty: number;
+  machineId?: number | null;
+  machineName?: string | null;
+  batch: string;
+  note: string;
+  actor: string;
+  counterparty: string;
+  linked: boolean;
+  createdAt: number;
+}
+
+export interface HalfaInvoice {
+  id: number;
+  invoiceNo: string;
+  invoiceDate: string;
+  cashbox: string;
+  currency: CurrencyCode;
+  warehouseId: number;
+  productId: number;
+  productName: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+  factoryMoveId?: number | null;
+  note: string;
+  status: 'active' | 'cancelled';
+  createdBy: string;
+  createdAt: number;
+}
+
+export interface PosterPrice {
+  id: string; // e.g. "900_أبيض" or "900_أبيض_EGP"
+  weight: string; // 250, 900
+  kind: string; // أبيض، ألوان، فضي، ذهبي، ورنيش
+  price: number; // SDG
+  priceEgp: number; // EGP
+  currency: CurrencyCode;
+}
+
+export interface AuditLog {
+  id: number;
+  username: string;
+  action: string;
+  detail: string;
+  timestamp: number;
+}
+
+export interface LabFormulation {
+  id: number;
+  formulaNo: string;
+  productName: string;
+  paintType: string;
+  baseKind: string;
+  targetPvc: number;
+  calculatedPvc: number;
+  cpvcEstimated: number;
+  totalSolidsWeight: number;
+  totalSolidsVolume: number;
+  totalBatchWeight: number;
+  totalBatchVolume: number;
+  calculatedDensity: number;
+  totalCost: number;
+  costPerKg: number;
+  ingredientsJson: string;
+  technicalAnalysis: string;
+  notes: string;
+  approvedForProduction: boolean;
+  createdBy: string;
+  createdAt: number;
+}
+
+export interface FormulationIngredient {
+  id: string;
+  name: string;
+  type: string;
+  weight: number;
+  density: number;
+  solidsPercent: number;
+  unitCost: number;
+  notes: string;
+}
+
+export interface ChemicalSafety {
+  id: number;
+  chemicalName: string;
+  commonName: string;
+  casNumber: string;
+  molecularFormula: string;
+  molecularWeight: number;
+  ghsPictograms: string;
+  signalWord: 'خطر' | 'تحذير';
+  hazardStatements: string;
+  precautionaryStatements: string;
+  storageConditions: string;
+  firstAidMeasures: string;
+  sdsSupplierName: string;
+  sdsFileUrlOrUri: string;
+  notes: string;
+  createdAt: number;
+}
+
+export interface ProductionBatch {
+  id: number;
+  batchNumber: string;
+  productionDate: string;
+  formulaId?: number | null;
+  formulaNo: string;
+  productName: string;
+  paintType: string;
+  baseKind: string;
+  targetPvc: number;
+  targetWeightKg: number;
+  actualWeightKg: number;
+  targetVolumeLiters: number;
+  cartonsCount: number;
+  packageUnit: string;
+  machineId?: number | null;
+  machineName: string;
+  qualityStatus: 'معتمد ومطابق' | 'تحت الفحص المخبري' | 'مرفوض/معالجة';
+  measuredDensity: number;
+  measuredViscosity: string;
+  scaledIngredientsJson: string;
+  supervisorOrEngineer: string;
+  shift: string;
+  notes: string;
+  syncStatus: string;
+  createdAt: number;
+  // Aliases for component convenience
+  orderNumber?: string;
+  paintColor?: string;
+  formulaName?: string;
+  packageWeightGrams?: number;
+  targetCartons?: number;
+  actualProducedCans?: number;
+  goodApprovedCans?: number;
+  productionEngineer?: string;
+  date?: string;
+  status?: string;
+}
+
+// Aliases for other services
+export type RawMaterialItem = FactoryItem;

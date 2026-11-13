@@ -199,9 +199,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose, onLogin
                 placeholder="••••"
                 className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary tracking-widest"
               />
-              <span className="text-[11px] text-theme-muted mt-1 block">
-                {language === 'ar' ? 'للتهيئة التجريبية: استخدم الرمز 1234' : 'Default setup PIN: 1234'}
-              </span>
             </div>
 
             <GlassButton

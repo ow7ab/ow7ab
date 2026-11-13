@@ -1,313 +1,473 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
-  FileText,
-  Download,
   Printer,
+  FileSpreadsheet,
+  TrendingUp,
+  Receipt,
+  CreditCard,
+  Layers,
+  PackageCheck,
+  ArrowLeftRight,
+  Coins,
   Calendar,
-  Filter,
-  CheckCircle2,
-  DollarSign,
-  Package,
-  Factory,
-  Building,
-  ShieldCheck,
-  FileSpreadsheet
+  ShieldAlert
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
 import { GlassButton } from '../ui/GlassButton';
 import { ReportExporter } from '../../services/ReportExporter';
 import { ErpDataService } from '../../services/ErpDataService';
+import { GRANULAR_ACTIONS, hasReportTabPermission } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
+import {
+  SalesInvoice,
+  InvoicePayment,
+  Customer,
+  TreasuryMovement,
+  Product,
+  StockMove,
+  FactoryItem,
+  FactoryMove
+} from '../../types/erp';
+
+type ReportTabId =
+  | 'مبيعات الشهر الحالي'
+  | 'المبيعات'
+  | 'المديونيات'
+  | 'المواد الخام في المخزن'
+  | 'المنتج التام'
+  | 'حركة المخزون'
+  | 'حركات الخزن';
+
+type PeriodFilter = 'ALL' | 'TODAY' | 'DAYS_7' | 'DAYS_30' | 'CUSTOM';
+
+const REPORT_TABS: { id: ReportTabId; labelEn: string; icon: React.ReactNode }[] = [
+  { id: 'مبيعات الشهر الحالي', labelEn: 'Current Month Sales', icon: <TrendingUp className="w-4 h-4" /> },
+  { id: 'المبيعات', labelEn: 'All Sales', icon: <Receipt className="w-4 h-4" /> },
+  { id: 'المديونيات', labelEn: 'Customer Debts', icon: <CreditCard className="w-4 h-4" /> },
+  { id: 'المواد الخام في المخزن', labelEn: 'Raw Materials', icon: <Layers className="w-4 h-4" /> },
+  { id: 'المنتج التام', labelEn: 'Finished Goods', icon: <PackageCheck className="w-4 h-4" /> },
+  { id: 'حركة المخزون', labelEn: 'Stock Moves', icon: <ArrowLeftRight className="w-4 h-4" /> },
+  { id: 'حركات الخزن', labelEn: 'Treasury Ledger', icon: <Coins className="w-4 h-4" /> }
+];
+
+function parseDateMs(dateStr?: string, fallbackTs?: number): number {
+  if (fallbackTs && Number.isFinite(fallbackTs) && fallbackTs > 1_000_000_000_000) return fallbackTs;
+  if (!dateStr) return 0;
+  const normalized = dateStr.trim().slice(0, 10);
+  const t = Date.parse(normalized);
+  return Number.isFinite(t) ? t : 0;
+}
 
 export const ReportsCenterView: React.FC = () => {
   const { language } = useLanguage();
-  const { canPerformAction, isSuperAdmin } = useAuth();
+  const { userProfile, canPerformAction } = useAuth();
 
-  const [reportType, setReportType] = useState<'FINANCIAL' | 'INVENTORY' | 'PRODUCTION' | 'CUSTOMERS'>('FINANCIAL');
-  const [dateFrom, setDateFrom] = useState('2026-11-01');
-  const [dateTo, setDateTo] = useState('2026-11-12');
+  const allowedTabs = useMemo(
+    () => REPORT_TABS.filter((tab) => hasReportTabPermission(userProfile, tab.id)),
+    [userProfile]
+  );
 
-  const cashboxes = ErpDataService.getInitialCashboxes();
-  const movements = ErpDataService.getInitialTreasuryMovements();
-  const products = ErpDataService.getInitialProducts();
-  const batches = ErpDataService.getInitialProductionBatches();
-  const invoices = ErpDataService.getInitialSalesInvoices();
+  const [activeTab, setActiveTab] = useState<ReportTabId>(allowedTabs[0]?.id || 'مبيعات الشهر الحالي');
+  const [period, setPeriod] = useState<PeriodFilter>('ALL');
+  const [dateFrom, setDateFrom] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [dateTo, setDateTo] = useState(() => new Date().toISOString().slice(0, 10));
 
-  const handleExportCsv = () => {
-    if (reportType === 'FINANCIAL') {
-      const headers = ['نوع السند', 'البند', 'المبلغ', 'العملة', 'الخزنة', 'البيان', 'المسؤول', 'التاريخ'];
-      const rows = movements.map(m => [m.type, m.category, m.amount, m.currency, m.cashboxName, m.description, m.employeeName, m.date]);
-      ReportExporter.exportToCsv('pmp_financial_report', headers, rows);
-    } else if (reportType === 'INVENTORY') {
-      const headers = ['اسم الصنف', 'اللون', 'الحجم', 'الرصيد الفعلي (كرتونة)', 'سعر البيع SDG', 'سعر البيع EGP'];
-      const rows = products.map(p => [p.name, p.paintColor, `${p.packageWeight}جم`, p.currentStock, p.salePriceSdg, p.salePriceEgp]);
-      ReportExporter.exportToCsv('pmp_inventory_valuation_report', headers, rows);
-    } else if (reportType === 'PRODUCTION') {
-      const headers = ['رقم الأمر', 'اللون', 'التركيبة', 'الكراتين المنتجة', 'العبوات السليمة', 'المهندس', 'التاريخ'];
-      const rows = batches.map(b => [b.orderNumber, b.paintColor, b.formulaName, b.targetCartons, b.goodApprovedCans, b.productionEngineer, b.date]);
-      ReportExporter.exportToCsv('pmp_production_report', headers, rows);
-    } else {
-      const headers = ['رقم الفاتورة', 'اسم العميل', 'الصافي', 'المدفوع', 'المتبقي', 'العملة', 'الحالة'];
-      const rows = invoices.map(i => [i.invoiceNumber, i.customerName, i.finalAmount, i.paidAmount, i.remainingAmount, i.currency, i.status]);
-      ReportExporter.exportToCsv('pmp_customer_receivables_report', headers, rows);
+  // Live Firestore states
+  const [invoices, setInvoices] = useState<SalesInvoice[]>([]);
+  const [payments, setPayments] = useState<InvoicePayment[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [movements, setMovements] = useState<TreasuryMovement[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [stockMoves, setStockMoves] = useState<StockMove[]>([]);
+  const [factoryItems, setFactoryItems] = useState<FactoryItem[]>([]);
+  const [factoryMoves, setFactoryMoves] = useState<FactoryMove[]>([]);
+
+  useEffect(() => {
+    if (allowedTabs.length > 0 && !allowedTabs.some((t) => t.id === activeTab)) {
+      setActiveTab(allowedTabs[0].id);
     }
+  }, [allowedTabs, activeTab]);
+
+  useEffect(() => {
+    const unsubs = [
+      ErpDataService.subscribeToCollection<SalesInvoice>('invoices', setInvoices),
+      ErpDataService.subscribeToCollection<InvoicePayment>('invoice_payments', setPayments),
+      ErpDataService.subscribeToCollection<Customer>('customers', setCustomers),
+      ErpDataService.subscribeToCollection<TreasuryMovement>('movements', setMovements),
+      ErpDataService.subscribeToCollection<Product>('products', setProducts),
+      ErpDataService.subscribeToCollection<StockMove>('stock_moves', setStockMoves),
+      ErpDataService.subscribeToCollection<FactoryItem>('factory_items', setFactoryItems),
+      ErpDataService.subscribeToCollection<FactoryMove>('factory_moves', setFactoryMoves)
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, []);
+
+  const matchesPeriod = (dateStr?: string, ts?: number): boolean => {
+    if (period === 'ALL') return true;
+    const itemMs = parseDateMs(dateStr, ts);
+    if (!itemMs) return true;
+    const now = Date.now();
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    if (period === 'TODAY') {
+      const d = (dateStr || new Date(itemMs).toISOString()).slice(0, 10);
+      return d === todayStr;
+    }
+    if (period === 'DAYS_7') {
+      return itemMs >= now - 7 * 86_400_000;
+    }
+    if (period === 'DAYS_30') {
+      return itemMs >= now - 30 * 86_400_000;
+    }
+    if (period === 'CUSTOM') {
+      const fromMs = dateFrom ? Date.parse(dateFrom) : 0;
+      const toMs = dateTo ? Date.parse(dateTo) + 86_399_999 : Number.MAX_SAFE_INTEGER;
+      return itemMs >= fromMs && itemMs <= toMs;
+    }
+    return true;
   };
 
-  const handlePrint = () => {
-    if (reportType === 'FINANCIAL') {
-      const headers = ['النوع', 'البند', 'المبلغ', 'العملة', 'الخزنة', 'البيان'];
-      const rows = movements.map(m => [m.type === 'INCOME' ? 'قبض' : 'صرف', m.category, m.amount.toLocaleString(), m.currency, m.cashboxName, m.description]);
-      ReportExporter.exportToPrint('التقرير المالي وحركة الخزينة والسيولة', headers, rows);
-    } else if (reportType === 'INVENTORY') {
-      const headers = ['الصنف', 'اللون', 'الوزن', 'الرصيد الفعلي', 'السعر SDG'];
-      const rows = products.map(p => [p.name, p.paintColor, `${p.packageWeight}جم`, p.currentStock, p.salePriceSdg.toLocaleString()]);
-      ReportExporter.exportToPrint('تقرير جرد وتقييم مخزون المنتج التام', headers, rows);
-    } else if (reportType === 'PRODUCTION') {
-      const headers = ['الأمر', 'اللون', 'التركيبة', 'الكراتين', 'المهندس'];
-      const rows = batches.map(b => [b.orderNumber, b.paintColor, b.formulaName, b.targetCartons, b.productionEngineer]);
-      ReportExporter.exportToPrint('تقرير كفاءة وتشغيل خطوط إنتاج المصنع', headers, rows);
-    } else {
-      const headers = ['الفاتورة', 'العميل', 'الصافي', 'المدفوع', 'المتبقي', 'الحالة'];
-      const rows = invoices.map(i => [i.invoiceNumber, i.customerName, i.finalAmount.toLocaleString(), i.paidAmount.toLocaleString(), i.remainingAmount.toLocaleString(), i.status]);
-      ReportExporter.exportToPrint('تقرير مديونيات وحسابات العملاء', headers, rows);
+  // Android calculations
+  const productStocks = useMemo(() => ErpDataService.computeProductStocks(products, stockMoves), [products, stockMoves]);
+  const factoryBalances = useMemo(
+    () => ErpDataService.computeFactoryItemBalances(factoryItems, factoryMoves),
+    [factoryItems, factoryMoves]
+  );
+  const customerDebts = useMemo(
+    () => ErpDataService.computeCustomerDebts(customers, invoices, payments),
+    [customers, invoices, payments]
+  );
+
+  const currentMonthPrefix = new Date().toISOString().slice(0, 7); // YYYY-MM
+
+  const activeInvoices = useMemo(
+    () =>
+      invoices
+        .filter((i) => i.status !== 'cancelled')
+        .filter((i) => matchesPeriod(i.invoiceDate || i.date, i.createdAt))
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
+    [invoices, period, dateFrom, dateTo]
+  );
+
+  const currentMonthInvoices = useMemo(
+    () =>
+      invoices
+        .filter((i) => i.status !== 'cancelled')
+        .filter((i) => (i.invoiceDate || i.date || '').startsWith(currentMonthPrefix))
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
+    [invoices, currentMonthPrefix]
+  );
+
+  const filteredMovements = useMemo(
+    () =>
+      movements
+        .filter((m) => matchesPeriod(m.txDate || m.date, m.createdAt))
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
+    [movements, period, dateFrom, dateTo]
+  );
+
+  const filteredStockMoves = useMemo(
+    () =>
+      stockMoves
+        .filter((s) => matchesPeriod(undefined, s.createdAt))
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
+    [stockMoves, period, dateFrom, dateTo]
+  );
+
+  const debtorRows = useMemo(() => {
+    return customers
+      .map((c) => {
+        const debt = customerDebts.get(Number(c.id)) || {
+          totalInvoiced: 0,
+          totalPaid: 0,
+          remaining: 0,
+          primaryCurrency: 'SDG' as const
+        };
+        return { customer: c, ...debt };
+      })
+      .filter((r) => r.totalInvoiced > 0 || r.remaining > 0)
+      .sort((a, b) => b.remaining - a.remaining);
+  }, [customers, customerDebts]);
+
+  const canExportOrPrint =
+    canPerformAction(GRANULAR_ACTIONS.EXPORT) ||
+    canPerformAction(GRANULAR_ACTIONS.PRINT) ||
+    allowedTabs.length > 0;
+
+  const buildReportTable = (): { title: string; headers: string[]; rows: (string | number)[][] } => {
+    if (activeTab === 'مبيعات الشهر الحالي' || activeTab === 'المبيعات') {
+      const list = activeTab === 'مبيعات الشهر الحالي' ? currentMonthInvoices : activeInvoices;
+      return {
+        title: activeTab === 'مبيعات الشهر الحالي' ? `تقرير مبيعات الشهر الحالي (${currentMonthPrefix})` : 'تقرير المبيعات الشامل',
+        headers: ['رقم الفاتورة', 'التاريخ', 'العميل', 'الإجمالي', 'المدفوع', 'المتبقي', 'العملة', 'الحالة'],
+        rows: list.map((inv) => {
+          const fin = ErpDataService.computeInvoiceFinancials(inv, payments);
+          return [
+            inv.invoiceNo || String(inv.id),
+            inv.invoiceDate || inv.date || '',
+            inv.customerName,
+            Number(inv.total ?? inv.finalAmount ?? 0),
+            fin.paidAmount,
+            fin.remainingAmount,
+            inv.currency,
+            fin.statusLabel
+          ];
+        })
+      };
     }
+
+    if (activeTab === 'المديونيات') {
+      return {
+        title: 'تقرير مديونيات العملاء وأرصدة السداد',
+        headers: ['العميل', 'الهاتف', 'إجمالي الفواتير', 'إجمالي المسدد', 'المتبقي (المديونية)', 'العملة'],
+        rows: debtorRows.map((d) => [
+          d.customer.name,
+          d.customer.phone,
+          d.totalInvoiced,
+          d.totalPaid,
+          d.remaining,
+          d.primaryCurrency
+        ])
+      };
+    }
+
+    if (activeTab === 'المواد الخام في المخزن') {
+      const rawItems = factoryItems.filter((fi) => fi.category === 'raw' || !fi.category || fi.category.includes('خام'));
+      return {
+        title: 'تقرير أرصدة المواد الخام بالمصنع',
+        headers: ['المادة الخام', 'الوحدة', 'الرصيد المحسوب', 'تكلفة الوحدة EGP'],
+        rows: rawItems.map((fi) => [
+          fi.name,
+          fi.unit,
+          factoryBalances.get(Number(fi.id)) ?? 0,
+          Number(fi.unitCostEgp || 0)
+        ])
+      };
+    }
+
+    if (activeTab === 'المنتج التام') {
+      return {
+        title: 'تقرير جرد وتقييم المنتج التام بالمخازن',
+        headers: ['الصنف', 'اللون', 'الحجم', 'الرصيد الفعلي', 'سعر البيع SDG', 'سعر البيع EGP'],
+        rows: products.map((p) => [
+          p.name,
+          p.paintColor,
+          p.packageWeight,
+          productStocks.get(Number(p.id)) ?? 0,
+          Number(p.salePrice ?? p.salePriceSdg ?? 0),
+          Number(p.salePriceEgp ?? 0)
+        ])
+      };
+    }
+
+    if (activeTab === 'حركة المخزون') {
+      return {
+        title: 'تقرير حركة المخزون للمنتجات التامة',
+        headers: ['رقم الحركة', 'رقم الصنف', 'اسم الصنف', 'نوع الحركة', 'الكمية', 'البيان', 'الموظف', 'التاريخ'],
+        rows: filteredStockMoves.map((sm) => {
+          const prod = products.find((p) => Number(p.id) === Number(sm.productId));
+          return [
+            sm.id,
+            sm.productId,
+            prod?.name || `صنف #${sm.productId}`,
+            sm.kind,
+            sm.quantity,
+            sm.note || '-',
+            sm.createdBy,
+            sm.createdAt ? new Date(sm.createdAt).toLocaleDateString('ar-EG') : '-'
+          ];
+        })
+      };
+    }
+
+    return {
+      title: 'تقرير حركات الخزن والسيولة النقدية',
+      headers: ['التاريخ', 'الخزنة', 'النوع', 'المبلغ', 'العملة', 'المرجع', 'البيان', 'بواسطة'],
+      rows: filteredMovements.map((m) => [
+        m.txDate || m.date || '',
+        m.cashbox || m.cashboxName || '',
+        m.direction || (m.type === 'INCOME' ? 'وارد' : 'منصرف'),
+        Number(m.amount) || 0,
+        m.currency,
+        m.reference || '-',
+        m.description,
+        m.createdBy || m.employeeName || '-'
+      ])
+    };
   };
+
+  if (allowedTabs.length === 0) {
+    return (
+      <GlassCard className="p-8 text-center space-y-3">
+        <ShieldAlert className="w-10 h-10 text-red-500 mx-auto" />
+        <h3 className="text-base font-bold text-theme-primary">لا تملك صلاحية عرض التقارير</h3>
+        <p className="text-xs text-theme-secondary">
+          يرجى مراجعة مدير النظام لمنحك أحد صلاحيات التقارير (مثل: تقارير المبيعات، التقارير، المحاسبة).
+        </p>
+      </GlassCard>
+    );
+  }
+
+  const reportData = buildReportTable();
 
   return (
-    <div className="space-y-6">
-      {/* Title Bar */}
+    <div className="space-y-5">
+      {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-4 border-b border-theme">
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-xl font-black text-theme-primary">
-              {language === 'ar' ? 'مركز التقارير التنفيذية والطباعة (Enterprise Reports Center)' : 'Reports & Exports Center'}
+              {language === 'ar' ? 'مركز التقارير المعتمدة والطباعة' : 'Enterprise Reports Center'}
             </h2>
-            <GlassBadge variant="cyan">
-              {language === 'ar' ? 'تصدير PDF وExcel' : 'PDF & Excel'}
-            </GlassBadge>
+            <GlassBadge variant="cyan">{allowedTabs.length} تقارير مصرحة</GlassBadge>
           </div>
           <p className="text-xs text-theme-secondary mt-1">
             {language === 'ar'
-              ? 'استخراج وطباعة الكشوفات المالية المعتمدة، جرد المخازن، أوامر المصنع، ومديونيات العملاء.'
-              : 'Generate approved statement sheets, inventory valuations, batch records, and customer accounts.'}
+              ? 'متطابق مع 7 تقارير الأندرويد • أرقام حية من Firestore وتصدير مباشر Excel/CSV و PDF.'
+              : 'Matches the 7 Android Reports tabs with live Firestore calculations & CSV/Print export.'}
           </p>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <GlassButton variant="secondary" icon={<FileSpreadsheet className="w-4 h-4" />} onClick={handleExportCsv} className="text-xs">
-            {language === 'ar' ? 'تصدير Excel/CSV' : 'Export Excel'}
-          </GlassButton>
-          <GlassButton variant="primary" icon={<Printer className="w-4 h-4" />} onClick={handlePrint} className="text-xs">
-            {language === 'ar' ? 'طباعة / PDF' : 'Print PDF'}
-          </GlassButton>
-        </div>
+        {canExportOrPrint && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <GlassButton
+              variant="secondary"
+              icon={<FileSpreadsheet className="w-4 h-4" />}
+              onClick={() => ReportExporter.exportToCsv(`pmp_${activeTab}`, reportData.headers, reportData.rows)}
+              className="text-xs"
+            >
+              {language === 'ar' ? 'تصدير Excel/CSV' : 'Export CSV'}
+            </GlassButton>
+            <GlassButton
+              variant="primary"
+              icon={<Printer className="w-4 h-4" />}
+              onClick={() => ReportExporter.exportToPrint(reportData.title, reportData.headers, reportData.rows)}
+              className="text-xs"
+            >
+              {language === 'ar' ? 'طباعة / PDF' : 'Print / PDF'}
+            </GlassButton>
+          </div>
+        )}
       </div>
 
-      {/* Report Types Grid Selection */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <button
-          onClick={() => setReportType('FINANCIAL')}
-          className={`p-3.5 rounded-xl border text-xs text-right transition-all ${
-            reportType === 'FINANCIAL'
-              ? 'bg-pmp-primary/10 border-pmp-primary shadow-md font-bold text-theme-primary'
-              : 'bg-theme-surface border-theme text-theme-secondary hover:border-theme-hover'
-          }`}
-        >
-          <DollarSign className="w-5 h-5 text-pmp-primary mb-1.5" />
-          <span className="block text-sm font-bold">{language === 'ar' ? 'التقرير المالي وحركة الخزن' : 'Financial Statement'}</span>
-          <span className="text-[10px] text-theme-muted">سندات القبض والصرف والإقفالات</span>
-        </button>
-
-        <button
-          onClick={() => setReportType('INVENTORY')}
-          className={`p-3.5 rounded-xl border text-xs text-right transition-all ${
-            reportType === 'INVENTORY'
-              ? 'bg-pmp-primary/10 border-pmp-primary shadow-md font-bold text-theme-primary'
-              : 'bg-theme-surface border-theme text-theme-secondary hover:border-theme-hover'
-          }`}
-        >
-          <Package className="w-5 h-5 text-pmp-accent mb-1.5" />
-          <span className="block text-sm font-bold">{language === 'ar' ? 'جرد وتقييم المخزون' : 'Inventory Valuation'}</span>
-          <span className="text-[10px] text-theme-muted">المنتج التام وبراميل الخامات</span>
-        </button>
-
-        <button
-          onClick={() => setReportType('PRODUCTION')}
-          className={`p-3.5 rounded-xl border text-xs text-right transition-all ${
-            reportType === 'PRODUCTION'
-              ? 'bg-pmp-primary/10 border-pmp-primary shadow-md font-bold text-theme-primary'
-              : 'bg-theme-surface border-theme text-theme-secondary hover:border-theme-hover'
-          }`}
-        >
-          <Factory className="w-5 h-5 text-pmp-success mb-1.5" />
-          <span className="block text-sm font-bold">{language === 'ar' ? 'تقرير إنتاج المصنع' : 'Factory Output'}</span>
-          <span className="text-[10px] text-theme-muted">أوامر الخلط ومخرجات الكراتين</span>
-        </button>
-
-        <button
-          onClick={() => setReportType('CUSTOMERS')}
-          className={`p-3.5 rounded-xl border text-xs text-right transition-all ${
-            reportType === 'CUSTOMERS'
-              ? 'bg-pmp-primary/10 border-pmp-primary shadow-md font-bold text-theme-primary'
-              : 'bg-theme-surface border-theme text-theme-secondary hover:border-theme-hover'
-          }`}
-        >
-          <Building className="w-5 h-5 text-pmp-warning mb-1.5" />
-          <span className="block text-sm font-bold">{language === 'ar' ? 'مديونيات وفواتير العملاء' : 'Customer Receivables'}</span>
-          <span className="text-[10px] text-theme-muted">الأرصدة الآجلة وسداد الأقساط</span>
-        </button>
+      {/* 7 Android Report Tabs (RBAC Filtered) */}
+      <div className="flex flex-wrap gap-2">
+        {allowedTabs.map((tab) => {
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-3.5 py-2 rounded-xl border text-xs font-bold transition-all flex items-center gap-1.5 min-h-[40px] ${
+                isActive
+                  ? 'bg-pmp-primary text-white border-pmp-primary shadow-md'
+                  : 'bg-theme-surface border-theme text-theme-secondary hover:text-theme-primary'
+              }`}
+            >
+              {tab.icon}
+              <span>{language === 'ar' ? tab.id : tab.labelEn}</span>
+            </button>
+          );
+        })}
       </div>
 
-      {/* Date Range Selection Bar */}
-      <GlassCard className="p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-          <div>
-            <label className="block text-theme-muted mb-1 font-bold">{language === 'ar' ? 'من تاريخ:' : 'From Date:'}</label>
-            <input
-              type="date"
-              value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg bg-theme-surface border border-theme text-theme-primary focus:outline-none focus:border-pmp-primary font-mono"
-            />
-          </div>
-
-          <div>
-            <label className="block text-theme-muted mb-1 font-bold">{language === 'ar' ? 'إلى تاريخ:' : 'To Date:'}</label>
-            <input
-              type="date"
-              value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg bg-theme-surface border border-theme text-theme-primary focus:outline-none focus:border-pmp-primary font-mono"
-            />
-          </div>
+      {/* Period Filter Bar */}
+      <GlassCard className="p-4 space-y-3">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Calendar className="w-4 h-4 text-pmp-primary" />
+          <span className="font-bold text-theme-primary">الفترة الزمنية:</span>
+          {(
+            [
+              { id: 'ALL', label: 'الكل' },
+              { id: 'TODAY', label: 'اليوم' },
+              { id: 'DAYS_7', label: 'آخر 7 أيام' },
+              { id: 'DAYS_30', label: 'آخر 30 يوم' },
+              { id: 'CUSTOM', label: 'تاريخ مخصص' }
+            ] as { id: PeriodFilter; label: string }[]
+          ).map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => setPeriod(p.id)}
+              className={`px-3 py-1.5 rounded-lg border font-bold transition-all ${
+                period === p.id
+                  ? 'bg-pmp-primary/15 border-pmp-primary text-pmp-primary'
+                  : 'bg-theme-base border-theme text-theme-secondary'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
         </div>
+
+        {period === 'CUSTOM' && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-theme text-xs">
+            <div>
+              <label className="block text-theme-muted mb-1 font-bold">من تاريخ:</label>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg bg-theme-base border border-theme text-theme-primary font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-theme-muted mb-1 font-bold">إلى تاريخ:</label>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg bg-theme-base border border-theme text-theme-primary font-mono"
+              />
+            </div>
+          </div>
+        )}
       </GlassCard>
 
-      {/* Report Preview Data Table */}
+      {/* Report Data Table */}
       <GlassCard className="p-0 overflow-hidden">
-        <div className="p-4 border-b border-theme flex justify-between items-center">
-          <h4 className="font-bold text-theme-primary text-sm">
-            {reportType === 'FINANCIAL' ? 'معاينة: حركة الخزينة والسيولة النقدية' :
-             reportType === 'INVENTORY' ? 'معاينة: رصيد وتقييم مستودعات المنتج التام' :
-             reportType === 'PRODUCTION' ? 'معاينة: أوامر وتشغيلات خطوط خلط الدهانات' :
-             'معاينة: كشف فواتير ومستحقات العملاء'}
-          </h4>
-          <span className="text-xs text-theme-muted font-mono">{dateFrom} إلى {dateTo}</span>
+        <div className="p-4 border-b border-theme flex flex-wrap justify-between items-center gap-2">
+          <h4 className="font-bold text-theme-primary text-sm">{reportData.title}</h4>
+          <span className="text-xs text-theme-muted font-mono">{reportData.rows.length} سجل</span>
         </div>
 
-        <div className="overflow-x-auto">
-          {reportType === 'FINANCIAL' && (
+        {reportData.rows.length === 0 ? (
+          <div className="p-10 text-center text-xs text-theme-muted">
+            لا توجد سجلات مطابقة لهذا التقرير ضمن الفترة المختارة.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
             <table className="w-full text-right border-collapse text-xs">
               <thead>
                 <tr className="bg-theme-surface/70 border-b border-theme text-theme-muted font-bold">
-                  <th className="py-2.5 px-4">نوع السند</th>
-                  <th className="py-2.5 px-4">البند</th>
-                  <th className="py-2.5 px-4">المبلغ والعملة</th>
-                  <th className="py-2.5 px-4">الخزنة</th>
-                  <th className="py-2.5 px-4">البيان</th>
-                  <th className="py-2.5 px-4">التاريخ</th>
+                  {reportData.headers.map((h) => (
+                    <th key={h} className="py-3 px-4 whitespace-nowrap">
+                      {h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-theme">
-                {movements.map(m => (
-                  <tr key={m.id} className="hover:bg-theme-surface/40">
-                    <td className="py-3 px-4 font-bold text-pmp-primary">{m.type === 'INCOME' ? 'قبض' : 'صرف'}</td>
-                    <td className="py-3 px-4">{m.category}</td>
-                    <td className="py-3 px-4 font-black">{m.amount.toLocaleString()} {m.currency}</td>
-                    <td className="py-3 px-4 text-theme-secondary">{m.cashboxName}</td>
-                    <td className="py-3 px-4">{m.description}</td>
-                    <td className="py-3 px-4 font-mono text-theme-muted">{m.date}</td>
+                {reportData.rows.map((row, rIdx) => (
+                  <tr key={rIdx} className="hover:bg-theme-surface/40">
+                    {row.map((cell, cIdx) => (
+                      <td key={cIdx} className="py-3 px-4 whitespace-nowrap text-theme-primary">
+                        {typeof cell === 'number' ? cell.toLocaleString() : cell}
+                      </td>
+                    ))}
                   </tr>
                 ))}
               </tbody>
             </table>
-          )}
-
-          {reportType === 'INVENTORY' && (
-            <table className="w-full text-right border-collapse text-xs">
-              <thead>
-                <tr className="bg-theme-surface/70 border-b border-theme text-theme-muted font-bold">
-                  <th className="py-2.5 px-4">الصنف والطلاء</th>
-                  <th className="py-2.5 px-4">اللون والتصنيف</th>
-                  <th className="py-2.5 px-4">حجم العبوة</th>
-                  <th className="py-2.5 px-4">الرصيد الفعلي</th>
-                  <th className="py-2.5 px-4">السعر (SDG)</th>
-                  <th className="py-2.5 px-4">السعر (EGP)</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-theme">
-                {products.map(p => (
-                  <tr key={p.id} className="hover:bg-theme-surface/40">
-                    <td className="py-3 px-4 font-bold text-theme-primary">{p.name}</td>
-                    <td className="py-3 px-4">{p.paintColor} ({p.category})</td>
-                    <td className="py-3 px-4 font-mono">{p.packageWeight}جم</td>
-                    <td className="py-3 px-4 font-black text-pmp-accent">{p.currentStock} كرتونة</td>
-                    <td className="py-3 px-4 font-bold">{p.salePriceSdg.toLocaleString()} SDG</td>
-                    <td className="py-3 px-4 font-bold">{p.salePriceEgp.toLocaleString()} EGP</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {reportType === 'PRODUCTION' && (
-            <table className="w-full text-right border-collapse text-xs">
-              <thead>
-                <tr className="bg-theme-surface/70 border-b border-theme text-theme-muted font-bold">
-                  <th className="py-2.5 px-4">رقم الأمر</th>
-                  <th className="py-2.5 px-4">التركيبة واللون</th>
-                  <th className="py-2.5 px-4">العبوة</th>
-                  <th className="py-2.5 px-4">الإنتاج المستهدف</th>
-                  <th className="py-2.5 px-4">الإنتاج الفعلي</th>
-                  <th className="py-2.5 px-4">المهندس</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-theme">
-                {batches.map(b => (
-                  <tr key={b.id} className="hover:bg-theme-surface/40">
-                    <td className="py-3 px-4 font-mono font-bold text-pmp-primary">{b.orderNumber}</td>
-                    <td className="py-3 px-4 font-bold">{b.formulaName} ({b.paintColor})</td>
-                    <td className="py-3 px-4 font-mono">{b.packageWeightGrams}جم</td>
-                    <td className="py-3 px-4">{b.targetCartons} كرتونة</td>
-                    <td className="py-3 px-4 font-black text-pmp-success">{b.actualProducedCans} علبة</td>
-                    <td className="py-3 px-4 text-theme-secondary">{b.productionEngineer}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {reportType === 'CUSTOMERS' && (
-            <table className="w-full text-right border-collapse text-xs">
-              <thead>
-                <tr className="bg-theme-surface/70 border-b border-theme text-theme-muted font-bold">
-                  <th className="py-2.5 px-4">رقم الفاتورة</th>
-                  <th className="py-2.5 px-4">اسم العميل</th>
-                  <th className="py-2.5 px-4">صافي القيمة</th>
-                  <th className="py-2.5 px-4">المسدد</th>
-                  <th className="py-2.5 px-4">المتبقي (مديونية)</th>
-                  <th className="py-2.5 px-4">الحالة</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-theme">
-                {invoices.map(i => (
-                  <tr key={i.id} className="hover:bg-theme-surface/40">
-                    <td className="py-3 px-4 font-mono font-bold text-pmp-primary">{i.invoiceNumber}</td>
-                    <td className="py-3 px-4 font-bold">{i.customerName}</td>
-                    <td className="py-3 px-4 font-black">{i.finalAmount.toLocaleString()} {i.currency}</td>
-                    <td className="py-3 px-4 text-green-500 font-bold">{i.paidAmount.toLocaleString()} {i.currency}</td>
-                    <td className="py-3 px-4 font-bold text-theme-muted">{i.remainingAmount > 0 ? `${i.remainingAmount.toLocaleString()} ${i.currency}` : '-'}</td>
-                    <td className="py-3 px-4">
-                      <GlassBadge variant={i.status === 'PAID' ? 'green' : 'gold'}>{i.status}</GlassBadge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+          </div>
+        )}
       </GlassCard>
     </div>
   );

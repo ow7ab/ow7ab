@@ -8,6 +8,7 @@ interface GlassButtonProps {
   className?: string;
   type?: 'button' | 'submit' | 'reset';
   disabled?: boolean;
+  isLoading?: boolean;
   size?: 'sm' | 'md' | 'lg';
 }
 
@@ -19,6 +20,7 @@ export const GlassButton: React.FC<GlassButtonProps> = ({
   className = '',
   type = 'button',
   disabled = false,
+  isLoading = false,
   size = 'md'
 }) => {
   const variantClass = {
@@ -28,14 +30,15 @@ export const GlassButton: React.FC<GlassButtonProps> = ({
   }[variant];
 
   const sizeClass = size === 'lg' ? 'px-6 py-3 text-base' : size === 'sm' ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm';
+  const isDisabled = disabled || isLoading;
 
   return (
     <button
       type={type}
-      disabled={disabled}
+      disabled={isDisabled}
       onClick={onClick}
       className={`btn ${variantClass} ${sizeClass} ${className}`}
-      style={{ opacity: disabled ? 0.6 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }}
+      style={{ opacity: isDisabled ? 0.6 : 1, cursor: isDisabled ? 'not-allowed' : 'pointer' }}
     >
       {icon && <span style={{ display: 'inline-flex', alignItems: 'center' }}>{icon}</span>}
       {children}
