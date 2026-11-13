@@ -1,4 +1,4 @@
-name: PMP Paints - Unified Web Platform Deployment (GitHub Pages & Cloudflare Pages)
+name: PMP Paints - Cloudflare Pages & GitHub Pages Web Deployment
 
 on:
   push:
@@ -7,6 +7,7 @@ on:
     paths:
       - "web/**"
       - "public/**"
+      - "wrangler.toml"
       - ".github/workflows/deploy-web.yml"
   workflow_dispatch:
 
@@ -22,83 +23,101 @@ concurrency:
 
 jobs:
   build-and-deploy-web:
-    name: Build, Test & Deploy Unified ERP Website
+    name: Build, Test & Deploy Unified ERP Web Platform
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.pages_deploy.outputs.page_url }}
 
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: 'npm'
           cache-dependency-path: 'web/package.json'
 
-      - name: Sync Official Release Metadata & Assets into Web Public
+      - name: Sync Official Release Metadata & Brand Assets into Web Public
         run: |
-          mkdir -p web/public/assets
-          if [ -d public/assets ]; then
-            cp -rn public/assets/* web/public/assets/ || true
-          fi
-          if [ -f public/releases-history.json ]; then
-            cp public/releases-history.json web/public/releases-history.json
-          fi
+          python3 - << 'PYEOF'
+          import os
+          import shutil
+
+          os.makedirs(os.path.join("web", "public", "assets"), exist_ok=True)
+          pub_assets = os.path.join("public", "assets")
+          if os.path.isdir(pub_assets):
+              for name in os.listdir(pub_assets):
+                  src = os.path.join(pub_assets, name)
+                  dst = os.path.join("web", "public", "assets", name)
+                  if os.path.isfile(src):
+                      shutil.copy2(src, dst)
+
+          hist_src = os.path.join("public", "releases-history.json")
+          if os.path.isfile(hist_src):
+              shutil.copy2(hist_src, os.path.join("web", "public", "releases-history.json"))
+          PYEOF
 
       - name: Install Web Dependencies
         run: |
           npm ci --prefix web
 
-      - name: Run All Web Automated Tests
+      - name: Run All Web Automated Unit Tests
         run: |
           npm test --prefix web
 
-      - name: Build Root Bundle (Cloudflare Pages / Firebase Hosting / Cloud Run)
+      - name: Build Production Bundle for Cloudflare Pages (Root Base /)
         env:
           VITE_BASE_PATH: /
         run: |
           npm run build --prefix web
           test -f web/dist/index.html
           test -f web/dist/_redirects
+          test -f web/dist/_headers
+          test -f web/dist/releases-history.json
 
-      - name: Deploy to Cloudflare Pages (if secrets configured)
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy web/dist --project-name=pmp-paints-erp --branch=main
+      - name: Deploy Unified Web App to Cloudflare Pages (pmp-paints-erp.pages.dev)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
+        run: |
+          PROJECT_NAME="${CLOUDFLARE_PROJECT_NAME:-pmp-paints-erp}"
+          if [ -n "${CLOUDFLARE_API_TOKEN}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            echo "Deploying web/dist to Cloudflare Pages project: ${PROJECT_NAME}.pages.dev (branch: main)..."
+            npx --yes wrangler@3 pages project create "${PROJECT_NAME}" --production-branch=main 2>/dev/null || echo "Project ${PROJECT_NAME} already exists or managed in Cloudflare."
+            npx --yes wrangler@3 pages deploy web/dist --project-name="${PROJECT_NAME}" --branch=main --commit-dirty=true
+          else
+            echo "Note: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID secrets not set in GitHub Actions; skipping CLI push (use Cloudflare Pages native Git integration or add secrets)."
+          fi
 
-      - name: Build GitHub Pages Unified Bundle (/ow7ab/)
+      - name: Build Production Bundle for GitHub Pages (/ow7ab/)
         env:
           VITE_BASE_PATH: /ow7ab/
         run: |
           npm run build --prefix web
           test -f web/dist/index.html
           test -f web/dist/404.html
-          if ls public/*.apk >/dev/null 2>&1; then
-            cp public/*.apk web/dist/
-          fi
-          if [ -f public/version.json ]; then
-            cp public/version.json web/dist/version.json
-          fi
-          if [ -f public/releases-history.json ]; then
-            cp public/releases-history.json web/dist/releases-history.json
-          fi
+          python3 - << 'PYEOF'
+          import glob
+          import os
+          import shutil
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+          for apk_file in glob.glob(os.path.join("public", "*.apk")):
+              if os.path.isfile(apk_file):
+                  shutil.copy2(apk_file, os.path.join("web", "dist", os.path.basename(apk_file)))
+
+          for json_name in ("version.json", "releases-history.json"):
+              src = os.path.join("public", json_name)
+              if os.path.isfile(src):
+                  shutil.copy2(src, os.path.join("web", "dist", json_name))
+          PYEOF
 
       - name: Upload Unified Web Artifact for GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
           path: web/dist
 
-      - name: Deploy Unified ERP & APK Portal to GitHub Pages
+      - name: Deploy Unified ERP & APK Website to GitHub Pages
         id: pages_deploy
         continue-on-error: true
         uses: actions/deploy-pages@v4

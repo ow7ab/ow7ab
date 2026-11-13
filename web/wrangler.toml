@@ -1,0 +1,8 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "pmp-paints-erp"
+compatibility_date = "2026-11-12"
+pages_build_output_dir = "dist"
+
+[vars]
+NODE_VERSION = "22"
+VITE_BASE_PATH = "/"
