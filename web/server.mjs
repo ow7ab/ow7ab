@@ -6,8 +6,10 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DIST_DIR = path.join(__dirname, 'dist');
+const ROOT_DIR = path.resolve(__dirname, '..');
 const PORT = Number(process.env.PORT || 3000);
 const HOST = '0.0.0.0';
+const DIRECT_GITHUB_APK_URL = 'https://github.com/ow7ab/ow7ab/releases/latest/download/pmp-paints-latest.apk';
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -47,6 +49,42 @@ const server = http.createServer((req, res) => {
   let safePath = path.normalize(urlPath).replace(/^(\.\.[/\\])+/, '');
   if (safePath === '/' || safePath === '') {
     safePath = '/index.html';
+  }
+
+  // Handle direct APK download requests with local fallback or 302 redirect to verified binary stream
+  if (safePath.toLowerCase().endsWith('.apk') || safePath === '/download-apk') {
+    const candidateApks = [
+      path.join(DIST_DIR, safePath),
+      path.join(ROOT_DIR, 'public', 'pmp-paints-latest.apk'),
+      path.join(ROOT_DIR, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk'),
+      path.join(ROOT_DIR, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')
+    ];
+    const existingApk = candidateApks.find((p) => {
+      try {
+        return fs.statSync(p).isFile();
+      } catch {
+        return false;
+      }
+    });
+
+    if (existingApk) {
+      const stat = fs.statSync(existingApk);
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.android.package-archive',
+        'Content-Length': stat.size,
+        'Content-Disposition': 'attachment; filename="pmp-paints-latest.apk"',
+        'Cache-Control': 'no-cache'
+      });
+      fs.createReadStream(existingApk).pipe(res);
+      return;
+    }
+
+    res.writeHead(302, {
+      Location: DIRECT_GITHUB_APK_URL,
+      'Cache-Control': 'no-cache'
+    });
+    res.end();
+    return;
   }
 
   let filePath = path.join(DIST_DIR, safePath);

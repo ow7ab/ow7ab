@@ -1,8 +1,14 @@
+/**
+ * PMP PAINTS Unified Cloud ERP Data Service
+ * Connects the Web Platform 1:1 to the EXACT same Cloud Firestore database,
+ * cluster path (`erp_clusters/{clusterCode}`), collection names, document ID conventions,
+ * and ledger aggregation formulas used by Android (`CloudErpSyncRepository.kt` & `PmpViewModel.kt`).
+ */
+
 import {
   collection,
   doc,
   getDocs,
-  getDoc,
   setDoc,
   deleteDoc,
   onSnapshot,
@@ -15,381 +21,367 @@ import {
   LEGACY_CLUSTER_CODE
 } from '../config/firebaseConfig';
 import {
+  AuditLog,
   Cashbox,
   TreasuryMovement,
-  InterTreasuryTransfer,
+  TreasuryTransfer,
   DailyClosing,
+  Product,
+  Warehouse,
+  StockMove,
   Customer,
   SalesInvoice,
   InvoicePayment,
-  Warehouse,
-  Product,
-  StockMove,
+  Supplier,
+  PurchaseInvoice,
   FactoryItem,
-  FactoryMachine,
   FactoryMove,
-  HalfaInvoice,
-  PosterPrice,
-  AuditLog,
-  LabFormulation,
-  ChemicalSafety,
+  Machine,
   ProductionBatch,
-  CurrencyCode
+  ChemicalFormulation,
+  QualityInspection,
+  PosterPrice
 } from '../types/erp';
-
 import {
-  ComputedCashboxBalance,
-  javaHashHex,
   safeId,
   cashboxDocId,
   posterPriceDocId,
+  deduplicateCollectionRecords,
+  computeDistinctCashboxesWithBalances,
   computeCashboxBalances,
   computeProductStocks,
   computeFactoryItemBalances,
   computeInvoiceFinancials,
-  computeCustomerDebts
+  computeCustomerDebts,
+  computeSupplierBalances
 } from './ErpCalculations';
 
 export {
-  javaHashHex,
   safeId,
   cashboxDocId,
-  posterPriceDocId
+  posterPriceDocId,
+  deduplicateCollectionRecords,
+  computeDistinctCashboxesWithBalances,
+  computeCashboxBalances,
+  computeProductStocks,
+  computeFactoryItemBalances,
+  computeInvoiceFinancials,
+  computeCustomerDebts,
+  computeSupplierBalances
 };
-export type { ComputedCashboxBalance };
 
-export const PRIMARY_CLUSTER = DEFAULT_CLUSTER_CODE;
-export const LEGACY_V16_CLUSTER = LEGACY_CLUSTER_CODE;
+export const PRIMARY_CLUSTER = DEFAULT_CLUSTER_CODE; // "PMP-ERP-MAIN-CLUSTER"
+export const LEGACY_V16_CLUSTER = LEGACY_CLUSTER_CODE; // "PMP-ERP-V16-CLUSTER"
 
-const CLUSTER_STORAGE_KEY = 'pmp_active_cluster_code';
+const CLUSTER_STORAGE_KEY = 'pmp_active_erp_cluster';
+
+function normalizeTimestampToDateString(val: any): string {
+  if (!val) return '';
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number') {
+    return new Date(val).toISOString().split('T')[0];
+  }
+  if (val && typeof val.seconds === 'number') {
+    return new Date(val.seconds * 1000).toISOString().split('T')[0];
+  }
+  return String(val);
+}
+
+function normalizeFirestoreDoc<T>(docId: string, raw: Record<string, any>, indexFallback: number): T {
+  const numericId =
+    typeof raw.id === 'number'
+      ? raw.id
+      : typeof raw.id === 'string' && /^\d+$/.test(raw.id)
+      ? Number(raw.id)
+      : indexFallback;
+
+  const normalized: Record<string, any> = {
+    ...raw,
+    id: numericId,
+    _docId: docId
+  };
+
+  if (raw.serverUpdatedAt && typeof raw.serverUpdatedAt.seconds === 'number') {
+    normalized.updatedAt = raw.serverUpdatedAt.seconds * 1000;
+  }
+  if (!normalized.txDate && raw.date) {
+    normalized.txDate = normalizeTimestampToDateString(raw.date);
+  }
+  if (!normalized.invoiceDate && raw.date) {
+    normalized.invoiceDate = normalizeTimestampToDateString(raw.date);
+  }
+  if (!normalized.moveDate && raw.date) {
+    normalized.moveDate = normalizeTimestampToDateString(raw.date);
+  }
+
+  return normalized as T;
+}
 
 export interface ClusterHealthReport {
-  ok: boolean;
   cluster: string;
+  ok: boolean;
   latencyMs: number;
   counts: Record<string, number>;
   error?: string;
 }
 
-// In-memory Distributed Tombstone & Epoch cache for the active cluster
-const tombstonesByCollection = new Map<string, Set<string>>();
-let activeEpochTimestamp = 0;
+class ErpDataServiceImpl {
+  private currentCluster: string;
 
-function normalizeTombKey(val: string): string {
-  return String(val || '').trim().toLowerCase();
-}
-
-export function isRecordTombstoned(collectionName: string, docId: string, item: any): boolean {
-  const colKey = normalizeTombKey(collectionName);
-  const deletedSet = tombstonesByCollection.get(colKey);
-  if (deletedSet) {
-    const candidates = [
-      docId,
-      item?.id != null ? String(item.id) : '',
-      item?.userCode,
-      item?.invoiceNo,
-      item?.name
-    ].filter(Boolean);
-
-    for (const c of candidates) {
-      const n = normalizeTombKey(c);
-      if (deletedSet.has(n)) return true;
-      // Strip common Android prefixes for comparison
-      const stripped = n.replace(/^(mov|cust|inv|trf|prod|box|fi|fm|sm|wh|close|hinv|form|batch|usr)-/i, '');
-      if (stripped && deletedSet.has(stripped)) return true;
-    }
+  constructor() {
+    const saved =
+      typeof localStorage !== 'undefined' ? localStorage.getItem(CLUSTER_STORAGE_KEY) : null;
+    this.currentCluster =
+      saved && saved.trim().length > 0 ? saved.trim().toUpperCase() : PRIMARY_CLUSTER;
   }
 
-  const createdAt = Number(item?.createdAt || 0);
-  if (createdAt >= 1_600_000_000_000 && activeEpochTimestamp > 0 && createdAt < activeEpochTimestamp) {
-    return true;
+  get activeCluster(): string {
+    return this.currentCluster;
   }
-  return false;
-}
 
-/**
- * Enterprise ErpDataService — Single Source of Truth matching Android Room + CloudErpSyncRepository.kt
- */
-export const ErpDataService = {
-  activeCluster:
-    (typeof localStorage !== 'undefined' && localStorage.getItem(CLUSTER_STORAGE_KEY)) ||
-    PRIMARY_CLUSTER,
-
-  setActiveCluster(clusterCode: string) {
-    const valid = clusterCode === LEGACY_V16_CLUSTER ? LEGACY_V16_CLUSTER : PRIMARY_CLUSTER;
-    this.activeCluster = valid;
+  setActiveCluster(clusterCode: string): void {
+    const clean = (clusterCode || PRIMARY_CLUSTER).trim().toUpperCase();
+    this.currentCluster = clean;
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(CLUSTER_STORAGE_KEY, valid);
+      localStorage.setItem(CLUSTER_STORAGE_KEY, clean);
     }
-  },
+  }
 
-  getClusterDocPath(cluster?: string) {
-    return `erp_clusters/${cluster || ErpDataService.activeCluster}`;
-  },
-
-  /**
-   * Starts background listener on `deleted_records` and `system_metadata/cluster_epoch`
-   * matching Android `DeletedRecordsRegistry`.
-   */
-  subscribeTombstonesAndEpoch(onChange?: () => void): Unsubscribe {
-    const cluster = this.activeCluster;
-    const tombRef = collection(firestore, `erp_clusters/${cluster}/deleted_records`);
-    const epochRef = doc(firestore, `erp_clusters/${cluster}/system_metadata`, 'cluster_epoch');
-
-    const unsubTomb = onSnapshot(
-      tombRef,
-      (snap) => {
-        tombstonesByCollection.clear();
-        snap.forEach((d) => {
-          const data = d.data() || {};
-          const col = normalizeTombKey(data.collection || data.collectionName || '');
-          if (!col) return;
-          if (!tombstonesByCollection.has(col)) tombstonesByCollection.set(col, new Set());
-          const set = tombstonesByCollection.get(col)!;
-          if (data.entityId) set.add(normalizeTombKey(String(data.entityId)));
-          if (data.originalId) set.add(normalizeTombKey(String(data.originalId)));
-          if (data.docId) set.add(normalizeTombKey(String(data.docId)));
-        });
-        if (onChange) onChange();
-      },
-      () => {}
-    );
-
-    const unsubEpoch = onSnapshot(
-      epochRef,
-      (snap) => {
-        if (snap.exists()) {
-          const ts = Number(snap.data()?.wipeTimestamp || 0);
-          if (Number.isFinite(ts) && ts > activeEpochTimestamp) {
-            activeEpochTimestamp = ts;
-            if (onChange) onChange();
-          }
-        }
-      },
-      () => {}
-    );
-
-    return () => {
-      unsubTomb();
-      unsubEpoch();
-    };
-  },
+  collectionPath(collectionName: string, clusterOverride?: string): string {
+    const c = (clusterOverride || this.currentCluster).trim().toUpperCase();
+    return `erp_clusters/${c}/${collectionName}`;
+  }
 
   /**
-   * Real-time two-way collection subscription against `/erp_clusters/{activeCluster}/{collectionName}`.
-   * Properly propagates empty snapshots when records are cleared/deleted and filters tombstones.
+   * Real-time Firestore listener for any Android ERP collection under `/erp_clusters/{activeCluster}/{collectionName}`.
+   * Automatically deduplicates records on read and falls back to `LEGACY_V16_CLUSTER` if `PRIMARY_CLUSTER` is empty.
    */
   subscribeToCollection<T>(
     collectionName: string,
     onUpdate: (items: T[]) => void,
     onError?: (err: Error) => void
   ): Unsubscribe {
-    try {
-      const cluster = this.activeCluster;
-      const colRef = collection(firestore, `erp_clusters/${cluster}/${collectionName}`);
-      return onSnapshot(
-        colRef,
-        (snapshot) => {
+    const primaryCluster = this.currentCluster;
+    const colRef = collection(firestore, this.collectionPath(collectionName, primaryCluster));
+    let fallbackUnsub: Unsubscribe | null = null;
+
+    const primaryUnsub = onSnapshot(
+      colRef,
+      (snapshot) => {
+        if (!snapshot.empty) {
+          if (fallbackUnsub) {
+            fallbackUnsub();
+            fallbackUnsub = null;
+          }
           const items: T[] = [];
+          let idx = 1;
           snapshot.forEach((docSnap) => {
-            const raw = docSnap.data() || {};
-            if (isRecordTombstoned(collectionName, docSnap.id, raw)) {
-              return;
-            }
-            const parsedId =
-              typeof raw.id === 'number'
-                ? raw.id
-                : typeof raw.id === 'string' && /^\d+$/.test(raw.id)
-                ? Number(raw.id)
-                : raw.id ?? docSnap.id;
-
-            items.push({
-              ...raw,
-              id: parsedId,
-              _docId: docSnap.id
-            } as unknown as T);
+            items.push(normalizeFirestoreDoc<T>(docSnap.id, docSnap.data(), idx++));
           });
-          onUpdate(items);
-        },
-        (err) => {
-          console.error(`Firestore subscription error [${cluster}/${collectionName}]:`, err);
-          if (onError) onError(err);
+          onUpdate(deduplicateCollectionRecords(collectionName, items));
+        } else if (primaryCluster === PRIMARY_CLUSTER && !fallbackUnsub) {
+          const legacyRef = collection(
+            firestore,
+            this.collectionPath(collectionName, LEGACY_V16_CLUSTER)
+          );
+          fallbackUnsub = onSnapshot(
+            legacyRef,
+            (legacySnap) => {
+              const legacyItems: T[] = [];
+              let idx = 1;
+              legacySnap.forEach((docSnap) => {
+                legacyItems.push(normalizeFirestoreDoc<T>(docSnap.id, docSnap.data(), idx++));
+              });
+              onUpdate(deduplicateCollectionRecords(collectionName, legacyItems));
+            },
+            () => {
+              onUpdate([]);
+            }
+          );
+        } else {
+          onUpdate([]);
         }
-      );
-    } catch (err: any) {
-      console.error(`Sync listener init error for ${collectionName}:`, err);
-      if (onError) onError(err);
-      return () => {};
-    }
-  },
-
-  async fetchCollectionOnce<T>(collectionName: string, cluster?: string): Promise<T[]> {
-    const targetCluster = cluster || this.activeCluster;
-    const colRef = collection(firestore, `erp_clusters/${targetCluster}/${collectionName}`);
-    const snap = await getDocs(colRef);
-    const items: T[] = [];
-    snap.forEach((docSnap) => {
-      const raw = docSnap.data() || {};
-      if (!isRecordTombstoned(collectionName, docSnap.id, raw)) {
-        const parsedId =
-          typeof raw.id === 'number'
-            ? raw.id
-            : typeof raw.id === 'string' && /^\d+$/.test(raw.id)
-            ? Number(raw.id)
-            : raw.id ?? docSnap.id;
-        items.push({ ...raw, id: parsedId, _docId: docSnap.id } as unknown as T);
+      },
+      (err) => {
+        console.error(`Subscription error [${primaryCluster}/${collectionName}]:`, err);
+        if (onError) onError(err);
       }
-    });
-    return items;
-  },
+    );
 
-  /**
-   * Bidirectional Write Operation to active cluster + legacy mirror if needed.
-   * Rejects non-ASCII docIds automatically via `safeId` so `firestore.rules` always accepts writes.
-   */
-  async saveRecord(
-    collectionName: string,
-    rawDocId: string,
-    data: Record<string, any>,
-    actor: string = 'WEB_USER'
-  ): Promise<boolean> {
-    const cleanDocId = safeId(String(rawDocId), `DOC-${Date.now()}`);
-    const payload = {
-      ...data,
-      serverUpdatedBy: actor,
-      serverUpdatedAt: serverTimestamp(),
-      syncOrigin: 'PMP_UNIFIED_WEB_PORTAL',
-      clusterCode: this.activeCluster
+    return () => {
+      primaryUnsub();
+      if (fallbackUnsub) fallbackUnsub();
     };
+  }
 
-    const targetCluster = this.activeCluster;
-    const primaryRef = doc(firestore, `erp_clusters/${targetCluster}/${collectionName}`, cleanDocId);
-    await setDoc(primaryRef, payload, { merge: true });
+  async fetchCollectionOnce<T>(collectionName: string, clusterOverride?: string): Promise<T[]> {
+    const colRef = collection(firestore, this.collectionPath(collectionName, clusterOverride));
+    const snap = await getDocs(colRef);
+    if (snap.empty && !clusterOverride && this.currentCluster === PRIMARY_CLUSTER) {
+      const legacySnap = await getDocs(
+        collection(firestore, this.collectionPath(collectionName, LEGACY_V16_CLUSTER))
+      );
+      const legacyList: T[] = [];
+      let idx = 1;
+      legacySnap.forEach((d) =>
+        legacyList.push(normalizeFirestoreDoc<T>(d.id, d.data(), idx++))
+      );
+      return deduplicateCollectionRecords(collectionName, legacyList);
+    }
+    const list: T[] = [];
+    let idx = 1;
+    snap.forEach((d) => list.push(normalizeFirestoreDoc<T>(d.id, d.data(), idx++)));
+    return deduplicateCollectionRecords(collectionName, list);
+  }
 
-    // Mirror to secondary cluster silently for mixed V16/Main Android device compatibility
-    const otherCluster = targetCluster === PRIMARY_CLUSTER ? LEGACY_V16_CLUSTER : PRIMARY_CLUSTER;
-    setDoc(doc(firestore, `erp_clusters/${otherCluster}/${collectionName}`, cleanDocId), payload, {
-      merge: true
-    }).catch(() => {});
-
-    return true;
-  },
-
-  /**
-   * Deletes record from active cluster AND creates an Android-compatible tombstone in `deleted_records`
-   * so older Android devices do not re-upload deleted rows.
-   */
-  async deleteRecord(
+  async saveDocument<T extends Record<string, any>>(
     collectionName: string,
-    rawDocId: string,
-    entityId?: string | number,
-    actor: string = 'WEB_ADMIN'
-  ): Promise<boolean> {
-    const cleanDocId = safeId(String(rawDocId), String(entityId || Date.now()));
-    const resolvedEntityId = String(entityId ?? cleanDocId);
-    const tombstoneDocId = safeId(`TOMB-${collectionName}-${cleanDocId}`, `TOMB-${Date.now()}`);
-
-    const tombstoneData = {
-      collection: collectionName,
-      entityId: resolvedEntityId,
-      docId: cleanDocId,
-      deletedAt: Date.now(),
-      deletedBy: actor,
+    docId: string,
+    data: T
+  ): Promise<void> {
+    const cleanDocId = safeId(docId, `DOC-${Date.now()}`);
+    const payload: Record<string, any> = {
+      ...data,
       serverUpdatedAt: serverTimestamp()
     };
+    delete payload._docId;
 
-    const targetCluster = this.activeCluster;
-    await deleteDoc(doc(firestore, `erp_clusters/${targetCluster}/${collectionName}`, cleanDocId));
-    await setDoc(doc(firestore, `erp_clusters/${targetCluster}/deleted_records`, tombstoneDocId), tombstoneData, {
-      merge: true
-    });
+    const docRef = doc(firestore, this.collectionPath(collectionName), cleanDocId);
+    await setDoc(docRef, payload, { merge: true });
+  }
 
-    // Update local tombstone cache immediately
-    const colKey = normalizeTombKey(collectionName);
-    if (!tombstonesByCollection.has(colKey)) tombstonesByCollection.set(colKey, new Set());
-    tombstonesByCollection.get(colKey)!.add(normalizeTombKey(cleanDocId));
-    tombstonesByCollection.get(colKey)!.add(normalizeTombKey(resolvedEntityId));
+  async deleteDocument(collectionName: string, docId: string): Promise<void> {
+    const cleanDocId = safeId(docId, docId);
+    const docRef = doc(firestore, this.collectionPath(collectionName), cleanDocId);
+    await deleteDoc(docRef);
+  }
 
-    return true;
-  },
-
-  /**
-   * Appends an immutable entry to `/erp_clusters/{activeCluster}/audit_logs` matching Android.
-   */
   async logAudit(username: string, action: string, detail: string): Promise<void> {
     try {
-      const id = Date.now();
-      const docId = `LOG-${id}-${Math.floor(Math.random() * 1000)}`;
-      const entry: AuditLog = {
-        id,
-        username,
+      const ts = Date.now();
+      const logId = `LOG-${ts}`;
+      const logEntry: AuditLog = {
+        id: ts,
+        username: username || 'المدير',
         action,
         detail,
-        timestamp: id
+        timestamp: ts
       };
-      await setDoc(doc(firestore, `erp_clusters/${this.activeCluster}/audit_logs`, docId), {
-        ...entry,
-        serverUpdatedAt: serverTimestamp()
-      });
-    } catch (err) {
-      console.warn('Audit log write skipped:', err);
+      await this.saveDocument('audit_logs', logId, logEntry);
+    } catch (e) {
+      console.warn('Audit log write skipped:', e);
     }
-  },
+  }
+
+  computeDistinctCashboxesWithBalances(
+    cashboxes: Cashbox[],
+    movements: TreasuryMovement[]
+  ) {
+    return computeDistinctCashboxesWithBalances(cashboxes, movements);
+  }
+
+  computeCashboxBalances(cashboxes: Cashbox[], movements: TreasuryMovement[]): Cashbox[] {
+    return computeCashboxBalances(cashboxes, movements);
+  }
+
+  computeProductStocks(products: Product[], stockMoves: StockMove[]): Map<number, number> {
+    return computeProductStocks(products, stockMoves);
+  }
+
+  computeFactoryItemBalances(
+    items: FactoryItem[],
+    moves: FactoryMove[]
+  ): Map<number, number> {
+    return computeFactoryItemBalances(items, moves);
+  }
+
+  computeInvoiceFinancials(
+    invoice: SalesInvoice,
+    externalPayments: InvoicePayment[]
+  ): { paidAmount: number; remainingAmount: number; statusLabel: 'مدفوعة' | 'سداد جزئي' | 'غير مدفوعة' } {
+    return computeInvoiceFinancials(invoice, externalPayments);
+  }
+
+  computeCustomerDebts(
+    customers: Customer[],
+    invoices: SalesInvoice[],
+    payments: InvoicePayment[]
+  ) {
+    return computeCustomerDebts(customers, invoices, payments);
+  }
+
+  computeSupplierBalances(
+    suppliers: Supplier[],
+    purchases: PurchaseInvoice[]
+  ) {
+    return computeSupplierBalances(suppliers, purchases);
+  }
 
   /**
-   * Measures real round-trip Firestore latency & collection counts for Settings diagnostic card.
+   * Measures real round-trip cloud latency & collection counts for Settings diagnostic card.
    */
   async checkServerHealth(): Promise<ClusterHealthReport> {
-    const start = performance.now();
-    const cluster = this.activeCluster;
-    const collectionsToCheck = [
-      'user_accounts',
-      'cashboxes',
-      'movements',
-      'invoices',
-      'customers',
-      'products',
-      'stock_moves',
-      'factory_items',
-      'factory_moves',
-      'lab_formulations',
-      'paint_batches',
-      'poster_prices'
-    ];
+    const start = Date.now();
+    const counts: Record<string, number> = {};
     try {
-      const counts: Record<string, number> = {};
+      const cols = [
+        'user_accounts',
+        'cashboxes',
+        'movements',
+        'warehouses',
+        'products',
+        'customers',
+        'invoices',
+        'suppliers',
+        'purchases',
+        'factory_items',
+        'paint_batches',
+        'poster_prices'
+      ];
       await Promise.all(
-        collectionsToCheck.map(async (col) => {
-          const snap = await getDocs(collection(firestore, `erp_clusters/${cluster}/${col}`));
-          counts[col] = snap.size;
+        cols.map(async (c) => {
+          const items = await this.fetchCollectionOnce(c);
+          counts[c] = items.length;
         })
       );
-      const latencyMs = Math.round(performance.now() - start);
-      return { ok: true, cluster, latencyMs, counts };
+      return {
+        cluster: this.currentCluster,
+        ok: true,
+        latencyMs: Date.now() - start,
+        counts
+      };
     } catch (err: any) {
       return {
+        cluster: this.currentCluster,
         ok: false,
-        cluster,
-        latencyMs: Math.round(performance.now() - start),
-        counts: {},
-        error: err?.message || 'فشل الاتصال بقاعدة البيانات السحابية'
+        latencyMs: Date.now() - start,
+        counts,
+        error: err?.message || 'فشل الاتصال بالخادم السحابي'
       };
     }
-  },
+  }
+}
 
-  // ===========================================================================
-  // Android Parity Business Calculations (PmpDao.kt & PmpRepository.kt)
-  // ===========================================================================
+export const ErpDataService = new ErpDataServiceImpl();
 
-  /**
-   * Computes live cashbox balances per (cashbox, currency) from `movements`,
-   * matching `PmpDao.getAggregatedCashboxBalances()` SQL query.
-   */
-  computeCashboxBalances,
-  computeProductStocks,
-  computeFactoryItemBalances,
-  computeInvoiceFinancials,
-  computeCustomerDebts
+export type {
+  Cashbox,
+  TreasuryMovement,
+  TreasuryTransfer,
+  DailyClosing,
+  Product,
+  Warehouse,
+  StockMove,
+  Customer,
+  SalesInvoice,
+  InvoicePayment,
+  Supplier,
+  PurchaseInvoice,
+  FactoryItem,
+  FactoryMove,
+  Machine,
+  ProductionBatch,
+  ChemicalFormulation,
+  QualityInspection,
+  PosterPrice
 };
-
-export type { FactoryMachine };

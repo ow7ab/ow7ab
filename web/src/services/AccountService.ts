@@ -28,7 +28,8 @@ import {
   ErpDataService,
   PRIMARY_CLUSTER,
   LEGACY_V16_CLUSTER,
-  safeId
+  safeId,
+  deduplicateCollectionRecords
 } from './ErpDataService';
 
 function mapFirestoreDocToUserAccount(docId: string, raw: Record<string, any>, fallbackIndex: number): UserAccount {
@@ -133,7 +134,7 @@ export const AccountService = {
             list.push(acc);
           }
         });
-        onUpdate(list);
+        onUpdate(deduplicateCollectionRecords('user_accounts', list));
       },
       (err) => {
         console.error('user_accounts subscription error:', err);
@@ -165,7 +166,7 @@ export const AccountService = {
             list.push(mapped);
           }
         });
-        onUpdate(list);
+        onUpdate(deduplicateCollectionRecords('user_accounts', list));
       },
       () => {}
     );
@@ -194,7 +195,7 @@ export const AccountService = {
       return this.getAllEmployees(fallbackCluster);
     }
 
-    return list;
+    return deduplicateCollectionRecords('user_accounts', list);
   },
 
   /**
