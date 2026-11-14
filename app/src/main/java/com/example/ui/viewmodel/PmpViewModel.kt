@@ -1186,6 +1186,31 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun deleteInvoicePermanently(invoiceId: Long, user: String = resolveUserActor("المدير")) {
+        if (!checkOnlineBeforeTransaction("حذف فاتورة نهائياً")) return
+        val userObj = currentUser.value
+        val allowed = userObj.isSystemManager() || userObj.hasModulePermission("صلاحية الحذف والتصفير")
+        if (!allowed) {
+            postMessage("لا تملك صلاحية الحذف النهائي للفواتير", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            val res = repository.deleteInvoicePermanently(invoiceId, user)
+            res.onSuccess { deletedInv ->
+                cloudErpSyncRepo.deleteInvoiceFromCloud(
+                    clusterCode = serverClusterCode.value,
+                    invoiceId = deletedInv.id,
+                    invoiceNo = deletedInv.invoiceNo,
+                    actor = user
+                )
+                postMessage("تم الحذف النهائي للفاتورة ${deletedInv.invoiceNo} (${deletedInv.customerName}) من السيرفر")
+                persistAndSyncToServer()
+            }.onFailure {
+                postMessage(it.message ?: "تعذر الحذف النهائي للفاتورة", isError = true)
+            }
+        }
+    }
+
     fun addCashbox(name: String, user: String = resolveUserActor("المدير")) {
         if (!checkOnlineBeforeTransaction("إضافة خزنة")) return
         viewModelScope.launch {
@@ -2393,12 +2418,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
         val res = updateManager.installApk(context, target, pendingUpdate)
         res.onSuccess {
-            updateManager.refreshInstalledVersionState()
-            _updateAvailable.value = false
-            _availableUpdate.value = null
-            _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
-            _lastUpdateCheckStatus.value = "تم تحديث التطبيق وتفعيل الإصدار الجديد بنجاح."
-            postMessage("تم تجهيز وتثبيت الإصدار الجديد بنجاح.")
+            _updateUiState.value = com.example.util.UpdateUiState.INSTALLING
+            _lastUpdateCheckStatus.value = "تم فتح مثبّت الحزم لتثبيت التحديث المنزّل؛ يرجى تأكيد التثبيت."
+            postMessage("تم فتح نافذة تثبيت الإصدار الجديد.")
         }.onFailure { err ->
             val errMsg = UpdateManager.sanitizeUserFacingErrorMessage(err.message)
             _lastUpdateCheckStatus.value = errMsg

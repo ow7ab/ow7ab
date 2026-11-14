@@ -110,6 +110,9 @@ interface PmpDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertInvoiceItems(items: List<InvoiceItemEntity>)
 
+    @Query("DELETE FROM invoice_items WHERE invoiceId = :invoiceId")
+    suspend fun deleteInvoiceItemsByInvoiceId(invoiceId: Long)
+
     // --- Payments ---
     @Query("SELECT * FROM invoice_payments ORDER BY id DESC")
     fun getAllInvoicePayments(): Flow<List<InvoicePaymentEntity>>
@@ -125,6 +128,9 @@ interface PmpDao {
 
     @Update
     suspend fun updateInvoicePayment(payment: InvoicePaymentEntity)
+
+    @Query("DELETE FROM invoice_payments WHERE invoiceId = :invoiceId")
+    suspend fun deleteInvoicePaymentsByInvoiceId(invoiceId: Long)
 
     // --- Warehouses & Products ---
     @Query("SELECT * FROM warehouses ORDER BY name ASC")

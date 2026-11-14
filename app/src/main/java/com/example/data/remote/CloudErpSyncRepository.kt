@@ -3231,6 +3231,79 @@ class CloudErpSyncRepository(
         }
     }
 
+    suspend fun deleteInvoiceFromCloud(
+        clusterCode: String,
+        invoiceId: Long,
+        invoiceNo: String,
+        actor: String = currentActorId
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cRef = clusterRef(clusterCode)
+            val cleanNo = invoiceNo.trim()
+            val candidateDocIds = linkedSetOf<String>()
+            if (cleanNo.isNotBlank()) {
+                candidateDocIds.add(safeId(cleanNo, "INV-$invoiceId"))
+                candidateDocIds.add(cleanNo)
+            }
+            candidateDocIds.add("INV-$invoiceId")
+            candidateDocIds.add(invoiceId.toString())
+
+            DeletedRecordsRegistry.registerDeleted("invoices", invoiceId, safeId(cleanNo, "INV-$invoiceId"), actor)
+            if (cleanNo.isNotBlank()) {
+                DeletedRecordsRegistry.registerDeleted("invoices", cleanNo, safeId(cleanNo, "INV-$invoiceId"), actor)
+            }
+
+            for (docId in candidateDocIds) {
+                val tombDocId = safeId("invoices_$docId", "invoices_$invoiceId")
+                runCatching {
+                    cRef.collection("deleted_records").document(tombDocId).set(
+                        mapOf(
+                            "collection" to "invoices",
+                            "entityId" to invoiceId.toString(),
+                            "invoiceNo" to cleanNo,
+                            "docId" to docId,
+                            "deletedAt" to FieldValue.serverTimestamp(),
+                            "deletedBy" to actor
+                        ),
+                        SetOptions.merge()
+                    ).await()
+                }
+                runCatching { cRef.collection("invoices").document(docId).delete().await() }
+            }
+
+            // Also delete any invoice documents matching id or invoiceNo
+            runCatching {
+                val byIdSnap = cRef.collection("invoices").whereEqualTo("id", invoiceId).get().await()
+                for (doc in byIdSnap.documents) {
+                    DeletedRecordsRegistry.registerDeleted("invoices", doc.id, doc.id, actor)
+                    runCatching { doc.reference.delete().await() }
+                }
+            }
+            if (cleanNo.isNotBlank()) {
+                runCatching {
+                    val byNoSnap = cRef.collection("invoices").whereEqualTo("invoiceNo", cleanNo).get().await()
+                    for (doc in byNoSnap.documents) {
+                        DeletedRecordsRegistry.registerDeleted("invoices", doc.id, doc.id, actor)
+                        runCatching { doc.reference.delete().await() }
+                    }
+                }
+            }
+
+            // Clean up linked invoice_payments & invoice_items on server
+            for (linkedCol in listOf("invoice_payments", "invoice_items")) {
+                runCatching {
+                    val snap = cRef.collection(linkedCol).whereEqualTo("invoiceId", invoiceId).get().await()
+                    for (doc in snap.documents) {
+                        val lid = doc.getLong("id") ?: 0L
+                        DeletedRecordsRegistry.registerDeleted(linkedCol, lid.takeIf { it > 0L }?.toString() ?: doc.id, doc.id, actor)
+                        runCatching { doc.reference.delete().await() }
+                    }
+                }
+            }
+            Unit
+        }
+    }
+
     /**
      * Instantly pushes a single financial MovementEntity to Cloud Firestore in < 100ms
      */

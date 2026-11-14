@@ -61,8 +61,9 @@ export const SalesModuleView: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'مدفوعة' | 'سداد جزئي' | 'غير مدفوعة' | 'ملغاة'>('ALL');
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  // Payment Modal State
+  // Payment & Permanent Delete Modal State
   const [payingInvoice, setPayingInvoice] = useState<SalesInvoice | null>(null);
+  const [deletingInvoice, setDeletingInvoice] = useState<SalesInvoice | null>(null);
   const [payAmount, setPayAmount] = useState('');
   const [payCashbox, setPayCashbox] = useState('');
   const [payNote, setPayNote] = useState('');
@@ -614,6 +615,54 @@ export const SalesModuleView: React.FC = () => {
     }
   };
 
+  const handleDeleteInvoicePermanently = async (inv: SalesInvoice) => {
+    if (isSubmitting) return;
+    if (!canDelete) {
+      showNotice('err', 'لا تملك صلاحية الحذف النهائي للفواتير');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const actorName = userProfile?.fullName || userProfile?.username || 'المدير';
+      const invDocId = (inv as any)._docId || safeId(inv.invoiceNo, `INV-${inv.id}`);
+
+      // Delete invoice + record Android-compatible tombstone in deleted_records
+      await ErpDataService.deleteDocumentWithTombstone('invoices', invDocId, inv.id, actorName);
+      if (inv.invoiceNo && safeId(inv.invoiceNo, '') !== invDocId) {
+        await ErpDataService.deleteDocumentWithTombstone('invoices', safeId(inv.invoiceNo, `INV-${inv.id}`), inv.invoiceNo, actorName).catch(() => {});
+      }
+
+      // Clean up linked payments in Firestore if present
+      const linkedPays = payments.filter((p) => Number(p.invoiceId) === Number(inv.id));
+      for (const p of linkedPays) {
+        const payDocId = (p as any)._docId || `PAY-${p.id}`;
+        await ErpDataService.deleteDocumentWithTombstone('invoice_payments', payDocId, p.id, actorName).catch(() => {});
+      }
+
+      // Clean up linked invoice_items documents if stored separately
+      const allItems = await ErpDataService.fetchCollectionOnce<InvoiceItem>('invoice_items').catch(() => []);
+      for (const it of allItems) {
+        if (Number(it.invoiceId) === Number(inv.id)) {
+          const itemDocId = (it as any)._docId || `ITEM-${it.id ?? Date.now()}`;
+          await ErpDataService.deleteDocumentWithTombstone('invoice_items', itemDocId, it.id ?? itemDocId, actorName).catch(() => {});
+        }
+      }
+
+      await ErpDataService.logAudit(
+        userProfile?.username || 'admin',
+        'INVOICE_PERMANENT_DELETE',
+        `حذف نهائي للفاتورة ${inv.invoiceNo} (${inv.customerName}) من السيرفر`
+      );
+      setDeletingInvoice(null);
+      showNotice('ok', `تم الحذف النهائي للفاتورة ${inv.invoiceNo} (${inv.customerName}) من السيرفر بنجاح`);
+    } catch (err: any) {
+      showNotice('err', err?.message || 'فشل الحذف النهائي للفاتورة من السيرفر');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleSaveCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canCreate || !custForm.name.trim()) return;
@@ -848,10 +897,20 @@ export const SalesModuleView: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => handleCancelInvoice(inv)}
-                              className="p-1.5 text-red-400 hover:bg-red-500/10 rounded-lg"
-                              title="إلغاء الفاتورة"
+                              className="p-1.5 text-amber-400 hover:bg-amber-500/10 rounded-lg"
+                              title="إلغاء الفاتورة وإرجاع المخزون"
                             >
                               <XCircle className="w-4 h-4" />
+                            </button>
+                          )}
+                          {canDelete && (
+                            <button
+                              type="button"
+                              onClick={() => setDeletingInvoice(inv)}
+                              className="p-1.5 text-red-400 hover:bg-red-500/15 rounded-lg"
+                              title="حذف نهائي من السيرفر"
+                            >
+                              <Trash2 className="w-4 h-4" />
                             </button>
                           )}
                         </td>
@@ -1451,6 +1510,41 @@ export const SalesModuleView: React.FC = () => {
             </GlassButton>
           </div>
         </form>
+      </Modal>
+
+      {/* Permanent Server Invoice Delete Confirmation Modal */}
+      <Modal
+        isOpen={Boolean(deletingInvoice)}
+        onClose={() => !isSubmitting && setDeletingInvoice(null)}
+        title={`تأكيد الحذف النهائي — ${deletingInvoice?.invoiceNo || ''}`}
+        maxWidth="max-w-md"
+      >
+        <div className="space-y-4 text-xs">
+          <p className="text-theme-primary leading-relaxed">
+            هل أنت متأكد من حذف فاتورة العميل{' '}
+            <strong className="text-red-400">{deletingInvoice?.customerName}</strong> (رقم{' '}
+            <span className="font-mono font-bold">{deletingInvoice?.invoiceNo}</span>) نهائياً من السيرفر؟
+          </p>
+          <p className="text-theme-muted bg-red-500/10 border border-red-500/30 rounded-xl p-3">
+            سيتم حذف الفاتورة والدفعات المرتبطة بها وتسجيل شاهد حذف في السيرفر لمنع استعادتها من أي جهاز آخر.
+          </p>
+          <div className="flex justify-end gap-2">
+            <GlassButton
+              variant="secondary"
+              disabled={isSubmitting}
+              onClick={() => setDeletingInvoice(null)}
+            >
+              إلغاء
+            </GlassButton>
+            <GlassButton
+              variant="primary"
+              disabled={isSubmitting}
+              onClick={() => deletingInvoice && handleDeleteInvoicePermanently(deletingInvoice)}
+            >
+              {isSubmitting ? 'جارٍ الحذف...' : 'حذف نهائي من السيرفر'}
+            </GlassButton>
+          </div>
+        </div>
       </Modal>
     </div>
   );

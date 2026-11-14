@@ -237,7 +237,7 @@ export const ReportExporter = {
       <body>
         <div class="header">
           <div class="brand">
-            <h1>شركة المهندس للدهانات — PMP PAINTS</h1>
+            <h1>شركة PMP للبوهيات والدهانات — PMP PAINTS</h1>
             <p>المنظومة الصناعية والمحاسبية الموحدة (السودان • مصر)</p>
           </div>
           <div class="meta">
@@ -476,7 +476,7 @@ export const ReportExporter = {
       <body>
         <div class="header">
           <div class="brand">
-            <h1>شركة المهندس للدهانات — PMP PAINTS</h1>
+            <h1>شركة PMP للبوهيات والدهانات — PMP PAINTS</h1>
             <p>كشف حساب عميل تفصيلي معتمد (الفواتير المسحوبة والدفعات المسددة)</p>
           </div>
           <div class="meta">
@@ -661,7 +661,7 @@ export const ReportExporter = {
       <body>
         <div class="header">
           <div class="brand">
-            <h1>شركة المهندس للدهانات — PMP PAINTS</h1>
+            <h1>شركة PMP للبوهيات والدهانات — PMP PAINTS</h1>
             <p>كشف حساب تفصيلي للخزنة المالية: ${safeBox} (${safeCur})</p>
           </div>
           <div class="meta">

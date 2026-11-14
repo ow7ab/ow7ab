@@ -18,6 +18,7 @@ import com.example.util.UpdateManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -51,21 +52,18 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `canRequestPackageInstalls never throws SecurityException without REQUEST_INSTALL_PACKAGES`() {
+  fun `direct APK update permission is declared and canRequestPackageInstalls never throws`() {
     val app = ApplicationProvider.getApplicationContext<Application>()
     val updateManager = UpdateManager(app)
-    assertFalse(
-      "REQUEST_INSTALL_PACKAGES should remain undeclared for Play Policy compliance",
+    assertTrue(
+      "REQUEST_INSTALL_PACKAGES must be declared so downloaded APKs install directly without Google Play redirect",
       updateManager.hasDeclaredRequestInstallPackagesPermission()
     )
-    assertFalse(
-      "canRequestPackageInstalls must return false safely without throwing SecurityException",
-      updateManager.canRequestPackageInstalls()
-    )
+    // Calling canRequestPackageInstalls must never throw SecurityException in Robolectric/Android
+    updateManager.canRequestPackageInstalls()
 
     val viewModel = PmpViewModel(app)
-    assertFalse(viewModel.hasDeclaredInstallPackagesPermission())
-    assertFalse(viewModel.canRequestPackageInstalls(null))
+    assertTrue(viewModel.hasDeclaredInstallPackagesPermission())
   }
 
   @Test

@@ -812,6 +812,33 @@ class PmpRepository(
         Result.success(Unit)
     }
 
+    suspend fun deleteInvoicePermanently(invoiceId: Long, user: String): Result<InvoiceEntity> = runInTransaction(
+        operationName = "DELETE_INVOICE_PERMANENTLY",
+        entityType = "invoices",
+        details = "حذف نهائي للفاتورة #$invoiceId من قاعدة البيانات والسيرفر"
+    ) {
+        val invoice = dao.getInvoiceById(invoiceId)
+            ?: return@runInTransaction Result.failure(Exception("الفاتورة غير موجودة"))
+
+        DeletedRecordsRegistry.registerDeleted("invoices", invoice.id, "INV-${invoice.id}", user)
+        if (invoice.invoiceNo.isNotBlank()) {
+            DeletedRecordsRegistry.registerDeleted("invoices", invoice.invoiceNo, invoice.invoiceNo, user)
+        }
+
+        dao.deleteInvoicePaymentsByInvoiceId(invoiceId)
+        dao.deleteInvoiceItemsByInvoiceId(invoiceId)
+        dao.deleteInvoiceById(invoiceId)
+
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = user,
+                action = "DELETE_INVOICE_PERMANENT",
+                detail = "حذف نهائي للفاتورة ${invoice.invoiceNo} (${invoice.customerName})"
+            )
+        )
+        Result.success(invoice)
+    }
+
     // --- Warehouses & Products ---
     fun getWarehouses(): Flow<List<WarehouseEntity>> = dao.getAllWarehouses()
     fun getProducts(): Flow<List<ProductEntity>> = dao.getAllProducts()

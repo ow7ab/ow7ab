@@ -2410,30 +2410,15 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * فتح صفحة التطبيق في متجر Google Play أو بوابة التحديث الرسمية عبر Intent.ACTION_VIEW بدون صلاحيات حساسة
+     * فتح بوابة التحديث الرسمية عبر المتصفح فقط كخيار احتياطي دون تحويل المستخدم لمتجر Google Play
      */
     fun openGooglePlayOrWebUpdatePage(
         activityContext: Context = appContext,
         fallbackWebUrl: String = DEFAULT_APK_DOWNLOAD_URL
     ): Boolean {
-        val marketIntent = Intent(
-            Intent.ACTION_VIEW,
-            Uri.parse("market://details?id=${appContext.packageName}")
-        ).apply {
-            setPackage("com.android.vending")
-            if (activityContext !is android.app.Activity) {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-        }
-        val launchedPlay = runCatching {
-            activityContext.startActivity(marketIntent)
-            true
-        }.getOrDefault(false)
-        if (launchedPlay) return true
-
         val safeWebUrl = fallbackWebUrl.trim()
             .takeIf { it.startsWith("https://", ignoreCase = true) }
-            ?: com.example.core.architecture.PmpAppVersionContract.GOOGLE_PLAY_STORE_URL
+            ?: DEFAULT_APK_DOWNLOAD_URL
 
         val webIntent = Intent(
             Intent.ACTION_VIEW,

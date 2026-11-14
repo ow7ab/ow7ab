@@ -119,6 +119,7 @@ fun SalesScreen(
     var statementCustomerId by remember { mutableStateOf<Long?>(null) }
     var customerToClearBalance by remember { mutableStateOf<CustomerEntity?>(null) }
     var customerToDeletePermanently by remember { mutableStateOf<CustomerEntity?>(null) }
+    var invoiceToDeletePermanently by remember { mutableStateOf<InvoiceEntity?>(null) }
 
     // Launcher for exporting statement PDF
     val createStatementPdfLauncher = rememberLauncherForActivityResult(
@@ -1874,6 +1875,17 @@ fun SalesScreen(
                             modifier = Modifier.weight(0.8f)
                         )
                     }
+                    if (canDeleteOrZero) {
+                        GlassButton(
+                            text = "حذف الفاتورة نهائياً من السيرفر",
+                            icon = Icons.Default.DeleteForever,
+                            gradient = PmpBrandRedGradient,
+                            onClick = { invoiceToDeletePermanently = inv },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("delete_invoice_permanently_button")
+                        )
+                    }
                 }
             }
         }
@@ -2154,5 +2166,44 @@ fun SalesScreen(
                 containerColor = PmpNavySurface
             )
         }
+    }
+
+    invoiceToDeletePermanently?.let { targetInv ->
+        AlertDialog(
+            onDismissRequest = { invoiceToDeletePermanently = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.DeleteForever, contentDescription = null, tint = PmpRedLight)
+                    Text(
+                        text = "حذف الفاتورة نهائياً (${targetInv.invoiceNo})",
+                        color = PmpRedLight,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.5.sp
+                    )
+                }
+            },
+            text = {
+                Text(
+                    text = "هل أنت متأكد من الحذف النهائي لفاتورة العميل (${targetInv.customerName}) رقم ${targetInv.invoiceNo} من الجهاز والسيرفر؟ لن يمكن استعادتها لاحقاً.",
+                    color = TextWhite,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "تأكيد الحذف النهائي",
+                    gradient = PmpBrandRedGradient,
+                    onClick = {
+                        viewModel.deleteInvoicePermanently(targetInv.id)
+                        invoiceToDeletePermanently = null
+                        selectedInvoiceForDetail = null
+                    }
+                )
+            },
+            dismissButton = {
+                GlassButton(text = "إلغاء", onClick = { invoiceToDeletePermanently = null })
+            },
+            containerColor = PmpNavySurface
+        )
     }
 }

@@ -391,3 +391,10 @@ test('Duplicate Warehouse Deduplication, Orphan +720 Move Exclusion, Chronologic
   // 4. ReportExporter exposes Treasury Cashbox PDF statement export
   assert.equal(typeof ReportExporter.ReportExporter.exportTreasuryStatementToPrint, 'function');
 });
+
+test('ReportExporter: PDF templates display شركة PMP للبوهيات instead of شركة المهندس للدهانات', () => {
+  const exporterSrc = fs.readFileSync(path.join(SRC_SERVICES_DIR, 'ReportExporter.ts'), 'utf8');
+  assert.equal(exporterSrc.includes('شركة المهندس'), false);
+  const matches = exporterSrc.match(/شركة PMP للبوهيات والدهانات — PMP PAINTS/g) || [];
+  assert.equal(matches.length, 3);
+});
