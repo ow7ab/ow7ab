@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { safeStorageGet, safeStorageSet } from '../utils/safeStorage';
 
 export type Language = 'ar' | 'en';
 
@@ -101,7 +102,7 @@ const LanguageContext = createContext<LanguageContextType>({
 
 export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [language, setLanguageState] = useState<Language>(() => {
-    const saved = localStorage.getItem('pmp_web_lang') as Language;
+    const saved = safeStorageGet('pmp_web_lang') as Language | null;
     return saved === 'en' ? 'en' : 'ar';
   });
 
@@ -109,9 +110,13 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const isRtl = direction === 'rtl';
 
   useEffect(() => {
-    document.documentElement.setAttribute('lang', language);
-    document.documentElement.setAttribute('dir', direction);
-    localStorage.setItem('pmp_web_lang', language);
+    try {
+      document.documentElement.setAttribute('lang', language);
+      document.documentElement.setAttribute('dir', direction);
+    } catch {
+      // Ignore restricted DOM access
+    }
+    safeStorageSet('pmp_web_lang', language);
   }, [language, direction]);
 
   const toggleLanguage = () => {

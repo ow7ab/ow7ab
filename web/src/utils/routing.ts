@@ -65,14 +65,22 @@ export function buildBrowserPath(route: AppRoute): string {
 export function resolveInitialRouteFromLocation(): AppRoute {
   if (typeof window === 'undefined') return '/';
 
-  const params = new URLSearchParams(window.location.search);
-  const ghRedirectPath = params.get('p');
-  if (ghRedirectPath) {
-    const restoredRoute = normalizeAppRoute(ghRedirectPath);
-    const cleanUrl = buildBrowserPath(restoredRoute) + (window.location.hash || '');
-    window.history.replaceState(null, '', cleanUrl);
-    return restoredRoute;
-  }
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    const ghRedirectPath = params.get('p');
+    if (ghRedirectPath) {
+      const restoredRoute = normalizeAppRoute(ghRedirectPath);
+      const cleanUrl = buildBrowserPath(restoredRoute) + (window.location.hash || '');
+      try {
+        window.history?.replaceState?.(null, '', cleanUrl);
+      } catch {
+        // Ignore restricted history mutations
+      }
+      return restoredRoute;
+    }
 
-  return normalizeAppRoute(window.location.pathname);
+    return normalizeAppRoute(window.location.pathname || '/');
+  } catch {
+    return '/';
+  }
 }

@@ -445,10 +445,10 @@ class IdempotencyGuardPhase5Test {
     }
 
     @Test
-    fun `version bumped to 20 and shared idempotency files exist across Android, Web, Desktop, and Rules`() {
+    fun `version bumped to 21 and shared idempotency files exist across Android, Web, Desktop, and Rules`() {
         val rootDir = listOf(File("."), File("..")).first { File(it, "settings.gradle.kts").exists() }
-        assertEquals(20, BuildConfig.VERSION_CODE)
-        assertTrue(BuildConfig.VERSION_NAME.startsWith("20.0"))
+        assertEquals(21, BuildConfig.VERSION_CODE)
+        assertTrue(BuildConfig.VERSION_NAME.startsWith("21.0"))
         assertTrue(File(rootDir, "app/src/main/java/com/example/util/IdempotencyProtectionSystem.kt").exists())
         assertTrue(File(rootDir, "web/src/services/IdempotencyService.ts").exists())
         assertTrue(File(rootDir, "web/src/hooks/useTransactionGuard.ts").exists())

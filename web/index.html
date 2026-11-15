@@ -13,7 +13,38 @@
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div
+        id="pmp-initial-loader"
+        style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;color:#F8FAFC;font-family:'Cairo',system-ui,sans-serif;"
+      >
+        <div style="width:44px;height:44px;border-radius:50%;border:3px solid rgba(255,255,255,0.14);border-top-color:#EF4444;animation:pmpSpin 0.85s linear infinite;"></div>
+        <div style="font-size:16px;font-weight:800;">PMP PAINTS ERP</div>
+        <div id="pmp-loader-status" style="font-size:13px;color:#94A3B8;">جاري تحميل المنصة السحابية...</div>
+      </div>
+    </div>
+    <style>
+      @keyframes pmpSpin { to { transform: rotate(360deg); } }
+    </style>
+    <script>
+      (function () {
+        function showBootFallback(reason) {
+          if (window.__PMP_BOOT_OK) return;
+          var statusEl = document.getElementById('pmp-loader-status');
+          if (!statusEl) return;
+          statusEl.innerHTML =
+            '<span style="color:#FCA5A5;display:block;margin-bottom:10px;">تعذر إكمال تشغيل الواجهة تلقائياً (' +
+            String(reason || 'Network/Module Load') +
+            ')</span><button type="button" onclick="window.location.reload()" style="padding:8px 18px;border-radius:10px;border:none;background:#DC2626;color:#fff;font-weight:700;cursor:pointer;">إعادة المحاولة</button>';
+        }
+        window.addEventListener('error', function (e) {
+          if (!window.__PMP_BOOT_OK) showBootFallback(e && e.message);
+        });
+        window.setTimeout(function () {
+          if (!window.__PMP_BOOT_OK) showBootFallback('Boot timeout');
+        }, 7000);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

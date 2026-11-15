@@ -97,7 +97,10 @@ export function sanitizeApkDownloadUrl(rawUrl?: string | null): string {
 /**
  * Cleans markdown and technical jargon from release notes for end-user display.
  */
-export function cleanUserFacingReleaseNotes(rawNotes?: string | null, versionName = 'v20.0'): string {
+export function cleanUserFacingReleaseNotes(
+  rawNotes?: string | null,
+  versionName = APP_VERSION_CONTRACT.VERSION_NAME
+): string {
   const raw = String(rawNotes ?? '').trim();
   if (!raw || raw.includes('### ') || raw.includes('SHA-256') || raw.includes('Firestore') || raw.includes('R8/ProGuard')) {
     return `• إصدار ${versionName} الرسمي المعتمد: نظام موحد لمنع تكرار العمليات وحماية التزامن وإدارة حالة التنفيذ عبر كافة الفروع.\n• ترقية سلسة ومباشرة على الهاتف مع الحفاظ الكامل على كافة البيانات والحسابات المسجلة.`;
@@ -108,7 +111,7 @@ export function cleanUserFacingReleaseNotes(rawNotes?: string | null, versionNam
 export const DEFAULT_DESKTOP_RELEASE: StableDesktopRelease = {
   versionName: `v${APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME}`,
   tagName: `desktop-v${APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME}`,
-  publishedAt: '2026-11-15T12:00:00Z',
+  publishedAt: '2026-11-15T20:00:00Z',
   setupUrl: APP_VERSION_CONTRACT.GITHUB_LATEST_WINDOWS_URL,
   setupFileName: APP_VERSION_CONTRACT.WINDOWS_INSTALLER_FILENAME,
   setupSizeMb: 0,
@@ -122,7 +125,7 @@ export const DEFAULT_STABLE_RELEASE: StableApkRelease = {
   versionCode: APP_VERSION_CONTRACT.CURRENT_VERSION_CODE,
   versionName: `v${APP_VERSION_CONTRACT.CURRENT_VERSION_NAME}`,
   buildId: `PMP-v${APP_VERSION_CONTRACT.CURRENT_VERSION_NAME}-b${APP_VERSION_CONTRACT.CURRENT_VERSION_CODE}`,
-  publishedAt: '2026-11-15T12:00:00Z',
+  publishedAt: '2026-11-15T20:00:00Z',
   fileSizeBytes: 32663762,
   fileSizeMb: 31.15,
   apkSha256: '5445d7d226aeb1480f6b75499254cb2019d8d46daa2f2cea79bd80ee1de2e57c',
@@ -131,7 +134,7 @@ export const DEFAULT_STABLE_RELEASE: StableApkRelease = {
   githubReleaseUrl: APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL,
   pagesDownloadUrl: APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL,
   releaseNotes:
-    '• إصدار v20.0 الرسمي المعتمد: نظام موحد لمنع تكرار العمليات وحماية التزامن وإدارة حالة التنفيذ عبر الأندرويد والويب وسطح المكتب.\n• ترقية سلسة ومباشرة على الهاتف مع الحفاظ الكامل على كافة البيانات والحسابات المسجلة.',
+    `• إصدار ${APP_VERSION_CONTRACT.VERSION_NAME} الرسمي المعتمد: نظام فحص دوري للتحديثات وإشعارات غير مزعجة، وحماية منع تكرار العمليات عبر الأندرويد والويب وسطح المكتب.\n• ترقية سلسة ومباشرة على الهاتف مع الحفاظ الكامل على كافة البيانات والحسابات المسجلة.`,
   releaseStatus: 'PUBLISHED',
   assetFileName: APP_VERSION_CONTRACT.DOWNLOAD_APK_FILENAME,
   isAvailable: true,

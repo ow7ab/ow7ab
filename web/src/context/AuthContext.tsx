@@ -25,6 +25,7 @@ import {
   LoginRateLimiter
 } from '../services/PasswordSecurity';
 import { getDesktopBridge } from '../utils/desktopBridge';
+import { safeStorageGet, safeStorageRemove, safeStorageSet } from '../utils/safeStorage';
 
 const SESSION_STORAGE_KEY = 'pmp_web_portal_user';
 
@@ -107,14 +108,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             _issuedAt: issuedAt,
             _integritySeal: seal
           });
-          localStorage.setItem(SESSION_STORAGE_KEY, payloadStr);
+          safeStorageSet(SESSION_STORAGE_KEY, payloadStr);
           const desktopBridge = getDesktopBridge();
           if (desktopBridge) {
             void desktopBridge.secureStorageSet(SESSION_STORAGE_KEY, payloadStr).catch(() => {});
           }
         })
         .catch(() => {
-          localStorage.removeItem(SESSION_STORAGE_KEY);
+          safeStorageRemove(SESSION_STORAGE_KEY);
           const desktopBridge = getDesktopBridge();
           if (desktopBridge) {
             void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
@@ -122,7 +123,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
     } else {
       setLinkedAccount(null);
-      localStorage.removeItem(SESSION_STORAGE_KEY);
+      safeStorageRemove(SESSION_STORAGE_KEY);
       const desktopBridge = getDesktopBridge();
       if (desktopBridge) {
         void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
@@ -135,7 +136,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let cancelled = false;
     (async () => {
       try {
-        let saved = localStorage.getItem(SESSION_STORAGE_KEY);
+        let saved = safeStorageGet(SESSION_STORAGE_KEY);
         const desktopBridge = getDesktopBridge();
         if (!saved && desktopBridge) {
           saved = await desktopBridge.secureStorageGet(SESSION_STORAGE_KEY).catch(() => null);
@@ -150,14 +151,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             cleanAccount.roleType = resolveUserRoleType(cleanAccount);
             setLinkedAccount(cleanAccount);
           } else {
-            localStorage.removeItem(SESSION_STORAGE_KEY);
+            safeStorageRemove(SESSION_STORAGE_KEY);
             if (desktopBridge) {
               void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
             }
           }
         }
       } catch {
-        localStorage.removeItem(SESSION_STORAGE_KEY);
+        safeStorageRemove(SESSION_STORAGE_KEY);
       }
     })();
     return () => {

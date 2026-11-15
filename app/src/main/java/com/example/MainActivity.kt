@@ -8,12 +8,17 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -145,6 +150,7 @@ class MainActivity : FragmentActivity() {
         runCatching {
             viewModel.verifyActiveSessionNotExpired()
             viewModel.verifyPostInstallAndRefreshVersion()
+            viewModel.runPeriodicUpdateCheckIfDue(force = false)
         }
     }
 
@@ -385,6 +391,7 @@ fun PmpAppContent(
     val isNetworkOnline by viewModel.isNetworkOnline.collectAsState()
     val updateAvailable by viewModel.updateAvailable.collectAsState()
     val availableUpdate by viewModel.availableUpdate.collectAsState()
+    val isUpdateBannerDismissed by viewModel.isUpdateBannerDismissed.collectAsState()
     val effectiveVersionName by viewModel.effectiveVersionName.collectAsState()
     val userAccounts by viewModel.userAccounts.collectAsState()
     val products by viewModel.products.collectAsState()
@@ -734,41 +741,60 @@ fun PmpAppContent(
                     }
 
                     val liveCloudUpdate = availableUpdate
-                    if (updateAvailable && liveCloudUpdate != null && currentScreen != PmpScreen.SETTINGS) {
-                        Surface(
-                            color = if (liveCloudUpdate.isMandatory) Color(0xFFB91C1C) else Color(0xFF0F172A),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { currentScreen = PmpScreen.SETTINGS }
-                                .testTag("live_cloud_update_banner")
-                        ) {
-                            Row(
+                    val showNonIntrusiveUpdateBanner = updateAvailable &&
+                        liveCloudUpdate != null &&
+                        currentScreen != PmpScreen.SETTINGS &&
+                        (!isUpdateBannerDismissed || liveCloudUpdate.isMandatory)
+                    AnimatedVisibility(
+                        visible = showNonIntrusiveUpdateBanner,
+                        enter = fadeIn(animationSpec = tween(220)) + expandVertically(),
+                        exit = fadeOut(animationSpec = tween(180)) + shrinkVertically()
+                    ) {
+                        if (liveCloudUpdate != null) {
+                            Surface(
+                                color = if (liveCloudUpdate.isMandatory) Color(0xFFB91C1C) else Color(0xFF0F172A),
+                                tonalElevation = 4.dp,
+                                shadowElevation = 4.dp,
+                                shape = RoundedCornerShape(14.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (liveCloudUpdate.isMandatory) Color(0xFFFCA5A5) else Color(0xFF10B981).copy(alpha = 0.45f)
+                                ),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                                    .testTag("live_cloud_update_banner")
                             ) {
                                 Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    modifier = Modifier.weight(1f)
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.SystemUpdate,
-                                        contentDescription = null,
+                                        contentDescription = androidx.compose.ui.res.stringResource(
+                                            id = R.string.update_action_now
+                                        ),
                                         tint = Color(0xFF34D399),
-                                        modifier = Modifier.size(18.dp)
+                                        modifier = Modifier.size(20.dp)
                                     )
-                                    Column {
+                                    Column(modifier = Modifier.weight(1f)) {
                                         Text(
                                             text = if (liveCloudUpdate.isMandatory) {
-                                                "تحديث إلزامي متاح الآن (الإصدار ${liveCloudUpdate.versionName})"
+                                                androidx.compose.ui.res.stringResource(
+                                                    id = R.string.update_available_mandatory_title,
+                                                    liveCloudUpdate.versionName
+                                                )
                                             } else {
-                                                "تحديث جديد متاح (الإصدار ${liveCloudUpdate.versionName})"
+                                                androidx.compose.ui.res.stringResource(
+                                                    id = R.string.update_available_title,
+                                                    liveCloudUpdate.versionName
+                                                )
                                             },
                                             color = Color.White,
-                                            fontSize = 11.5.sp,
+                                            fontSize = 12.sp,
                                             fontWeight = FontWeight.Bold
                                         )
                                         val cleanNote = remember(liveCloudUpdate.releaseNotes) {
@@ -781,25 +807,45 @@ fun PmpAppContent(
                                             Text(
                                                 text = cleanNote,
                                                 color = Color(0xFFCBD5E1),
-                                                fontSize = 10.sp,
+                                                fontSize = 10.5.sp,
                                                 maxLines = 1
                                             )
                                         }
                                     }
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(Color(0xFF10B981))
-                                        .clickable { currentScreen = PmpScreen.SETTINGS }
-                                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                                ) {
-                                    Text(
-                                        text = "تحديث الآن",
-                                        color = Color.Black,
-                                        fontSize = 10.5.sp,
-                                        fontWeight = FontWeight.ExtraBold
-                                    )
+                                    Button(
+                                        onClick = { currentScreen = PmpScreen.SETTINGS },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color(0xFF10B981),
+                                            contentColor = Color.Black
+                                        ),
+                                        shape = RoundedCornerShape(10.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        modifier = Modifier
+                                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                            .testTag("in_app_update_action_button")
+                                    ) {
+                                        Text(
+                                            text = androidx.compose.ui.res.stringResource(id = R.string.update_action_now),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                    }
+                                    if (!liveCloudUpdate.isMandatory) {
+                                        TextButton(
+                                            onClick = { viewModel.dismissUpdateBanner() },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                            modifier = Modifier
+                                                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                                .testTag("dismiss_update_banner_button")
+                                        ) {
+                                            Text(
+                                                text = androidx.compose.ui.res.stringResource(id = R.string.update_action_later),
+                                                color = Color(0xFFCBD5E1),
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

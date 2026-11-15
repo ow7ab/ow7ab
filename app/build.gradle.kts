@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.pmppaints.erp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 20
-    versionName = "20.0"
+    versionCode = 21
+    versionName = "21.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -90,9 +90,9 @@ Thread.getAllStackTraces().keys
     .filter { it.name.startsWith("AWT-EventQueue") }
     .forEach { it.uncaughtExceptionHandler = kspAwtSafeHandler }
 
-val defaultConfiguredVersionCode: Int = android.defaultConfig.versionCode ?: 20
+val defaultConfiguredVersionCode: Int = android.defaultConfig.versionCode ?: 21
 val defaultConfiguredVersionName: String =
-    android.defaultConfig.versionName?.takeIf { it.isNotBlank() } ?: "20.0"
+    android.defaultConfig.versionName?.takeIf { it.isNotBlank() } ?: "21.0"
 val resolvedVersionCode: Int =
     (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: defaultConfiguredVersionCode
 val resolvedVersionName: String =
@@ -104,7 +104,7 @@ val resolvedGitCommit: String =
         ?: "9a8b7c6d"
 val resolvedBuildTimestampUtc: String =
     (project.findProperty("buildTimestampUtc")?.toString()?.trim()?.takeIf { it.isNotBlank() })
-        ?: "2026-11-10T10:00:00Z"
+        ?: "2026-11-15T20:00:00Z"
 val cleanVersionNameForBuildId: String =
     resolvedVersionName.removePrefix("v").removePrefix("V").trim()
 val resolvedBuildId: String =

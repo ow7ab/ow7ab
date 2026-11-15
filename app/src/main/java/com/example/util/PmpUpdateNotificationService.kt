@@ -125,9 +125,9 @@ object UpdateNotificationHelper {
                 val channel = NotificationChannel(
                     CHANNEL_ID,
                     "تحديثات التطبيق",
-                    NotificationManager.IMPORTANCE_HIGH
+                    NotificationManager.IMPORTANCE_DEFAULT
                 ).apply {
-                    description = "إشعارات توفر إصدارات جديدة من تطبيق PMP PAINTS"
+                    description = "إشعارات هادئة عند توفر إصدارات جديدة من تطبيق PMP PAINTS"
                 }
                 manager.createNotificationChannel(channel)
             }.onFailure { err ->
@@ -184,7 +184,8 @@ object UpdateNotificationHelper {
             context = context,
             versionCode = updateInfo.versionCode,
             versionName = updateInfo.versionName,
-            releaseNotes = updateInfo.releaseNotes
+            releaseNotes = updateInfo.releaseNotes,
+            isMandatory = updateInfo.isMandatory
         )
     }
 
@@ -192,12 +193,15 @@ object UpdateNotificationHelper {
         context: Context,
         versionCode: Int,
         versionName: String,
-        releaseNotes: String
+        releaseNotes: String,
+        isMandatory: Boolean = false
     ) {
         runCatching {
             val appContext = context.applicationContext
-            val installedCode = UpdateManager.getInstance(appContext).getInstalledVersionCode()
+            val mgr = UpdateManager.getInstance(appContext)
+            val installedCode = mgr.getInstalledVersionCode()
             if (versionCode <= installedCode) return
+            if (!isMandatory && mgr.isUpdateNotificationSnoozed(versionCode)) return
             if (wasVersionAlreadyNotified(appContext, versionCode)) return
 
             markVersionNotified(appContext, versionCode)
@@ -238,7 +242,9 @@ object UpdateNotificationHelper {
                 .setContentTitle("تحديث جديد متاح (${versionName.removePrefix("v")})")
                 .setContentText(cleanSummary)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(cleanSummary))
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setPriority(if (isMandatory) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+                .setOnlyAlertOnce(true)
+                .setSilent(!isMandatory)
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
                 .build()
@@ -313,7 +319,7 @@ class PmpFirebaseMessagingService : FirebaseMessagingService() {
                 UpdateNotificationHelper.notifyNewUpdateAvailableIfNeeded(
                     context = applicationContext,
                     versionCode = versionCode,
-                    versionName = versionName.ifBlank { "3.$versionCode-PRO" },
+                    versionName = versionName.ifBlank { "v${versionCode}.0" },
                     releaseNotes = releaseNotes
                 )
             }

@@ -11,15 +11,15 @@ on:
       version_code:
         description: "رقم البناء الجديد (versionCode) - يزيد تلقائياً إذا كان مستخدماً مسبقاً"
         required: true
-        default: "18"
+        default: "21"
       version_name:
-        description: "اسم الإصدار (versionName) مثل 18.0"
+        description: "اسم الإصدار (versionName) مثل 21.0"
         required: true
-        default: "18.0"
+        default: "21.0"
       release_notes:
         description: "ملاحظات التحديث التي ستظهر للمستخدمين وعلى الموقع الرسمي"
         required: false
-        default: "إصدار 18.0 (بناء 18): إطلاق الموقع الرسمي المتكامل ومنظومة الإصدارات الآلية، مع ترقية شاملة للأمان (PBKDF2، 2FA، عزل البصمة) وتفعيل R8/ProGuard."
+        default: "إصدار 21.0 (بناء 21): ترقية نظام الفحص الدوري للتحديثات وإشعارات التحديث غير المزعجة، وتوحيد منصة الويب وسطح المكتب والأندرويد مع حماية منع تكرار العمليات."
       public_base_url:
         description: "رابط الاستضافة العامة الاختياري (يُستخدم GitHub Pages تلقائياً عند تركه فارغاً)"
         required: false
@@ -529,8 +529,8 @@ jobs:
           published_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
           # 1. Read configured versionCode and versionName from app/build.gradle.kts
-          gradle_code = 18
-          gradle_name = "18.0"
+          gradle_code = 21
+          gradle_name = "21.0"
           if os.path.exists("app/build.gradle.kts"):
               try:
                   with open("app/build.gradle.kts", "r", encoding="utf-8") as gf:
@@ -545,16 +545,16 @@ jobs:
                   pass
 
           # 2. Read last published versionCode from version.json
-          existing_code = 17
-          existing_name = "v4.2"
+          existing_code = 20
+          existing_name = "v20.0"
           if os.path.exists("version.json"):
               try:
                   with open("version.json", "r", encoding="utf-8") as f:
                       prev = json.load(f)
-                      existing_code = int(prev.get("versionCode", 17))
-                      existing_name = str(prev.get("versionName", "v4.2")).strip()
+                      existing_code = int(prev.get("versionCode", 20))
+                      existing_name = str(prev.get("versionName", "v20.0")).strip()
               except Exception:
-                  existing_code = 17
+                  existing_code = 20
 
           # 3. Query GitHub Releases API to discover highest already-published versionCode
           highest_github_release_code = existing_code
@@ -601,7 +601,7 @@ jobs:
           # Monotonically increasing versionCode strategy:
           # Ensure new release versionCode is strictly greater than any previously published release
           if not v_code_str:
-              v_code = max(gradle_code, highest_published_code + 1, 18)
+              v_code = max(gradle_code, highest_published_code + 1, 21)
           else:
               requested_code = int(v_code_str)
               v_code = max(requested_code, highest_published_code + 1) if requested_code <= highest_published_code else requested_code
@@ -951,8 +951,8 @@ jobs:
             npx --yes wrangler@3 pages deploy web/dist --project-name="${CF_PROJ}" --branch=main --commit-dirty=true
           fi
 
-          # 2. Build GitHub Pages bundle (/ow7ab/) and copy APK + version manifests into web/dist
-          VITE_BASE_PATH=/ow7ab/ npm run build --prefix web
+          # 2. Build GitHub Pages bundle (/ow7ab/) into dist-ghpages and copy APK + version manifests
+          VITE_BASE_PATH=/ow7ab/ npm run build --prefix web -- --outDir dist-ghpages
           python3 - << 'PYEOF'
           import glob
           import os
@@ -961,19 +961,19 @@ jobs:
           for pattern in (os.path.join("public", "*.apk"), os.path.join("release_out", "*.apk")):
               for apk_file in glob.glob(pattern):
                   if os.path.isfile(apk_file):
-                      shutil.copy2(apk_file, os.path.join("web", "dist", os.path.basename(apk_file)))
+                      shutil.copy2(apk_file, os.path.join("web", "dist-ghpages", os.path.basename(apk_file)))
 
           for json_name in ("version.json", "releases-history.json"):
               src = os.path.join("public", json_name)
               if os.path.isfile(src):
-                  shutil.copy2(src, os.path.join("web", "dist", json_name))
+                  shutil.copy2(src, os.path.join("web", "dist-ghpages", json_name))
           PYEOF
 
       - name: Upload Unified Web Artifacts for GitHub Pages Hosting
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: web/dist
+          path: web/dist-ghpages
 
       - name: Deploy Official Website & Release Portal to GitHub Pages
         if: github.event_name != 'pull_request'

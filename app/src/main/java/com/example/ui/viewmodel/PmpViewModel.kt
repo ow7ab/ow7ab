@@ -586,6 +586,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     private val _availableUpdate = MutableStateFlow<UpdateInfo?>(null)
     val availableUpdate: StateFlow<UpdateInfo?> = _availableUpdate.asStateFlow()
 
+    private val _isUpdateBannerDismissed = MutableStateFlow(false)
+    val isUpdateBannerDismissed: StateFlow<Boolean> = _isUpdateBannerDismissed.asStateFlow()
+
     private val _updateUiState = MutableStateFlow(com.example.util.UpdateUiState.IDLE)
     val updateUiState: StateFlow<com.example.util.UpdateUiState> = _updateUiState.asStateFlow()
 
@@ -724,6 +727,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, SharingStarted.Lazily, 0)
     private var wasNetworkOnlineForRecovery: Boolean = isConnectedToCloud()
+    private var periodicUpdateSchedulerJob: kotlinx.coroutines.Job? = null
 
     init {
         val initialMode = _themeMode.value
@@ -903,6 +907,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                             if (verifiedReachable != null && verifiedReachable.versionCode > installedCode) {
                                 _availableUpdate.value = verifiedReachable
                                 _updateAvailable.value = true
+                                _isUpdateBannerDismissed.value =
+                                    !verifiedReachable.isMandatory &&
+                                        updateManager.isUpdateNotificationSnoozed(verifiedReachable.versionCode)
                                 if (_updateUiState.value != com.example.util.UpdateUiState.DOWNLOADING &&
                                     _updateUiState.value != com.example.util.UpdateUiState.READY_TO_INSTALL &&
                                     _updateUiState.value != com.example.util.UpdateUiState.INSTALLING
@@ -918,6 +925,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                             } else {
                                 _availableUpdate.value = null
                                 _updateAvailable.value = false
+                                _isUpdateBannerDismissed.value = false
                                 if (!_isDownloadingUpdate.value) {
                                     _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
                                     _lastUpdateCheckStatus.value = "أنت تستخدم أحدث إصدار من PMP PAINTS."
@@ -927,6 +935,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     checkForAppUpdates(manual = false)
+                    startPeriodicUpdateScheduler()
                 } catch (e: Exception) {
                     Log.w("PmpViewModel", "Cloud update init notice: ${e.message}")
                 }
@@ -2602,8 +2611,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun generateDefaultVersionJsonForAdmin(): String {
         val currentOrNext = _availableUpdate.value ?: run {
             val nextCode = updateManager.getEffectiveVersionCode() + 1
-            val nextMinor = (nextCode - 13).coerceAtLeast(1)
-            val nextName = "v3.$nextMinor"
+            val nextName = "v${nextCode}.0"
             val cleanNextName = nextName.removePrefix("v")
             UpdateManager.LATEST_CLOUD_RELEASE_INFO.copy(
                 versionCode = nextCode,
@@ -2761,6 +2769,55 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         refreshBuildIdentityReport()
     }
 
+    private fun startPeriodicUpdateScheduler() {
+        if (periodicUpdateSchedulerJob?.isActive == true) return
+        periodicUpdateSchedulerJob = viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(UpdateManager.DEFAULT_PERIODIC_CHECK_INTERVAL_MS)
+                runPeriodicUpdateCheckIfDue(force = false)
+            }
+        }
+    }
+
+    fun dismissUpdateBanner() {
+        val currentCandidate = _availableUpdate.value
+        if (currentCandidate != null && !currentCandidate.isMandatory) {
+            updateManager.snoozeUpdateNotification(currentCandidate.versionCode)
+            _isUpdateBannerDismissed.value = true
+        }
+    }
+
+    fun runPeriodicUpdateCheckIfDue(force: Boolean = false) {
+        if (_isCheckingUpdate.value) return
+        if (!force && !updateManager.shouldRunPeriodicCheck()) return
+        viewModelScope.launch {
+            if (_isCheckingUpdate.value) return@launch
+            val result = updateManager.checkForUpdatesPeriodicallyIfDue(
+                metadataUrl = customUpdateMetadataUrl.value,
+                clusterCode = serverClusterCode.value,
+                force = force
+            )
+            val installedCode = updateManager.getEffectiveVersionCode()
+            result.onSuccess { updateInfo ->
+                if (updateInfo != null && updateInfo.versionCode > installedCode) {
+                    _availableUpdate.value = updateInfo
+                    _updateAvailable.value = true
+                    _isUpdateBannerDismissed.value =
+                        !updateInfo.isMandatory &&
+                            updateManager.isUpdateNotificationSnoozed(updateInfo.versionCode)
+                    if (_updateUiState.value != com.example.util.UpdateUiState.DOWNLOADING &&
+                        _updateUiState.value != com.example.util.UpdateUiState.READY_TO_INSTALL &&
+                        _updateUiState.value != com.example.util.UpdateUiState.INSTALLING
+                    ) {
+                        _updateUiState.value = com.example.util.UpdateUiState.AVAILABLE
+                        _lastUpdateCheckStatus.value = "يتوفر إصدار جديد يتضمن تحسينات وإصلاحات."
+                    }
+                    refreshBuildIdentityReport()
+                }
+            }
+        }
+    }
+
     fun checkForAppUpdates(manual: Boolean = true, customUrl: String? = null) {
         if (_isCheckingUpdate.value) {
             if (manual) {
@@ -2775,12 +2832,21 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             verifyPostInstallAndRefreshVersion()
             val url = customUrl ?: customUpdateMetadataUrl.value
             val result = updateManager.checkForUpdates(url, serverClusterCode.value)
+            updateManager.recordPeriodicCheckTimestamp()
             _isCheckingUpdate.value = false
 
             val installedCode = updateManager.getEffectiveVersionCode()
 
             result.onSuccess { updateInfo ->
                 if (updateInfo != null && updateInfo.versionCode > installedCode) {
+                    if (manual) {
+                        updateManager.clearUpdateNotificationSnooze()
+                        _isUpdateBannerDismissed.value = false
+                    } else {
+                        _isUpdateBannerDismissed.value =
+                            !updateInfo.isMandatory &&
+                                updateManager.isUpdateNotificationSnoozed(updateInfo.versionCode)
+                    }
                     _availableUpdate.value = updateInfo
                     _updateAvailable.value = true
                     _updateUiState.value = com.example.util.UpdateUiState.AVAILABLE
@@ -2797,6 +2863,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     _availableUpdate.value = null
                     _updateAvailable.value = false
+                    _isUpdateBannerDismissed.value = false
                     _downloadedApkFile.value = null
                     _updateUiState.value = com.example.util.UpdateUiState.UP_TO_DATE
                     val upToDateMsg = "أنت تستخدم أحدث إصدار من PMP PAINTS."

@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">PMP Paints</string>
+    <string name="update_available_title">تحديث جديد متاح (الإصدار %1$s)</string>
+    <string name="update_available_mandatory_title">تحديث إلزامي متاح الآن (الإصدار %1$s)</string>
+    <string name="update_action_now">تحديث</string>
+    <string name="update_action_later">لاحقاً</string>
+    <string name="update_dismiss_desc">تأجيل إشعار التحديث مؤقتاً</string>
 </resources>

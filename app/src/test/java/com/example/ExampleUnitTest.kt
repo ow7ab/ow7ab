@@ -1403,6 +1403,16 @@ class ExampleUnitTest {
         remoteVersionName = nextName
       )
     )
+    assertTrue(BuildConfig.VERSION_CODE >= 21)
+    assertEquals(BuildConfig.VERSION_CODE, com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE)
+    assertEquals("21.0", BuildConfig.VERSION_NAME)
+    assertTrue(com.example.util.UpdateManager.DEFAULT_PERIODIC_CHECK_INTERVAL_MS >= 60_000L)
+    assertTrue(com.example.util.UpdateManager.DEFAULT_NOTIFICATION_SNOOZE_MS >= 60_000L)
+    assertEquals(
+      "5445d7d226aeb1480f6b75499254cb2019d8d46daa2f2cea79bd80ee1de2e57c",
+      com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.sha256Checksum
+    )
+    assertEquals(32663762L, com.example.util.UpdateManager.LATEST_CLOUD_RELEASE_INFO.fileSize)
     assertFalse(
       "Same version ($currentName / code $currentCode) must not trigger a redundant update",
       com.example.core.architecture.PmpAppVersionContract.isRemoteUpdateNewer(

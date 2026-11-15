@@ -417,6 +417,13 @@ export const DownloadApkSection: React.FC = () => {
                   src={item.src}
                   alt={item.title}
                   loading="lazy"
+                  onError={(e) => {
+                    const img = e.currentTarget;
+                    if (!img.dataset.fallbackApplied) {
+                      img.dataset.fallbackApplied = '1';
+                      img.src = resolveAssetUrl('assets/pmp_brand_poster.jpg');
+                    }
+                  }}
                   style={{
                     width: '100%',
                     height: 'auto',

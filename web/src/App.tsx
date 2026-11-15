@@ -13,7 +13,9 @@ import {
   resolveInitialRouteFromLocation
 } from './utils/routing';
 import { DesktopWindowChrome } from './components/layout/DesktopWindowChrome';
+import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { isDesktopApp } from './utils/desktopBridge';
+import { safeHistoryPush } from './utils/safeStorage';
 
 const AppContent: React.FC = () => {
   const { userProfile } = useAuth();
@@ -24,9 +26,13 @@ const AppContent: React.FC = () => {
     if (typeof window !== 'undefined') {
       const nextUrl = buildBrowserPath(targetRoute);
       if (window.location.pathname !== nextUrl) {
-        window.history.pushState({ route: targetRoute }, '', nextUrl);
+        safeHistoryPush({ route: targetRoute }, '', nextUrl);
       }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      try {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } catch {
+        // Ignore unsupported scrollTo options
+      }
     }
   }, []);
 
@@ -117,15 +123,17 @@ const AppContent: React.FC = () => {
 
 export const App: React.FC = () => {
   return (
-    <ThemeProvider>
-      <LanguageProvider>
-        <AuthProvider>
-          <DesktopWindowChrome>
-            <AppContent />
-          </DesktopWindowChrome>
-        </AuthProvider>
-      </LanguageProvider>
-    </ThemeProvider>
+    <ErrorBoundary>
+      <ThemeProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <DesktopWindowChrome>
+              <AppContent />
+            </DesktopWindowChrome>
+          </AuthProvider>
+        </LanguageProvider>
+      </ThemeProvider>
+    </ErrorBoundary>
   );
 };
 

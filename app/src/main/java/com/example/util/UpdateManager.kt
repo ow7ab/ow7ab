@@ -495,6 +495,103 @@ class UpdateManager(private val context: Context) {
         _installStatusMessage.value = null
     }
 
+    /**
+     * آخر توقيت لفحص التحديثات الدوري التلقائي (مللي ثانية).
+     */
+    fun getLastPeriodicCheckTimestamp(): Long {
+        return runCatching { prefs.getLong(KEY_LAST_PERIODIC_CHECK_MS, 0L) }.getOrDefault(0L)
+    }
+
+    fun recordPeriodicCheckTimestamp(nowMillis: Long = System.currentTimeMillis()) {
+        runCatching {
+            prefs.edit().putLong(KEY_LAST_PERIODIC_CHECK_MS, nowMillis).apply()
+        }
+    }
+
+    /**
+     * التحقق مما إذا حان موعد الفحص الدوري للتحديثات عبر Firebase/GitHub.
+     */
+    fun shouldRunPeriodicCheck(
+        nowMillis: Long = System.currentTimeMillis(),
+        intervalMs: Long = DEFAULT_PERIODIC_CHECK_INTERVAL_MS
+    ): Boolean {
+        if (intervalMs <= 0L) return true
+        val lastChecked = getLastPeriodicCheckTimestamp()
+        if (lastChecked <= 0L) return true
+        return (nowMillis - lastChecked) >= intervalMs
+    }
+
+    /**
+     * تأجيل إشعار التحديث غير الإلزامي لفترة محددة عند ضغط المستخدم على «لاحقاً».
+     */
+    fun snoozeUpdateNotification(
+        versionCode: Int,
+        durationMs: Long = DEFAULT_NOTIFICATION_SNOOZE_MS,
+        nowMillis: Long = System.currentTimeMillis()
+    ) {
+        if (versionCode <= 0) return
+        runCatching {
+            prefs.edit()
+                .putInt(KEY_SNOOZED_UPDATE_CODE, versionCode)
+                .putLong(KEY_SNOOZED_UNTIL_MS, nowMillis + durationMs.coerceAtLeast(0L))
+                .apply()
+        }
+    }
+
+    fun isUpdateNotificationSnoozed(
+        versionCode: Int,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (versionCode <= 0) return false
+        return runCatching {
+            val snoozedCode = prefs.getInt(KEY_SNOOZED_UPDATE_CODE, -1)
+            val snoozedUntil = prefs.getLong(KEY_SNOOZED_UNTIL_MS, 0L)
+            snoozedCode == versionCode && nowMillis < snoozedUntil
+        }.getOrDefault(false)
+    }
+
+    fun clearUpdateNotificationSnooze() {
+        runCatching {
+            prefs.edit()
+                .remove(KEY_SNOOZED_UPDATE_CODE)
+                .remove(KEY_SNOOZED_UNTIL_MS)
+                .apply()
+        }
+    }
+
+    /**
+     * فحص دوري ذكي للتحديثات يستخدم بيانات Firebase وGitHub ويعرض إشعاراً غير مزعج عند توفر إصدار أحدث.
+     */
+    suspend fun checkForUpdatesPeriodicallyIfDue(
+        metadataUrl: String = DEFAULT_UPDATE_METADATA_URL,
+        clusterCode: String = "PMP-MAIN-01",
+        intervalMs: Long = DEFAULT_PERIODIC_CHECK_INTERVAL_MS,
+        force: Boolean = false,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Result<UpdateInfo?> {
+        if (!force && !shouldRunPeriodicCheck(nowMillis = nowMillis, intervalMs = intervalMs)) {
+            DeveloperUpdateLogger.info("PeriodicCheck", "Skipped periodic check; interval not yet elapsed.")
+            return Result.success(null)
+        }
+        val result = checkForUpdates(metadataUrl = metadataUrl, clusterCode = clusterCode)
+        recordPeriodicCheckTimestamp(nowMillis)
+        result.onSuccess { info ->
+            val installedCode = getEffectiveVersionCode()
+            if (info != null && info.versionCode > installedCode) {
+                val shouldDispatchSystemNotification =
+                    info.isMandatory || !isUpdateNotificationSnoozed(info.versionCode, nowMillis)
+                if (shouldDispatchSystemNotification) {
+                    UpdateNotificationHelper.notifyNewUpdateAvailableIfNeeded(
+                        context = appContext,
+                        updateInfo = info,
+                        installedVersionCode = installedCode
+                    )
+                }
+            }
+        }
+        return result
+    }
+
     internal fun onPackageInstallerStatus(status: Int, rawMessage: String) {
         DeveloperUpdateLogger.info("PackageInstaller", "Received status=$status, rawMessage=$rawMessage")
         when (status) {
@@ -1143,7 +1240,7 @@ class UpdateManager(private val context: Context) {
 
             UpdateInfo(
                 versionCode = parsedCode,
-                versionName = tagName.ifBlank { "3.$parsedCode-PRO" },
+                versionName = tagName.ifBlank { "v${parsedCode}.0" },
                 downloadUrl = apkDownloadUrl,
                 releaseNotes = body,
                 isMandatory = false,
@@ -2650,7 +2747,12 @@ class UpdateManager(private val context: Context) {
         private const val KEY_VERIFIED_OTA_VERSION_NAME = "verified_ota_version_name"
         private const val KEY_VERIFIED_OTA_BUILD_ID = "verified_ota_build_id"
         private const val KEY_VERIFIED_OTA_BASE_APK_CODE = "verified_ota_base_apk_code"
+        private const val KEY_LAST_PERIODIC_CHECK_MS = "last_periodic_update_check_ms"
+        private const val KEY_SNOOZED_UPDATE_CODE = "snoozed_update_version_code"
+        private const val KEY_SNOOZED_UNTIL_MS = "snoozed_update_until_ms"
         private const val MAX_DOWNLOAD_RETRIES_PER_URL = 2
+        const val DEFAULT_PERIODIC_CHECK_INTERVAL_MS = 6L * 60L * 60L * 1000L
+        const val DEFAULT_NOTIFICATION_SNOOZE_MS = 24L * 60L * 60L * 1000L
         internal const val MIN_VALID_APK_SIZE_BYTES = 100 * 1024L // 100 KB minimum for real APK
 
         const val CANONICAL_APK_ASSET_NAME = "pmp-paints-latest.apk"
@@ -2707,18 +2809,18 @@ class UpdateManager(private val context: Context) {
         val DEFAULT_APK_DOWNLOAD_URL = com.example.core.architecture.PmpAppVersionContract.DEFAULT_PAGES_APK_URL
 
         /**
-         * بيانات الإصدار المرجعي المنشور والمتحقق منه فعلياً (Version v20.0 / Build 20)
+         * بيانات الإصدار المرجعي المنشور والمتحقق منه فعلياً (Version v21.0 / Build 21)
          */
         val LATEST_CLOUD_RELEASE_INFO = UpdateInfo(
             versionCode = BuildConfig.VERSION_CODE.coerceAtLeast(com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE),
             versionName = BuildConfig.VERSION_NAME.ifBlank { com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME },
             downloadUrl = DEFAULT_APK_DOWNLOAD_URL,
-            releaseNotes = "إصدار v20.0 الشامل: منظومة Idempotency Protection System وحارس منع تكرار العمليات TransactionSubmissionGuard وشاشة متابعة العمليات عبر Android وDesktop وWeb.",
+            releaseNotes = "إصدار v21.0 الشامل: تفعيل نظام الفحص الدوري للتحديثات وإشعارات التحديث غير المزعجة، ومنظومة Idempotency Protection System وحارس منع تكرار العمليات عبر Android وDesktop وWeb.",
             isMandatory = false,
-            sha256Checksum = "9bb5d7bc646468b5d838303cd7e08846a3e14b939615e9a8e00600d8a146f57a",
+            sha256Checksum = "5445d7d226aeb1480f6b75499254cb2019d8d46daa2f2cea79bd80ee1de2e57c",
             minSupportedVersionCode = 1,
-            fileSizeMb = 30.99,
-            fileSize = 32494119L,
+            fileSizeMb = 31.15,
+            fileSize = 32663762L,
             buildId = BuildConfig.BUILD_ID,
             gitCommit = BuildConfig.GIT_COMMIT_SHA,
             publishedAt = BuildConfig.BUILD_TIMESTAMP_UTC,

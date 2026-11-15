@@ -1,7 +1,7 @@
 {
   "name": "pmp-paints-web",
   "private": true,
-  "version": "1.0.0",
+  "version": "21.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

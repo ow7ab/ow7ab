@@ -185,7 +185,10 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
                   <span style={{ fontSize: '11px', color: 'var(--pmp-green)' }}>● سحابة الإنتاج متصلة (Active)</span>
                 </div>
               </div>
-              <GlassBadge text="الإصدار 20.0 المعتمد" variant="cyan" />
+              <GlassBadge
+                text={`الإصدار ${(latestRelease?.versionName || APP_VERSION_CONTRACT.CURRENT_VERSION_NAME).replace(/^v/i, '')} المعتمد`}
+                variant="cyan"
+              />
             </div>
 
             {/* Quick Live Stats Grid */}

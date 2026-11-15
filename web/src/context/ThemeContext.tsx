@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { safeStorageGet, safeStorageSet } from '../utils/safeStorage';
 
 export type ThemeMode = 'true-black' | 'daylight';
 
@@ -16,13 +17,17 @@ const ThemeContext = createContext<ThemeContextType>({
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [theme, setThemeState] = useState<ThemeMode>(() => {
-    const saved = localStorage.getItem('pmp_web_theme') as ThemeMode;
+    const saved = safeStorageGet('pmp_web_theme') as ThemeMode | null;
     return saved === 'daylight' ? 'daylight' : 'true-black';
   });
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('pmp_web_theme', theme);
+    try {
+      document.documentElement.setAttribute('data-theme', theme);
+    } catch {
+      // Ignore restricted DOM access
+    }
+    safeStorageSet('pmp_web_theme', theme);
   }, [theme]);
 
   const toggleTheme = () => {

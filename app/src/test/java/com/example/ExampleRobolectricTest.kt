@@ -67,6 +67,57 @@ class ExampleRobolectricTest {
   }
 
   @Test
+  fun `updateManager periodic check scheduling and snooze suppression behave cleanly`() {
+    val app = ApplicationProvider.getApplicationContext<Application>()
+    val updateManager = UpdateManager(app)
+    updateManager.clearUpdateNotificationSnooze()
+
+    val baseTime = 1_780_000_000_000L
+    // Before recording any check timestamp, a periodic check should be due
+    assertTrue(
+      "Periodic check must run when no prior check timestamp exists",
+      updateManager.shouldRunPeriodicCheck(nowMillis = baseTime)
+    )
+
+    updateManager.recordPeriodicCheckTimestamp(baseTime)
+    assertFalse(
+      "Periodic check must not re-run immediately before interval elapses",
+      updateManager.shouldRunPeriodicCheck(
+        nowMillis = baseTime + (UpdateManager.DEFAULT_PERIODIC_CHECK_INTERVAL_MS / 2)
+      )
+    )
+    assertTrue(
+      "Periodic check must run again once interval elapses",
+      updateManager.shouldRunPeriodicCheck(
+        nowMillis = baseTime + UpdateManager.DEFAULT_PERIODIC_CHECK_INTERVAL_MS + 1000L
+      )
+    )
+
+    // Non-mandatory snooze should suppress duplicate prompts for the same version until expiry or newer version
+    updateManager.snoozeUpdateNotification(
+      versionCode = 22,
+      durationMs = UpdateManager.DEFAULT_NOTIFICATION_SNOOZE_MS,
+      nowMillis = baseTime
+    )
+    assertTrue(
+      "Snoozed version 22 must be suppressed inside snooze window",
+      updateManager.isUpdateNotificationSnoozed(22, nowMillis = baseTime + 60_000L)
+    )
+    assertFalse(
+      "Newer version 23 must NOT be suppressed by snooze on version 22",
+      updateManager.isUpdateNotificationSnoozed(23, nowMillis = baseTime + 60_000L)
+    )
+    assertFalse(
+      "Snooze must expire cleanly after DEFAULT_NOTIFICATION_SNOOZE_MS",
+      updateManager.isUpdateNotificationSnoozed(
+        22,
+        nowMillis = baseTime + UpdateManager.DEFAULT_NOTIFICATION_SNOOZE_MS + 1000L
+      )
+    )
+    updateManager.clearUpdateNotificationSnooze()
+  }
+
+  @Test
   fun `loginScreen hides bound biometric user details and renders circular fingerprint icon`() {
     val app = ApplicationProvider.getApplicationContext<Application>()
     val boundUser = UserAccountEntity(

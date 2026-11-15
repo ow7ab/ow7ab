@@ -502,45 +502,45 @@ test('Scenario 20: Non-network validation failure releases lock cleanly so user 
   assert.equal(fixedRes.resultReference, 'INV-FIXED-1');
 });
 
-test('Version v20.0 sync & Windows Desktop GitHub release parser work accurately', () => {
-  assert.equal(APP_VERSION_CONTRACT.CURRENT_VERSION_CODE, 20);
-  assert.equal(APP_VERSION_CONTRACT.CURRENT_VERSION_NAME, '20.0');
-  assert.equal(APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME, '20.0.0');
+test('Version v21.0 sync & Windows Desktop GitHub release parser work accurately', () => {
+  assert.equal(APP_VERSION_CONTRACT.CURRENT_VERSION_CODE, 21);
+  assert.equal(APP_VERSION_CONTRACT.CURRENT_VERSION_NAME, '21.0');
+  assert.equal(APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME, '21.0.0');
 
   const rootVersion = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'version.json'), 'utf8'));
   const pubVersion = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'public/version.json'), 'utf8'));
   const desktopPkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'desktop/package.json'), 'utf8'));
-  assert.equal(rootVersion.versionCode, 20);
-  assert.equal(pubVersion.versionCode, 20);
-  assert.equal(desktopPkg.version, '20.0.0');
+  assert.equal(rootVersion.versionCode, 21);
+  assert.equal(pubVersion.versionCode, 21);
+  assert.equal(desktopPkg.version, '21.0.0');
 
   const parsedDesktop = parseGitHubDesktopRelease({
-    tag_name: 'desktop-v20.0.0',
-    published_at: '2026-11-15T12:00:00Z',
+    tag_name: 'desktop-v21.0.0',
+    published_at: '2026-11-15T20:00:00Z',
     draft: false,
     prerelease: false,
     assets: [
       {
-        name: 'pmp-paints-desktop-setup-20.0.0-x64.exe',
+        name: 'pmp-paints-desktop-setup-21.0.0-x64.exe',
         size: 85 * 1024 * 1024,
-        browser_download_url: 'https://github.com/ow7ab/ow7ab/releases/download/desktop-v20.0.0/pmp-paints-desktop-setup-20.0.0-x64.exe'
+        browser_download_url: 'https://github.com/ow7ab/ow7ab/releases/download/desktop-v21.0.0/pmp-paints-desktop-setup-21.0.0-x64.exe'
       },
       {
-        name: 'pmp-paints-desktop-portable-20.0.0-x64.exe',
+        name: 'pmp-paints-desktop-portable-21.0.0-x64.exe',
         size: 80 * 1024 * 1024,
-        browser_download_url: 'https://github.com/ow7ab/ow7ab/releases/download/desktop-v20.0.0/pmp-paints-desktop-portable-20.0.0-x64.exe'
+        browser_download_url: 'https://github.com/ow7ab/ow7ab/releases/download/desktop-v21.0.0/pmp-paints-desktop-portable-21.0.0-x64.exe'
       }
     ]
   });
   assert.ok(parsedDesktop);
-  assert.equal(parsedDesktop.tagName, 'desktop-v20.0.0');
+  assert.equal(parsedDesktop.tagName, 'desktop-v21.0.0');
   assert.equal(parsedDesktop.setupSizeMb, 85);
   assert.equal(parsedDesktop.portableSizeMb, 80);
 
   // Ignores drafts or releases without .exe
   assert.equal(
     parseGitHubDesktopRelease({
-      tag_name: 'desktop-v20.1.0',
+      tag_name: 'desktop-v21.1.0',
       draft: true,
       assets: [{ name: 'app.exe', browser_download_url: 'https://example.com/app.exe' }]
     }),

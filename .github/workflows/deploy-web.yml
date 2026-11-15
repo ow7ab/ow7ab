@@ -94,9 +94,9 @@ jobs:
         env:
           VITE_BASE_PATH: /ow7ab/
         run: |
-          npm run build --prefix web
-          test -f web/dist/index.html
-          test -f web/dist/404.html
+          npm run build --prefix web -- --outDir dist-ghpages
+          test -f web/dist-ghpages/index.html
+          test -f web/dist-ghpages/404.html
           python3 - << 'PYEOF'
           import glob
           import os
@@ -104,21 +104,21 @@ jobs:
 
           for apk_file in glob.glob(os.path.join("public", "*.apk")):
               if os.path.isfile(apk_file):
-                  shutil.copy2(apk_file, os.path.join("web", "dist", os.path.basename(apk_file)))
+                  shutil.copy2(apk_file, os.path.join("web", "dist-ghpages", os.path.basename(apk_file)))
 
           for json_name in ("version.json", "releases-history.json"):
               src = os.path.join("public", json_name)
               if os.path.isfile(src):
-                  shutil.copy2(src, os.path.join("web", "dist", json_name))
+                  shutil.copy2(src, os.path.join("web", "dist-ghpages", json_name))
           PYEOF
-          if [ ! -f "web/dist/pmp-paints-latest.apk" ]; then
-            curl -fL "https://github.com/ow7ab/ow7ab/releases/latest/download/pmp-paints-latest.apk" -o "web/dist/pmp-paints-latest.apk" || echo "Using direct release download stream."
+          if [ ! -f "web/dist-ghpages/pmp-paints-latest.apk" ]; then
+            curl -fL "https://github.com/ow7ab/ow7ab/releases/latest/download/pmp-paints-latest.apk" -o "web/dist-ghpages/pmp-paints-latest.apk" || echo "Using direct release download stream."
           fi
 
       - name: Upload Unified Web Artifact for GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
-          path: web/dist
+          path: web/dist-ghpages
 
       - name: Deploy Unified ERP & APK Website to GitHub Pages
         id: pages_deploy
