@@ -1402,6 +1402,14 @@ class CloudErpSyncRepository(
                 syncedCount += pushPhase2InventoryToCloud(cRef, resolvedInvDao, actor)
             }
 
+            // 10c. Phase 4 Double-Entry General Ledger Sync
+            val resolvedAccDao = runCatching {
+                PmpDatabase.getDatabase(firestore.app.applicationContext).erpAccountingDao()
+            }.getOrNull()
+            if (resolvedAccDao != null) {
+                syncedCount += pushPhase4AccountingToCloud(cRef, resolvedAccDao, actor)
+            }
+
             // 11. Cluster Server Info & Cross-Network Egypt-Sudan Linking Metadata (Non-blocking)
             runCatching {
                 cRef.collection("server_status").document("cluster_meta").set(
@@ -2045,6 +2053,14 @@ class CloudErpSyncRepository(
             }.getOrNull()
             if (resolvedInvDao != null) {
                 restoredCount += restorePhase2InventoryFromCloud(cRef, resolvedInvDao)
+            }
+
+            // 10c. Restore Phase 4 Double-Entry General Ledger
+            val resolvedAccDao = runCatching {
+                PmpDatabase.getDatabase(firestore.app.applicationContext).erpAccountingDao()
+            }.getOrNull()
+            if (resolvedAccDao != null) {
+                restoredCount += restorePhase4AccountingFromCloud(cRef, resolvedAccDao)
             }
 
             // Clean any residual duplicates across cashboxes, warehouses, transactions, and user accounts
@@ -2762,6 +2778,228 @@ class CloudErpSyncRepository(
             if (qcList.isNotEmpty()) {
                 invDao.upsertQcInspections(qcList)
                 restored += qcList.size
+            }
+        }
+        return restored
+    }
+
+    private suspend fun pushPhase4AccountingToCloud(
+        cRef: com.google.firebase.firestore.DocumentReference,
+        accDao: ErpAccountingDao,
+        actor: String
+    ): Int {
+        var count = 0
+        val accounts = accDao.getAllAccountsDirect()
+        accounts.chunked(200).forEach { chunk ->
+            val batch = firestore.batch()
+            chunk.forEach { acc ->
+                val docId = safeId(acc.accountCode, acc.syncUuid)
+                batch.set(
+                    cRef.collection("accounting_accounts").document(docId),
+                    mapOf(
+                        "id" to acc.id,
+                        "syncUuid" to acc.syncUuid,
+                        "accountCode" to acc.accountCode,
+                        "nameAr" to acc.nameAr,
+                        "nameEn" to acc.nameEn,
+                        "accountType" to acc.accountType,
+                        "normalSide" to acc.normalSide,
+                        "parentCode" to acc.parentCode,
+                        "currencyHint" to acc.currencyHint,
+                        "isSystemAccount" to acc.isSystemAccount,
+                        "active" to acc.active,
+                        "recordVersion" to acc.recordVersion,
+                        "createdAt" to acc.createdAt,
+                        "updatedAt" to acc.updatedAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+
+        val entries = accDao.getAllJournalEntriesDirect()
+        entries.chunked(200).forEach { chunk ->
+            val batch = firestore.batch()
+            chunk.forEach { je ->
+                val docId = safeId(je.syncUuid.ifBlank { je.entryNo }, je.entryNo)
+                batch.set(
+                    cRef.collection("journal_entries").document(docId),
+                    mapOf(
+                        "id" to je.id,
+                        "syncUuid" to je.syncUuid,
+                        "entryNo" to je.entryNo,
+                        "entryDate" to je.entryDate,
+                        "sourceType" to je.sourceType,
+                        "sourceDocId" to (je.sourceDocId ?: 0L),
+                        "sourceDocNo" to je.sourceDocNo,
+                        "description" to je.description,
+                        "currency" to je.currency,
+                        "fxRateToUsd" to je.fxRateToUsd,
+                        "fxRateToSdg" to je.fxRateToSdg,
+                        "totalDebit" to je.totalDebit,
+                        "totalCredit" to je.totalCredit,
+                        "status" to je.status,
+                        "reversedEntryId" to (je.reversedEntryId ?: 0L),
+                        "reversedByEntryNo" to je.reversedByEntryNo,
+                        "reversalReason" to je.reversalReason,
+                        "idempotencyKey" to je.idempotencyKey,
+                        "createdBy" to je.createdBy,
+                        "approvedBy" to je.approvedBy,
+                        "deviceId" to je.deviceId,
+                        "recordVersion" to je.recordVersion,
+                        "createdAt" to je.createdAt,
+                        "updatedAt" to je.updatedAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+
+        val lines = accDao.getAllJournalLinesDirect()
+        lines.chunked(250).forEach { chunk ->
+            val batch = firestore.batch()
+            chunk.forEach { ln ->
+                val docId = safeId(ln.syncUuid, "JL-${ln.id}")
+                batch.set(
+                    cRef.collection("journal_lines").document(docId),
+                    mapOf(
+                        "id" to ln.id,
+                        "syncUuid" to ln.syncUuid,
+                        "journalEntryId" to ln.journalEntryId,
+                        "journalEntryUuid" to ln.journalEntryUuid,
+                        "lineOrder" to ln.lineOrder,
+                        "accountCode" to ln.accountCode,
+                        "accountName" to ln.accountName,
+                        "accountType" to ln.accountType,
+                        "debit" to ln.debit,
+                        "credit" to ln.credit,
+                        "currency" to ln.currency,
+                        "costCenter" to ln.costCenter,
+                        "partyType" to ln.partyType,
+                        "partyName" to ln.partyName,
+                        "memo" to ln.memo,
+                        "createdAt" to ln.createdAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+        return count
+    }
+
+    private suspend fun restorePhase4AccountingFromCloud(
+        cRef: com.google.firebase.firestore.DocumentReference,
+        accDao: ErpAccountingDao
+    ): Int {
+        var restored = 0
+        runCatching {
+            val accSnap = cRef.collection("accounting_accounts").get().await()
+            val accList = accSnap.documents.mapNotNull { doc ->
+                val code = doc.getString("accountCode") ?: return@mapNotNull null
+                if (code.isBlank()) return@mapNotNull null
+                ChartAccountEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: "ACC-$code",
+                    accountCode = code,
+                    nameAr = doc.getString("nameAr") ?: code,
+                    nameEn = doc.getString("nameEn") ?: "",
+                    accountType = doc.getString("accountType") ?: "ASSET",
+                    normalSide = doc.getString("normalSide") ?: "DEBIT",
+                    parentCode = doc.getString("parentCode") ?: "",
+                    currencyHint = doc.getString("currencyHint") ?: "ALL",
+                    isSystemAccount = doc.safeBoolean("isSystemAccount") ?: true,
+                    active = doc.safeBoolean("active") ?: true,
+                    recordVersion = doc.safeLong("recordVersion")?.toInt() ?: 1,
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (accList.isNotEmpty()) {
+                accDao.upsertAccounts(accList)
+                restored += accList.size
+            }
+
+            val jeSnap = cRef.collection("journal_entries").get().await()
+            val entryIdByUuid = mutableMapOf<String, Long>()
+            for (doc in jeSnap.documents) {
+                val uuid = doc.getString("syncUuid") ?: doc.id
+                val entryNo = doc.getString("entryNo") ?: doc.id
+                val totalDr = (doc.safeDouble("totalDebit") ?: 0.0).coerceAtLeast(0.0)
+                val totalCr = (doc.safeDouble("totalCredit") ?: 0.0).coerceAtLeast(0.0)
+                if (kotlin.math.abs(totalDr - totalCr) > 0.01) continue
+                val existing = accDao.getJournalEntryByUuid(uuid) ?: accDao.getJournalEntryByNo(entryNo)
+                val entity = JournalEntryEntity(
+                    id = existing?.id ?: 0L,
+                    syncUuid = uuid,
+                    entryNo = entryNo,
+                    entryDate = doc.getString("entryDate") ?: "",
+                    sourceType = doc.getString("sourceType") ?: "MANUAL_ADJUSTMENT",
+                    sourceDocId = doc.safeLong("sourceDocId")?.takeIf { it > 0L },
+                    sourceDocNo = doc.getString("sourceDocNo") ?: "",
+                    description = doc.getString("description") ?: "قيد متزامن",
+                    currency = doc.getString("currency") ?: "SDG",
+                    fxRateToUsd = doc.safeDouble("fxRateToUsd") ?: 1.0,
+                    fxRateToSdg = doc.safeDouble("fxRateToSdg") ?: 1.0,
+                    totalDebit = totalDr,
+                    totalCredit = totalCr,
+                    status = doc.getString("status") ?: "POSTED",
+                    reversedEntryId = doc.safeLong("reversedEntryId")?.takeIf { it > 0L },
+                    reversedByEntryNo = doc.getString("reversedByEntryNo") ?: "",
+                    reversalReason = doc.getString("reversalReason") ?: "",
+                    idempotencyKey = doc.getString("idempotencyKey") ?: "",
+                    createdBy = doc.getString("createdBy") ?: "CLOUD_SYNC",
+                    approvedBy = doc.getString("approvedBy") ?: "",
+                    deviceId = doc.getString("deviceId") ?: "CLOUD",
+                    recordVersion = doc.safeLong("recordVersion")?.toInt() ?: 1,
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+                val localId = accDao.upsertJournalEntry(entity)
+                val resolvedId = if (entity.id > 0L) entity.id else localId
+                entryIdByUuid[uuid] = resolvedId
+                restored++
+            }
+
+            val jlSnap = cRef.collection("journal_lines").get().await()
+            val linesToInsert = jlSnap.documents.mapNotNull { doc ->
+                val uuid = doc.getString("syncUuid") ?: doc.id
+                val jeUuid = doc.getString("journalEntryUuid") ?: return@mapNotNull null
+                val localJeId = entryIdByUuid[jeUuid] ?: accDao.getJournalEntryByUuid(jeUuid)?.id ?: return@mapNotNull null
+                val dr = (doc.safeDouble("debit") ?: 0.0).coerceAtLeast(0.0)
+                val cr = (doc.safeDouble("credit") ?: 0.0).coerceAtLeast(0.0)
+                JournalLineEntity(
+                    syncUuid = uuid,
+                    journalEntryId = localJeId,
+                    journalEntryUuid = jeUuid,
+                    lineOrder = doc.safeLong("lineOrder")?.toInt() ?: 1,
+                    accountCode = doc.getString("accountCode") ?: "3100",
+                    accountName = doc.getString("accountName") ?: "",
+                    accountType = doc.getString("accountType") ?: "ASSET",
+                    debit = dr,
+                    credit = cr,
+                    currency = doc.getString("currency") ?: "SDG",
+                    costCenter = doc.getString("costCenter") ?: "",
+                    partyType = doc.getString("partyType") ?: "",
+                    partyName = doc.getString("partyName") ?: "",
+                    memo = doc.getString("memo") ?: "",
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (linesToInsert.isNotEmpty()) {
+                accDao.upsertJournalLines(linesToInsert)
+                restored += linesToInsert.size
             }
         }
         return restored

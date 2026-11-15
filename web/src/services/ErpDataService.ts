@@ -60,8 +60,36 @@ import {
   PackagingRule,
   PurchaseReceipt,
   ProductionOrder,
-  QcInspection
+  QcInspection,
+  AccountType,
+  ChartAccount,
+  JournalEntry,
+  JournalLine,
+  TrialBalanceRow,
+  TrialBalanceReport,
+  IncomeStatementReport,
+  BalanceSheetReport,
+  ReconciliationItem,
+  CurrencyFxRates,
+  ConsolidatedFxSummary
 } from '../types/erp';
+import {
+  DEFAULT_CHART_OF_ACCOUNTS,
+  resolveCashAccountCode,
+  createBalancedJournalPayload,
+  buildReversalJournalPayloads,
+  buildPurchaseReceiptJournalPayload,
+  buildProductionIssueJournalPayload,
+  buildQcFinishedGoodsJournalPayload,
+  buildSalesInvoiceJournalPayloads,
+  buildTreasuryMovementJournalPayload,
+  buildTreasuryTransferJournalPayloads,
+  computeTrialBalance,
+  computeIncomeStatement,
+  computeBalanceSheet,
+  computeConsolidatedFxSummary,
+  computeReconciliationReport
+} from './AccountingEngine';
 import {
   DEFAULT_PACKAGING_RULES,
   resolveWarehouseClass,
@@ -156,7 +184,22 @@ export {
   receivePurchaseToRawMaterialsInState,
   createProductionOrderModel,
   issueRawMaterialsForOrderInState,
-  inspectQcAndPostToFinishedGoodsInState
+  inspectQcAndPostToFinishedGoodsInState,
+  DEFAULT_CHART_OF_ACCOUNTS,
+  resolveCashAccountCode,
+  createBalancedJournalPayload,
+  buildReversalJournalPayloads,
+  buildPurchaseReceiptJournalPayload,
+  buildProductionIssueJournalPayload,
+  buildQcFinishedGoodsJournalPayload,
+  buildSalesInvoiceJournalPayloads,
+  buildTreasuryMovementJournalPayload,
+  buildTreasuryTransferJournalPayloads,
+  computeTrialBalance,
+  computeIncomeStatement,
+  computeBalanceSheet,
+  computeConsolidatedFxSummary,
+  computeReconciliationReport
 };
 
 export type {
@@ -203,6 +246,9 @@ export type ErpCollectionName =
   | 'warehouse_transfer_items'
   | 'packaging_rules'
   | 'stock_batches'
+  | 'accounting_accounts'
+  | 'journal_entries'
+  | 'journal_lines'
   | 'audit_logs'
   | 'permission_audit_logs';
 
@@ -744,6 +790,24 @@ class ErpDataServiceImpl {
   ): number {
     return compareRecordsChronologically(a, b, order);
   }
+
+  async persistJournalPayload(
+    payload: { entry: JournalEntry; lines: JournalLine[] } | null | undefined
+  ): Promise<void> {
+    if (!payload) return;
+    await this.saveRecord('journal_entries', payload.entry.syncUuid, payload.entry);
+    await Promise.all(
+      payload.lines.map((ln) => this.saveRecord('journal_lines', ln.syncUuid, ln))
+    );
+  }
+
+  async persistJournalPayloads(
+    payloads: Array<{ entry: JournalEntry; lines: JournalLine[] } | null | undefined>
+  ): Promise<void> {
+    for (const p of payloads) {
+      if (p) await this.persistJournalPayload(p);
+    }
+  }
 }
 
 export const ErpDataService = new ErpDataServiceImpl();
@@ -784,5 +848,16 @@ export type {
   PackagingRule,
   PurchaseReceipt,
   ProductionOrder,
-  QcInspection
+  QcInspection,
+  AccountType,
+  ChartAccount,
+  JournalEntry,
+  JournalLine,
+  TrialBalanceRow,
+  TrialBalanceReport,
+  IncomeStatementReport,
+  BalanceSheetReport,
+  ReconciliationItem,
+  CurrencyFxRates,
+  ConsolidatedFxSummary
 };

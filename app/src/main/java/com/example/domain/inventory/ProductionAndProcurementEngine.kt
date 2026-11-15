@@ -2,6 +2,7 @@ package com.example.domain.inventory
 
 import androidx.room.withTransaction
 import com.example.data.local.*
+import com.example.domain.accounting.AccountingLedgerEngine
 import com.example.isSystemManager
 import com.example.util.ErpLifecycleEngine
 import org.json.JSONArray
@@ -92,6 +93,7 @@ class ProductionAndProcurementEngine(
 ) {
     private val dao = database.pmpDao()
     private val invDao = database.erpInventoryDao()
+    private val accountingEngine = AccountingLedgerEngine(database)
 
     companion object {
         private const val EPSILON = 1e-6
@@ -300,7 +302,9 @@ class ProductionAndProcurementEngine(
                     updatedAt = now
                 )
                 val insertedId = invDao.upsertPurchaseReceipt(receipt)
-                receipt.copy(id = if (receipt.id > 0) receipt.id else insertedId)
+                val savedReceipt = receipt.copy(id = if (receipt.id > 0) receipt.id else insertedId)
+                accountingEngine.postPurchaseReceiptJournalInternal(savedReceipt)
+                savedReceipt
             }
         }
     }
@@ -484,6 +488,15 @@ class ProductionAndProcurementEngine(
                     updatedAt = now
                 )
                 invDao.upsertProductionOrder(updated)
+
+                val netIssuedCost = materials.sumOf { line ->
+                    val netQty = (line.qty - line.returnedQty - line.wastedQty).coerceAtLeast(0.0)
+                    netQty * line.unitCost.coerceAtLeast(0.0)
+                }
+                val wasteCost = materials.sumOf { line ->
+                    line.wastedQty.coerceAtLeast(0.0) * line.unitCost.coerceAtLeast(0.0)
+                }
+                accountingEngine.postProductionIssueJournalInternal(updated, netIssuedCost, wasteCost)
                 updated
             }
         }
@@ -711,7 +724,20 @@ class ProductionAndProcurementEngine(
                     )
                 )
 
-                qcRecord.copy(id = qcId) to updatedOrder
+                val savedQc = qcRecord.copy(id = qcId)
+                if (isPassed) {
+                    val postedQtyCartons = if (fullCartons > 0) {
+                        fullCartons.toDouble()
+                    } else {
+                        round((input.goodCans.toDouble() / order.cansPerCarton.coerceAtLeast(1)) * 1000.0) / 1000.0
+                    }
+                    val unitCostEgp = (matchedProduct?.purchasePrice ?: 0.0).takeIf { it > 0.0 }
+                        ?: ((formula?.costPerKg ?: 0.0) * (order.packageWeightGrams.toDouble() / 1000.0) * order.cansPerCarton)
+                    val fgCostValue = postedQtyCartons * unitCostEgp.coerceAtLeast(0.0)
+                    accountingEngine.postQcFinishedGoodsJournalInternal(updatedOrder, savedQc, fgCostValue)
+                }
+
+                savedQc to updatedOrder
             }
         }
     }

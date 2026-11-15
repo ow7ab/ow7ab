@@ -309,5 +309,75 @@ test("12. Phase 3 Rules: purchase_receipts, production_orders & qc_inspections v
   );
 });
 
+test("13. Phase 4 Rules: journal_entries enforce DR==CR balance & append-only reversals, journal_lines are immutable", async () => {
+  const clientDb = testEnv.unauthenticatedContext().firestore();
+  const cRef = clientDb.collection("erp_clusters").doc("PMP-ERP-MAIN-CLUSTER");
+
+  await assertSucceeds(
+    cRef.collection("accounting_accounts").doc("ACC-1110").set({
+      accountCode: "1110",
+      nameAr: "صندوق النقدية - السودان (SDG)",
+      accountType: "ASSET",
+    })
+  );
+
+  await assertFails(
+    cRef.collection("journal_entries").doc("JRN-UNBALANCED").set({
+      entryNo: "JRN-UNBALANCED",
+      totalDebit: 1000,
+      totalCredit: 900,
+      status: "POSTED",
+    })
+  );
+
+  const jRef = cRef.collection("journal_entries").doc("JRN-1001");
+  await assertSucceeds(
+    jRef.set({
+      entryNo: "JRN-1001",
+      totalDebit: 1000,
+      totalCredit: 1000,
+      status: "POSTED",
+      recordVersion: 1,
+    })
+  );
+
+  await assertFails(jRef.delete());
+  await assertFails(jRef.update({ totalDebit: 2000, totalCredit: 2000, status: "REVERSED" }));
+
+  await assertSucceeds(
+    jRef.update({
+      status: "REVERSED",
+      reversedByEntryNo: "REV-1001",
+      reversalReason: "تصحيح خطأ إدخال",
+      recordVersion: 2,
+      updatedAt: Date.now(),
+    })
+  );
+
+  await assertFails(
+    jRef.update({
+      status: "REVERSED",
+      reversalReason: "ثاني عكس",
+    })
+  );
+
+  const lRef = cRef.collection("journal_lines").doc("JL-1001-1");
+  await assertFails(
+    cRef.collection("journal_lines").doc("JL-BAD").set({
+      debit: -50,
+      credit: 0,
+    })
+  );
+  await assertSucceeds(
+    lRef.set({
+      accountCode: "1110",
+      debit: 1000,
+      credit: 0,
+    })
+  );
+  await assertFails(lRef.update({ debit: 500 }));
+  await assertFails(lRef.delete());
+});
+
 
 

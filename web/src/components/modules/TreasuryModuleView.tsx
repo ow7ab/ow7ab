@@ -30,7 +30,9 @@ import {
   TreasuryMovement,
   TreasuryTransfer,
   DailyClosing,
-  SalesInvoice
+  SalesInvoice,
+  buildTreasuryMovementJournalPayload,
+  buildTreasuryTransferJournalPayloads
 } from '../../services/ErpDataService';
 import { DistinctCashboxSummary, normalizeEntityKey } from '../../services/ErpCalculations';
 import { GRANULAR_ACTIONS, isSystemManager } from '../../services/SecurityService';
@@ -285,6 +287,19 @@ export const TreasuryModuleView: React.FC = () => {
         updatedAt: Date.now()
       });
 
+      const movJournal = buildTreasuryMovementJournalPayload({
+        id,
+        txDate: today,
+        cashbox: movForm.cashbox.trim(),
+        currency: movForm.currency,
+        direction: movForm.direction,
+        amount: amt,
+        description: desc,
+        reference: ref,
+        createdBy: userProfile?.fullName || userProfile?.username || 'المدير'
+      });
+      await ErpDataService.persistJournalPayload(movJournal).catch(() => {});
+
       await ErpDataService.logAudit(
         userProfile?.username || 'admin',
         'ADD_TREASURY_MOVEMENT',
@@ -399,6 +414,20 @@ export const TreasuryModuleView: React.FC = () => {
         ErpDataService.saveDocument('movements', `MOV-${now + 1}`, outMov),
         ErpDataService.saveDocument('movements', `MOV-${now + 2}`, inMov)
       ]);
+
+      const trfJournals = buildTreasuryTransferJournalPayloads({
+        id: now,
+        txDate: today,
+        reference: ref,
+        sourceCashbox: trfForm.sourceCashbox,
+        destinationCashbox: trfForm.destinationCashbox,
+        sourceCurrency: trfForm.sourceCurrency,
+        destinationCurrency: trfForm.destinationCurrency,
+        sourceAmount: srcAmt,
+        destinationAmount: destAmt,
+        createdBy: actor
+      });
+      await ErpDataService.persistJournalPayloads(trfJournals).catch(() => {});
 
       await ErpDataService.logAudit(
         userProfile?.username || 'admin',

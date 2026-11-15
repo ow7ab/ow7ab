@@ -28,7 +28,14 @@ import {
   TreasuryMovement,
   Warehouse
 } from '../../types/erp';
-import { ErpDataService, safeId, isSalesWarehouse } from '../../services/ErpDataService';
+import {
+  ErpDataService,
+  safeId,
+  isSalesWarehouse,
+  buildSalesInvoiceJournalPayloads,
+  resolveCashAccountCode,
+  createBalancedJournalPayload
+} from '../../services/ErpDataService';
 import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
@@ -400,6 +407,25 @@ export const SalesModuleView: React.FC = () => {
         await ErpDataService.upsertDocument('movements', `MOV-${now + 101}`, tm);
       }
 
+      const totalCogs = draftLines.reduce((sum, l) => {
+        const prod = products.find((p) => Number(p.id) === Number(l.productId));
+        const unitCost = Number(prod?.purchasePrice || prod?.costPrice || 0);
+        return sum + Math.max(0, l.quantity) * Math.max(0, unitCost);
+      }, 0);
+      const salesJournals = buildSalesInvoiceJournalPayloads({
+        invoiceId: now,
+        invoiceNo,
+        invoiceDate: new Date(now).toISOString().split('T')[0],
+        customerName: custName,
+        currency: invCurrency,
+        totalRevenue: authoritativeNetTotal,
+        totalCogs,
+        paidAmount: paidInit,
+        cashbox: resolvedCashbox,
+        actor: actorName
+      });
+      await ErpDataService.persistJournalPayloads(salesJournals).catch(() => {});
+
       await ErpDataService.logAudit(
         userProfile?.username || 'sales',
         'CREATE_INVOICE',
@@ -498,6 +524,23 @@ export const SalesModuleView: React.FC = () => {
         ErpDataService.upsertDocument('invoice_payments', `PAY-${now}`, payDoc),
         ErpDataService.upsertDocument('movements', `MOV-${now + 1}`, tm)
       ]);
+
+      const cashCode = resolveCashAccountCode(targetCashbox, payingInvoice.currency);
+      const payJournal = createBalancedJournalPayload({
+        entryDate: new Date(now).toISOString().split('T')[0],
+        sourceType: 'CUSTOMER_PAYMENT',
+        sourceDocId: now,
+        sourceDocNo: payingInvoice.invoiceNo,
+        description: `تحصيل دفعة من العميل ${payingInvoice.customerName} في ${targetCashbox}`,
+        currency: payingInvoice.currency,
+        lines: [
+          { accountCode: cashCode, debit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: targetCashbox, memo: `وارد خزنة ${targetCashbox}` },
+          { accountCode: '1130', credit: amt, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: payingInvoice.customerName, memo: `تخفيض ذمة العميل ${payingInvoice.customerName}` }
+        ],
+        createdBy: actorName,
+        idempotencyKey: `JRN-PAY-${now}-${payingInvoice.invoiceNo}`
+      });
+      await ErpDataService.persistJournalPayload(payJournal).catch(() => {});
 
       await ErpDataService.logAudit(
         userProfile?.username || 'treasury',
@@ -619,6 +662,47 @@ export const SalesModuleView: React.FC = () => {
           };
           await ErpDataService.upsertDocument('movements', `MOV-${revTs}`, revMov);
           reversedTotal += amt;
+        }
+      }
+
+      const invTotal = Number(inv.total || 0);
+      if (invTotal > 0.001) {
+        const cancelInvJournal = createBalancedJournalPayload({
+          entryDate: new Date(now).toISOString().split('T')[0],
+          sourceType: 'INVOICE_CANCEL',
+          sourceDocId: Number(inv.id),
+          sourceDocNo: inv.invoiceNo,
+          description: `عكس إيراد فاتورة ملغاة ${inv.invoiceNo}`,
+          currency: inv.currency || 'SDG',
+          lines: [
+            { accountCode: '4100', debit: invTotal, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: inv.customerName, memo: `إلغاء إيراد ${inv.invoiceNo}` },
+            { accountCode: '1130', credit: invTotal, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: inv.customerName, memo: `إلغاء ذمة ${inv.invoiceNo}` }
+          ],
+          createdBy: actorName,
+          idempotencyKey: `JRN-CANCEL-INV-${inv.invoiceNo}`
+        });
+        await ErpDataService.persistJournalPayload(cancelInvJournal).catch(() => {});
+      }
+      for (const p of linkedPays) {
+        const amt = Math.abs(Number(p.amount || 0));
+        if (amt > 0.001 && p.cashbox) {
+          const cur = (p.currency || inv.currency || 'SDG') as CurrencyCode;
+          const cashCode = resolveCashAccountCode(p.cashbox, cur);
+          const cancelPayJournal = createBalancedJournalPayload({
+            entryDate: new Date(now).toISOString().split('T')[0],
+            sourceType: 'INVOICE_CANCEL',
+            sourceDocId: Number(p.id),
+            sourceDocNo: inv.invoiceNo,
+            description: `رد دفعة نقدية لإلغاء الفاتورة ${inv.invoiceNo}`,
+            currency: cur,
+            lines: [
+              { accountCode: '1130', debit: amt, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: inv.customerName, memo: 'تسوية ذمة عميل عند الإلغاء' },
+              { accountCode: cashCode, credit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: p.cashbox, memo: `صرف استرداد من ${p.cashbox}` }
+            ],
+            createdBy: actorName,
+            idempotencyKey: `JRN-CANCEL-PAY-${p.id}`
+          });
+          await ErpDataService.persistJournalPayload(cancelPayJournal).catch(() => {});
         }
       }
 

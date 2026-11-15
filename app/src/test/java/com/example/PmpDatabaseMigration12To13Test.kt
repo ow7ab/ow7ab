@@ -43,7 +43,7 @@ class PmpDatabaseMigration12To13Test {
         helper.close()
 
         val db = Room.databaseBuilder(context, PmpDatabase::class.java, dbName)
-            .addMigrations(PmpDatabase.MIGRATION_11_12, PmpDatabase.MIGRATION_12_13)
+            .addMigrations(PmpDatabase.MIGRATION_11_12, PmpDatabase.MIGRATION_12_13, PmpDatabase.MIGRATION_13_14)
             .allowMainThreadQueries()
             .build()
         migratedDb = db

@@ -203,7 +203,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
       labelAr: 'التقارير',
       labelEn: 'Reports',
       icon: <BarChart3 className="w-4 h-4" />,
-      visible: canAccessModule('التقارير')
+      visible: canAccessModule('التقارير') || canAccessModule('المحاسبة')
     },
     {
       id: 'SETTINGS',

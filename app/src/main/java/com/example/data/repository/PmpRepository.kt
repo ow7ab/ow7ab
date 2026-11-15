@@ -16,6 +16,7 @@ class PmpRepository(
 
     fun getDao(): PmpDao = dao
     fun getErpInventoryDao(): ErpInventoryDao? = database?.erpInventoryDao()
+    fun getErpAccountingDao(): ErpAccountingDao? = database?.erpAccountingDao()
     val inventoryEngine: com.example.domain.inventory.InventoryMovementEngine? by lazy {
         database?.let { com.example.domain.inventory.InventoryMovementEngine(it) }
     }
@@ -23,6 +24,9 @@ class PmpRepository(
         val db = database ?: return@lazy null
         val inv = inventoryEngine ?: return@lazy null
         com.example.domain.inventory.ProductionAndProcurementEngine(db, inv)
+    }
+    val accountingEngine: com.example.domain.accounting.AccountingLedgerEngine? by lazy {
+        database?.let { com.example.domain.accounting.AccountingLedgerEngine(it) }
     }
 
     suspend fun <T> runInTransaction(
@@ -111,6 +115,14 @@ class PmpRepository(
         getErpInventoryDao()?.getAllProductionOrders() ?: kotlinx.coroutines.flow.flowOf(emptyList())
     fun getQcInspections(): Flow<List<QcInspectionEntity>> =
         getErpInventoryDao()?.getAllQcInspections() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+
+    // --- Phase 4 Double-Entry General Ledger Reactive Streams ---
+    fun getAccountingAccounts(): Flow<List<ChartAccountEntity>> =
+        getErpAccountingDao()?.getAllAccounts() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getJournalEntries(): Flow<List<JournalEntryEntity>> =
+        getErpAccountingDao()?.getAllJournalEntries() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getJournalLines(): Flow<List<JournalLineEntity>> =
+        getErpAccountingDao()?.getAllJournalLines() ?: kotlinx.coroutines.flow.flowOf(emptyList())
 
     suspend fun addCashbox(name: String, user: String): Long {
         val trimmed = name.trim()
@@ -239,18 +251,18 @@ class PmpRepository(
         val safeRef = reference.trim().ifBlank { "REC-${System.currentTimeMillis() % 1000000}" }
         val safeDesc = description.trim().ifBlank { "حركة $direction نقدية في $cashbox" }
 
-        val id = dao.insertMovement(
-            MovementEntity(
-                txDate = date,
-                cashbox = cashbox,
-                currency = currency,
-                direction = direction,
-                amount = amount,
-                description = safeDesc,
-                reference = safeRef,
-                createdBy = user
-            )
+        val movementEntity = MovementEntity(
+            txDate = date,
+            cashbox = cashbox,
+            currency = currency,
+            direction = direction,
+            amount = amount,
+            description = safeDesc,
+            reference = safeRef,
+            createdBy = user
         )
+        val id = dao.insertMovement(movementEntity)
+        accountingEngine?.postTreasuryMovementJournalInternal(movementEntity.copy(id = id))
         dao.insertAuditLog(
             AuditLogEntity(
                 username = user,
@@ -353,6 +365,16 @@ class PmpRepository(
                 createdBy = user
             )
         )
+        accountingEngine?.postCustomerPaymentJournalInternal(
+            paymentId = if (lastPaymentId > 0L) lastPaymentId else movId,
+            referenceDocNo = ref,
+            payDate = date,
+            customerName = customerName,
+            cashbox = cashbox,
+            currency = currency,
+            amount = amount,
+            actor = user
+        )
 
         dao.insertAuditLog(
             AuditLogEntity(
@@ -427,23 +449,23 @@ class PmpRepository(
         )
 
         // 3. Record Transfer Log
-        val transferId = dao.insertTransfer(
-            TransferEntity(
-                reference = reference.trim(),
-                txDate = date,
-                sourceCashbox = sourceCashbox,
-                destinationCashbox = destinationCashbox,
-                sourceCurrency = sourceCurrency,
-                destinationCurrency = destinationCurrency,
-                sourceAmount = sourceAmount,
-                rate = rate,
-                destinationAmount = destinationAmount,
-                description = fullDescription.trim(),
-                halfaInvoiceId = halfaInvoiceId,
-                halfaAmount = halfaAmount,
-                createdBy = user
-            )
+        val transferEntity = TransferEntity(
+            reference = reference.trim(),
+            txDate = date,
+            sourceCashbox = sourceCashbox,
+            destinationCashbox = destinationCashbox,
+            sourceCurrency = sourceCurrency,
+            destinationCurrency = destinationCurrency,
+            sourceAmount = sourceAmount,
+            rate = rate,
+            destinationAmount = destinationAmount,
+            description = fullDescription.trim(),
+            halfaInvoiceId = halfaInvoiceId,
+            halfaAmount = halfaAmount,
+            createdBy = user
         )
+        val transferId = dao.insertTransfer(transferEntity)
+        accountingEngine?.postTreasuryTransferJournalInternal(transferEntity.copy(id = transferId))
 
         dao.insertAuditLog(
             AuditLogEntity(
@@ -693,6 +715,23 @@ class PmpRepository(
             }
         }
 
+        val productsById = dao.getProductsDirect().associateBy { it.id }
+        val totalCogs = updatedItems.sumOf { item ->
+            val pid = item.productId
+            val prodCost = if (pid != null) (productsById[pid]?.purchasePrice ?: 0.0).coerceAtLeast(0.0) else 0.0
+            item.quantity * prodCost
+        }
+        accountingEngine?.postSalesInvoiceJournalInternal(
+            invoiceId = invoiceId,
+            invoiceNo = invoiceNumber,
+            invoiceDate = date,
+            customerName = cleanCustomerName,
+            currency = currency,
+            totalRevenue = total,
+            totalCogs = totalCogs,
+            actor = user
+        )
+
         // Handle instant payment if specified
         if (!paymentCashbox.isNullOrBlank() && paymentAmount != null && paymentAmount > 0) {
             val actualPay = paymentAmount.coerceAtMost(total)
@@ -718,6 +757,16 @@ class PmpRepository(
                     reference = "INV:$invoiceNumber:P$payId",
                     createdBy = user
                 )
+            )
+            accountingEngine?.postCustomerPaymentJournalInternal(
+                paymentId = payId,
+                referenceDocNo = invoiceNumber,
+                payDate = date,
+                customerName = cleanCustomerName,
+                cashbox = paymentCashbox,
+                currency = cleanCurrency,
+                amount = actualPay,
+                actor = user
             )
         }
 
@@ -788,6 +837,16 @@ class PmpRepository(
                 createdBy = user
             )
         )
+        accountingEngine?.postCustomerPaymentJournalInternal(
+            paymentId = payId,
+            referenceDocNo = invoiceNo,
+            payDate = date,
+            customerName = customerName,
+            cashbox = cashbox,
+            currency = cleanCurrency,
+            amount = amount,
+            actor = user
+        )
 
         dao.insertAuditLog(
             AuditLogEntity(
@@ -844,8 +903,10 @@ class PmpRepository(
         // 3. القيود العكسية للخزينة والمدفوعات (Compensating Financial Movements): عكس أي دفعات مسجلة على الفاتورة في الخزنة
         val invoicePayments = dao.getInvoicePaymentsByInvoiceIdDirect(invoiceId)
         var reversedPaymentsTotal = 0.0
+        val cancelledPayments = mutableListOf<InvoicePaymentEntity>()
         for (payment in invoicePayments) {
             if (payment.status == "active" && payment.amount > 0.0) {
+                cancelledPayments.add(payment)
                 dao.updateInvoicePayment(
                     payment.copy(
                         status = "cancelled",
@@ -869,6 +930,13 @@ class PmpRepository(
                 reversedPaymentsTotal += payment.amount
             }
         }
+
+        accountingEngine?.postInvoiceCancelJournalInternal(
+            invoice = invoice,
+            reversedPayments = cancelledPayments,
+            reason = cleanReason,
+            actor = user
+        )
 
         dao.insertAuditLog(
             AuditLogEntity(

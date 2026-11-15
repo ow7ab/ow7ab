@@ -26,9 +26,10 @@ import {
 } from '../../types/erp';
 import { ErpDataService } from '../../services/ErpDataService';
 import { ReportExporter } from '../../services/ReportExporter';
+import { AccountingModuleView } from '../modules/AccountingModuleView';
 import { useLanguage } from '../../context/LanguageContext';
 
-type ReportTab = 'المبيعات' | 'الخزنة' | 'المخزون' | 'المديونيات' | 'سجل الرقابة';
+type ReportTab = 'المبيعات' | 'الخزنة' | 'المخزون' | 'المديونيات' | 'دفتر الأستاذ' | 'القوائم المالية' | 'سجل الرقابة';
 
 export const ReportsCenterView: React.FC = () => {
   const { language } = useLanguage();
@@ -348,6 +349,8 @@ export const ReportsCenterView: React.FC = () => {
           { id: 'الخزنة' as const, label: 'تقرير الخزنة والسيولة', icon: <Wallet className="w-4 h-4" /> },
           { id: 'المخزون' as const, label: 'تقرير جرد المخزون', icon: <Package className="w-4 h-4" /> },
           { id: 'المديونيات' as const, label: 'كشف حساب عميل / المديونيات', icon: <Users className="w-4 h-4" /> },
+          { id: 'دفتر الأستاذ' as const, label: 'دفتر الأستاذ والقيود المزدوجة', icon: <FileText className="w-4 h-4" /> },
+          { id: 'القوائم المالية' as const, label: 'القوائم المالية والتسوية', icon: <FileText className="w-4 h-4" /> },
           { id: 'سجل الرقابة' as const, label: 'سجل الرقابة والعمليات', icon: <ShieldCheck className="w-4 h-4" /> }
         ].map((tab) => (
           <button
@@ -431,48 +434,54 @@ export const ReportsCenterView: React.FC = () => {
         </GlassCard>
       )}
 
-      {/* Active Report Table */}
-      <GlassCard className="p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-theme pb-3">
-          <div>
-            <h3 className="text-base font-black text-theme-primary">{reportPayload.title}</h3>
-            <p className="text-xs text-theme-secondary mt-0.5">{reportPayload.subtitle}</p>
+      {/* Phase 4 Accounting Views OR Standard Report Table */}
+      {selectedReport === 'دفتر الأستاذ' ? (
+        <AccountingModuleView initialMode="LEDGER" />
+      ) : selectedReport === 'القوائم المالية' ? (
+        <AccountingModuleView initialMode="STATEMENTS" />
+      ) : (
+        <GlassCard className="p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-theme pb-3">
+            <div>
+              <h3 className="text-base font-black text-theme-primary">{reportPayload.title}</h3>
+              <p className="text-xs text-theme-secondary mt-0.5">{reportPayload.subtitle}</p>
+            </div>
+            <GlassBadge variant="cyan">{reportPayload.rows.length} سجل</GlassBadge>
           </div>
-          <GlassBadge variant="cyan">{reportPayload.rows.length} سجل</GlassBadge>
-        </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs text-right">
-            <thead>
-              <tr className="border-b border-theme text-theme-muted">
-                {reportPayload.headers.map((h, i) => (
-                  <th key={i} className="py-3 px-3">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {reportPayload.rows.map((row, rIdx) => (
-                <tr key={rIdx} className="hover:bg-white/[0.02]">
-                  {row.map((cell, cIdx) => (
-                    <td key={cIdx} className="py-2.5 px-3 text-theme-primary">
-                      {cell}
-                    </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs text-right">
+              <thead>
+                <tr className="border-b border-theme text-theme-muted">
+                  {reportPayload.headers.map((h, i) => (
+                    <th key={i} className="py-3 px-3">
+                      {h}
+                    </th>
                   ))}
                 </tr>
-              ))}
-              {reportPayload.rows.length === 0 && (
-                <tr>
-                  <td colSpan={reportPayload.headers.length} className="py-8 text-center text-theme-muted">
-                    لا توجد بيانات مسجلة في هذا التقرير حالياً
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </GlassCard>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {reportPayload.rows.map((row, rIdx) => (
+                  <tr key={rIdx} className="hover:bg-white/[0.02]">
+                    {row.map((cell, cIdx) => (
+                      <td key={cIdx} className="py-2.5 px-3 text-theme-primary">
+                        {cell}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                {reportPayload.rows.length === 0 && (
+                  <tr>
+                    <td colSpan={reportPayload.headers.length} className="py-8 text-center text-theme-muted">
+                      لا توجد بيانات مسجلة في هذا التقرير حالياً
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </GlassCard>
+      )}
     </div>
   );
 };

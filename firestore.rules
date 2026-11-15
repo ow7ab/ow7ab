@@ -49,6 +49,7 @@ service cloud.firestore {
         'lab_formulations', 'formulations', 'paint_batches', 'chemical_safety',
         'purchase_orders', 'purchase_receipts', 'goods_receipts', 'production_orders', 'qc_inspections', 'fg_receipts', 'sales_deliveries',
         'inventory_movements', 'warehouse_stock_balances', 'warehouse_transfers', 'warehouse_transfer_items', 'packaging_rules', 'stock_batches',
+        'accounting_accounts', 'journal_entries', 'journal_lines',
         'deleted_records', 'system_metadata', 'system_config', 'app_updates',
         'permission_audit_logs', 'config'
       ];
@@ -181,7 +182,11 @@ service cloud.firestore {
     }
 
     function isAppendOnlyMovementCollection(col) {
-      return col == 'inventory_movements';
+      return col in ['inventory_movements', 'journal_entries'];
+    }
+
+    function isImmutableJournalLineCollection(col) {
+      return col == 'journal_lines';
     }
 
     function isProtectedTombstoneCollection(col) {
@@ -238,6 +243,19 @@ service cloud.firestore {
         (col != 'user_accounts' || (
           (!('username' in d) || isNonEmptyString(d.username, 120)) &&
           (!('active' in d) || d.active is bool)
+        )) &&
+        (col != 'accounting_accounts' || (
+          (!('accountCode' in d) || isNonEmptyString(d.accountCode, 32)) &&
+          (!('nameAr' in d) || isNonEmptyString(d.nameAr, 160))
+        )) &&
+        (col != 'journal_entries' || (
+          (!('totalDebit' in d) || (d.totalDebit is number && d.totalDebit >= 0)) &&
+          (!('totalCredit' in d) || (d.totalCredit is number && d.totalCredit >= 0)) &&
+          (!('totalDebit' in d) || !('totalCredit' in d) || (d.totalDebit - d.totalCredit < 0.001 && d.totalCredit - d.totalDebit < 0.001))
+        )) &&
+        (col != 'journal_lines' || (
+          (!('debit' in d) || (d.debit is number && d.debit >= 0)) &&
+          (!('credit' in d) || (d.credit is number && d.credit >= 0))
         ));
     }
 
@@ -251,14 +269,14 @@ service cloud.firestore {
     match /erp_clusters/{clusterCode}/{collectionName}/{docId} {
       allow get, list: if isValidId(clusterCode) && isAllowedErpCollection(collectionName);
       allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidErpDocWrite(collectionName);
-      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && isValidId(docId) && isValidErpDocWrite(collectionName) && (!isAppendOnlyMovementCollection(collectionName) || (request.resource.data.status == 'REVERSED' && resource.data.status == 'POSTED' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'recordVersion', 'updatedAt', 'serverUpdatedAt', 'serverUpdatedBy'])));
-      allow delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && !isAppendOnlyMovementCollection(collectionName) && (!isProtectedTombstoneCollection(collectionName) || isSignedIn() || clusterCode == 'PMP-ERP-V16-CLUSTER') && isValidId(docId);
+      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && !isImmutableJournalLineCollection(collectionName) && isValidId(docId) && isValidErpDocWrite(collectionName) && (!isAppendOnlyMovementCollection(collectionName) || (request.resource.data.status == 'REVERSED' && resource.data.status == 'POSTED' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reversedByEntryNo', 'reversalReason', 'recordVersion', 'updatedAt', 'serverUpdatedAt', 'serverUpdatedBy'])));
+      allow delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && !isAppendOnlyMovementCollection(collectionName) && !isImmutableJournalLineCollection(collectionName) && (!isProtectedTombstoneCollection(collectionName) || isSignedIn() || clusterCode == 'PMP-ERP-V16-CLUSTER') && isValidId(docId);
     }
 
     match /erp_clusters/{clusterCode}/{collectionName}/{docId}/{subCollection}/{subDocId} {
       allow get, list: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && isValidId(docId);
       allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidId(subDocId) && isReasonablePayload();
-      allow update, delete: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && !isAppendOnlyMovementCollection(collectionName) && isValidId(docId) && isValidId(subDocId) && isReasonablePayload();
+      allow update, delete: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && !isAppendOnlyMovementCollection(collectionName) && !isImmutableJournalLineCollection(collectionName) && isValidId(docId) && isValidId(subDocId) && isReasonablePayload();
     }
   }
 }

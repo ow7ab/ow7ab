@@ -28,7 +28,10 @@ import {
   validateTransferRoute,
   canApproveTransfer,
   postMovementInState,
-  reverseMovementInState
+  reverseMovementInState,
+  buildPurchaseReceiptJournalPayload,
+  buildProductionIssueJournalPayload,
+  buildQcFinishedGoodsJournalPayload
 } from '../../services/ErpDataService';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import {
@@ -211,6 +214,20 @@ export const WebProcurementGrnPanel: React.FC<{
 
       await ErpDataService.saveRecord('purchase_receipts', receipt.syncUuid, receipt);
       await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
+
+      const grnJournal = buildPurchaseReceiptJournalPayload({
+        grnSyncUuid: receipt.syncUuid,
+        grnNo: receipt.grnNo,
+        receiptDate: receipt.receiptDate,
+        supplierName: receipt.supplierName,
+        materialName: receipt.materialName,
+        unit: receipt.unit,
+        acceptedQty: receipt.acceptedQty,
+        unitCost: receipt.unitCost,
+        currency: receipt.currency,
+        performedBy: actor
+      });
+      await ErpDataService.persistJournalPayload(grnJournal).catch(() => {});
 
       if (receipt.acceptedQty > 0) {
         const fm: FactoryMove = {
@@ -617,6 +634,21 @@ export const WebProductionOrderQcPanel: React.FC<{
       );
       await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
       await ErpDataService.saveRecord('production_orders', updatedOrder.syncUuid, updatedOrder);
+
+      const unitCostEgp = Number(mat.unitCostEgp || 0);
+      const netUsedQty = Math.max(0, (Number(issueQty) || 0) - (Number(returnQty) || 0) - (Number(wasteQty) || 0));
+      const issueJournal = buildProductionIssueJournalPayload({
+        orderSyncUuid: updatedOrder.syncUuid,
+        orderNo: updatedOrder.orderNo,
+        orderDate: updatedOrder.orderDate,
+        productName: updatedOrder.productName,
+        netIssuedCost: netUsedQty * unitCostEgp,
+        wasteCost: (Number(wasteQty) || 0) * unitCostEgp,
+        actor,
+        currency: 'EGP'
+      });
+      await ErpDataService.persistJournalPayload(issueJournal).catch(() => {});
+
       await ErpDataService.logAudit(actor, 'ISSUE_PRODUCTION_MATERIALS', `صرف ${issueQty} ${mat.unit} من ${mat.name} لأمر ${updatedOrder.orderNo}`);
       onNotice?.('ok', `تم صرف المواد الخام لأمر ${updatedOrder.orderNo} وتحديث رصيد مخزن المواد الخام`);
       setOrderToIssue(null);
@@ -664,6 +696,23 @@ export const WebProductionOrderQcPanel: React.FC<{
       await ErpDataService.saveRecord('qc_inspections', qc.syncUuid, qc);
       await ErpDataService.saveRecord('production_orders', updatedOrder.syncUuid, updatedOrder);
       await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
+
+      if (qc.postedToStock) {
+        const matchedProd = products.find((p) => Number(p.id) === Number(matchingProductId));
+        const unitCost = Number(matchedProd?.purchasePrice || matchedProd?.costPrice || formula?.costPerKg || 0);
+        const fgJournal = buildQcFinishedGoodsJournalPayload({
+          qcSyncUuid: qc.syncUuid,
+          qcNo: qc.qcNo,
+          orderNo: updatedOrder.orderNo,
+          productName: updatedOrder.productName,
+          producedFullCartons: updatedOrder.producedFullCartons,
+          fgTotalCost: updatedOrder.producedFullCartons * unitCost,
+          inspectorName: actor,
+          currency: 'EGP'
+        });
+        await ErpDataService.persistJournalPayload(fgJournal).catch(() => {});
+      }
+
       await ErpDataService.logAudit(
         actor,
         'QC_INSPECTION_GATE',

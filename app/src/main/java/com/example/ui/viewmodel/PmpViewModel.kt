@@ -365,6 +365,22 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    // --- Phase 4 Double-Entry General Ledger Reactive Flows ---
+    val accountingAccounts = repository.getAccountingAccounts()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val journalEntries = repository.getJournalEntries()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val journalLines = repository.getJournalLines()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
     val halfaInvoices = repository.getHalfaInvoices()
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in halfaInvoices flow", e)
@@ -4751,6 +4767,63 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     postMessage("تم إنشاء قيد عكسي ${it.documentNo} مع الاحتفاظ بالسجل الأصلي للتدقيق")
                     persistAndSyncToServer()
                 }.onFailure { postMessage(it.message ?: "تعذر عكس الحركة", isError = true) }
+        }
+    }
+
+    // --- Phase 4 Double-Entry General Ledger Actions ---
+
+    fun postManualJournalEntry(
+        debitAccountCode: String,
+        creditAccountCode: String,
+        amount: Double,
+        currency: String,
+        description: String,
+        sourceType: String = "MANUAL_ADJUSTMENT"
+    ) {
+        if (!checkOnlineBeforeTransaction("ترحيل قيد يومية محاسبي")) return
+        viewModelScope.launch {
+            val accEng = repository.accountingEngine ?: return@launch
+            val actor = resolveUserActor("المحاسب")
+            accEng.postJournalEntry(
+                com.example.domain.accounting.JournalPostRequest(
+                    sourceType = sourceType,
+                    description = description,
+                    currency = currency,
+                    lines = listOf(
+                        com.example.domain.accounting.JournalLineInput(
+                            accountCode = debitAccountCode,
+                            debit = amount,
+                            memo = description
+                        ),
+                        com.example.domain.accounting.JournalLineInput(
+                            accountCode = creditAccountCode,
+                            credit = amount,
+                            memo = description
+                        )
+                    ),
+                    createdBy = actor,
+                    approvedBy = actor
+                )
+            ).onSuccess { (entry, _) ->
+                postMessage("تم ترحيل القيد المزدوج المتوازن ${entry.entryNo} (${entry.totalDebit} ${entry.currency})")
+                persistAndSyncToServer()
+            }.onFailure { err ->
+                postMessage(err.message ?: "تعذر ترحيل القيد المحاسبي", isError = true)
+            }
+        }
+    }
+
+    fun reverseAccountingJournal(entryId: Long, reason: String) {
+        if (!checkOnlineBeforeTransaction("عكس قيد يومية محاسبي")) return
+        viewModelScope.launch {
+            val accEng = repository.accountingEngine ?: return@launch
+            accEng.reverseJournalEntry(entryId, reason, resolveUserActor("المدير"))
+                .onSuccess { (rev, _) ->
+                    postMessage("تم إنشاء القيد العكسي ${rev.entryNo} مع حفظ القيد الأصلي للتدقيق")
+                    persistAndSyncToServer()
+                }.onFailure { err ->
+                    postMessage(err.message ?: "تعذر عكس القيد المحاسبي", isError = true)
+                }
         }
     }
 }

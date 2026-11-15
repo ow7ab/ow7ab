@@ -46,15 +46,19 @@ import kotlinx.coroutines.sync.withLock
         SyncOutboxEntity::class,
         PurchaseReceiptEntity::class,
         ProductionOrderEntity::class,
-        QcInspectionEntity::class
+        QcInspectionEntity::class,
+        ChartAccountEntity::class,
+        JournalEntryEntity::class,
+        JournalLineEntity::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
 
     abstract fun pmpDao(): PmpDao
     abstract fun erpInventoryDao(): ErpInventoryDao
+    abstract fun erpAccountingDao(): ErpAccountingDao
 
     companion object {
         @Volatile
@@ -939,6 +943,134 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private fun upgradeSchemaToV14Accounting(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `accounting_accounts` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `accountCode` TEXT NOT NULL,
+                    `nameAr` TEXT NOT NULL,
+                    `nameEn` TEXT NOT NULL,
+                    `accountType` TEXT NOT NULL,
+                    `normalSide` TEXT NOT NULL,
+                    `parentCode` TEXT NOT NULL,
+                    `currencyHint` TEXT NOT NULL,
+                    `isSystemAccount` INTEGER NOT NULL,
+                    `active` INTEGER NOT NULL,
+                    `recordVersion` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_acc_code` ON `accounting_accounts` (`accountCode`)")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_acc_uuid` ON `accounting_accounts` (`syncUuid`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `journal_entries` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `entryNo` TEXT NOT NULL,
+                    `entryDate` TEXT NOT NULL,
+                    `sourceType` TEXT NOT NULL,
+                    `sourceDocId` INTEGER,
+                    `sourceDocNo` TEXT NOT NULL,
+                    `description` TEXT NOT NULL,
+                    `currency` TEXT NOT NULL,
+                    `fxRateToUsd` REAL NOT NULL,
+                    `fxRateToSdg` REAL NOT NULL,
+                    `totalDebit` REAL NOT NULL,
+                    `totalCredit` REAL NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `reversedEntryId` INTEGER,
+                    `reversedByEntryNo` TEXT NOT NULL,
+                    `reversalReason` TEXT NOT NULL,
+                    `idempotencyKey` TEXT NOT NULL,
+                    `createdBy` TEXT NOT NULL,
+                    `approvedBy` TEXT NOT NULL,
+                    `deviceId` TEXT NOT NULL,
+                    `recordVersion` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_jrn_uuid` ON `journal_entries` (`syncUuid`)")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_jrn_no` ON `journal_entries` (`entryNo`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_jrn_idemp` ON `journal_entries` (`idempotencyKey`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `journal_lines` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `journalEntryId` INTEGER NOT NULL,
+                    `journalEntryUuid` TEXT NOT NULL,
+                    `lineOrder` INTEGER NOT NULL,
+                    `accountCode` TEXT NOT NULL,
+                    `accountName` TEXT NOT NULL,
+                    `accountType` TEXT NOT NULL,
+                    `debit` REAL NOT NULL,
+                    `credit` REAL NOT NULL,
+                    `currency` TEXT NOT NULL,
+                    `costCenter` TEXT NOT NULL,
+                    `partyType` TEXT NOT NULL,
+                    `partyName` TEXT NOT NULL,
+                    `memo` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_jln_entry_id` ON `journal_lines` (`journalEntryId`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_jln_acc_code` ON `journal_lines` (`accountCode`)")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_jln_uuid` ON `journal_lines` (`syncUuid`)")
+
+            // Seed canonical PMP Industrial ERP Chart of Accounts idempotently
+            val now = System.currentTimeMillis()
+            val seedRows = listOf(
+                arrayOf("ACC-1110", "1110", "صندوق النقدية - السودان (SDG)", "Cashbox Sudan SDG", "ASSET", "DEBIT", "1100", "SDG"),
+                arrayOf("ACC-1111", "1111", "صندوق النقدية - مصر (EGP)", "Cashbox Egypt EGP", "ASSET", "DEBIT", "1100", "EGP"),
+                arrayOf("ACC-1112", "1112", "صندوق النقدية - الدولار (USD)", "Cashbox USD", "ASSET", "DEBIT", "1100", "USD"),
+                arrayOf("ACC-1115", "1115", "خزائن وعهد الفروع (حلفا/عطبرة)", "Branch Cashboxes", "ASSET", "DEBIT", "1100", "ALL"),
+                arrayOf("ACC-1120", "1120", "البنوك والتحويلات الوسيطة والعملات", "Banks & FX Clearing", "ASSET", "DEBIT", "1100", "ALL"),
+                arrayOf("ACC-1130", "1130", "ذمم العملاء المدينة (المبيعات الآجلة)", "Accounts Receivable", "ASSET", "DEBIT", "1100", "ALL"),
+                arrayOf("ACC-1141", "1141", "مخزون المواد الخام والتعبئة", "Raw Materials Inventory", "ASSET", "DEBIT", "1140", "ALL"),
+                arrayOf("ACC-1142", "1142", "مخزون الإنتاج تحت التشغيل (WIP)", "Work In Progress Inventory", "ASSET", "DEBIT", "1140", "ALL"),
+                arrayOf("ACC-1143", "1143", "مخزون الإنتاج التام والمبيعات", "Finished Goods Inventory", "ASSET", "DEBIT", "1140", "ALL"),
+                arrayOf("ACC-1210", "1210", "الآلات ومعدات الخلط والتصنيع", "Factory Machinery & Equipment", "ASSET", "DEBIT", "1200", "ALL"),
+                arrayOf("ACC-2110", "2110", "ذمم الموردين الدائنة (المشتريات)", "Accounts Payable Suppliers", "LIABILITY", "CREDIT", "2100", "ALL"),
+                arrayOf("ACC-2120", "2120", "التزامات ومصروفات مستحقة", "Accrued Liabilities", "LIABILITY", "CREDIT", "2100", "ALL"),
+                arrayOf("ACC-3100", "3100", "رأس المال والأرصدة الافتتاحية والأرباح المحتجزة", "Capital & Retained Earnings", "EQUITY", "CREDIT", "3000", "ALL"),
+                arrayOf("ACC-4100", "4100", "إيرادات مبيعات الدهانات والبوهيات", "Paint Sales Revenue", "REVENUE", "CREDIT", "4000", "ALL"),
+                arrayOf("ACC-4200", "4200", "إيرادات أخرى وفروق عملة دائنة", "Other Income & FX Gain", "REVENUE", "CREDIT", "4000", "ALL"),
+                arrayOf("ACC-5100", "5100", "تكلفة البضاعة المباعة (COGS)", "Cost of Goods Sold", "EXPENSE", "DEBIT", "5000", "ALL"),
+                arrayOf("ACC-5200", "5200", "فاقد ومصروفات التصنيع والإنتاج", "Manufacturing Overhead & Waste", "EXPENSE", "DEBIT", "5000", "ALL"),
+                arrayOf("ACC-5300", "5300", "مصروفات التشغيل والعمومية", "Operating & General Expenses", "EXPENSE", "DEBIT", "5000", "ALL")
+            )
+            seedRows.forEach { row ->
+                db.execSQL(
+                    """
+                    INSERT OR IGNORE INTO `accounting_accounts` (
+                        `syncUuid`, `accountCode`, `nameAr`, `nameEn`, `accountType`, `normalSide`,
+                        `parentCode`, `currencyHint`, `isSystemAccount`, `active`, `recordVersion`, `createdAt`, `updatedAt`
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, ?)
+                    """.trimIndent(),
+                    arrayOf<Any>(row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], now, now)
+                )
+            }
+        }
+
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+                upgradeSchemaToV12AndBackfill(db)
+                upgradeSchemaToV13Phase3(db)
+                upgradeSchemaToV14Accounting(db)
+            }
+        }
+
         private val dbCallbackMutex = Mutex()
         private val dbCallbackScope = CoroutineScope(
             SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
@@ -970,7 +1102,8 @@ abstract class PmpDatabase : RoomDatabase() {
                         MIGRATION_9_10,
                         MIGRATION_10_11,
                         MIGRATION_11_12,
-                        MIGRATION_12_13
+                        MIGRATION_12_13,
+                        MIGRATION_13_14
                     )
                     .addCallback(DatabaseCallback(appContext))
                     .build()
@@ -996,6 +1129,7 @@ abstract class PmpDatabase : RoomDatabase() {
                             } else {
                                 seedDefaultPackagingRulesIfEmpty(database.erpInventoryDao())
                             }
+                            seedDefaultChartOfAccountsIfEmpty(database.erpAccountingDao())
                             DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
                         }
                     } catch (t: Throwable) {
@@ -1020,6 +1154,7 @@ abstract class PmpDatabase : RoomDatabase() {
                             DatabaseBackupManager.restoreIfEmpty(appContext, dao)
                             seedDefaultUsersIfEmpty(dao)
                             seedDefaultPackagingRulesIfEmpty(database.erpInventoryDao())
+                            seedDefaultChartOfAccountsIfEmpty(database.erpAccountingDao())
                             DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
                         }
                     } catch (t: Throwable) {
@@ -1143,6 +1278,34 @@ abstract class PmpDatabase : RoomDatabase() {
                             updatedBy = "SYSTEM",
                             updatedAt = now
                         )
+                    )
+                )
+            }
+        }
+
+        private suspend fun seedDefaultChartOfAccountsIfEmpty(accDao: ErpAccountingDao) {
+            if (accDao.getAccountCount() == 0) {
+                val now = System.currentTimeMillis()
+                accDao.upsertAccounts(
+                    listOf(
+                        ChartAccountEntity(syncUuid = "ACC-1110", accountCode = "1110", nameAr = "صندوق النقدية - السودان (SDG)", nameEn = "Cashbox Sudan SDG", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1100", currencyHint = "SDG", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-1111", accountCode = "1111", nameAr = "صندوق النقدية - مصر (EGP)", nameEn = "Cashbox Egypt EGP", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1100", currencyHint = "EGP", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-1112", accountCode = "1112", nameAr = "صندوق النقدية - الدولار (USD)", nameEn = "Cashbox USD", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1100", currencyHint = "USD", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-1115", accountCode = "1115", nameAr = "خزائن وعهد الفروع (حلفا/عطبرة)", nameEn = "Branch Cashboxes", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1100", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-1120", accountCode = "1120", nameAr = "البنوك والتحويلات الوسيطة والعملات", nameEn = "Banks & FX Clearing", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1100", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-1130", accountCode = "1130", nameAr = "ذمم العملاء المدينة (المبيعات الآجلة)", nameEn = "Accounts Receivable", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1100", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-1141", accountCode = "1141", nameAr = "مخزون المواد الخام والتعبئة", nameEn = "Raw Materials Inventory", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1140", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-1142", accountCode = "1142", nameAr = "مخزون الإنتاج تحت التشغيل (WIP)", nameEn = "Work In Progress Inventory", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1140", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-1143", accountCode = "1143", nameAr = "مخزون الإنتاج التام والمبيعات", nameEn = "Finished Goods Inventory", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1140", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-1210", accountCode = "1210", nameAr = "الآلات ومعدات الخلط والتصنيع", nameEn = "Factory Machinery & Equipment", accountType = AccountType.ASSET.name, normalSide = "DEBIT", parentCode = "1200", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-2110", accountCode = "2110", nameAr = "ذمم الموردين الدائنة (المشتريات)", nameEn = "Accounts Payable Suppliers", accountType = AccountType.LIABILITY.name, normalSide = "CREDIT", parentCode = "2100", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-2120", accountCode = "2120", nameAr = "التزامات ومصروفات مستحقة", nameEn = "Accrued Liabilities", accountType = AccountType.LIABILITY.name, normalSide = "CREDIT", parentCode = "2100", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-3100", accountCode = "3100", nameAr = "رأس المال والأرصدة الافتتاحية والأرباح المحتجزة", nameEn = "Capital & Retained Earnings", accountType = AccountType.EQUITY.name, normalSide = "CREDIT", parentCode = "3000", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-4100", accountCode = "4100", nameAr = "إيرادات مبيعات الدهانات والبوهيات", nameEn = "Paint Sales Revenue", accountType = AccountType.REVENUE.name, normalSide = "CREDIT", parentCode = "4000", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-4200", accountCode = "4200", nameAr = "إيرادات أخرى وفروق عملة دائنة", nameEn = "Other Income & FX Gain", accountType = AccountType.REVENUE.name, normalSide = "CREDIT", parentCode = "4000", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-5100", accountCode = "5100", nameAr = "تكلفة البضاعة المباعة (COGS)", nameEn = "Cost of Goods Sold", accountType = AccountType.EXPENSE.name, normalSide = "DEBIT", parentCode = "5000", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-5200", accountCode = "5200", nameAr = "فاقد ومصروفات التصنيع والإنتاج", nameEn = "Manufacturing Overhead & Waste", accountType = AccountType.EXPENSE.name, normalSide = "DEBIT", parentCode = "5000", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-5300", accountCode = "5300", nameAr = "مصروفات التشغيل والعمومية", nameEn = "Operating & General Expenses", accountType = AccountType.EXPENSE.name, normalSide = "DEBIT", parentCode = "5000", currencyHint = "ALL", createdAt = now, updatedAt = now)
                     )
                 )
             }

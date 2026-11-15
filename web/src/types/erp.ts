@@ -785,4 +785,138 @@ export interface QcInspection {
   updatedAt: number;
 }
 
+export type AccountType = 'ASSET' | 'LIABILITY' | 'EQUITY' | 'REVENUE' | 'EXPENSE';
+
+export interface ChartAccount {
+  id?: number;
+  syncUuid: string;
+  accountCode: string;
+  nameAr: string;
+  nameEn: string;
+  accountType: AccountType | string;
+  normalSide: 'DEBIT' | 'CREDIT' | string;
+  parentCode: string;
+  currencyHint: CurrencyCode | 'ALL' | string;
+  isSystem: boolean;
+  active: boolean;
+  recordVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface JournalEntry {
+  id?: number;
+  syncUuid: string;
+  entryNo: string;
+  entryDate: string;
+  sourceType: string;
+  sourceDocId?: number | null;
+  sourceDocNo: string;
+  description: string;
+  currency: CurrencyCode | string;
+  fxRateToUsd: number;
+  fxRateToSdg: number;
+  totalDebit: number;
+  totalCredit: number;
+  status: 'POSTED' | 'REVERSED' | string;
+  reversedEntryId?: number | null;
+  reversedByEntryNo?: string;
+  reversalReason?: string;
+  idempotencyKey: string;
+  createdBy: string;
+  approvedBy: string;
+  recordVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface JournalLine {
+  id?: number;
+  syncUuid: string;
+  journalEntryId: number;
+  journalEntryUuid: string;
+  lineOrder: number;
+  accountCode: string;
+  accountName: string;
+  accountType: AccountType | string;
+  debit: number;
+  credit: number;
+  currency: CurrencyCode | string;
+  costCenter: string;
+  partyType: string;
+  partyName: string;
+  memo: string;
+  createdAt: number;
+}
+
+export interface TrialBalanceRow {
+  accountCode: string;
+  accountName: string;
+  accountType: AccountType | string;
+  normalSide: 'DEBIT' | 'CREDIT' | string;
+  totalDebit: number;
+  totalCredit: number;
+  netDebit: number;
+  netCredit: number;
+  signedBalance: number;
+}
+
+export interface TrialBalanceReport {
+  currency: CurrencyCode | string;
+  rows: TrialBalanceRow[];
+  totalDebit: number;
+  totalCredit: number;
+  isBalanced: boolean;
+}
+
+export interface IncomeStatementReport {
+  currency: CurrencyCode | string;
+  revenueRows: TrialBalanceRow[];
+  cogsRows: TrialBalanceRow[];
+  operatingExpenseRows: TrialBalanceRow[];
+  totalRevenue: number;
+  totalCogs: number;
+  grossProfit: number;
+  totalOperatingExpenses: number;
+  netIncome: number;
+}
+
+export interface BalanceSheetReport {
+  currency: CurrencyCode | string;
+  assetRows: TrialBalanceRow[];
+  liabilityRows: TrialBalanceRow[];
+  equityRows: TrialBalanceRow[];
+  totalAssets: number;
+  totalLiabilities: number;
+  totalEquityBeforeNetIncome: number;
+  currentNetIncome: number;
+  totalLiabilitiesAndEquity: number;
+  isBalanced: boolean;
+  imbalanceDiff: number;
+}
+
+export interface ReconciliationItem {
+  label: string;
+  operationalValue: number;
+  glValue: number;
+  difference: number;
+  status: 'MATCHED' | 'VARIANCE' | string;
+}
+
+export interface CurrencyFxRates {
+  egpToSdg: number;
+  usdToSdg: number;
+}
+
+export interface ConsolidatedFxSummary {
+  baseCurrency: 'SDG';
+  rates: CurrencyFxRates;
+  totalRevenueConsolidated: number;
+  totalExpensesConsolidated: number;
+  netIncomeConsolidated: number;
+  totalAssetsConsolidated: number;
+  totalLiabilitiesConsolidated: number;
+  totalEquityConsolidated: number;
+}
+
 
