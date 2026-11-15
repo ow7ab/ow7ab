@@ -252,6 +252,36 @@ export interface InvoicePayment {
   timestamp?: number;
 }
 
+export type WarehouseClass = 'RAW_MATERIALS' | 'FINISHED_GOODS' | 'SALES';
+
+export type InventoryItemCategory = 'RAW_MATERIAL' | 'PACKAGING' | 'FINISHED_GOOD';
+
+export type InventoryMovementType =
+  | 'PURCHASE_RECEIPT'
+  | 'PRODUCTION_ISSUE'
+  | 'PRODUCTION_RETURN'
+  | 'PRODUCTION_RECEIPT'
+  | 'WAREHOUSE_TRANSFER_OUT'
+  | 'WAREHOUSE_TRANSFER_IN'
+  | 'SALES_ISSUE'
+  | 'CUSTOMER_RETURN'
+  | 'SUPPLIER_RETURN'
+  | 'STOCK_ADJUSTMENT'
+  | 'OPENING_BALANCE'
+  | 'DAMAGED_GOODS'
+  | 'EXPIRED_GOODS';
+
+export type MovementRecordStatus = 'POSTED' | 'REVERSED' | 'PENDING_APPROVAL' | 'REJECTED';
+
+export type WarehouseTransferStatus =
+  | 'DRAFT'
+  | 'PENDING_APPROVAL'
+  | 'APPROVED'
+  | 'IN_TRANSIT'
+  | 'RECEIVED'
+  | 'REJECTED'
+  | 'CANCELLED';
+
 export interface Warehouse {
   id: number;
   name: string;
@@ -259,8 +289,15 @@ export interface Warehouse {
   currency?: CurrencyCode;
   linkedCashbox?: string;
   warehouseType?: 'مبيعات' | 'داخل المصنع/إنتاج' | 'مواد خام' | string;
+  warehouseClass?: WarehouseClass;
   code?: string;
   branch?: string;
+  allowDirectSales?: boolean;
+  allowProductionReceipt?: boolean;
+  syncUuid?: string;
+  updatedAt?: number;
+  recordVersion?: number;
+  deviceId?: string;
   location?: string;
   manager?: string;
 }
@@ -282,6 +319,10 @@ export interface Product {
   paintColor: 'أبيض' | 'ألوان' | 'فضي' | 'ذهبي' | 'ورنيش' | string;
   active: boolean;
   currentStock: number;
+  syncUuid?: string;
+  updatedAt?: number;
+  recordVersion?: number;
+  deviceId?: string;
   // Aliases
   salePriceSdg?: number;
 }
@@ -296,6 +337,10 @@ export interface StockMove {
   kind: 'IN' | 'OUT' | 'SALE' | 'RETURN' | 'RETURN_IN' | 'CANCEL' | 'ADJUST' | string;
   invoiceId?: number | null;
   referenceNo?: string;
+  batchNumber?: string;
+  syncUuid?: string;
+  recordVersion?: number;
+  deviceId?: string;
   note: string;
   createdBy?: string;
   actor?: string;
@@ -308,9 +353,17 @@ export interface FactoryItem {
   name: string;
   unit: string;
   category: 'raw' | 'finished' | 'empty' | 'خامات إنتاج' | 'مواد تعبئة وتغليف' | 'مذيبات ومخففات' | 'إضافات كيميائية' | string;
+  itemCode?: string;
   linkedToEgypt?: boolean;
   defaultCurrency?: CurrencyCode;
   unitCostEgp?: number;
+  minStock?: number;
+  maxStock?: number;
+  batchTrackingRequired?: boolean;
+  syncUuid?: string;
+  updatedAt?: number;
+  recordVersion?: number;
+  deviceId?: string;
   actualBalance?: number;
   reorderLevel?: number;
 }
@@ -336,7 +389,141 @@ export interface FactoryMove {
   actor: string;
   counterparty: string;
   linked: boolean;
+  syncUuid?: string;
+  recordVersion?: number;
+  deviceId?: string;
   createdAt: number;
+}
+
+export interface InventoryMovement {
+  id: number;
+  syncUuid: string;
+  documentNo: string;
+  movementType: InventoryMovementType;
+  warehouseId: number;
+  warehouseCode?: string;
+  warehouseClass: WarehouseClass;
+  itemCategory: InventoryItemCategory;
+  itemId: number;
+  itemCode?: string;
+  itemName: string;
+  quantity: number;
+  signedQuantity: number;
+  unit: string;
+  unitCost: number;
+  totalCost: number;
+  currency: CurrencyCode | string;
+  batchNumber: string;
+  expiryDate?: string;
+  referenceDocType?: string;
+  referenceDocId?: number | null;
+  referenceDocNo?: string;
+  reversedMovementId?: number | null;
+  reason?: string;
+  status: MovementRecordStatus;
+  qcApproved: boolean;
+  idempotencyKey?: string;
+  performedBy: string;
+  approvedBy?: string;
+  deviceId?: string;
+  recordVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WarehouseStockBalance {
+  id?: number;
+  syncUuid: string;
+  warehouseId: number;
+  warehouseClass: WarehouseClass;
+  itemCategory: InventoryItemCategory;
+  itemId: number;
+  itemCode?: string;
+  itemName: string;
+  unit: string;
+  batchNumber: string;
+  expiryDate?: string;
+  onHandQty: number;
+  reservedQty: number;
+  inTransitQty: number;
+  quarantineQty: number;
+  availableQty: number;
+  avgUnitCost: number;
+  currency: CurrencyCode | string;
+  lastMovementUuid?: string;
+  updatedAt: number;
+}
+
+export interface WarehouseTransfer {
+  id: number;
+  syncUuid: string;
+  transferNo: string;
+  transferDate: string;
+  sourceWarehouseId: number;
+  sourceWarehouseName: string;
+  sourceWarehouseClass: WarehouseClass;
+  destinationWarehouseId: number;
+  destinationWarehouseName: string;
+  destinationWarehouseClass: WarehouseClass;
+  status: WarehouseTransferStatus;
+  totalCost: number;
+  currency: CurrencyCode | string;
+  notes?: string;
+  rejectionReason?: string;
+  createdBy: string;
+  reviewedBy?: string;
+  approvedBy?: string;
+  dispatchedBy?: string;
+  receivedBy?: string;
+  dispatchedAt?: number;
+  receivedAt?: number;
+  timelineJson?: string;
+  idempotencyKey?: string;
+  deviceId?: string;
+  recordVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WarehouseTransferItem {
+  id?: number;
+  transferId: number;
+  transferUuid: string;
+  itemCategory: InventoryItemCategory;
+  itemId: number;
+  itemCode?: string;
+  itemName: string;
+  unit: string;
+  requestedQty: number;
+  approvedQty: number;
+  shippedQty: number;
+  receivedQty: number;
+  rejectedQty: number;
+  unitCost: number;
+  totalCost: number;
+  batchNumber: string;
+  qcApprovedRequired: boolean;
+  qcApproved: boolean;
+}
+
+export interface PackagingRule {
+  id?: number;
+  syncUuid: string;
+  weightGrams: number;
+  label: string;
+  cansPerCarton: number;
+  emptyCanItemId?: number | null;
+  lidItemId?: number | null;
+  labelItemId?: number | null;
+  cartonItemId?: number | null;
+  defaultEmptyCanCostEgp: number;
+  defaultLidCostEgp: number;
+  defaultLabelCostEgp: number;
+  defaultCartonBoxCostEgp: number;
+  active: boolean;
+  updatedBy: string;
+  recordVersion: number;
+  updatedAt: number;
 }
 
 export interface HalfaInvoice {

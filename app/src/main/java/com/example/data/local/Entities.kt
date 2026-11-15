@@ -119,11 +119,35 @@ data class WarehouseEntity(
     val active: Boolean = true,
     val currency: String = "SDG", // SDG or EGP
     val linkedCashbox: String = "خزنة السودان",
-    val warehouseType: String = "مبيعات" // مبيعات, داخل المصنع/إنتاج, مواد خام
+    val warehouseType: String = "مبيعات", // مبيعات, داخل المصنع/إنتاج, مواد خام
+    val warehouseClass: String = "SALES", // RAW_MATERIALS, FINISHED_GOODS, SALES
+    val code: String = "",
+    val branch: String = "",
+    val allowDirectSales: Boolean = true,
+    val allowProductionReceipt: Boolean = false,
+    val syncUuid: String = "",
+    val updatedAt: Long = 0L,
+    val recordVersion: Int = 1,
+    val deviceId: String = ""
 )
 
 fun WarehouseEntity.isFactory(): Boolean {
     return name.contains("مصر") || name.contains("المصنع") || name.contains("القاهرة") || currency.equals("EGP", ignoreCase = true)
+}
+
+fun WarehouseEntity.resolveWarehouseClass(): WarehouseClass {
+    val explicit = warehouseClass.trim().uppercase()
+    if (explicit == WarehouseClass.RAW_MATERIALS.name) return WarehouseClass.RAW_MATERIALS
+    if (explicit == WarehouseClass.FINISHED_GOODS.name) return WarehouseClass.FINISHED_GOODS
+    val typeClean = warehouseType.trim()
+    val nameClean = name.trim()
+    return when {
+        typeClean.contains("مواد خام") || typeClean.equals("raw", ignoreCase = true) ||
+            nameClean.contains("المواد الخام") || nameClean.contains("مواد خام") -> WarehouseClass.RAW_MATERIALS
+        typeClean.contains("إنتاج") || typeClean.contains("انتاج") || typeClean.equals("finished", ignoreCase = true) ||
+            nameClean.contains("الإنتاج التام") || nameClean.contains("الانتاج التام") -> WarehouseClass.FINISHED_GOODS
+        else -> WarehouseClass.SALES
+    }
 }
 
 fun WarehouseEntity.resolveCurrency(): String {
@@ -153,7 +177,11 @@ data class ProductEntity(
     val minimumStock: Double = 10.0,
     val packageWeight: String = "900", // 250, 900, جالون, ربع
     val paintColor: String = "أبيض", // أبيض، ألوان، فضي، ذهبي، ورنيش
-    val active: Boolean = true
+    val active: Boolean = true,
+    val syncUuid: String = "",
+    val updatedAt: Long = 0L,
+    val recordVersion: Int = 1,
+    val deviceId: String = ""
 )
 
 fun InvoicePaymentEntity.resolvePaymentCurrency(invoiceCurrency: String = "SDG"): String {
@@ -186,7 +214,11 @@ data class StockMoveEntity(
     val invoiceId: Long? = null,
     val note: String = "",
     val createdBy: String = "المدير",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val batchNumber: String = "",
+    val syncUuid: String = "",
+    val recordVersion: Int = 1,
+    val deviceId: String = ""
 )
 
 @Entity(tableName = "factory_items")
@@ -194,7 +226,16 @@ data class FactoryItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
     val unit: String,
-    val category: String // raw, finished, empty
+    val category: String, // raw, finished, empty
+    val itemCode: String = "",
+    val unitCostEgp: Double = 0.0,
+    val minStock: Double = 0.0,
+    val maxStock: Double = 0.0,
+    val batchTrackingRequired: Boolean = false,
+    val syncUuid: String = "",
+    val updatedAt: Long = 0L,
+    val recordVersion: Int = 1,
+    val deviceId: String = ""
 )
 
 @Entity(tableName = "factory_machines")
@@ -218,7 +259,10 @@ data class FactoryMoveEntity(
     val actor: String = "مهندس الإنتاج",
     val counterparty: String = "",
     val linked: Boolean = false,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val syncUuid: String = "",
+    val recordVersion: Int = 1,
+    val deviceId: String = ""
 )
 
 @Entity(tableName = "halfa_invoices")

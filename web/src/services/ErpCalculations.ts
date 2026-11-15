@@ -195,6 +195,40 @@ export function deduplicateCollectionRecords<T = any>(collectionName: string, it
         key = idPart ? `id:${idPart}` : composite;
         break;
       }
+      case 'inventory_movements': {
+        key = raw.syncUuid
+          ? `uuid:${String(raw.syncUuid).trim()}`
+          : raw.idempotencyKey
+          ? `idemp:${String(raw.idempotencyKey).trim()}`
+          : `doc:${raw._docId ?? raw.id}`;
+        break;
+      }
+      case 'warehouse_stock_balances': {
+        key = raw.syncUuid
+          ? `uuid:${String(raw.syncUuid).trim()}`
+          : `bal:${raw.warehouseId ?? 0}__${raw.itemCategory ?? ''}__${raw.itemId ?? 0}__${String(raw.batchNumber ?? '').trim()}`;
+        break;
+      }
+      case 'warehouse_transfers': {
+        key = raw.transferNo
+          ? `trf:${String(raw.transferNo).trim()}`
+          : raw.syncUuid
+          ? `uuid:${String(raw.syncUuid).trim()}`
+          : `doc:${raw._docId ?? raw.id}`;
+        break;
+      }
+      case 'warehouse_transfer_items': {
+        key = raw.transferUuid
+          ? `whti:${String(raw.transferUuid)}__${raw.itemCategory ?? ''}__${raw.itemId ?? 0}__${String(raw.batchNumber ?? '').trim()}`
+          : `doc:${raw._docId ?? raw.id}`;
+        break;
+      }
+      case 'packaging_rules': {
+        key = raw.weightGrams !== undefined && raw.weightGrams !== null
+          ? `weight:${Number(raw.weightGrams)}`
+          : `uuid:${raw.syncUuid ?? raw._docId}`;
+        break;
+      }
       default: {
         key =
           raw.id !== undefined && raw.id !== null

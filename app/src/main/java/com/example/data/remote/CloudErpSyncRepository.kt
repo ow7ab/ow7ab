@@ -712,7 +712,8 @@ class CloudErpSyncRepository(
         dao: PmpDao,
         isManager: Boolean = true,
         activeUserId: Long? = null,
-        deviceId: String = "DEV-NODE"
+        deviceId: String = "DEV-NODE",
+        invDao: ErpInventoryDao? = null
     ): Result<Int> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
             runCatching {
@@ -1139,6 +1140,7 @@ class CloudErpSyncRepository(
                 val batch = firestore.batch()
                 warehouses.forEach { wh ->
                     val docId = "WH-${wh.id}"
+                    val whClass = wh.resolveWarehouseClass()
                     batch.set(
                         cRef.collection("warehouses").document(docId),
                         mapOf(
@@ -1148,6 +1150,14 @@ class CloudErpSyncRepository(
                             "currency" to wh.currency,
                             "linkedCashbox" to wh.linkedCashbox,
                             "warehouseType" to wh.warehouseType,
+                            "warehouseClass" to whClass.name,
+                            "code" to wh.code.ifBlank { docId },
+                            "branch" to wh.branch,
+                            "allowDirectSales" to (whClass == WarehouseClass.SALES),
+                            "allowProductionReceipt" to (whClass == WarehouseClass.FINISHED_GOODS),
+                            "syncUuid" to wh.syncUuid.ifBlank { "WH-UUID-${wh.id}" },
+                            "recordVersion" to wh.recordVersion,
+                            "updatedAt" to wh.updatedAt,
                             "serverUpdatedBy" to actor,
                             "serverUpdatedAt" to FieldValue.serverTimestamp()
                         ),
@@ -1175,6 +1185,13 @@ class CloudErpSyncRepository(
                             "name" to fi.name,
                             "unit" to fi.unit,
                             "category" to fi.category,
+                            "itemCode" to fi.itemCode.ifBlank { "RAW-${fi.id}" },
+                            "unitCostEgp" to fi.unitCostEgp,
+                            "minStock" to fi.minStock,
+                            "maxStock" to fi.maxStock,
+                            "batchTrackingRequired" to fi.batchTrackingRequired,
+                            "syncUuid" to fi.syncUuid.ifBlank { "FI-UUID-${fi.id}" },
+                            "recordVersion" to fi.recordVersion,
                             "linkedToEgypt" to true,
                             "defaultCurrency" to "EGP",
                             "serverUpdatedBy" to actor,
@@ -1377,6 +1394,14 @@ class CloudErpSyncRepository(
                 batch.commit().await()
             }
 
+            // 10b. Phase 2 Unified Inventory Engine (Packaging Rules, Inventory Movements, Balances, Transfers)
+            val resolvedInvDao = invDao ?: runCatching {
+                PmpDatabase.getDatabase(firestore.app.applicationContext).erpInventoryDao()
+            }.getOrNull()
+            if (resolvedInvDao != null) {
+                syncedCount += pushPhase2InventoryToCloud(cRef, resolvedInvDao, actor)
+            }
+
             // 11. Cluster Server Info & Cross-Network Egypt-Sudan Linking Metadata (Non-blocking)
             runCatching {
                 cRef.collection("server_status").document("cluster_meta").set(
@@ -1435,7 +1460,8 @@ class CloudErpSyncRepository(
         clusterCode: String,
         dao: PmpDao,
         currentActiveUserId: Long? = null,
-        deviceId: String = "DEV-NODE"
+        deviceId: String = "DEV-NODE",
+        invDao: ErpInventoryDao? = null
     ): Result<Int> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
             runCatching {
@@ -1756,13 +1782,23 @@ class CloudErpSyncRepository(
                     return@mapNotNull null
                 }
                 val existing = localWh.firstOrNull { it.name.trim().equals(name, ignoreCase = true) }
+                val whType = doc.getString("warehouseType") ?: existing?.warehouseType ?: "مبيعات"
+                val whClass = WarehouseClass.fromRaw(doc.getString("warehouseClass") ?: whType.ifBlank { name })
                 WarehouseEntity(
                     id = existing?.id ?: remoteId,
                     name = name,
                     active = doc.getBoolean("active") ?: existing?.active ?: true,
                     currency = doc.getString("currency") ?: existing?.currency ?: "SDG",
                     linkedCashbox = doc.getString("linkedCashbox") ?: existing?.linkedCashbox ?: "خزنة السودان",
-                    warehouseType = doc.getString("warehouseType") ?: existing?.warehouseType ?: "مبيعات"
+                    warehouseType = whType,
+                    warehouseClass = whClass.name,
+                    code = doc.getString("code") ?: existing?.code ?: "WH-${existing?.id ?: remoteId}",
+                    branch = doc.getString("branch") ?: existing?.branch ?: "",
+                    allowDirectSales = doc.getBoolean("allowDirectSales") ?: (whClass == WarehouseClass.SALES),
+                    allowProductionReceipt = doc.getBoolean("allowProductionReceipt") ?: (whClass == WarehouseClass.FINISHED_GOODS),
+                    syncUuid = doc.getString("syncUuid") ?: existing?.syncUuid ?: "",
+                    updatedAt = doc.safeLong("updatedAt") ?: existing?.updatedAt ?: 0L,
+                    recordVersion = (doc.safeLong("recordVersion")?.toInt()) ?: existing?.recordVersion ?: 1
                 )
             }.distinctBy { it.name.trim().lowercase() }
             if (restoredWarehouses.isNotEmpty()) {
@@ -1825,7 +1861,14 @@ class CloudErpSyncRepository(
                     id = id,
                     name = name,
                     unit = doc.getString("unit") ?: "كجم",
-                    category = doc.getString("category") ?: "raw"
+                    category = doc.getString("category") ?: "raw",
+                    itemCode = doc.getString("itemCode") ?: "RAW-$id",
+                    unitCostEgp = doc.safeDouble("unitCostEgp") ?: 0.0,
+                    minStock = doc.safeDouble("minStock") ?: 0.0,
+                    maxStock = doc.safeDouble("maxStock") ?: 0.0,
+                    batchTrackingRequired = doc.safeBoolean("batchTrackingRequired") ?: false,
+                    syncUuid = doc.getString("syncUuid") ?: "FI-UUID-$id",
+                    recordVersion = doc.safeLong("recordVersion")?.toInt() ?: 1
                 )
             }
             if (restoredFactoryItems.isNotEmpty()) {
@@ -1996,6 +2039,14 @@ class CloudErpSyncRepository(
                 restoredCount += restoredHalfaInvoices.size
             }
 
+            // 10b. Restore Phase 2 Packaging Rules, Inventory Movements, Balances & Transfers
+            val resolvedInvDao = invDao ?: runCatching {
+                PmpDatabase.getDatabase(firestore.app.applicationContext).erpInventoryDao()
+            }.getOrNull()
+            if (resolvedInvDao != null) {
+                restoredCount += restorePhase2InventoryFromCloud(cRef, resolvedInvDao)
+            }
+
             // Clean any residual duplicates across cashboxes, warehouses, transactions, and user accounts
             runCatching {
                 dao.removeDuplicateCashboxes()
@@ -2024,6 +2075,401 @@ class CloudErpSyncRepository(
         }
     }
 }
+
+    private suspend fun pushPhase2InventoryToCloud(
+        cRef: com.google.firebase.firestore.DocumentReference,
+        invDao: ErpInventoryDao,
+        actor: String
+    ): Int {
+        var count = 0
+        val pkgRules = invDao.getPackagingRulesDirect()
+        if (pkgRules.isNotEmpty()) {
+            val batch = firestore.batch()
+            pkgRules.forEach { rule ->
+                val docId = safeId(rule.syncUuid.ifBlank { "PKG-RULE-${rule.weightGrams}" }, "PKG-RULE-${rule.weightGrams}")
+                batch.set(
+                    cRef.collection("packaging_rules").document(docId),
+                    mapOf(
+                        "id" to rule.id,
+                        "syncUuid" to rule.syncUuid,
+                        "weightGrams" to rule.weightGrams,
+                        "label" to rule.label,
+                        "cansPerCarton" to rule.cansPerCarton,
+                        "defaultEmptyCanCostEgp" to rule.defaultEmptyCanCostEgp,
+                        "defaultLidCostEgp" to rule.defaultLidCostEgp,
+                        "defaultLabelCostEgp" to rule.defaultLabelCostEgp,
+                        "defaultCartonBoxCostEgp" to rule.defaultCartonBoxCostEgp,
+                        "active" to rule.active,
+                        "updatedBy" to rule.updatedBy,
+                        "recordVersion" to rule.recordVersion,
+                        "updatedAt" to rule.updatedAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+
+        val invMovements = invDao.getInventoryMovementsDirect()
+        invMovements.chunked(300).forEach { chunk ->
+            val batch = firestore.batch()
+            chunk.forEach { im ->
+                val docId = safeId(im.syncUuid.ifBlank { "IM-${im.id}" }, "IM-${im.id}")
+                batch.set(
+                    cRef.collection("inventory_movements").document(docId),
+                    mapOf(
+                        "id" to im.id,
+                        "syncUuid" to im.syncUuid,
+                        "documentNo" to im.documentNo,
+                        "movementType" to im.movementType,
+                        "warehouseId" to im.warehouseId,
+                        "warehouseCode" to im.warehouseCode,
+                        "warehouseClass" to im.warehouseClass,
+                        "itemCategory" to im.itemCategory,
+                        "itemId" to im.itemId,
+                        "itemCode" to im.itemCode,
+                        "itemName" to im.itemName,
+                        "quantity" to im.quantity,
+                        "signedQuantity" to im.signedQuantity,
+                        "unit" to im.unit,
+                        "unitCost" to im.unitCost,
+                        "totalCost" to im.totalCost,
+                        "currency" to im.currency,
+                        "batchNumber" to im.batchNumber,
+                        "expiryDate" to im.expiryDate,
+                        "referenceDocType" to im.referenceDocType,
+                        "referenceDocId" to (im.referenceDocId ?: 0L),
+                        "referenceDocNo" to im.referenceDocNo,
+                        "reversedMovementId" to (im.reversedMovementId ?: 0L),
+                        "reason" to im.reason,
+                        "status" to im.status,
+                        "qcApproved" to im.qcApproved,
+                        "idempotencyKey" to im.idempotencyKey,
+                        "performedBy" to im.performedBy,
+                        "approvedBy" to im.approvedBy,
+                        "deviceId" to im.deviceId,
+                        "recordVersion" to im.recordVersion,
+                        "createdAt" to im.createdAt,
+                        "updatedAt" to im.updatedAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+
+        val stockBalances = invDao.getStockBalancesDirect()
+        stockBalances.chunked(300).forEach { chunk ->
+            val batch = firestore.batch()
+            chunk.forEach { bal ->
+                val docId = safeId(bal.syncUuid.ifBlank { "BAL-${bal.warehouseId}-${bal.itemId}" }, "BAL-${bal.id}")
+                batch.set(
+                    cRef.collection("warehouse_stock_balances").document(docId),
+                    mapOf(
+                        "id" to bal.id,
+                        "syncUuid" to bal.syncUuid,
+                        "warehouseId" to bal.warehouseId,
+                        "warehouseClass" to bal.warehouseClass,
+                        "itemCategory" to bal.itemCategory,
+                        "itemId" to bal.itemId,
+                        "itemCode" to bal.itemCode,
+                        "itemName" to bal.itemName,
+                        "unit" to bal.unit,
+                        "batchNumber" to bal.batchNumber,
+                        "expiryDate" to bal.expiryDate,
+                        "onHandQty" to bal.onHandQty,
+                        "reservedQty" to bal.reservedQty,
+                        "inTransitQty" to bal.inTransitQty,
+                        "quarantineQty" to bal.quarantineQty,
+                        "availableQty" to bal.availableQty,
+                        "avgUnitCost" to bal.avgUnitCost,
+                        "currency" to bal.currency,
+                        "lastMovementUuid" to bal.lastMovementUuid,
+                        "updatedAt" to bal.updatedAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+
+        val whTransfers = invDao.getWarehouseTransfersDirect()
+        whTransfers.chunked(300).forEach { chunk ->
+            val batch = firestore.batch()
+            chunk.forEach { trf ->
+                val docId = safeId(trf.transferNo.ifBlank { "WHTRF-${trf.id}" }, "WHTRF-${trf.id}")
+                batch.set(
+                    cRef.collection("warehouse_transfers").document(docId),
+                    mapOf(
+                        "id" to trf.id,
+                        "syncUuid" to trf.syncUuid,
+                        "transferNo" to trf.transferNo,
+                        "transferDate" to trf.transferDate,
+                        "sourceWarehouseId" to trf.sourceWarehouseId,
+                        "sourceWarehouseName" to trf.sourceWarehouseName,
+                        "sourceWarehouseClass" to trf.sourceWarehouseClass,
+                        "destinationWarehouseId" to trf.destinationWarehouseId,
+                        "destinationWarehouseName" to trf.destinationWarehouseName,
+                        "destinationWarehouseClass" to trf.destinationWarehouseClass,
+                        "status" to trf.status,
+                        "totalCost" to trf.totalCost,
+                        "currency" to trf.currency,
+                        "notes" to trf.notes,
+                        "rejectionReason" to trf.rejectionReason,
+                        "createdBy" to trf.createdBy,
+                        "reviewedBy" to trf.reviewedBy,
+                        "approvedBy" to trf.approvedBy,
+                        "dispatchedBy" to trf.dispatchedBy,
+                        "receivedBy" to trf.receivedBy,
+                        "dispatchedAt" to trf.dispatchedAt,
+                        "receivedAt" to trf.receivedAt,
+                        "timelineJson" to trf.timelineJson,
+                        "idempotencyKey" to trf.idempotencyKey,
+                        "deviceId" to trf.deviceId,
+                        "recordVersion" to trf.recordVersion,
+                        "createdAt" to trf.createdAt,
+                        "updatedAt" to trf.updatedAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+
+        val trfItems = invDao.getAllTransferItemsDirect()
+        trfItems.chunked(300).forEach { chunk ->
+            val batch = firestore.batch()
+            chunk.forEach { item ->
+                val docId = safeId("WHTI-${item.transferId}-${item.id}", "WHTI-${item.id}")
+                batch.set(
+                    cRef.collection("warehouse_transfer_items").document(docId),
+                    mapOf(
+                        "id" to item.id,
+                        "transferId" to item.transferId,
+                        "transferUuid" to item.transferUuid,
+                        "itemCategory" to item.itemCategory,
+                        "itemId" to item.itemId,
+                        "itemCode" to item.itemCode,
+                        "itemName" to item.itemName,
+                        "unit" to item.unit,
+                        "requestedQty" to item.requestedQty,
+                        "approvedQty" to item.approvedQty,
+                        "shippedQty" to item.shippedQty,
+                        "receivedQty" to item.receivedQty,
+                        "rejectedQty" to item.rejectedQty,
+                        "unitCost" to item.unitCost,
+                        "totalCost" to item.totalCost,
+                        "batchNumber" to item.batchNumber,
+                        "qcApprovedRequired" to item.qcApprovedRequired,
+                        "qcApproved" to item.qcApproved,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+        return count
+    }
+
+    private suspend fun restorePhase2InventoryFromCloud(
+        cRef: com.google.firebase.firestore.DocumentReference,
+        invDao: ErpInventoryDao
+    ): Int {
+        var restored = 0
+        runCatching {
+            val pkgSnap = cRef.collection("packaging_rules").get().await()
+            val pkgList = pkgSnap.documents.mapNotNull { doc ->
+                val w = doc.safeLong("weightGrams")?.toInt() ?: return@mapNotNull null
+                val cans = doc.safeLong("cansPerCarton")?.toInt() ?: return@mapNotNull null
+                if (w <= 0 || cans <= 0) return@mapNotNull null
+                PackagingRuleEntity(
+                    syncUuid = doc.getString("syncUuid") ?: "PKG-RULE-$w",
+                    weightGrams = w,
+                    label = doc.getString("label") ?: "$w جرام ($cans علبة/كرتونة)",
+                    cansPerCarton = cans,
+                    defaultEmptyCanCostEgp = doc.safeDouble("defaultEmptyCanCostEgp") ?: 4.5,
+                    defaultLidCostEgp = doc.safeDouble("defaultLidCostEgp") ?: 1.2,
+                    defaultLabelCostEgp = doc.safeDouble("defaultLabelCostEgp") ?: 0.8,
+                    defaultCartonBoxCostEgp = doc.safeDouble("defaultCartonBoxCostEgp") ?: 18.0,
+                    active = doc.safeBoolean("active") ?: true,
+                    updatedBy = doc.getString("updatedBy") ?: "CLOUD_SYNC",
+                    recordVersion = doc.safeLong("recordVersion")?.toInt() ?: 1,
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (pkgList.isNotEmpty()) {
+                invDao.upsertPackagingRules(pkgList)
+                restored += pkgList.size
+            }
+
+            val imSnap = cRef.collection("inventory_movements").get().await()
+            val imList = imSnap.documents.mapNotNull { doc ->
+                val syncUuid = doc.getString("syncUuid") ?: return@mapNotNull null
+                val qty = doc.safeDouble("quantity") ?: return@mapNotNull null
+                if (qty <= 0.0) return@mapNotNull null
+                InventoryMovementEntity(
+                    syncUuid = syncUuid,
+                    documentNo = doc.getString("documentNo") ?: doc.id,
+                    movementType = doc.getString("movementType") ?: "STOCK_ADJUSTMENT",
+                    warehouseId = doc.safeLong("warehouseId") ?: 1L,
+                    warehouseCode = doc.getString("warehouseCode") ?: "",
+                    warehouseClass = doc.getString("warehouseClass") ?: "SALES",
+                    itemCategory = doc.getString("itemCategory") ?: "FINISHED_GOOD",
+                    itemId = doc.safeLong("itemId") ?: 0L,
+                    itemCode = doc.getString("itemCode") ?: "",
+                    itemName = doc.getString("itemName") ?: "صنف",
+                    quantity = qty,
+                    signedQuantity = doc.safeDouble("signedQuantity") ?: qty,
+                    unit = doc.getString("unit") ?: "كرتونة",
+                    unitCost = doc.safeDouble("unitCost") ?: 0.0,
+                    totalCost = doc.safeDouble("totalCost") ?: 0.0,
+                    currency = doc.getString("currency") ?: "EGP",
+                    batchNumber = doc.getString("batchNumber") ?: "",
+                    expiryDate = doc.getString("expiryDate") ?: "",
+                    referenceDocType = doc.getString("referenceDocType") ?: "",
+                    referenceDocId = doc.safeLong("referenceDocId")?.takeIf { it > 0L },
+                    referenceDocNo = doc.getString("referenceDocNo") ?: "",
+                    reversedMovementId = doc.safeLong("reversedMovementId")?.takeIf { it > 0L },
+                    reason = doc.getString("reason") ?: "",
+                    status = doc.getString("status") ?: "POSTED",
+                    qcApproved = doc.safeBoolean("qcApproved") ?: true,
+                    idempotencyKey = doc.getString("idempotencyKey") ?: syncUuid,
+                    performedBy = doc.getString("performedBy") ?: "CLOUD_SYNC",
+                    approvedBy = doc.getString("approvedBy") ?: "",
+                    deviceId = doc.getString("deviceId") ?: "",
+                    recordVersion = doc.safeLong("recordVersion")?.toInt() ?: 1,
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (imList.isNotEmpty()) {
+                invDao.upsertInventoryMovementsFromSync(imList)
+                restored += imList.size
+            }
+
+            val balSnap = cRef.collection("warehouse_stock_balances").get().await()
+            val balList = balSnap.documents.mapNotNull { doc ->
+                val whId = doc.safeLong("warehouseId") ?: return@mapNotNull null
+                val itemId = doc.safeLong("itemId") ?: return@mapNotNull null
+                val itemCat = doc.getString("itemCategory") ?: "FINISHED_GOOD"
+                val batchNum = doc.getString("batchNumber") ?: ""
+                WarehouseStockBalanceEntity(
+                    syncUuid = doc.getString("syncUuid") ?: "BAL-$whId-$itemCat-$itemId-$batchNum",
+                    warehouseId = whId,
+                    warehouseClass = doc.getString("warehouseClass") ?: "SALES",
+                    itemCategory = itemCat,
+                    itemId = itemId,
+                    itemCode = doc.getString("itemCode") ?: "",
+                    itemName = doc.getString("itemName") ?: "صنف",
+                    unit = doc.getString("unit") ?: "كرتونة",
+                    batchNumber = batchNum,
+                    expiryDate = doc.getString("expiryDate") ?: "",
+                    onHandQty = (doc.safeDouble("onHandQty") ?: 0.0).coerceAtLeast(0.0),
+                    reservedQty = (doc.safeDouble("reservedQty") ?: 0.0).coerceAtLeast(0.0),
+                    inTransitQty = (doc.safeDouble("inTransitQty") ?: 0.0).coerceAtLeast(0.0),
+                    quarantineQty = (doc.safeDouble("quarantineQty") ?: 0.0).coerceAtLeast(0.0),
+                    availableQty = (doc.safeDouble("availableQty") ?: 0.0).coerceAtLeast(0.0),
+                    avgUnitCost = doc.safeDouble("avgUnitCost") ?: 0.0,
+                    currency = doc.getString("currency") ?: "EGP",
+                    lastMovementUuid = doc.getString("lastMovementUuid") ?: "",
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (balList.isNotEmpty()) {
+                invDao.upsertStockBalances(balList)
+                restored += balList.size
+            }
+
+            val trfSnap = cRef.collection("warehouse_transfers").get().await()
+            val restoredTransfers = trfSnap.documents.mapNotNull { doc ->
+                val transferNo = doc.getString("transferNo") ?: doc.id
+                if (transferNo.isBlank()) return@mapNotNull null
+                val id = doc.safeLong("id") ?: 0L
+                val srcWhId = doc.safeLong("sourceWarehouseId") ?: return@mapNotNull null
+                val dstWhId = doc.safeLong("destinationWarehouseId") ?: return@mapNotNull null
+                WarehouseTransferEntity(
+                    id = id,
+                    syncUuid = doc.getString("syncUuid") ?: "WHTRF-UUID-$transferNo",
+                    transferNo = transferNo,
+                    transferDate = doc.getString("transferDate") ?: "2026-10-26",
+                    sourceWarehouseId = srcWhId,
+                    sourceWarehouseName = doc.getString("sourceWarehouseName") ?: "",
+                    sourceWarehouseClass = doc.getString("sourceWarehouseClass") ?: WarehouseClass.FINISHED_GOODS.name,
+                    destinationWarehouseId = dstWhId,
+                    destinationWarehouseName = doc.getString("destinationWarehouseName") ?: "",
+                    destinationWarehouseClass = doc.getString("destinationWarehouseClass") ?: WarehouseClass.SALES.name,
+                    status = doc.getString("status") ?: WarehouseTransferStatus.DRAFT.name,
+                    totalCost = doc.safeDouble("totalCost") ?: 0.0,
+                    currency = doc.getString("currency") ?: "EGP",
+                    notes = doc.getString("notes") ?: "",
+                    rejectionReason = doc.getString("rejectionReason") ?: "",
+                    createdBy = doc.getString("createdBy") ?: "CLOUD_SYNC",
+                    reviewedBy = doc.getString("reviewedBy") ?: "",
+                    approvedBy = doc.getString("approvedBy") ?: "",
+                    dispatchedBy = doc.getString("dispatchedBy") ?: "",
+                    receivedBy = doc.getString("receivedBy") ?: "",
+                    dispatchedAt = doc.safeLong("dispatchedAt") ?: 0L,
+                    receivedAt = doc.safeLong("receivedAt") ?: 0L,
+                    timelineJson = doc.getString("timelineJson") ?: "[]",
+                    idempotencyKey = doc.getString("idempotencyKey") ?: "",
+                    deviceId = doc.getString("deviceId") ?: "",
+                    recordVersion = doc.safeLong("recordVersion")?.toInt() ?: 1,
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (restoredTransfers.isNotEmpty()) {
+                restoredTransfers.forEach { invDao.insertOrUpdateWarehouseTransfer(it) }
+                restored += restoredTransfers.size
+            }
+
+            val trfItemsSnap = cRef.collection("warehouse_transfer_items").get().await()
+            val restoredTrfItems = trfItemsSnap.documents.mapNotNull { doc ->
+                val transferId = doc.safeLong("transferId") ?: return@mapNotNull null
+                val itemId = doc.safeLong("itemId") ?: return@mapNotNull null
+                WarehouseTransferItemEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    transferId = transferId,
+                    transferUuid = doc.getString("transferUuid") ?: "",
+                    itemCategory = doc.getString("itemCategory") ?: InventoryItemCategory.FINISHED_GOOD.name,
+                    itemId = itemId,
+                    itemCode = doc.getString("itemCode") ?: "",
+                    itemName = doc.getString("itemName") ?: "صنف",
+                    unit = doc.getString("unit") ?: "كرتونة",
+                    requestedQty = doc.safeDouble("requestedQty") ?: 0.0,
+                    approvedQty = doc.safeDouble("approvedQty") ?: 0.0,
+                    shippedQty = doc.safeDouble("shippedQty") ?: 0.0,
+                    receivedQty = doc.safeDouble("receivedQty") ?: 0.0,
+                    rejectedQty = doc.safeDouble("rejectedQty") ?: 0.0,
+                    unitCost = doc.safeDouble("unitCost") ?: 0.0,
+                    totalCost = doc.safeDouble("totalCost") ?: 0.0,
+                    batchNumber = doc.getString("batchNumber") ?: "",
+                    qcApprovedRequired = doc.safeBoolean("qcApprovedRequired") ?: true,
+                    qcApproved = doc.safeBoolean("qcApproved") ?: false
+                )
+            }
+            if (restoredTrfItems.isNotEmpty()) {
+                invDao.insertTransferItems(restoredTrfItems)
+                restored += restoredTrfItems.size
+            }
+        }
+        return restored
+    }
 
     /**
      * Performs a server diagnostics health check to verify connection stability and response latency.

@@ -47,8 +47,33 @@ import {
   InvoicePayment,
   Customer,
   AuditLog,
-  CurrencyCode
+  CurrencyCode,
+  WarehouseClass,
+  InventoryItemCategory,
+  InventoryMovementType,
+  MovementRecordStatus,
+  WarehouseTransferStatus,
+  InventoryMovement,
+  WarehouseStockBalance,
+  WarehouseTransfer,
+  WarehouseTransferItem,
+  PackagingRule
 } from '../types/erp';
+import {
+  DEFAULT_PACKAGING_RULES,
+  resolveWarehouseClass,
+  signedQuantityFor,
+  validateWarehousePolicy,
+  validateTransferRoute,
+  balanceKey,
+  postMovementInState,
+  attemptDeleteMovement,
+  reverseMovementInState,
+  canApproveTransfer,
+  getCansPerCarton,
+  convertCansToCartons,
+  convertCartonsToCans
+} from './InventoryMovementEngine';
 import {
   safeId,
   cashboxDocId,
@@ -105,7 +130,20 @@ export {
   isStockInMoveKind,
   resolveWarehouseFilterIds,
   parseDateStringToEpochMs,
-  compareRecordsChronologically
+  compareRecordsChronologically,
+  DEFAULT_PACKAGING_RULES,
+  resolveWarehouseClass,
+  signedQuantityFor,
+  validateWarehousePolicy,
+  validateTransferRoute,
+  balanceKey,
+  postMovementInState,
+  attemptDeleteMovement,
+  reverseMovementInState,
+  canApproveTransfer,
+  getCansPerCarton,
+  convertCansToCartons,
+  convertCartonsToCans
 };
 
 export type {
@@ -144,6 +182,12 @@ export type ErpCollectionName =
   | 'customers'
   | 'employee_tasks'
   | 'purchase_suggestions'
+  | 'inventory_movements'
+  | 'warehouse_stock_balances'
+  | 'warehouse_transfers'
+  | 'warehouse_transfer_items'
+  | 'packaging_rules'
+  | 'stock_batches'
   | 'audit_logs'
   | 'permission_audit_logs';
 
@@ -712,5 +756,15 @@ export type {
   SalesInvoice,
   InvoicePayment,
   Customer,
-  AuditLog
+  AuditLog,
+  WarehouseClass,
+  InventoryItemCategory,
+  InventoryMovementType,
+  MovementRecordStatus,
+  WarehouseTransferStatus,
+  InventoryMovement,
+  WarehouseStockBalance,
+  WarehouseTransfer,
+  WarehouseTransferItem,
+  PackagingRule
 };

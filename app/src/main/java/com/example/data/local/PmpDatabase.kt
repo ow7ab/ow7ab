@@ -37,14 +37,21 @@ import kotlinx.coroutines.sync.withLock
         UserAccountEntity::class,
         FormulationEntity::class,
         ChemicalSafetyEntity::class,
-        ProductionBatchEntity::class
+        ProductionBatchEntity::class,
+        InventoryMovementEntity::class,
+        WarehouseStockBalanceEntity::class,
+        WarehouseTransferEntity::class,
+        WarehouseTransferItemEntity::class,
+        PackagingRuleEntity::class,
+        SyncOutboxEntity::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
 
     abstract fun pmpDao(): PmpDao
+    abstract fun erpInventoryDao(): ErpInventoryDao
 
     companion object {
         @Volatile
@@ -335,6 +342,470 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private fun getTableColumns(db: SupportSQLiteDatabase, tableName: String): Set<String> {
+            val cols = mutableSetOf<String>()
+            db.query("PRAGMA table_info(`$tableName`)").use { cursor ->
+                val nameIdx = cursor.getColumnIndex("name")
+                while (cursor.moveToNext()) {
+                    if (nameIdx >= 0) cols.add(cursor.getString(nameIdx))
+                }
+            }
+            return cols
+        }
+
+        private fun addColumnIfMissing(
+            db: SupportSQLiteDatabase,
+            tableName: String,
+            columnName: String,
+            columnDefSql: String,
+            existingColumns: MutableSet<String>
+        ) {
+            if (columnName !in existingColumns) {
+                db.execSQL("ALTER TABLE `$tableName` ADD COLUMN `$columnName` $columnDefSql")
+                existingColumns.add(columnName)
+            }
+        }
+
+        private fun upgradeSchemaToV12AndBackfill(db: SupportSQLiteDatabase) {
+            // 1. Extend warehouses table safely with Three-Warehouse classification & sync metadata
+            val whCols = getTableColumns(db, "warehouses").toMutableSet()
+            addColumnIfMissing(db, "warehouses", "warehouseClass", "TEXT NOT NULL DEFAULT 'SALES'", whCols)
+            addColumnIfMissing(db, "warehouses", "code", "TEXT NOT NULL DEFAULT ''", whCols)
+            addColumnIfMissing(db, "warehouses", "branch", "TEXT NOT NULL DEFAULT ''", whCols)
+            addColumnIfMissing(db, "warehouses", "allowDirectSales", "INTEGER NOT NULL DEFAULT 1", whCols)
+            addColumnIfMissing(db, "warehouses", "allowProductionReceipt", "INTEGER NOT NULL DEFAULT 0", whCols)
+            addColumnIfMissing(db, "warehouses", "syncUuid", "TEXT NOT NULL DEFAULT ''", whCols)
+            addColumnIfMissing(db, "warehouses", "updatedAt", "INTEGER NOT NULL DEFAULT 0", whCols)
+            addColumnIfMissing(db, "warehouses", "recordVersion", "INTEGER NOT NULL DEFAULT 1", whCols)
+            addColumnIfMissing(db, "warehouses", "deviceId", "TEXT NOT NULL DEFAULT ''", whCols)
+
+            db.execSQL(
+                """
+                UPDATE `warehouses` SET
+                    `warehouseClass` = CASE
+                        WHEN `warehouseType` LIKE '%مواد خام%' OR `name` LIKE '%المواد الخام%' OR `name` LIKE '%مواد خام%' THEN 'RAW_MATERIALS'
+                        WHEN `warehouseType` LIKE '%إنتاج%' OR `warehouseType` LIKE '%انتاج%' OR `name` LIKE '%الإنتاج التام%' OR `name` LIKE '%الانتاج التام%' THEN 'FINISHED_GOODS'
+                        ELSE 'SALES'
+                    END,
+                    `allowDirectSales` = CASE
+                        WHEN `warehouseType` LIKE '%مواد خام%' OR `name` LIKE '%المواد الخام%' OR `warehouseType` LIKE '%إنتاج%' OR `name` LIKE '%الإنتاج التام%' THEN 0
+                        ELSE 1
+                    END,
+                    `allowProductionReceipt` = CASE
+                        WHEN `warehouseType` LIKE '%إنتاج%' OR `name` LIKE '%الإنتاج التام%' THEN 1
+                        ELSE 0
+                    END,
+                    `code` = CASE WHEN TRIM(`code`) = '' THEN 'WH-' || `id` ELSE `code` END,
+                    `syncUuid` = CASE WHEN TRIM(`syncUuid`) = '' THEN 'WH-UUID-' || `id` ELSE `syncUuid` END
+                """.trimIndent()
+            )
+
+            // 2. Extend products, stock_moves, factory_items, factory_moves non-destructively
+            val prodCols = getTableColumns(db, "products").toMutableSet()
+            addColumnIfMissing(db, "products", "syncUuid", "TEXT NOT NULL DEFAULT ''", prodCols)
+            addColumnIfMissing(db, "products", "updatedAt", "INTEGER NOT NULL DEFAULT 0", prodCols)
+            addColumnIfMissing(db, "products", "recordVersion", "INTEGER NOT NULL DEFAULT 1", prodCols)
+            addColumnIfMissing(db, "products", "deviceId", "TEXT NOT NULL DEFAULT ''", prodCols)
+            db.execSQL("UPDATE `products` SET `syncUuid` = 'PROD-UUID-' || `id` WHERE TRIM(`syncUuid`) = ''")
+
+            val smCols = getTableColumns(db, "stock_moves").toMutableSet()
+            addColumnIfMissing(db, "stock_moves", "batchNumber", "TEXT NOT NULL DEFAULT ''", smCols)
+            addColumnIfMissing(db, "stock_moves", "syncUuid", "TEXT NOT NULL DEFAULT ''", smCols)
+            addColumnIfMissing(db, "stock_moves", "recordVersion", "INTEGER NOT NULL DEFAULT 1", smCols)
+            addColumnIfMissing(db, "stock_moves", "deviceId", "TEXT NOT NULL DEFAULT ''", smCols)
+            db.execSQL("UPDATE `stock_moves` SET `syncUuid` = 'SM-UUID-' || `id` WHERE TRIM(`syncUuid`) = ''")
+
+            val fiCols = getTableColumns(db, "factory_items").toMutableSet()
+            addColumnIfMissing(db, "factory_items", "itemCode", "TEXT NOT NULL DEFAULT ''", fiCols)
+            addColumnIfMissing(db, "factory_items", "unitCostEgp", "REAL NOT NULL DEFAULT 0.0", fiCols)
+            addColumnIfMissing(db, "factory_items", "minStock", "REAL NOT NULL DEFAULT 0.0", fiCols)
+            addColumnIfMissing(db, "factory_items", "maxStock", "REAL NOT NULL DEFAULT 0.0", fiCols)
+            addColumnIfMissing(db, "factory_items", "batchTrackingRequired", "INTEGER NOT NULL DEFAULT 0", fiCols)
+            addColumnIfMissing(db, "factory_items", "syncUuid", "TEXT NOT NULL DEFAULT ''", fiCols)
+            addColumnIfMissing(db, "factory_items", "updatedAt", "INTEGER NOT NULL DEFAULT 0", fiCols)
+            addColumnIfMissing(db, "factory_items", "recordVersion", "INTEGER NOT NULL DEFAULT 1", fiCols)
+            addColumnIfMissing(db, "factory_items", "deviceId", "TEXT NOT NULL DEFAULT ''", fiCols)
+            db.execSQL(
+                """
+                UPDATE `factory_items` SET
+                    `itemCode` = CASE WHEN TRIM(`itemCode`) = '' THEN 'RAW-' || `id` ELSE `itemCode` END,
+                    `syncUuid` = CASE WHEN TRIM(`syncUuid`) = '' THEN 'FI-UUID-' || `id` ELSE `syncUuid` END
+                """.trimIndent()
+            )
+
+            val fmCols = getTableColumns(db, "factory_moves").toMutableSet()
+            addColumnIfMissing(db, "factory_moves", "syncUuid", "TEXT NOT NULL DEFAULT ''", fmCols)
+            addColumnIfMissing(db, "factory_moves", "recordVersion", "INTEGER NOT NULL DEFAULT 1", fmCols)
+            addColumnIfMissing(db, "factory_moves", "deviceId", "TEXT NOT NULL DEFAULT ''", fmCols)
+            db.execSQL("UPDATE `factory_moves` SET `syncUuid` = 'FM-UUID-' || `id` WHERE TRIM(`syncUuid`) = ''")
+
+            // 3. Create new Phase 2 tables & exact Room-declared indices
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `inventory_movements` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `documentNo` TEXT NOT NULL,
+                    `movementType` TEXT NOT NULL,
+                    `warehouseId` INTEGER NOT NULL,
+                    `warehouseCode` TEXT NOT NULL,
+                    `warehouseClass` TEXT NOT NULL,
+                    `itemCategory` TEXT NOT NULL,
+                    `itemId` INTEGER NOT NULL,
+                    `itemCode` TEXT NOT NULL,
+                    `itemName` TEXT NOT NULL,
+                    `quantity` REAL NOT NULL,
+                    `signedQuantity` REAL NOT NULL,
+                    `unit` TEXT NOT NULL,
+                    `unitCost` REAL NOT NULL,
+                    `totalCost` REAL NOT NULL,
+                    `currency` TEXT NOT NULL,
+                    `batchNumber` TEXT NOT NULL,
+                    `expiryDate` TEXT NOT NULL,
+                    `referenceDocType` TEXT NOT NULL,
+                    `referenceDocId` INTEGER,
+                    `referenceDocNo` TEXT NOT NULL,
+                    `reversedMovementId` INTEGER,
+                    `reason` TEXT NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `qcApproved` INTEGER NOT NULL,
+                    `idempotencyKey` TEXT NOT NULL,
+                    `performedBy` TEXT NOT NULL,
+                    `approvedBy` TEXT NOT NULL,
+                    `deviceId` TEXT NOT NULL,
+                    `recordVersion` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_inv_mov_sync_uuid` ON `inventory_movements` (`syncUuid`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_inv_mov_lookup` ON `inventory_movements` (`warehouseId`, `itemCategory`, `itemId`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `warehouse_stock_balances` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `warehouseId` INTEGER NOT NULL,
+                    `warehouseClass` TEXT NOT NULL,
+                    `itemCategory` TEXT NOT NULL,
+                    `itemId` INTEGER NOT NULL,
+                    `itemCode` TEXT NOT NULL,
+                    `itemName` TEXT NOT NULL,
+                    `unit` TEXT NOT NULL,
+                    `batchNumber` TEXT NOT NULL,
+                    `expiryDate` TEXT NOT NULL,
+                    `onHandQty` REAL NOT NULL,
+                    `reservedQty` REAL NOT NULL,
+                    `inTransitQty` REAL NOT NULL,
+                    `quarantineQty` REAL NOT NULL,
+                    `availableQty` REAL NOT NULL,
+                    `avgUnitCost` REAL NOT NULL,
+                    `currency` TEXT NOT NULL,
+                    `lastMovementUuid` TEXT NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_wh_stock_bal_key` ON `warehouse_stock_balances` (`warehouseId`, `itemCategory`, `itemId`, `batchNumber`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `warehouse_transfers` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `transferNo` TEXT NOT NULL,
+                    `transferDate` TEXT NOT NULL,
+                    `sourceWarehouseId` INTEGER NOT NULL,
+                    `sourceWarehouseName` TEXT NOT NULL,
+                    `sourceWarehouseClass` TEXT NOT NULL,
+                    `destinationWarehouseId` INTEGER NOT NULL,
+                    `destinationWarehouseName` TEXT NOT NULL,
+                    `destinationWarehouseClass` TEXT NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `totalCost` REAL NOT NULL,
+                    `currency` TEXT NOT NULL,
+                    `notes` TEXT NOT NULL,
+                    `rejectionReason` TEXT NOT NULL,
+                    `createdBy` TEXT NOT NULL,
+                    `reviewedBy` TEXT NOT NULL,
+                    `approvedBy` TEXT NOT NULL,
+                    `dispatchedBy` TEXT NOT NULL,
+                    `receivedBy` TEXT NOT NULL,
+                    `dispatchedAt` INTEGER NOT NULL,
+                    `receivedAt` INTEGER NOT NULL,
+                    `timelineJson` TEXT NOT NULL,
+                    `idempotencyKey` TEXT NOT NULL,
+                    `deviceId` TEXT NOT NULL,
+                    `recordVersion` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_wh_trf_no` ON `warehouse_transfers` (`transferNo`)")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_wh_trf_sync_uuid` ON `warehouse_transfers` (`syncUuid`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `warehouse_transfer_items` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `transferId` INTEGER NOT NULL,
+                    `transferUuid` TEXT NOT NULL,
+                    `itemCategory` TEXT NOT NULL,
+                    `itemId` INTEGER NOT NULL,
+                    `itemCode` TEXT NOT NULL,
+                    `itemName` TEXT NOT NULL,
+                    `unit` TEXT NOT NULL,
+                    `requestedQty` REAL NOT NULL,
+                    `approvedQty` REAL NOT NULL,
+                    `shippedQty` REAL NOT NULL,
+                    `receivedQty` REAL NOT NULL,
+                    `rejectedQty` REAL NOT NULL,
+                    `unitCost` REAL NOT NULL,
+                    `totalCost` REAL NOT NULL,
+                    `batchNumber` TEXT NOT NULL,
+                    `qcApprovedRequired` INTEGER NOT NULL,
+                    `qcApproved` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_wh_trf_item_trf_id` ON `warehouse_transfer_items` (`transferId`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `packaging_rules` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `weightGrams` INTEGER NOT NULL,
+                    `label` TEXT NOT NULL,
+                    `cansPerCarton` INTEGER NOT NULL,
+                    `emptyCanItemId` INTEGER,
+                    `lidItemId` INTEGER,
+                    `labelItemId` INTEGER,
+                    `cartonItemId` INTEGER,
+                    `defaultEmptyCanCostEgp` REAL NOT NULL,
+                    `defaultLidCostEgp` REAL NOT NULL,
+                    `defaultLabelCostEgp` REAL NOT NULL,
+                    `defaultCartonBoxCostEgp` REAL NOT NULL,
+                    `active` INTEGER NOT NULL,
+                    `updatedBy` TEXT NOT NULL,
+                    `recordVersion` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_pkg_rule_weight` ON `packaging_rules` (`weightGrams`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `sync_outbox` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `operationId` TEXT NOT NULL,
+                    `entityType` TEXT NOT NULL,
+                    `entityUuid` TEXT NOT NULL,
+                    `action` TEXT NOT NULL,
+                    `payloadJson` TEXT NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `retryCount` INTEGER NOT NULL,
+                    `lastError` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_sync_outbox_op_id` ON `sync_outbox` (`operationId`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_sync_outbox_status` ON `sync_outbox` (`status`)")
+
+            // 4. Seed default packaging rules idempotently (250g=48, 900g=12, 4000g=4)
+            val now = System.currentTimeMillis()
+            db.execSQL(
+                """
+                INSERT OR IGNORE INTO `packaging_rules`
+                (`syncUuid`, `weightGrams`, `label`, `cansPerCarton`, `defaultEmptyCanCostEgp`, `defaultLidCostEgp`, `defaultLabelCostEgp`, `defaultCartonBoxCostEgp`, `active`, `updatedBy`, `recordVersion`, `updatedAt`)
+                VALUES
+                ('PKG-RULE-250', 250, '250 جرام (48 علبة/كرتونة)', 48, 3.2, 0.9, 0.6, 16.0, 1, 'SYSTEM', 1, $now),
+                ('PKG-RULE-900', 900, '900 جرام (12 علبة/كرتونة)', 12, 5.5, 1.4, 0.9, 18.0, 1, 'SYSTEM', 1, $now),
+                ('PKG-RULE-4000', 4000, '4000 جرام - جالون (4 علب/كرتونة)', 4, 14.0, 3.5, 1.8, 22.0, 1, 'SYSTEM', 1, $now)
+                """.trimIndent()
+            )
+
+            // 5. Idempotently project existing historical stock_moves into append-only inventory_movements
+            db.execSQL(
+                """
+                INSERT OR IGNORE INTO `inventory_movements` (
+                    `syncUuid`, `documentNo`, `movementType`, `warehouseId`, `warehouseCode`, `warehouseClass`,
+                    `itemCategory`, `itemId`, `itemCode`, `itemName`, `quantity`, `signedQuantity`, `unit`,
+                    `unitCost`, `totalCost`, `currency`, `batchNumber`, `expiryDate`, `referenceDocType`,
+                    `referenceDocId`, `referenceDocNo`, `reversedMovementId`, `reason`, `status`,
+                    `qcApproved`, `idempotencyKey`, `performedBy`, `approvedBy`, `deviceId`, `recordVersion`, `createdAt`, `updatedAt`
+                )
+                SELECT
+                    'HIST-SM-' || sm.`id`,
+                    'HIST-SM-' || sm.`id`,
+                    CASE
+                        WHEN UPPER(TRIM(sm.`kind`)) IN ('RETURN', 'RETURN_IN', 'مرتجع') THEN 'CUSTOMER_RETURN'
+                        WHEN UPPER(TRIM(sm.`kind`)) IN ('SALE', 'OUT') THEN 'SALES_ISSUE'
+                        WHEN UPPER(TRIM(sm.`kind`)) IN ('IN', 'وارد', 'توريد', 'إضافة', 'CANCEL') THEN 'OPENING_BALANCE'
+                        ELSE 'STOCK_ADJUSTMENT'
+                    END,
+                    sm.`warehouseId`,
+                    COALESCE(w.`code`, 'WH-' || sm.`warehouseId`),
+                    COALESCE(w.`warehouseClass`, 'SALES'),
+                    'FINISHED_GOOD',
+                    sm.`productId`,
+                    COALESCE(p.`sku`, 'PROD-' || sm.`productId`),
+                    COALESCE(p.`name`, 'منتج #' || sm.`productId`),
+                    ABS(sm.`quantity`),
+                    CASE
+                        WHEN UPPER(TRIM(sm.`kind`)) IN ('IN', 'RETURN', 'RETURN_IN', 'CANCEL', 'وارد', 'مرتجع', 'توريد', 'إضافة')
+                            THEN ABS(sm.`quantity`)
+                        ELSE -ABS(sm.`quantity`)
+                    END,
+                    COALESCE(p.`unit`, 'كرتونة'),
+                    COALESCE(p.`purchasePrice`, 0.0),
+                    ABS(sm.`quantity`) * COALESCE(p.`purchasePrice`, 0.0),
+                    COALESCE(w.`currency`, 'SDG'),
+                    COALESCE(sm.`batchNumber`, ''),
+                    '',
+                    CASE WHEN sm.`invoiceId` IS NOT NULL THEN 'SALES' ELSE 'HISTORICAL_STOCK_MOVE' END,
+                    sm.`invoiceId`,
+                    COALESCE('HIST-SM-' || sm.`id`, ''),
+                    NULL,
+                    COALESCE(sm.`note`, ''),
+                    'POSTED',
+                    1,
+                    'HIST-SM-' || sm.`id`,
+                    COALESCE(sm.`createdBy`, 'المدير'),
+                    'MIGRATION_V11_V12',
+                    'MIGRATION',
+                    1,
+                    sm.`createdAt`,
+                    sm.`createdAt`
+                FROM `stock_moves` sm
+                LEFT JOIN `warehouses` w ON w.`id` = sm.`warehouseId`
+                LEFT JOIN `products` p ON p.`id` = sm.`productId`
+                """.trimIndent()
+            )
+
+            // 6. Idempotently project existing factory_moves into inventory_movements mapped to RAW_MATERIALS / FINISHED_GOODS warehouses
+            db.execSQL(
+                """
+                INSERT OR IGNORE INTO `inventory_movements` (
+                    `syncUuid`, `documentNo`, `movementType`, `warehouseId`, `warehouseCode`, `warehouseClass`,
+                    `itemCategory`, `itemId`, `itemCode`, `itemName`, `quantity`, `signedQuantity`, `unit`,
+                    `unitCost`, `totalCost`, `currency`, `batchNumber`, `expiryDate`, `referenceDocType`,
+                    `referenceDocId`, `referenceDocNo`, `reversedMovementId`, `reason`, `status`,
+                    `qcApproved`, `idempotencyKey`, `performedBy`, `approvedBy`, `deviceId`, `recordVersion`, `createdAt`, `updatedAt`
+                )
+                SELECT
+                    'HIST-FM-' || fm.`id`,
+                    'HIST-FM-' || fm.`id`,
+                    CASE
+                        WHEN fm.`kind` LIKE '%توريد%' OR UPPER(TRIM(fm.`kind`)) = 'RAW_RECEIPT' THEN 'PURCHASE_RECEIPT'
+                        WHEN fm.`kind` LIKE '%إنتاج%' OR UPPER(TRIM(fm.`kind`)) = 'PRODUCTION_OUTPUT' THEN 'PRODUCTION_RECEIPT'
+                        WHEN fm.`kind` LIKE '%تالف%' THEN 'DAMAGED_GOODS'
+                        WHEN fm.`kind` LIKE '%صرف%' THEN 'PRODUCTION_ISSUE'
+                        ELSE 'STOCK_ADJUSTMENT'
+                    END,
+                    COALESCE(
+                        CASE
+                            WHEN fi.`category` = 'finished' THEN (SELECT `id` FROM `warehouses` WHERE `warehouseClass` = 'FINISHED_GOODS' ORDER BY `id` ASC LIMIT 1)
+                            ELSE (SELECT `id` FROM `warehouses` WHERE `warehouseClass` = 'RAW_MATERIALS' ORDER BY `id` ASC LIMIT 1)
+                        END,
+                        (SELECT `id` FROM `warehouses` ORDER BY `id` ASC LIMIT 1),
+                        1
+                    ),
+                    COALESCE(
+                        CASE
+                            WHEN fi.`category` = 'finished' THEN (SELECT `code` FROM `warehouses` WHERE `warehouseClass` = 'FINISHED_GOODS' ORDER BY `id` ASC LIMIT 1)
+                            ELSE (SELECT `code` FROM `warehouses` WHERE `warehouseClass` = 'RAW_MATERIALS' ORDER BY `id` ASC LIMIT 1)
+                        END,
+                        'WH-FAC'
+                    ),
+                    CASE WHEN fi.`category` = 'finished' THEN 'FINISHED_GOODS' ELSE 'RAW_MATERIALS' END,
+                    CASE
+                        WHEN fi.`category` = 'empty' THEN 'PACKAGING'
+                        WHEN fi.`category` = 'finished' THEN 'FINISHED_GOOD'
+                        ELSE 'RAW_MATERIAL'
+                    END,
+                    fm.`itemId`,
+                    COALESCE(fi.`itemCode`, 'RAW-' || fm.`itemId`),
+                    COALESCE(fm.`itemName`, fi.`name`, 'خامة #' || fm.`itemId`),
+                    ABS(fm.`qty`),
+                    CASE
+                        WHEN fm.`kind` LIKE '%توريد%' OR fm.`kind` LIKE '%إنتاج%' OR fm.`kind` LIKE '%وارد%' OR UPPER(TRIM(fm.`kind`)) IN ('RAW_RECEIPT', 'PRODUCTION_OUTPUT', 'IN')
+                            THEN ABS(fm.`qty`)
+                        ELSE -ABS(fm.`qty`)
+                    END,
+                    COALESCE(fi.`unit`, 'كجم'),
+                    COALESCE(fi.`unitCostEgp`, 0.0),
+                    ABS(fm.`qty`) * COALESCE(fi.`unitCostEgp`, 0.0),
+                    'EGP',
+                    COALESCE(fm.`batch`, ''),
+                    '',
+                    'HISTORICAL_FACTORY_MOVE',
+                    fm.`id`,
+                    'HIST-FM-' || fm.`id`,
+                    NULL,
+                    COALESCE(fm.`note`, ''),
+                    'POSTED',
+                    1,
+                    'HIST-FM-' || fm.`id`,
+                    COALESCE(fm.`actor`, 'مهندس الإنتاج'),
+                    'MIGRATION_V11_V12',
+                    'MIGRATION',
+                    1,
+                    fm.`createdAt`,
+                    fm.`createdAt`
+                FROM `factory_moves` fm
+                LEFT JOIN `factory_items` fi ON fi.`id` = fm.`itemId`
+                """.trimIndent()
+            )
+
+            // 7. Compute initial atomic warehouse_stock_balances from projected inventory_movements
+            db.execSQL(
+                """
+                INSERT OR IGNORE INTO `warehouse_stock_balances` (
+                    `syncUuid`, `warehouseId`, `warehouseClass`, `itemCategory`, `itemId`, `itemCode`, `itemName`,
+                    `unit`, `batchNumber`, `expiryDate`, `onHandQty`, `reservedQty`, `inTransitQty`,
+                    `quarantineQty`, `availableQty`, `avgUnitCost`, `currency`, `lastMovementUuid`, `updatedAt`
+                )
+                SELECT
+                    'BAL-' || im.`warehouseId` || '-' || im.`itemCategory` || '-' || im.`itemId` || '-' || im.`batchNumber`,
+                    im.`warehouseId`,
+                    MAX(im.`warehouseClass`),
+                    im.`itemCategory`,
+                    im.`itemId`,
+                    MAX(im.`itemCode`),
+                    MAX(im.`itemName`),
+                    MAX(im.`unit`),
+                    im.`batchNumber`,
+                    '',
+                    MAX(0.0, COALESCE(SUM(im.`signedQuantity`), 0.0)),
+                    0.0,
+                    0.0,
+                    0.0,
+                    MAX(0.0, COALESCE(SUM(im.`signedQuantity`), 0.0)),
+                    COALESCE(AVG(NULLIF(im.`unitCost`, 0.0)), 0.0),
+                    MAX(im.`currency`),
+                    MAX(im.`syncUuid`),
+                    $now
+                FROM `inventory_movements` im
+                WHERE im.`status` = 'POSTED'
+                GROUP BY im.`warehouseId`, im.`itemCategory`, im.`itemId`, im.`batchNumber`
+                """.trimIndent()
+            )
+        }
+
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+                upgradeSchemaToV12AndBackfill(db)
+            }
+        }
+
         private val dbCallbackMutex = Mutex()
         private val dbCallbackScope = CoroutineScope(
             SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
@@ -364,7 +835,8 @@ abstract class PmpDatabase : RoomDatabase() {
                         MIGRATION_7_8,
                         MIGRATION_8_9,
                         MIGRATION_9_10,
-                        MIGRATION_10_11
+                        MIGRATION_10_11,
+                        MIGRATION_11_12
                     )
                     .addCallback(DatabaseCallback(appContext))
                     .build()
@@ -386,7 +858,9 @@ abstract class PmpDatabase : RoomDatabase() {
                             val dao = database.pmpDao()
                             val restored = DatabaseBackupManager.restoreIfEmpty(appContext, dao)
                             if (!restored) {
-                                seedInitialData(dao)
+                                seedInitialData(dao, database.erpInventoryDao())
+                            } else {
+                                seedDefaultPackagingRulesIfEmpty(database.erpInventoryDao())
                             }
                             DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
                         }
@@ -411,6 +885,7 @@ abstract class PmpDatabase : RoomDatabase() {
                             val dao = database.pmpDao()
                             DatabaseBackupManager.restoreIfEmpty(appContext, dao)
                             seedDefaultUsersIfEmpty(dao)
+                            seedDefaultPackagingRulesIfEmpty(database.erpInventoryDao())
                             DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
                         }
                     } catch (t: Throwable) {
@@ -493,8 +968,55 @@ abstract class PmpDatabase : RoomDatabase() {
         }
 
 
-        private suspend fun seedInitialData(dao: PmpDao) {
+        private suspend fun seedDefaultPackagingRulesIfEmpty(invDao: ErpInventoryDao) {
+            if (invDao.getPackagingRulesDirect().isEmpty()) {
+                val now = System.currentTimeMillis()
+                invDao.upsertPackagingRules(
+                    listOf(
+                        PackagingRuleEntity(
+                            syncUuid = "PKG-RULE-250",
+                            weightGrams = 250,
+                            label = "250 جرام (48 علبة/كرتونة)",
+                            cansPerCarton = 48,
+                            defaultEmptyCanCostEgp = 3.2,
+                            defaultLidCostEgp = 0.9,
+                            defaultLabelCostEgp = 0.6,
+                            defaultCartonBoxCostEgp = 16.0,
+                            updatedBy = "SYSTEM",
+                            updatedAt = now
+                        ),
+                        PackagingRuleEntity(
+                            syncUuid = "PKG-RULE-900",
+                            weightGrams = 900,
+                            label = "900 جرام (12 علبة/كرتونة)",
+                            cansPerCarton = 12,
+                            defaultEmptyCanCostEgp = 5.5,
+                            defaultLidCostEgp = 1.4,
+                            defaultLabelCostEgp = 0.9,
+                            defaultCartonBoxCostEgp = 18.0,
+                            updatedBy = "SYSTEM",
+                            updatedAt = now
+                        ),
+                        PackagingRuleEntity(
+                            syncUuid = "PKG-RULE-4000",
+                            weightGrams = 4000,
+                            label = "4000 جرام - جالون (4 علب/كرتونة)",
+                            cansPerCarton = 4,
+                            defaultEmptyCanCostEgp = 14.0,
+                            defaultLidCostEgp = 3.5,
+                            defaultLabelCostEgp = 1.8,
+                            defaultCartonBoxCostEgp = 22.0,
+                            updatedBy = "SYSTEM",
+                            updatedAt = now
+                        )
+                    )
+                )
+            }
+        }
+
+        private suspend fun seedInitialData(dao: PmpDao, invDao: ErpInventoryDao) {
             seedDefaultUsersIfEmpty(dao)
+            seedDefaultPackagingRulesIfEmpty(invDao)
             // Seed Cashboxes (Separated for each branch & region)
             val cashboxes = listOf("خزنة السودان", "خزنة مصر", "خزنة حلفا", "خزنة عطبرة")
             cashboxes.forEach { boxName ->
@@ -503,14 +1025,14 @@ abstract class PmpDatabase : RoomDatabase() {
                 }
             }
 
-            // Seed Warehouses (Separated: Sudan sales vs Factory/Egypt)
+            // Seed Three-Warehouse Architecture (Sales, Raw Materials, Finished Goods)
             val warehouses = listOf(
-                WarehouseEntity(name = "مخزن مبيعات حلفا", currency = "SDG", linkedCashbox = "خزنة حلفا", warehouseType = "مبيعات"),
-                WarehouseEntity(name = "مخزن مبيعات عطبرة", currency = "SDG", linkedCashbox = "خزنة عطبرة", warehouseType = "مبيعات"),
-                WarehouseEntity(name = "مخزن مبيعات الخرطوم", currency = "SDG", linkedCashbox = "خزنة السودان", warehouseType = "مبيعات"),
-                WarehouseEntity(name = "مخزن مبيعات المصنع (مصر)", currency = "EGP", linkedCashbox = "خزنة مصر", warehouseType = "مبيعات"),
-                WarehouseEntity(name = "مخزن المواد الخام داخل المصنع (مصر)", currency = "EGP", linkedCashbox = "خزنة مصر", warehouseType = "مواد خام"),
-                WarehouseEntity(name = "مخزن الإنتاج التام داخل المصنع", currency = "EGP", linkedCashbox = "خزنة مصر", warehouseType = "داخل المصنع/إنتاج")
+                WarehouseEntity(name = "مخزن مبيعات حلفا", currency = "SDG", linkedCashbox = "خزنة حلفا", warehouseType = "مبيعات", warehouseClass = WarehouseClass.SALES.name, code = "WH-SLS-HF", branch = "حلفا", allowDirectSales = true, allowProductionReceipt = false),
+                WarehouseEntity(name = "مخزن مبيعات عطبرة", currency = "SDG", linkedCashbox = "خزنة عطبرة", warehouseType = "مبيعات", warehouseClass = WarehouseClass.SALES.name, code = "WH-SLS-AT", branch = "عطبرة", allowDirectSales = true, allowProductionReceipt = false),
+                WarehouseEntity(name = "مخزن مبيعات الخرطوم", currency = "SDG", linkedCashbox = "خزنة السودان", warehouseType = "مبيعات", warehouseClass = WarehouseClass.SALES.name, code = "WH-SLS-KH", branch = "الخرطوم", allowDirectSales = true, allowProductionReceipt = false),
+                WarehouseEntity(name = "مخزن مبيعات المصنع (مصر)", currency = "EGP", linkedCashbox = "خزنة مصر", warehouseType = "مبيعات", warehouseClass = WarehouseClass.SALES.name, code = "WH-SLS-EG", branch = "القاهرة", allowDirectSales = true, allowProductionReceipt = false),
+                WarehouseEntity(name = "مخزن المواد الخام داخل المصنع (مصر)", currency = "EGP", linkedCashbox = "خزنة مصر", warehouseType = "مواد خام", warehouseClass = WarehouseClass.RAW_MATERIALS.name, code = "WH-RAW-EG", branch = "المصنع", allowDirectSales = false, allowProductionReceipt = false),
+                WarehouseEntity(name = "مخزن الإنتاج التام داخل المصنع", currency = "EGP", linkedCashbox = "خزنة مصر", warehouseType = "داخل المصنع/إنتاج", warehouseClass = WarehouseClass.FINISHED_GOODS.name, code = "WH-FG-EG", branch = "المصنع", allowDirectSales = false, allowProductionReceipt = true)
             )
             warehouses.forEach { dao.insertWarehouse(it) }
 

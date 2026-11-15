@@ -15,6 +15,10 @@ class PmpRepository(
 ) {
 
     fun getDao(): PmpDao = dao
+    fun getErpInventoryDao(): ErpInventoryDao? = database?.erpInventoryDao()
+    val inventoryEngine: com.example.domain.inventory.InventoryMovementEngine? by lazy {
+        database?.let { com.example.domain.inventory.InventoryMovementEngine(it) }
+    }
 
     suspend fun <T> runInTransaction(
         operationName: String = "ROOM_TRANSACTION",
@@ -851,15 +855,21 @@ class PmpRepository(
         warehouseType: String = "مبيعات",
         user: String
     ): Long {
+        val whClass = WarehouseClass.fromRaw(warehouseType.ifBlank { name })
         val id = dao.insertWarehouse(
             WarehouseEntity(
                 name = name.trim(),
                 currency = currency,
                 linkedCashbox = linkedCashbox,
-                warehouseType = warehouseType
+                warehouseType = warehouseType,
+                warehouseClass = whClass.name,
+                allowDirectSales = whClass == WarehouseClass.SALES,
+                allowProductionReceipt = whClass == WarehouseClass.FINISHED_GOODS,
+                syncUuid = java.util.UUID.randomUUID().toString(),
+                updatedAt = System.currentTimeMillis()
             )
         )
-        dao.insertAuditLog(AuditLogEntity(username = user, action = "ADD_WAREHOUSE", detail = "$name [$currency - $linkedCashbox]"))
+        dao.insertAuditLog(AuditLogEntity(username = user, action = "ADD_WAREHOUSE", detail = "$name [$currency - $linkedCashbox - ${whClass.arabicLabel}]"))
         return id
     }
 
@@ -874,6 +884,8 @@ class PmpRepository(
     ): Result<Unit> {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return Result.failure(Exception("اسم المخزن لا يمكن أن يكون فارغاً"))
+        val existing = dao.getWarehousesDirect().firstOrNull { it.id == id }
+        val whClass = WarehouseClass.fromRaw(warehouseType.ifBlank { trimmed })
         dao.updateWarehouse(
             WarehouseEntity(
                 id = id,
@@ -881,7 +893,16 @@ class PmpRepository(
                 active = active,
                 currency = currency,
                 linkedCashbox = linkedCashbox,
-                warehouseType = warehouseType
+                warehouseType = warehouseType,
+                warehouseClass = whClass.name,
+                code = existing?.code?.ifBlank { "WH-$id" } ?: "WH-$id",
+                branch = existing?.branch.orEmpty(),
+                allowDirectSales = whClass == WarehouseClass.SALES,
+                allowProductionReceipt = whClass == WarehouseClass.FINISHED_GOODS,
+                syncUuid = existing?.syncUuid?.ifBlank { "WH-UUID-$id" } ?: "WH-UUID-$id",
+                updatedAt = System.currentTimeMillis(),
+                recordVersion = (existing?.recordVersion ?: 0) + 1,
+                deviceId = existing?.deviceId.orEmpty()
             )
         )
         dao.insertAuditLog(AuditLogEntity(username = user, action = "UPDATE_WAREHOUSE", detail = "$trimmed [نشط: $active, $currency, $linkedCashbox]"))

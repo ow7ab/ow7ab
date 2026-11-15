@@ -212,3 +212,51 @@ test("10. Security Hardening: cluster audit_logs are append-only and negative in
   );
 });
 
+test("11. Phase 2 Rules: inventory_movements are append-only (no delete, reversal-only update) and balances reject negatives", async () => {
+  const clientDb = testEnv.unauthenticatedContext().firestore();
+  const movRef = clientDb
+    .collection("erp_clusters")
+    .doc("PMP-ERP-MAIN-CLUSTER")
+    .collection("inventory_movements")
+    .doc("IM-UUID-1");
+
+  await assertSucceeds(
+    movRef.set({
+      syncUuid: "IM-UUID-1",
+      movementType: "PURCHASE_RECEIPT",
+      quantity: 50,
+      status: "POSTED",
+    })
+  );
+
+  // Deleting an inventory movement must fail
+  await assertFails(movRef.delete());
+
+  // Arbitrary update mutating quantity must fail
+  await assertFails(movRef.update({ status: "POSTED", quantity: 999 }));
+
+  // Reversal state transition POSTED -> REVERSED succeeds
+  await assertSucceeds(movRef.update({ status: "REVERSED" }));
+
+  // Negative balance must fail
+  await assertFails(
+    clientDb
+      .collection("erp_clusters")
+      .doc("PMP-ERP-MAIN-CLUSTER")
+      .collection("warehouse_stock_balances")
+      .doc("BAL-BAD")
+      .set({ onHandQty: -10, availableQty: -10 })
+  );
+
+  // Invalid packaging rule (cansPerCarton <= 0) must fail
+  await assertFails(
+    clientDb
+      .collection("erp_clusters")
+      .doc("PMP-ERP-MAIN-CLUSTER")
+      .collection("packaging_rules")
+      .doc("PKG-BAD")
+      .set({ weightGrams: 900, cansPerCarton: 0 })
+  );
+});
+
+
