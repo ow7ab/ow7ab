@@ -329,6 +329,42 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    // --- Phase 2 & Phase 3 Enterprise ERP Reactive Flows ---
+    val erpMovements = repository.getErpMovements()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val erpStockBalances = repository.getErpStockBalances()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val erpTransfers = repository.getErpTransfers()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val packagingRulesDb = repository.getPackagingRulesDb()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val purchaseReceipts = repository.getPurchaseReceipts()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val productionOrdersDb = repository.getProductionOrdersDb()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val qcInspections = repository.getQcInspections()
+        .catch { emit(emptyList()) }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
     val halfaInvoices = repository.getHalfaInvoices()
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in halfaInvoices flow", e)
@@ -4438,6 +4474,283 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             _productionOrders.value = com.example.util.ErpLifecycleEngine.saveProductionOrder(getApplication(), updated)
             postMessage("تم صرف الخامات (${order.targetWeightKg} كجم) وتأكيد استلام مهندس الإنتاج لأمر ${order.orderNumber}")
             persistAndSyncToServer()
+        }
+    }
+
+    // --- Phase 3 Room + Ledger Actions (Procurement -> Raw Materials, BOM -> Production -> QC Gate -> Finished Goods, Transfers) ---
+
+    fun receivePurchaseToRawWarehouse(
+        materialId: Long,
+        materialName: String,
+        unit: String,
+        supplierName: String,
+        batchNumber: String,
+        expiryDate: String,
+        orderedQty: Double,
+        receivedQty: Double,
+        acceptedQty: Double,
+        rejectedQty: Double,
+        unitCost: Double,
+        currency: String,
+        discrepancyReason: String,
+        cashboxAmount: Double = 0.0,
+        notes: String = ""
+    ) {
+        if (!checkOnlineBeforeTransaction("استلام وفحص شحنة المشتريات")) return
+        viewModelScope.launch {
+            val coordinator = repository.phase3Engine
+            if (coordinator == null) {
+                postMessage("محرك الاستلام غير مهيأ حالياً", isError = true)
+                return@launch
+            }
+            val actor = resolveUserActor("أمين مخزن الخام")
+            val result = coordinator.receivePurchaseToRawMaterials(
+                com.example.domain.inventory.PurchaseReceiptInput(
+                    supplierName = supplierName,
+                    materialId = materialId,
+                    materialName = materialName,
+                    unit = unit,
+                    batchNumber = batchNumber,
+                    expiryDate = expiryDate,
+                    orderedQty = orderedQty,
+                    receivedQty = receivedQty,
+                    acceptedQty = acceptedQty,
+                    rejectedQty = rejectedQty,
+                    unitCost = unitCost,
+                    currency = currency,
+                    discrepancyReason = discrepancyReason,
+                    notes = notes,
+                    performedBy = actor,
+                    approver = currentUser.value
+                )
+            )
+            result.onSuccess { receipt ->
+                if (cashboxAmount > 0.0) {
+                    val linkedBox = resolveCashboxForCurrency(currency)
+                    repository.recordMovement(
+                        cashbox = linkedBox,
+                        currency = currency,
+                        direction = "منصرف",
+                        amount = cashboxAmount,
+                        description = "فاتورة واستلام مشتريات ${receipt.grnNo} (${receipt.materialName}) - المورد: ${receipt.supplierName}",
+                        reference = receipt.grnNo,
+                        user = actor
+                    )
+                }
+                postMessage("تم اعتماد استلام ${receipt.grnNo}: مقبول ${receipt.acceptedQty} ${receipt.unit} في مخزن المواد الخام" +
+                    if (receipt.rejectedQty > 0.0) " • وحجر ${receipt.rejectedQty} مرفوضة" else "")
+                persistAndSyncToServer()
+            }.onFailure { err ->
+                postMessage(err.message ?: "تعذر إتمام استلام المشتريات", isError = true)
+            }
+        }
+    }
+
+    fun createBomProductionOrder(
+        formula: FormulationEntity?,
+        productName: String,
+        paintColor: String,
+        packageWeightGrams: Int,
+        targetCartons: Int,
+        machineName: String,
+        productionEngineer: String,
+        notes: String = ""
+    ) {
+        if (!checkOnlineBeforeTransaction("إنشاء أمر إنتاج BOM")) return
+        viewModelScope.launch {
+            val coordinator = repository.phase3Engine ?: return@launch
+            val matchedProduct = products.value.firstOrNull {
+                it.name.equals(productName, ignoreCase = true) ||
+                    (it.paintColor.equals(paintColor, ignoreCase = true) && it.packageWeight == packageWeightGrams.toString())
+            }
+            val result = coordinator.createProductionOrder(
+                com.example.domain.inventory.ProductionOrderCreateInput(
+                    formulaId = formula?.id,
+                    productId = matchedProduct?.id,
+                    productName = productName,
+                    paintColor = paintColor,
+                    packageWeightGrams = packageWeightGrams,
+                    targetCartons = targetCartons,
+                    machineName = machineName,
+                    productionEngineer = productionEngineer,
+                    approvedBy = resolveUserActor("المدير"),
+                    notes = notes
+                )
+            )
+            result.onSuccess { order ->
+                postMessage("تم إنشاء أمر الإنتاج ${order.orderNo}: ${order.targetCartons} كرتونة = ${order.targetCans} علبة (${order.packageWeightGrams} جم)")
+                persistAndSyncToServer()
+            }.onFailure { err ->
+                postMessage(err.message ?: "تعذر إنشاء أمر الإنتاج", isError = true)
+            }
+        }
+    }
+
+    fun issueMaterialsForProductionOrder(
+        order: ProductionOrderEntity,
+        materialId: Long,
+        materialName: String,
+        issueQty: Double,
+        returnedQty: Double = 0.0,
+        wastedQty: Double = 0.0,
+        unit: String = "كجم",
+        batchNumber: String = ""
+    ) {
+        if (!checkOnlineBeforeTransaction("صرف خامات لأمر الإنتاج")) return
+        viewModelScope.launch {
+            val coordinator = repository.phase3Engine ?: return@launch
+            val result = coordinator.issueRawMaterialsForOrder(
+                orderId = order.id,
+                materials = listOf(
+                    com.example.domain.inventory.MaterialIssueLineInput(
+                        itemId = materialId,
+                        itemName = materialName,
+                        qty = issueQty,
+                        returnedQty = returnedQty,
+                        wastedQty = wastedQty,
+                        unit = unit,
+                        batchNumber = batchNumber
+                    )
+                ),
+                actor = resolveUserActor("أمين مخزن الخام")
+            )
+            result.onSuccess { updated ->
+                postMessage("تم صرف الخامات لأمر ${updated.orderNo} من مخزن المواد الخام")
+                persistAndSyncToServer()
+            }.onFailure { err ->
+                postMessage(err.message ?: "تعذر صرف الخامات", isError = true)
+            }
+        }
+    }
+
+    fun submitQcInspectionForProductionOrder(
+        order: ProductionOrderEntity,
+        goodCans: Int,
+        rejectedCans: Int,
+        reworkCans: Int,
+        measuredDensity: Double,
+        measuredViscosity: String,
+        colorMatchPassed: Boolean,
+        wastedRawKg: Double = 0.0,
+        forceReject: Boolean = false,
+        notes: String = ""
+    ) {
+        if (!checkOnlineBeforeTransaction("فحص الجودة وترحيل الإنتاج التام")) return
+        viewModelScope.launch {
+            val coordinator = repository.phase3Engine ?: return@launch
+            val result = coordinator.inspectQcAndPostToFinishedGoods(
+                com.example.domain.inventory.QcProductionInspectionInput(
+                    productionOrderId = order.id,
+                    inspectorName = resolveUserActor("مسؤول الجودة"),
+                    measuredDensity = measuredDensity,
+                    measuredViscosity = measuredViscosity,
+                    colorMatchPassed = colorMatchPassed,
+                    goodCans = goodCans,
+                    rejectedCans = rejectedCans,
+                    reworkCans = reworkCans,
+                    wastedRawKg = wastedRawKg,
+                    forceReject = forceReject,
+                    notes = notes
+                )
+            )
+            result.onSuccess { (qc, updatedOrder) ->
+                if (qc.postedToStock) {
+                    postMessage("تم اعتماد الجودة ${qc.qcNo}: دخول ${updatedOrder.producedFullCartons} كرتونة (${updatedOrder.producedLooseCans} علبة) إلى مخزن الإنتاج التام")
+                } else {
+                    postMessage("بوابة الجودة ${qc.qcNo}: تم رفض/حجر التشغيلة ومنع دخولها لمخزن الإنتاج التام", isError = true)
+                }
+                persistAndSyncToServer()
+            }.onFailure { err ->
+                postMessage(err.message ?: "فشل تسجيل فحص الجودة", isError = true)
+            }
+        }
+    }
+
+    fun createWarehouseTransfer(
+        sourceWarehouseId: Long,
+        destinationWarehouseId: Long,
+        productId: Long,
+        productName: String,
+        qty: Double,
+        batchNumber: String = "",
+        notes: String = ""
+    ) {
+        if (!checkOnlineBeforeTransaction("إنشاء تحويل مخزني")) return
+        viewModelScope.launch {
+            val eng = repository.inventoryEngine ?: return@launch
+            val res = eng.createTransferDraft(
+                com.example.domain.inventory.TransferCreateRequest(
+                    sourceWarehouseId = sourceWarehouseId,
+                    destinationWarehouseId = destinationWarehouseId,
+                    notes = notes,
+                    createdBy = resolveUserActor("أمين المخزن"),
+                    items = listOf(
+                        com.example.domain.inventory.TransferLineInput(
+                            itemCategory = InventoryItemCategory.FINISHED_GOOD,
+                            itemId = productId,
+                            itemName = productName,
+                            requestedQty = qty,
+                            batchNumber = batchNumber,
+                            qcApprovedRequired = true,
+                            qcApproved = true
+                        )
+                    )
+                )
+            )
+            res.onSuccess { trf ->
+                postMessage("تم إنشاء مسودة التحويل ${trf.transferNo} بانتظار الاعتماد")
+                persistAndSyncToServer()
+            }.onFailure { err ->
+                postMessage(err.message ?: "تعذر إنشاء مستند التحويل", isError = true)
+            }
+        }
+    }
+
+    fun approveWarehouseTransfer(transferId: Long) {
+        if (!checkOnlineBeforeTransaction("اعتماد التحويل المخزني")) return
+        viewModelScope.launch {
+            val eng = repository.inventoryEngine ?: return@launch
+            eng.approveTransfer(transferId, currentUser.value, allowCreatorOverride = currentUser.value.isSuperAdminAccount())
+                .onSuccess {
+                    postMessage("تم اعتماد التحويل ${it.transferNo} وحجز الكمية")
+                    persistAndSyncToServer()
+                }.onFailure { postMessage(it.message ?: "تعذر اعتماد التحويل", isError = true) }
+        }
+    }
+
+    fun dispatchWarehouseTransfer(transferId: Long) {
+        if (!checkOnlineBeforeTransaction("شحن التحويل المخزني")) return
+        viewModelScope.launch {
+            val eng = repository.inventoryEngine ?: return@launch
+            eng.dispatchTransfer(transferId, resolveUserActor("مسؤول الشحن"))
+                .onSuccess {
+                    postMessage("تم خروج التحويل ${it.transferNo} (في الطريق / In Transit)")
+                    persistAndSyncToServer()
+                }.onFailure { postMessage(it.message ?: "تعذر شحن التحويل", isError = true) }
+        }
+    }
+
+    fun receiveWarehouseTransfer(transferId: Long) {
+        if (!checkOnlineBeforeTransaction("استلام التحويل المخزني")) return
+        viewModelScope.launch {
+            val eng = repository.inventoryEngine ?: return@launch
+            eng.receiveTransfer(transferId, resolveUserActor("أمين مخزن المبيعات"))
+                .onSuccess {
+                    postMessage("تم استلام التحويل ${it.transferNo} في ${it.destinationWarehouseName}")
+                    persistAndSyncToServer()
+                }.onFailure { postMessage(it.message ?: "تعذر استلام التحويل", isError = true) }
+        }
+    }
+
+    fun reverseInventoryMovement(movementId: Long, reason: String) {
+        if (!checkOnlineBeforeTransaction("عكس حركة مخزنية")) return
+        viewModelScope.launch {
+            val eng = repository.inventoryEngine ?: return@launch
+            eng.reverseMovement(movementId, reason, resolveUserActor("المدير"))
+                .onSuccess {
+                    postMessage("تم إنشاء قيد عكسي ${it.documentNo} مع الاحتفاظ بالسجل الأصلي للتدقيق")
+                    persistAndSyncToServer()
+                }.onFailure { postMessage(it.message ?: "تعذر عكس الحركة", isError = true) }
         }
     }
 }

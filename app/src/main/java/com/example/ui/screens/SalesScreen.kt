@@ -40,6 +40,7 @@ import com.example.data.local.getEffectiveSalePrice
 import com.example.data.local.resolveCurrency
 import com.example.data.local.resolveLinkedCashbox
 import com.example.data.local.resolvePaymentCurrency
+import com.example.data.local.resolveWarehouseClass
 import com.example.hasModulePermission
 import com.example.isSystemManager
 import com.example.ui.components.*
@@ -179,12 +180,24 @@ fun SalesScreen(
     var invPayAmount by remember { mutableStateOf("") }
     var invPayCashbox by remember { mutableStateOf(viewModel.resolveCashboxForCurrency(defaultAccountCurrency)) }
 
+    val salesWarehouses = remember(warehouses) {
+        warehouses.filter { it.resolveWarehouseClass() == com.example.data.local.WarehouseClass.SALES }
+            .ifEmpty { warehouses }
+    }
+
     // Invoice items builder
     val draftItems = remember { mutableStateListOf<InvoiceItemEntity>() }
     var itemProductText by remember { mutableStateOf("") }
     var itemQuantityText by remember { mutableStateOf("1") }
     var itemPriceText by remember { mutableStateOf("") }
-    var itemWarehouseText by remember { mutableStateOf(warehouses.firstOrNull()?.name ?: "مخزن مبيعات الخرطوم") }
+    var itemWarehouseText by remember { mutableStateOf(salesWarehouses.firstOrNull()?.name ?: "مخزن مبيعات الخرطوم") }
+
+    LaunchedEffect(salesWarehouses) {
+        val currentNames = salesWarehouses.map { it.name }
+        if (currentNames.isNotEmpty() && itemWarehouseText !in currentNames) {
+            itemWarehouseText = currentNames.first()
+        }
+    }
 
     LaunchedEffect(defaultAccountCurrency) {
         if (draftItems.isEmpty()) {
@@ -446,7 +459,7 @@ fun SalesScreen(
                 // New Invoice Form
                 item {
                     val customerNames = customers.map { it.name }
-                    val warehouseNames = warehouses.map { it.name }.ifEmpty { listOf("مخزن المصنع الرئيسي") }
+                    val warehouseNames = salesWarehouses.map { it.name }.ifEmpty { listOf("مخزن مبيعات الخرطوم") }
                     val subtotal = draftItems.sumOf { it.lineTotal }
                     val disc = invDiscount.toDoubleOrNull() ?: 0.0
                     val total = (subtotal - disc).coerceAtLeast(0.0)
@@ -566,7 +579,16 @@ fun SalesScreen(
                                     val qty = itemQuantityText.toDoubleOrNull() ?: 1.0
                                     val price = itemPriceText.toDoubleOrNull() ?: 0.0
                                     val matchedProduct = products.find { itemProductText.startsWith(it.sku) }
-                                    val matchedWh = warehouses.find { it.name == itemWarehouseText }
+                                    val matchedWh = salesWarehouses.find { it.name == itemWarehouseText }
+                                        ?: warehouses.find { it.name == itemWarehouseText }
+
+                                    if (matchedWh != null && matchedWh.resolveWarehouseClass() != com.example.data.local.WarehouseClass.SALES) {
+                                        viewModel.postMessage(
+                                            "ممنوع البيع مباشرة من (${matchedWh.name})؛ البيع مسموح فقط من مخازن المبيعات.",
+                                            isError = true
+                                        )
+                                        return@GlassButton
+                                    }
 
                                     val desc = if (matchedProduct != null) {
                                         "${matchedProduct.name} - ${matchedProduct.paintColor} ($qty ${matchedProduct.unit})"

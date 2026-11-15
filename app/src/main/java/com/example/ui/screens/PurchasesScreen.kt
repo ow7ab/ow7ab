@@ -470,6 +470,18 @@ fun PurchasesScreen(
             }
         }
 
+        // Phase 3 Official GRN Inspection -> RAW_MATERIALS Warehouse
+        item(key = "procurement_grn_phase3_card") {
+            ProcurementGrnPhase3Card(
+                viewModel = viewModel,
+                selectedItem = selectedFactoryItem,
+                fallbackMaterialName = currentSelectedRaw,
+                currency = rawCurrency,
+                supplierName = rawSupplier,
+                note = rawNote
+            )
+        }
+
         // Success Confirmation Banner
         successRecord?.let { record ->
             item {

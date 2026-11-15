@@ -29,6 +29,7 @@ import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS, isSystemManager } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
+import { WebThreeWarehouseTransferPanel } from './Phase3ErpPanels';
 
 type InventorySubTab = 'BALANCES' | 'WAREHOUSES_DIR' | 'STOCK_MOVES' | 'ADD_PRODUCT';
 
@@ -922,6 +923,12 @@ export const WarehousesModuleView: React.FC = () => {
               </table>
             </div>
           </GlassCard>
+
+          <WebThreeWarehouseTransferPanel
+            warehouses={warehouses}
+            products={products}
+            onNotice={showNotice}
+          />
         </div>
       )}
 

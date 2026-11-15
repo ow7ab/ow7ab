@@ -31,6 +31,7 @@ import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
+import { WebProductionOrderQcPanel } from './Phase3ErpPanels';
 
 type FactorySubTab = 'STORAGE' | 'BATCHES' | 'ORDERS' | 'HALFA_OUTBOUND' | 'LOG';
 
@@ -501,8 +502,17 @@ export const FactoryModuleView: React.FC = () => {
       )}
 
       {subTab === 'ORDERS' && (
-        <GlassCard className="p-6">
-          <h3 className="text-sm font-bold text-theme-primary mb-4">صرف خامات / تسجيل إنتاج تام بالمصنع</h3>
+        <div className="space-y-6">
+          <WebProductionOrderQcPanel
+            formulations={formulations}
+            factoryItems={factoryItems}
+            products={products}
+            warehouses={warehouses}
+            machines={machines}
+            onNotice={showNotice}
+          />
+          <GlassCard className="p-6">
+            <h3 className="text-sm font-bold text-theme-primary mb-4">صرف خامات / تسجيل إنتاج تام بالمصنع (السجل المباشر)</h3>
           <form onSubmit={handleSaveFactoryMove} className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
             <div>
               <label className="block font-bold text-theme-secondary mb-1">نوع الحركة</label>
@@ -567,6 +577,7 @@ export const FactoryModuleView: React.FC = () => {
             </div>
           </form>
         </GlassCard>
+        </div>
       )}
 
       {subTab === 'HALFA_OUTBOUND' && (

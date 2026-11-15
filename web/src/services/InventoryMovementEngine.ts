@@ -2,7 +2,11 @@ import {
   InventoryItemCategory,
   InventoryMovement,
   InventoryMovementType,
+  LabFormulation,
   PackagingRule,
+  ProductionOrder,
+  PurchaseReceipt,
+  QcInspection,
   UserAccount,
   Warehouse,
   WarehouseClass,
@@ -554,3 +558,434 @@ export function convertCartonsToCans(
 ): number {
   return Math.max(0, Math.floor(cartons)) * getCansPerCarton(weightGrams, customRules);
 }
+
+export function isSalesWarehouse(warehouse: Partial<Warehouse> | null | undefined): boolean {
+  return resolveWarehouseClass(warehouse) === 'SALES';
+}
+
+export interface WebPurchaseReceiptInput {
+  poNo?: string;
+  supplierName: string;
+  rawWarehouse: Warehouse;
+  materialId: number;
+  materialCode?: string;
+  materialName: string;
+  unit?: string;
+  batchNumber?: string;
+  expiryDate?: string;
+  orderedQty?: number;
+  receivedQty: number;
+  acceptedQty: number;
+  rejectedQty?: number;
+  unitCost?: number;
+  currency?: string;
+  discrepancyReason?: string;
+  notes?: string;
+  performedBy?: string;
+  now?: number;
+}
+
+export function receivePurchaseToRawMaterialsInState(
+  state: MovementLedgerState,
+  input: WebPurchaseReceiptInput
+): { receipt: PurchaseReceipt; state: MovementLedgerState } {
+  const whClass = resolveWarehouseClass(input.rawWarehouse);
+  if (whClass !== 'RAW_MATERIALS') {
+    throw new Error('استلام المشتريات يجب أن يوجه حصراً إلى مخزن المواد الخام.');
+  }
+  const received = Number(input.receivedQty || 0);
+  const accepted = Number(input.acceptedQty || 0);
+  const rejected = Number(input.rejectedQty || 0);
+  if (received <= 0 || accepted < 0 || rejected < 0 || Math.abs(received - (accepted + rejected)) > 0.001) {
+    throw new Error('الكمية المستلمة يجب أن تساوي مجموع الكمية المقبولة والمرفوضة.');
+  }
+  const ordered = Number(input.orderedQty || received);
+  const hasDiscrepancy = rejected > 0 || (ordered > 0 && Math.abs(received - ordered) > 0.001);
+  if (hasDiscrepancy && !String(input.discrepancyReason || '').trim()) {
+    throw new Error('يجب كتابة سبب الرفض أو العجز/الزيادة عند اختلاف الاستلام.');
+  }
+
+  const now = input.now ?? Date.now();
+  const grnNo = `GRN-${String(now).slice(-6)}`;
+  const batchNumber = String(input.batchNumber || '').trim() || `BAT-RAW-${String(now).slice(-5)}`;
+  let nextState = state;
+
+  if (accepted > 0) {
+    nextState = postMovementInState(nextState, {
+      warehouse: input.rawWarehouse,
+      movementType: 'PURCHASE_RECEIPT',
+      itemCategory: 'RAW_MATERIAL',
+      itemId: input.materialId,
+      itemCode: input.materialCode || `RAW-${input.materialId}`,
+      itemName: input.materialName,
+      quantity: accepted,
+      unit: input.unit || 'كجم',
+      unitCost: input.unitCost || 0,
+      currency: input.currency || 'EGP',
+      batchNumber,
+      expiryDate: input.expiryDate || '',
+      referenceDocType: 'PURCHASE_RECEIPT',
+      referenceDocNo: grnNo,
+      reason: `استلام مشتريات مقبول (${grnNo}) — ${input.supplierName}`,
+      qcApproved: true,
+      quarantineHold: false,
+      performedBy: input.performedBy || 'أمين مخزن الخام',
+      idempotencyKey: `GRN-ACC-${grnNo}`,
+      now
+    }).state;
+  }
+
+  if (rejected > 0) {
+    nextState = postMovementInState(nextState, {
+      warehouse: input.rawWarehouse,
+      movementType: 'PURCHASE_RECEIPT',
+      itemCategory: 'RAW_MATERIAL',
+      itemId: input.materialId,
+      itemCode: input.materialCode || `RAW-${input.materialId}`,
+      itemName: input.materialName,
+      quantity: rejected,
+      unit: input.unit || 'كجم',
+      unitCost: input.unitCost || 0,
+      currency: input.currency || 'EGP',
+      batchNumber: `${batchNumber}-REJ`,
+      expiryDate: input.expiryDate || '',
+      referenceDocType: 'PURCHASE_QUARANTINE',
+      referenceDocNo: grnNo,
+      reason: `حجر كمية مرفوضة (${grnNo}): ${input.discrepancyReason || ''}`,
+      qcApproved: false,
+      quarantineHold: true,
+      performedBy: input.performedBy || 'أمين مخزن الخام',
+      idempotencyKey: `GRN-REJ-${grnNo}`,
+      now: now + 1
+    }).state;
+  }
+
+  const receipt: PurchaseReceipt = {
+    id: now,
+    syncUuid: `PR-${grnNo}`,
+    grnNo,
+    poNo: input.poNo || `PO-${String(now).slice(-5)}`,
+    receiptDate: new Date(now).toISOString().split('T')[0],
+    supplierName: input.supplierName.trim() || 'مورد معتمد',
+    warehouseId: input.rawWarehouse.id,
+    materialId: input.materialId,
+    materialCode: input.materialCode || `RAW-${input.materialId}`,
+    materialName: input.materialName.trim(),
+    unit: input.unit || 'كجم',
+    batchNumber,
+    expiryDate: input.expiryDate || '',
+    orderedQty: ordered,
+    receivedQty: received,
+    acceptedQty: accepted,
+    rejectedQty: rejected,
+    unitCost: input.unitCost || 0,
+    totalCost: accepted * (input.unitCost || 0),
+    currency: input.currency || 'EGP',
+    discrepancyReason: String(input.discrepancyReason || '').trim(),
+    qcStatus: accepted <= 0 && rejected > 0 ? 'REJECTED' : rejected > 0 ? 'PARTIAL' : 'APPROVED',
+    stockPosted: accepted > 0,
+    notes: String(input.notes || '').trim(),
+    performedBy: input.performedBy || 'أمين مخزن الخام',
+    approvedBy: hasDiscrepancy ? '' : (input.performedBy || 'أمين مخزن الخام'),
+    idempotencyKey: `PR-${grnNo}`,
+    recordVersion: 1,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  return { receipt, state: nextState };
+}
+
+export function createProductionOrderModel(params: {
+  formula?: LabFormulation | null;
+  productId?: number | null;
+  productName: string;
+  paintColor?: string;
+  packageWeightGrams: number;
+  targetCartons: number;
+  rawWarehouseId: number;
+  fgWarehouseId: number;
+  machineName?: string;
+  productionEngineer?: string;
+  approvedBy?: string;
+  customRules?: PackagingRule[];
+  now?: number;
+}): ProductionOrder {
+  const now = params.now ?? Date.now();
+  const cartons = Math.max(1, Math.floor(params.targetCartons));
+  const cansPerCarton = getCansPerCarton(params.packageWeightGrams, params.customRules || DEFAULT_PACKAGING_RULES);
+  const targetCans = cartons * cansPerCarton;
+  const targetWeightKg = (targetCans * params.packageWeightGrams) / 1000;
+  const orderNo = `PRD-${String(now).slice(-6)}`;
+  const batchNumber = `PB-${new Date(now).toISOString().split('T')[0].replace(/-/g, '')}-${String(now).slice(-3)}`;
+
+  let bomLinesJson = '[]';
+  if (params.formula && params.formula.ingredientsJson) {
+    try {
+      const parsed = JSON.parse(params.formula.ingredientsJson);
+      if (Array.isArray(parsed) && params.formula.totalBatchWeight > 0) {
+        const scale = targetWeightKg / params.formula.totalBatchWeight;
+        const scaled = parsed.map((ing: any) => ({
+          materialName: ing.name || 'خامة',
+          materialType: ing.type || 'مادة خام',
+          unit: 'كجم',
+          theoreticalRequiredKg: Math.round(Number(ing.weight || 0) * scale * 1000) / 1000,
+          unitCostEgp: Number(ing.unitCost || 0)
+        }));
+        bomLinesJson = JSON.stringify(scaled);
+      }
+    } catch {
+      bomLinesJson = '[]';
+    }
+  }
+
+  return {
+    id: now,
+    syncUuid: `PO-${orderNo}`,
+    orderNo,
+    orderDate: new Date(now).toISOString().split('T')[0],
+    formulaId: params.formula?.id ?? null,
+    formulaNo: params.formula?.formulaNo || 'STD-BOM',
+    productId: params.productId ?? null,
+    productName: params.productName.trim() || params.formula?.productName || 'منتج دهان',
+    paintColor: params.paintColor || params.formula?.baseKind || 'أبيض',
+    packageWeightGrams: params.packageWeightGrams,
+    cansPerCarton,
+    targetCartons: cartons,
+    targetCans,
+    targetWeightKg,
+    actualGoodCans: 0,
+    rejectedCans: 0,
+    reworkCans: 0,
+    producedFullCartons: 0,
+    producedLooseCans: 0,
+    wastedRawKg: 0,
+    bomLinesJson,
+    machineName: params.machineName || 'خلاط رئيسي 1',
+    productionEngineer: params.productionEngineer || 'مهندس الإنتاج',
+    status: 'APPROVED',
+    batchNumber,
+    rawWarehouseId: params.rawWarehouseId,
+    fgWarehouseId: params.fgWarehouseId,
+    qcInspectedBy: '',
+    qcNotes: '',
+    approvedBy: params.approvedBy || 'المدير',
+    idempotencyKey: `PO-${orderNo}`,
+    recordVersion: 1,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+export function issueRawMaterialsForOrderInState(
+  state: MovementLedgerState,
+  order: ProductionOrder,
+  rawWarehouse: Warehouse,
+  lines: Array<{
+    itemId: number;
+    itemName: string;
+    qty: number;
+    returnedQty?: number;
+    wastedQty?: number;
+    unit?: string;
+    batchNumber?: string;
+  }>,
+  actor = 'أمين مخزن الخام',
+  now = Date.now()
+): { order: ProductionOrder; state: MovementLedgerState } {
+  if (!lines || lines.length === 0) throw new Error('يجب تحديد مادة خام واحدة على الأقل.');
+  let nextState = state;
+  let wasteAdded = 0;
+
+  for (const line of lines) {
+    nextState = postMovementInState(nextState, {
+      warehouse: rawWarehouse,
+      movementType: 'PRODUCTION_ISSUE',
+      itemCategory: 'RAW_MATERIAL',
+      itemId: line.itemId,
+      itemName: line.itemName,
+      quantity: line.qty,
+      unit: line.unit || 'كجم',
+      currency: 'EGP',
+      batchNumber: line.batchNumber || '',
+      referenceDocType: 'PRODUCTION_ORDER',
+      referenceDocId: order.id,
+      referenceDocNo: order.orderNo,
+      reason: `صرف خامات لأمر الإنتاج ${order.orderNo}`,
+      performedBy: actor,
+      idempotencyKey: `PRD-ISS-${order.syncUuid}-${line.itemId}-${line.batchNumber || ''}`,
+      now
+    }).state;
+
+    if ((line.returnedQty || 0) > 0) {
+      nextState = postMovementInState(nextState, {
+        warehouse: rawWarehouse,
+        movementType: 'PRODUCTION_RETURN',
+        itemCategory: 'RAW_MATERIAL',
+        itemId: line.itemId,
+        itemName: line.itemName,
+        quantity: line.returnedQty!,
+        unit: line.unit || 'كجم',
+        currency: 'EGP',
+        batchNumber: line.batchNumber || '',
+        referenceDocType: 'PRODUCTION_RETURN',
+        referenceDocId: order.id,
+        referenceDocNo: order.orderNo,
+        reason: `مرتجع فائض خامات ${order.orderNo}`,
+        performedBy: actor,
+        idempotencyKey: `PRD-RET-${order.syncUuid}-${line.itemId}-${line.batchNumber || ''}`,
+        now: now + 1
+      }).state;
+    }
+    wasteAdded += Math.max(0, Number(line.wastedQty || 0));
+  }
+
+  return {
+    order: {
+      ...order,
+      status: 'MATERIALS_ISSUED',
+      wastedRawKg: order.wastedRawKg + wasteAdded,
+      recordVersion: order.recordVersion + 1,
+      updatedAt: now
+    },
+    state: nextState
+  };
+}
+
+export function inspectQcAndPostToFinishedGoodsInState(
+  state: MovementLedgerState,
+  params: {
+    order: ProductionOrder;
+    fgWarehouse: Warehouse;
+    productId: number;
+    measuredDensity: number;
+    expectedDensity?: number;
+    measuredViscosity?: string;
+    colorMatchPassed: boolean;
+    goodCans: number;
+    rejectedCans?: number;
+    reworkCans?: number;
+    forceReject?: boolean;
+    inspectorName?: string;
+    notes?: string;
+    now?: number;
+  }
+): { qc: QcInspection; order: ProductionOrder; state: MovementLedgerState } {
+  const now = params.now ?? Date.now();
+  const goodCans = Math.max(0, Math.floor(params.goodCans));
+  const rejectedCans = Math.max(0, Math.floor(params.rejectedCans || 0));
+  const reworkCans = Math.max(0, Math.floor(params.reworkCans || 0));
+  const totalInspected = goodCans + rejectedCans + reworkCans;
+  if (totalInspected <= 0) throw new Error('الكمية المفحوصة يجب أن تكون أكبر من صفر.');
+  if (params.order.status === 'POSTED_TO_FG') {
+    throw new Error('تم ترحيل إنتاج هذا الأمر مسبقاً.');
+  }
+
+  const targetDensity = (params.expectedDensity && params.expectedDensity > 0) ? params.expectedDensity : (params.measuredDensity || 1.25);
+  const minD = Math.round(targetDensity * 0.97 * 1000) / 1000;
+  const maxD = Math.round(targetDensity * 1.03 * 1000) / 1000;
+  const densityPass = params.measuredDensity <= 0 || (params.measuredDensity >= minD && params.measuredDensity <= maxD);
+  const isPassed = !params.forceReject && densityPass && params.colorMatchPassed && goodCans > 0;
+
+  const cansPerCarton = Math.max(1, params.order.cansPerCarton || getCansPerCarton(params.order.packageWeightGrams));
+  const fullCartons = isPassed ? Math.floor(goodCans / cansPerCarton) : 0;
+  const looseCans = isPassed ? goodCans % cansPerCarton : 0;
+  const qcNo = `QC-${String(now).slice(-6)}`;
+  let nextState = state;
+
+  if (isPassed) {
+    const qtyToPost = fullCartons > 0 ? fullCartons : Math.round((goodCans / cansPerCarton) * 1000) / 1000;
+    nextState = postMovementInState(nextState, {
+      warehouse: params.fgWarehouse,
+      movementType: 'PRODUCTION_RECEIPT',
+      itemCategory: 'FINISHED_GOOD',
+      itemId: params.productId,
+      itemName: params.order.productName,
+      quantity: qtyToPost,
+      unit: 'كرتونة',
+      currency: 'EGP',
+      batchNumber: params.order.batchNumber,
+      referenceDocType: 'QC_PRODUCTION_RECEIPT',
+      referenceDocNo: qcNo,
+      reason: `إنتاج تام معتمد جودة ${qcNo} (${fullCartons} كرتونة + ${looseCans} علبة)`,
+      qcApproved: true,
+      quarantineHold: false,
+      performedBy: params.order.productionEngineer,
+      approvedBy: params.inspectorName || 'مسؤول الجودة',
+      idempotencyKey: `FG-POST-${params.order.syncUuid}`,
+      now
+    }).state;
+  }
+
+  const quarantineCans = isPassed ? rejectedCans + reworkCans : totalInspected;
+  if (quarantineCans > 0) {
+    const qCartons = Math.max(0.001, Math.round((quarantineCans / cansPerCarton) * 1000) / 1000);
+    nextState = postMovementInState(nextState, {
+      warehouse: params.fgWarehouse,
+      movementType: 'PRODUCTION_RECEIPT',
+      itemCategory: 'FINISHED_GOOD',
+      itemId: params.productId,
+      itemName: params.order.productName,
+      quantity: qCartons,
+      unit: 'كرتونة',
+      currency: 'EGP',
+      batchNumber: `${params.order.batchNumber}-QC-HOLD`,
+      referenceDocType: 'QC_QUARANTINE',
+      referenceDocNo: qcNo,
+      reason: `حجر منتجات غير مطابقة للمواصفات (${qcNo})`,
+      qcApproved: false,
+      quarantineHold: true,
+      performedBy: params.inspectorName || 'مسؤول الجودة',
+      idempotencyKey: `FG-HOLD-${params.order.syncUuid}`,
+      now: now + 1
+    }).state;
+  }
+
+  const qc: QcInspection = {
+    id: now,
+    syncUuid: `QC-${qcNo}`,
+    qcNo,
+    sourceType: 'PRODUCTION_ORDER',
+    sourceDocId: params.order.id,
+    sourceDocNo: params.order.orderNo,
+    batchNumber: params.order.batchNumber,
+    itemCategory: 'FINISHED_GOOD',
+    itemId: params.productId,
+    itemName: params.order.productName,
+    inspectedQty: totalInspected,
+    acceptedQty: isPassed ? goodCans : 0,
+    rejectedQty: isPassed ? rejectedCans : goodCans + rejectedCans,
+    reworkQty: reworkCans,
+    measuredDensity: params.measuredDensity,
+    expectedMinDensity: minD,
+    expectedMaxDensity: maxD,
+    measuredViscosity: params.measuredViscosity || '110 KU',
+    colorMatchPassed: params.colorMatchPassed,
+    status: isPassed ? 'APPROVED' : reworkCans > 0 ? 'CONDITIONAL_REWORK' : 'REJECTED',
+    inspectorName: params.inspectorName || 'مسؤول الجودة',
+    notes: String(params.notes || '').trim(),
+    postedToStock: isPassed,
+    idempotencyKey: `QC-${params.order.syncUuid}`,
+    recordVersion: 1,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  const updatedOrder: ProductionOrder = {
+    ...params.order,
+    productId: params.productId,
+    actualGoodCans: qc.acceptedQty,
+    rejectedCans: qc.rejectedQty,
+    reworkCans,
+    producedFullCartons: fullCartons,
+    producedLooseCans: looseCans,
+    status: isPassed ? 'POSTED_TO_FG' : 'QC_REJECTED',
+    qcInspectedBy: qc.inspectorName,
+    qcNotes: qc.notes,
+    recordVersion: params.order.recordVersion + 1,
+    updatedAt: now
+  };
+
+  return { qc, order: updatedOrder, state: nextState };
+}
+

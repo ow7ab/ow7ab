@@ -19,6 +19,11 @@ class PmpRepository(
     val inventoryEngine: com.example.domain.inventory.InventoryMovementEngine? by lazy {
         database?.let { com.example.domain.inventory.InventoryMovementEngine(it) }
     }
+    val phase3Engine: com.example.domain.inventory.ProductionAndProcurementEngine? by lazy {
+        val db = database ?: return@lazy null
+        val inv = inventoryEngine ?: return@lazy null
+        com.example.domain.inventory.ProductionAndProcurementEngine(db, inv)
+    }
 
     suspend fun <T> runInTransaction(
         operationName: String = "ROOM_TRANSACTION",
@@ -90,6 +95,22 @@ class PmpRepository(
     fun getAggregatedCashboxBalances(): Flow<List<CashboxBalanceTuple>> = dao.getAggregatedCashboxBalances()
     fun getAggregatedCurrencyBalances(): Flow<List<CurrencyBalanceTuple>> = dao.getAggregatedCurrencyBalances()
     fun getAggregatedProductStockBalances(): Flow<List<ProductStockBalanceTuple>> = dao.getAggregatedProductStockBalances()
+
+    // --- Phase 2/3 ERP Reactive Streams ---
+    fun getErpMovements(): Flow<List<InventoryMovementEntity>> =
+        getErpInventoryDao()?.getAllInventoryMovements() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getErpStockBalances(): Flow<List<WarehouseStockBalanceEntity>> =
+        getErpInventoryDao()?.getAllStockBalances() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getErpTransfers(): Flow<List<WarehouseTransferEntity>> =
+        getErpInventoryDao()?.getAllWarehouseTransfers() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getPackagingRulesDb(): Flow<List<PackagingRuleEntity>> =
+        getErpInventoryDao()?.getAllActivePackagingRules() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getPurchaseReceipts(): Flow<List<PurchaseReceiptEntity>> =
+        getErpInventoryDao()?.getAllPurchaseReceipts() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getProductionOrdersDb(): Flow<List<ProductionOrderEntity>> =
+        getErpInventoryDao()?.getAllProductionOrders() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getQcInspections(): Flow<List<QcInspectionEntity>> =
+        getErpInventoryDao()?.getAllQcInspections() ?: kotlinx.coroutines.flow.flowOf(emptyList())
 
     suspend fun addCashbox(name: String, user: String): Long {
         val trimmed = name.trim()
@@ -594,6 +615,18 @@ class PmpRepository(
 
         val invoiceNumber = "INV-" + SimpleDateFormat("yyMMdd-HHmmss", Locale.getDefault()).format(Date())
 
+        val allWarehousesById = dao.getWarehousesDirect().associateBy { it.id }
+        for (item in normalizedItems) {
+            if (item.warehouseId != null) {
+                val wh = allWarehousesById[item.warehouseId]
+                if (wh != null && wh.resolveWarehouseClass() != WarehouseClass.SALES) {
+                    return@runInTransaction Result.failure(
+                        Exception("لا يُسمح بالبيع المباشر من ${wh.resolveWarehouseClass().arabicLabel} (${wh.name})؛ يجب التحويل أولاً إلى مخزن المبيعات عبر مستند تحويل معتمد.")
+                    )
+                }
+            }
+        }
+
         val invoiceId = dao.insertInvoice(
             InvoiceEntity(
                 invoiceNo = invoiceNumber,
@@ -613,8 +646,39 @@ class PmpRepository(
         val updatedItems = normalizedItems.map { it.copy(invoiceId = invoiceId) }
         dao.insertInvoiceItems(updatedItems)
 
+        val invDao = getErpInventoryDao()
+        val eng = inventoryEngine
         for (item in updatedItems) {
             if (item.productId != null && item.warehouseId != null) {
+                if (invDao != null && eng != null) {
+                    val trackedBalance = invDao.getTotalAvailableQty(
+                        warehouseId = item.warehouseId,
+                        itemCategory = InventoryItemCategory.FINISHED_GOOD.name,
+                        itemId = item.productId
+                    )
+                    if (trackedBalance > 0.0) {
+                        eng.postMovementInternal(
+                            com.example.domain.inventory.InventoryMovementRequest(
+                                movementType = InventoryMovementType.SALES_ISSUE,
+                                warehouseId = item.warehouseId,
+                                itemCategory = InventoryItemCategory.FINISHED_GOOD,
+                                itemId = item.productId,
+                                itemName = item.description,
+                                quantity = item.quantity,
+                                unit = "كرتونة",
+                                unitCost = item.unitPrice,
+                                currency = currency,
+                                referenceDocType = "SALES_INVOICE",
+                                referenceDocId = invoiceId,
+                                referenceDocNo = invoiceNumber,
+                                reason = "صرف مبيعات فاتورة $invoiceNumber للعميل $cleanCustomerName",
+                                qcApproved = true,
+                                performedBy = user,
+                                idempotencyKey = "INV-${invoiceId}-LINE-${item.productId}-${item.warehouseId}"
+                            )
+                        )
+                    }
+                }
                 dao.insertStockMove(
                     StockMoveEntity(
                         warehouseId = item.warehouseId,

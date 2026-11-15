@@ -57,11 +57,15 @@ import {
   WarehouseStockBalance,
   WarehouseTransfer,
   WarehouseTransferItem,
-  PackagingRule
+  PackagingRule,
+  PurchaseReceipt,
+  ProductionOrder,
+  QcInspection
 } from '../types/erp';
 import {
   DEFAULT_PACKAGING_RULES,
   resolveWarehouseClass,
+  isSalesWarehouse,
   signedQuantityFor,
   validateWarehousePolicy,
   validateTransferRoute,
@@ -72,7 +76,11 @@ import {
   canApproveTransfer,
   getCansPerCarton,
   convertCansToCartons,
-  convertCartonsToCans
+  convertCartonsToCans,
+  receivePurchaseToRawMaterialsInState,
+  createProductionOrderModel,
+  issueRawMaterialsForOrderInState,
+  inspectQcAndPostToFinishedGoodsInState
 } from './InventoryMovementEngine';
 import {
   safeId,
@@ -133,6 +141,7 @@ export {
   compareRecordsChronologically,
   DEFAULT_PACKAGING_RULES,
   resolveWarehouseClass,
+  isSalesWarehouse,
   signedQuantityFor,
   validateWarehousePolicy,
   validateTransferRoute,
@@ -143,7 +152,11 @@ export {
   canApproveTransfer,
   getCansPerCarton,
   convertCansToCartons,
-  convertCartonsToCans
+  convertCartonsToCans,
+  receivePurchaseToRawMaterialsInState,
+  createProductionOrderModel,
+  issueRawMaterialsForOrderInState,
+  inspectQcAndPostToFinishedGoodsInState
 };
 
 export type {
@@ -170,7 +183,9 @@ export type ErpCollectionName =
   | 'factory_machines'
   | 'raw_materials'
   | 'recipes'
+  | 'purchase_receipts'
   | 'production_orders'
+  | 'qc_inspections'
   | 'paint_batches'
   | 'lab_formulations'
   | 'chemical_safety'
@@ -766,5 +781,8 @@ export type {
   WarehouseStockBalance,
   WarehouseTransfer,
   WarehouseTransferItem,
-  PackagingRule
+  PackagingRule,
+  PurchaseReceipt,
+  ProductionOrder,
+  QcInspection
 };

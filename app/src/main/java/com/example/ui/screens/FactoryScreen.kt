@@ -933,7 +933,17 @@ fun FactoryScreen(
             }
 
             "أوامر الإنتاج" -> {
-                // Tab 2: Production Orders (أوامر الإنتاج)
+                // Phase 3: Approved BOM Production Orders + Material Issue + QC Gate -> FINISHED_GOODS
+                item(key = "production_order_qc_phase3_panel") {
+                    ProductionOrderQcPhase3Panel(
+                        viewModel = viewModel,
+                        formulations = formulations,
+                        factoryItems = factoryItems,
+                        machines = factoryMachines
+                    )
+                }
+
+                // Tab 2: Legacy Production Orders Card (Preserved)
                 item {
                     val machineNames = listOf("بدون ماكينة") + factoryMachines.map { it.name }
 

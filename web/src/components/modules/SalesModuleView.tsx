@@ -28,7 +28,7 @@ import {
   TreasuryMovement,
   Warehouse
 } from '../../types/erp';
-import { ErpDataService, safeId } from '../../services/ErpDataService';
+import { ErpDataService, safeId, isSalesWarehouse } from '../../services/ErpDataService';
 import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
@@ -99,14 +99,24 @@ export const SalesModuleView: React.FC = () => {
     return () => unsubs.forEach((u) => u());
   }, []);
 
+  const salesWarehouses = useMemo(
+    () => warehouses.filter((w) => isSalesWarehouse(w)),
+    [warehouses]
+  );
+
   useEffect(() => {
     if (customers.length > 0 && selectedCustomerId === 0) setSelectedCustomerId(Number(customers[0].id));
     if (customers.length > 0 && ledgerCustomerId === 0) setLedgerCustomerId(Number(customers[0].id));
     if (products.length > 0 && pickerProductId === 0) setPickerProductId(Number(products[0].id));
-    if (warehouses.length > 0 && invWarehouseId === 0) setInvWarehouseId(Number(warehouses[0].id));
+    if (salesWarehouses.length > 0) {
+      const currentIsSales = salesWarehouses.some((w) => Number(w.id) === Number(invWarehouseId));
+      if (invWarehouseId === 0 || !currentIsSales) {
+        setInvWarehouseId(Number(salesWarehouses[0].id));
+      }
+    }
     if (cashboxes.length > 0 && !invCashbox) setInvCashbox(cashboxes[0].name);
     if (cashboxes.length > 0 && !payCashbox) setPayCashbox(cashboxes[0].name);
-  }, [customers, products, warehouses, cashboxes]);
+  }, [customers, products, salesWarehouses, cashboxes, invWarehouseId]);
 
   const productStocks = useMemo(
     () => ErpDataService.computeProductStocksList(products, stockMoves, invWarehouseId > 0 ? invWarehouseId : null, warehouses),
@@ -153,6 +163,11 @@ export const SalesModuleView: React.FC = () => {
   };
 
   const handleAddDraftLine = () => {
+    const selectedWh = warehouses.find((w) => Number(w.id) === Number(invWarehouseId));
+    if (selectedWh && !isSalesWarehouse(selectedWh)) {
+      showNotice('err', 'لا يُسمح بالبيع من مخزن المواد الخام أو الإنتاج التام؛ اختر مخزن مبيعات فقط.');
+      return;
+    }
     const prod =
       productStocks.find((p) => Number(p.id) === Number(pickerProductId)) ||
       products.find((p) => Number(p.id) === Number(pickerProductId));
@@ -207,6 +222,11 @@ export const SalesModuleView: React.FC = () => {
     }
     if (draftLines.length === 0) {
       showNotice('err', 'أضف صنفاً واحداً على الأقل قبل حفظ الفاتورة');
+      return;
+    }
+    const selectedWh = warehouses.find((w) => Number(w.id) === Number(invWarehouseId));
+    if (!selectedWh || !isSalesWarehouse(selectedWh)) {
+      showNotice('err', 'يُمنع إصدار فواتير المبيعات من غير مخزن مبيعات معتمد (SALES).');
       return;
     }
 
@@ -982,7 +1002,10 @@ export const SalesModuleView: React.FC = () => {
                     onChange={(e) => setInvWarehouseId(Number(e.target.value))}
                     className="px-2 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
                   >
-                    {warehouses.map((w) => (
+                    {salesWarehouses.length === 0 && (
+                      <option value={0}>لا يوجد مخزن مبيعات متاح</option>
+                    )}
+                    {salesWarehouses.map((w) => (
                       <option key={w.id} value={w.id}>
                         {w.name}
                       </option>

@@ -47,7 +47,7 @@ service cloud.firestore {
         'halfa_invoices', 'poster_prices', 'audit_logs',
         'server_status', 'deleted_users',
         'lab_formulations', 'formulations', 'paint_batches', 'chemical_safety',
-        'purchase_orders', 'goods_receipts', 'production_orders', 'qc_inspections', 'fg_receipts', 'sales_deliveries',
+        'purchase_orders', 'purchase_receipts', 'goods_receipts', 'production_orders', 'qc_inspections', 'fg_receipts', 'sales_deliveries',
         'inventory_movements', 'warehouse_stock_balances', 'warehouse_transfers', 'warehouse_transfer_items', 'packaging_rules', 'stock_batches',
         'deleted_records', 'system_metadata', 'system_config', 'app_updates',
         'permission_audit_logs', 'config'
@@ -220,6 +220,20 @@ service cloud.firestore {
         (col != 'packaging_rules' || (
           (!('weightGrams' in d) || (d.weightGrams is number && d.weightGrams > 0)) &&
           (!('cansPerCarton' in d) || (d.cansPerCarton is number && d.cansPerCarton > 0))
+        )) &&
+        (col != 'purchase_receipts' || (
+          (!('receivedQty' in d) || (d.receivedQty is number && d.receivedQty > 0)) &&
+          (!('acceptedQty' in d) || (d.acceptedQty is number && d.acceptedQty >= 0)) &&
+          (!('rejectedQty' in d) || (d.rejectedQty is number && d.rejectedQty >= 0))
+        )) &&
+        (col != 'production_orders' || (
+          (!('targetCartons' in d) || (d.targetCartons is number && d.targetCartons > 0)) &&
+          (!('packageWeightGrams' in d) || (d.packageWeightGrams is number && d.packageWeightGrams > 0))
+        )) &&
+        (col != 'qc_inspections' || (
+          (!('inspectedQty' in d) || (d.inspectedQty is number && d.inspectedQty > 0)) &&
+          (!('acceptedQty' in d) || (d.acceptedQty is number && d.acceptedQty >= 0)) &&
+          (!('rejectedQty' in d) || (d.rejectedQty is number && d.rejectedQty >= 0))
         )) &&
         (col != 'user_accounts' || (
           (!('username' in d) || isNonEmptyString(d.username, 120)) &&

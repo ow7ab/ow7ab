@@ -43,9 +43,12 @@ import kotlinx.coroutines.sync.withLock
         WarehouseTransferEntity::class,
         WarehouseTransferItemEntity::class,
         PackagingRuleEntity::class,
-        SyncOutboxEntity::class
+        SyncOutboxEntity::class,
+        PurchaseReceiptEntity::class,
+        ProductionOrderEntity::class,
+        QcInspectionEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
@@ -806,6 +809,136 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private fun upgradeSchemaToV13Phase3(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `purchase_receipts` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `grnNo` TEXT NOT NULL,
+                    `poNo` TEXT NOT NULL,
+                    `receiptDate` TEXT NOT NULL,
+                    `supplierName` TEXT NOT NULL,
+                    `warehouseId` INTEGER NOT NULL,
+                    `materialId` INTEGER NOT NULL,
+                    `materialCode` TEXT NOT NULL,
+                    `materialName` TEXT NOT NULL,
+                    `unit` TEXT NOT NULL,
+                    `batchNumber` TEXT NOT NULL,
+                    `expiryDate` TEXT NOT NULL,
+                    `orderedQty` REAL NOT NULL,
+                    `receivedQty` REAL NOT NULL,
+                    `acceptedQty` REAL NOT NULL,
+                    `rejectedQty` REAL NOT NULL,
+                    `unitCost` REAL NOT NULL,
+                    `totalCost` REAL NOT NULL,
+                    `currency` TEXT NOT NULL,
+                    `discrepancyReason` TEXT NOT NULL,
+                    `qcStatus` TEXT NOT NULL,
+                    `stockPosted` INTEGER NOT NULL,
+                    `notes` TEXT NOT NULL,
+                    `performedBy` TEXT NOT NULL,
+                    `approvedBy` TEXT NOT NULL,
+                    `idempotencyKey` TEXT NOT NULL,
+                    `recordVersion` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_pr_sync_uuid` ON `purchase_receipts` (`syncUuid`)")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_pr_grn_no` ON `purchase_receipts` (`grnNo`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_pr_material_id` ON `purchase_receipts` (`materialId`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `production_orders` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `orderNo` TEXT NOT NULL,
+                    `orderDate` TEXT NOT NULL,
+                    `formulaId` INTEGER,
+                    `formulaNo` TEXT NOT NULL,
+                    `productId` INTEGER,
+                    `productName` TEXT NOT NULL,
+                    `paintColor` TEXT NOT NULL,
+                    `packageWeightGrams` INTEGER NOT NULL,
+                    `cansPerCarton` INTEGER NOT NULL,
+                    `targetCartons` INTEGER NOT NULL,
+                    `targetCans` INTEGER NOT NULL,
+                    `targetWeightKg` REAL NOT NULL,
+                    `actualGoodCans` INTEGER NOT NULL,
+                    `rejectedCans` INTEGER NOT NULL,
+                    `reworkCans` INTEGER NOT NULL,
+                    `producedFullCartons` INTEGER NOT NULL,
+                    `producedLooseCans` INTEGER NOT NULL,
+                    `wastedRawKg` REAL NOT NULL,
+                    `bomLinesJson` TEXT NOT NULL,
+                    `machineName` TEXT NOT NULL,
+                    `productionEngineer` TEXT NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `batchNumber` TEXT NOT NULL,
+                    `rawWarehouseId` INTEGER NOT NULL,
+                    `fgWarehouseId` INTEGER NOT NULL,
+                    `qcInspectedBy` TEXT NOT NULL,
+                    `qcNotes` TEXT NOT NULL,
+                    `approvedBy` TEXT NOT NULL,
+                    `idempotencyKey` TEXT NOT NULL,
+                    `recordVersion` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_po_sync_uuid` ON `production_orders` (`syncUuid`)")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_po_order_no` ON `production_orders` (`orderNo`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `qc_inspections` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `qcNo` TEXT NOT NULL,
+                    `sourceType` TEXT NOT NULL,
+                    `sourceDocId` INTEGER,
+                    `sourceDocNo` TEXT NOT NULL,
+                    `batchNumber` TEXT NOT NULL,
+                    `itemCategory` TEXT NOT NULL,
+                    `itemId` INTEGER NOT NULL,
+                    `itemName` TEXT NOT NULL,
+                    `inspectedQty` REAL NOT NULL,
+                    `acceptedQty` REAL NOT NULL,
+                    `rejectedQty` REAL NOT NULL,
+                    `reworkQty` REAL NOT NULL,
+                    `measuredDensity` REAL NOT NULL,
+                    `expectedMinDensity` REAL NOT NULL,
+                    `expectedMaxDensity` REAL NOT NULL,
+                    `measuredViscosity` TEXT NOT NULL,
+                    `colorMatchPassed` INTEGER NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `inspectorName` TEXT NOT NULL,
+                    `notes` TEXT NOT NULL,
+                    `postedToStock` INTEGER NOT NULL,
+                    `idempotencyKey` TEXT NOT NULL,
+                    `recordVersion` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_qc_sync_uuid` ON `qc_inspections` (`syncUuid`)")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_qc_no` ON `qc_inspections` (`qcNo`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_qc_source_doc` ON `qc_inspections` (`sourceDocNo`)")
+        }
+
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+                upgradeSchemaToV12AndBackfill(db)
+                upgradeSchemaToV13Phase3(db)
+            }
+        }
+
         private val dbCallbackMutex = Mutex()
         private val dbCallbackScope = CoroutineScope(
             SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
@@ -836,7 +969,8 @@ abstract class PmpDatabase : RoomDatabase() {
                         MIGRATION_8_9,
                         MIGRATION_9_10,
                         MIGRATION_10_11,
-                        MIGRATION_11_12
+                        MIGRATION_11_12,
+                        MIGRATION_12_13
                     )
                     .addCallback(DatabaseCallback(appContext))
                     .build()

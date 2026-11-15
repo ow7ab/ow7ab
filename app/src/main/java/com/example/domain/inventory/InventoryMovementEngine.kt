@@ -262,14 +262,49 @@ class InventoryMovementEngine(
         val now = System.currentTimeMillis()
         val signedQty = signedQtyFor(request)
         val absQty = abs(request.quantity)
-        val batchKey = request.batchNumber.trim()
+        var batchKey = request.batchNumber.trim()
 
-        val currentBalance = invDao.getStockBalanceRow(
+        var currentBalance = invDao.getStockBalanceRow(
             warehouseId = warehouse.id,
             itemCategory = request.itemCategory.name,
             itemId = request.itemId,
             batchNumber = batchKey
         )
+
+        // When batchNumber is not explicitly specified on an outbound movement, resolve FIFO from batched stock
+        if (signedQty < 0.0 && batchKey.isEmpty() && ((currentBalance?.availableQty ?: 0.0) + signedQty < -EPSILON)) {
+            val fifoCandidates = invDao.getAvailableStockBalanceRows(
+                warehouseId = warehouse.id,
+                itemCategory = request.itemCategory.name,
+                itemId = request.itemId
+            )
+            val totalAcrossBatches = fifoCandidates.sumOf { it.availableQty }
+            if (totalAcrossBatches >= absQty - EPSILON && fifoCandidates.isNotEmpty()) {
+                val firstCandidate = fifoCandidates.first()
+                if (firstCandidate.availableQty >= absQty - EPSILON) {
+                    batchKey = firstCandidate.batchNumber
+                    currentBalance = firstCandidate
+                } else {
+                    var remaining = absQty
+                    var lastMovement: InventoryMovementEntity? = null
+                    for ((idx, candidate) in fifoCandidates.withIndex()) {
+                        if (remaining <= EPSILON) break
+                        val take = minOf(remaining, candidate.availableQty)
+                        if (take <= EPSILON) continue
+                        lastMovement = postMovementInternal(
+                            request.copy(
+                                quantity = take,
+                                batchNumber = candidate.batchNumber,
+                                syncUuid = "$cleanSyncUuid-B$idx",
+                                idempotencyKey = if (cleanIdemp.isNotBlank()) "$cleanIdemp-B$idx" else ""
+                            )
+                        )
+                        remaining -= take
+                    }
+                    return lastMovement ?: throw IllegalStateException("تعذر إتمام الصرف FIFO للصنف ${request.itemName}.")
+                }
+            }
+        }
 
         val currentOnHand = currentBalance?.onHandQty ?: 0.0
         val currentReserved = currentBalance?.reservedQty ?: 0.0

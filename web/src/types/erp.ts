@@ -685,3 +685,104 @@ export interface QualityInspection {
   createdAt?: number;
 }
 
+export interface PurchaseReceipt {
+  id: number;
+  syncUuid: string;
+  grnNo: string;
+  poNo: string;
+  receiptDate: string;
+  supplierName: string;
+  warehouseId: number;
+  materialId: number;
+  materialCode: string;
+  materialName: string;
+  unit: string;
+  batchNumber: string;
+  expiryDate: string;
+  orderedQty: number;
+  receivedQty: number;
+  acceptedQty: number;
+  rejectedQty: number;
+  unitCost: number;
+  totalCost: number;
+  currency: CurrencyCode | string;
+  discrepancyReason: string;
+  qcStatus: 'PENDING' | 'APPROVED' | 'PARTIAL' | 'REJECTED';
+  stockPosted: boolean;
+  notes: string;
+  performedBy: string;
+  approvedBy: string;
+  idempotencyKey: string;
+  recordVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProductionOrder {
+  id: number;
+  syncUuid: string;
+  orderNo: string;
+  orderDate: string;
+  formulaId?: number | null;
+  formulaNo: string;
+  productId?: number | null;
+  productName: string;
+  paintColor: string;
+  packageWeightGrams: number;
+  cansPerCarton: number;
+  targetCartons: number;
+  targetCans: number;
+  targetWeightKg: number;
+  actualGoodCans: number;
+  rejectedCans: number;
+  reworkCans: number;
+  producedFullCartons: number;
+  producedLooseCans: number;
+  wastedRawKg: number;
+  bomLinesJson: string;
+  machineName: string;
+  productionEngineer: string;
+  status: 'DRAFT' | 'APPROVED' | 'MATERIALS_ISSUED' | 'IN_PRODUCTION' | 'QC_PENDING' | 'QC_APPROVED' | 'QC_REJECTED' | 'POSTED_TO_FG';
+  batchNumber: string;
+  rawWarehouseId: number;
+  fgWarehouseId: number;
+  qcInspectedBy: string;
+  qcNotes: string;
+  approvedBy: string;
+  idempotencyKey: string;
+  recordVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface QcInspection {
+  id: number;
+  syncUuid: string;
+  qcNo: string;
+  sourceType: 'PRODUCTION_ORDER' | 'PURCHASE_RECEIPT' | 'TRANSFER';
+  sourceDocId?: number | null;
+  sourceDocNo: string;
+  batchNumber: string;
+  itemCategory: InventoryItemCategory | string;
+  itemId: number;
+  itemName: string;
+  inspectedQty: number;
+  acceptedQty: number;
+  rejectedQty: number;
+  reworkQty: number;
+  measuredDensity: number;
+  expectedMinDensity: number;
+  expectedMaxDensity: number;
+  measuredViscosity: string;
+  colorMatchPassed: boolean;
+  status: 'APPROVED' | 'CONDITIONAL_REWORK' | 'REJECTED';
+  inspectorName: string;
+  notes: string;
+  postedToStock: boolean;
+  idempotencyKey: string;
+  recordVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+

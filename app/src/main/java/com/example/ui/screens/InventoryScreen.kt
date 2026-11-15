@@ -266,6 +266,15 @@ fun InventoryScreen(
                     }
                 }
 
+                // Phase 3: Three-Warehouse Architecture (RAW_MATERIALS / FINISHED_GOODS / SALES) & Transfer Workflow
+                item(key = "three_warehouse_transfer_panel") {
+                    ThreeWarehouseTransferPanel(
+                        viewModel = viewModel,
+                        warehouses = warehouses,
+                        products = products
+                    )
+                }
+
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),

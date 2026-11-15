@@ -229,6 +229,30 @@ export function deduplicateCollectionRecords<T = any>(collectionName: string, it
           : `uuid:${raw.syncUuid ?? raw._docId}`;
         break;
       }
+      case 'purchase_receipts': {
+        key = raw.grnNo
+          ? `grn:${String(raw.grnNo).trim()}`
+          : raw.syncUuid
+          ? `uuid:${String(raw.syncUuid).trim()}`
+          : `doc:${raw._docId ?? raw.id}`;
+        break;
+      }
+      case 'production_orders': {
+        key = raw.orderNo
+          ? `po:${String(raw.orderNo).trim()}`
+          : raw.syncUuid
+          ? `uuid:${String(raw.syncUuid).trim()}`
+          : `doc:${raw._docId ?? raw.id}`;
+        break;
+      }
+      case 'qc_inspections': {
+        key = raw.qcNo
+          ? `qc:${String(raw.qcNo).trim()}`
+          : raw.syncUuid
+          ? `uuid:${String(raw.syncUuid).trim()}`
+          : `doc:${raw._docId ?? raw.id}`;
+        break;
+      }
       default: {
         key =
           raw.id !== undefined && raw.id !== null

@@ -594,17 +594,18 @@ class ExampleUnitTest {
       mainContent.contains("installDefensiveUncaughtExceptionHandler()")
     )
 
-    // 2. Verify PmpDatabase preserves full migration chain through version 12 with MIGRATION_9_10, MIGRATION_10_11, and MIGRATION_11_12
+    // 2. Verify PmpDatabase preserves full migration chain through version 13 with MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, and MIGRATION_12_13
     val dbFile = listOf(
       java.io.File("app/src/main/java/com/example/data/local/PmpDatabase.kt"),
       java.io.File("src/main/java/com/example/data/local/PmpDatabase.kt")
     ).firstOrNull { it.exists() }
     assertNotNull("PmpDatabase.kt must exist", dbFile)
     val dbContent = dbFile!!.readText(Charsets.UTF_8)
-    assertTrue("PmpDatabase must be at version >= 12", dbContent.contains("version = 12"))
+    assertTrue("PmpDatabase must be at version 13", dbContent.contains("version = 13"))
     assertTrue("PmpDatabase must register MIGRATION_9_10", dbContent.contains("MIGRATION_9_10"))
     assertTrue("PmpDatabase must register MIGRATION_10_11", dbContent.contains("MIGRATION_10_11"))
     assertTrue("PmpDatabase must register MIGRATION_11_12", dbContent.contains("MIGRATION_11_12"))
+    assertTrue("PmpDatabase must register MIGRATION_12_13", dbContent.contains("MIGRATION_12_13"))
 
     // 3. Verify PmpDao has no bare @Insert annotations that could throw SQLiteConstraintException
     val daoFile = listOf(

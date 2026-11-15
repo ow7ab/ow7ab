@@ -259,4 +259,55 @@ test("11. Phase 2 Rules: inventory_movements are append-only (no delete, reversa
   );
 });
 
+test("12. Phase 3 Rules: purchase_receipts, production_orders & qc_inspections validate positive/non-negative bounds", async () => {
+  const clientDb = testEnv.unauthenticatedContext().firestore();
+  const cRef = clientDb.collection("erp_clusters").doc("PMP-ERP-MAIN-CLUSTER");
+
+  await assertSucceeds(
+    cRef.collection("purchase_receipts").doc("GRN-1001").set({
+      grnNo: "GRN-1001",
+      materialName: "تيتانيوم أبيض",
+      receivedQty: 100,
+      acceptedQty: 90,
+      rejectedQty: 10,
+      qcStatus: "PARTIAL",
+    })
+  );
+
+  await assertFails(
+    cRef.collection("purchase_receipts").doc("GRN-BAD").set({
+      receivedQty: 50,
+      acceptedQty: -5,
+    })
+  );
+
+  await assertSucceeds(
+    cRef.collection("production_orders").doc("PRD-1001").set({
+      orderNo: "PRD-1001",
+      productName: "بوهية أبيض 900 جم",
+      packageWeightGrams: 900,
+      targetCartons: 20,
+      status: "APPROVED",
+    })
+  );
+
+  await assertFails(
+    cRef.collection("production_orders").doc("PRD-BAD").set({
+      packageWeightGrams: 900,
+      targetCartons: 0,
+    })
+  );
+
+  await assertSucceeds(
+    cRef.collection("qc_inspections").doc("QC-1001").set({
+      qcNo: "QC-1001",
+      inspectedQty: 240,
+      acceptedQty: 240,
+      rejectedQty: 0,
+      status: "APPROVED",
+    })
+  );
+});
+
+
 

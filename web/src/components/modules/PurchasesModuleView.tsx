@@ -15,6 +15,7 @@ import { useAuth } from '../../context/AuthContext';
 import { ErpDataService } from '../../services/ErpDataService';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { Cashbox, CurrencyCode, FactoryItem, FactoryMove, TreasuryMovement } from '../../types/erp';
+import { WebProcurementGrnPanel } from './Phase3ErpPanels';
 
 export const PurchasesModuleView: React.FC = () => {
   const { language } = useLanguage();
@@ -391,6 +392,10 @@ export const PurchasesModuleView: React.FC = () => {
             </GlassCard>
           </div>
         </div>
+      )}
+
+      {activeSubTab === 'RECORD_PURCHASE' && (
+        <WebProcurementGrnPanel factoryItems={factoryItems} onNotice={showNotice} />
       )}
 
       {activeSubTab === 'ITEMS_DIRECTORY' && (

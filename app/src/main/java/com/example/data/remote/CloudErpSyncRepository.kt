@@ -2283,6 +2283,160 @@ class CloudErpSyncRepository(
             }
             batch.commit().await()
         }
+        count += pushPhase3ManufacturingToCloud(cRef, invDao, actor)
+        return count
+    }
+
+    private suspend fun pushPhase3ManufacturingToCloud(
+        cRef: com.google.firebase.firestore.DocumentReference,
+        invDao: ErpInventoryDao,
+        actor: String
+    ): Int {
+        var count = 0
+        val receipts = invDao.getPurchaseReceiptsDirect()
+        if (receipts.isNotEmpty()) {
+            val batch = firestore.batch()
+            receipts.forEach { r ->
+                val docId = safeId(r.grnNo.ifBlank { r.syncUuid }, r.syncUuid)
+                batch.set(
+                    cRef.collection("purchase_receipts").document(docId),
+                    mapOf(
+                        "id" to r.id,
+                        "syncUuid" to r.syncUuid,
+                        "grnNo" to r.grnNo,
+                        "poNo" to r.poNo,
+                        "receiptDate" to r.receiptDate,
+                        "supplierName" to r.supplierName,
+                        "warehouseId" to r.warehouseId,
+                        "materialId" to r.materialId,
+                        "materialCode" to r.materialCode,
+                        "materialName" to r.materialName,
+                        "unit" to r.unit,
+                        "batchNumber" to r.batchNumber,
+                        "expiryDate" to r.expiryDate,
+                        "orderedQty" to r.orderedQty,
+                        "receivedQty" to r.receivedQty,
+                        "acceptedQty" to r.acceptedQty,
+                        "rejectedQty" to r.rejectedQty,
+                        "unitCost" to r.unitCost,
+                        "totalCost" to r.totalCost,
+                        "currency" to r.currency,
+                        "discrepancyReason" to r.discrepancyReason,
+                        "qcStatus" to r.qcStatus,
+                        "stockPosted" to r.stockPosted,
+                        "notes" to r.notes,
+                        "performedBy" to r.performedBy,
+                        "approvedBy" to r.approvedBy,
+                        "idempotencyKey" to r.idempotencyKey,
+                        "recordVersion" to r.recordVersion,
+                        "createdAt" to r.createdAt,
+                        "updatedAt" to r.updatedAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+
+        val orders = invDao.getProductionOrdersDirect()
+        if (orders.isNotEmpty()) {
+            val batch = firestore.batch()
+            orders.forEach { o ->
+                val docId = safeId(o.orderNo.ifBlank { o.syncUuid }, o.syncUuid)
+                batch.set(
+                    cRef.collection("production_orders").document(docId),
+                    mapOf(
+                        "id" to o.id,
+                        "syncUuid" to o.syncUuid,
+                        "orderNo" to o.orderNo,
+                        "orderDate" to o.orderDate,
+                        "formulaId" to (o.formulaId ?: 0L),
+                        "formulaNo" to o.formulaNo,
+                        "productId" to (o.productId ?: 0L),
+                        "productName" to o.productName,
+                        "paintColor" to o.paintColor,
+                        "packageWeightGrams" to o.packageWeightGrams,
+                        "cansPerCarton" to o.cansPerCarton,
+                        "targetCartons" to o.targetCartons,
+                        "targetCans" to o.targetCans,
+                        "targetWeightKg" to o.targetWeightKg,
+                        "actualGoodCans" to o.actualGoodCans,
+                        "rejectedCans" to o.rejectedCans,
+                        "reworkCans" to o.reworkCans,
+                        "producedFullCartons" to o.producedFullCartons,
+                        "producedLooseCans" to o.producedLooseCans,
+                        "wastedRawKg" to o.wastedRawKg,
+                        "bomLinesJson" to o.bomLinesJson,
+                        "machineName" to o.machineName,
+                        "productionEngineer" to o.productionEngineer,
+                        "status" to o.status,
+                        "batchNumber" to o.batchNumber,
+                        "rawWarehouseId" to o.rawWarehouseId,
+                        "fgWarehouseId" to o.fgWarehouseId,
+                        "qcInspectedBy" to o.qcInspectedBy,
+                        "qcNotes" to o.qcNotes,
+                        "approvedBy" to o.approvedBy,
+                        "idempotencyKey" to o.idempotencyKey,
+                        "recordVersion" to o.recordVersion,
+                        "createdAt" to o.createdAt,
+                        "updatedAt" to o.updatedAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
+
+        val qcList = invDao.getQcInspectionsDirect()
+        if (qcList.isNotEmpty()) {
+            val batch = firestore.batch()
+            qcList.forEach { q ->
+                val docId = safeId(q.qcNo.ifBlank { q.syncUuid }, q.syncUuid)
+                batch.set(
+                    cRef.collection("qc_inspections").document(docId),
+                    mapOf(
+                        "id" to q.id,
+                        "syncUuid" to q.syncUuid,
+                        "qcNo" to q.qcNo,
+                        "sourceType" to q.sourceType,
+                        "sourceDocId" to (q.sourceDocId ?: 0L),
+                        "sourceDocNo" to q.sourceDocNo,
+                        "batchNumber" to q.batchNumber,
+                        "itemCategory" to q.itemCategory,
+                        "itemId" to q.itemId,
+                        "itemName" to q.itemName,
+                        "inspectedQty" to q.inspectedQty,
+                        "acceptedQty" to q.acceptedQty,
+                        "rejectedQty" to q.rejectedQty,
+                        "reworkQty" to q.reworkQty,
+                        "measuredDensity" to q.measuredDensity,
+                        "expectedMinDensity" to q.expectedMinDensity,
+                        "expectedMaxDensity" to q.expectedMaxDensity,
+                        "measuredViscosity" to q.measuredViscosity,
+                        "colorMatchPassed" to q.colorMatchPassed,
+                        "status" to q.status,
+                        "inspectorName" to q.inspectorName,
+                        "notes" to q.notes,
+                        "postedToStock" to q.postedToStock,
+                        "idempotencyKey" to q.idempotencyKey,
+                        "recordVersion" to q.recordVersion,
+                        "createdAt" to q.createdAt,
+                        "updatedAt" to q.updatedAt,
+                        "serverUpdatedBy" to actor,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                count++
+            }
+            batch.commit().await()
+        }
         return count
     }
 
@@ -2466,6 +2620,148 @@ class CloudErpSyncRepository(
             if (restoredTrfItems.isNotEmpty()) {
                 invDao.insertTransferItems(restoredTrfItems)
                 restored += restoredTrfItems.size
+            }
+        }
+        restored += restorePhase3ManufacturingFromCloud(cRef, invDao)
+        return restored
+    }
+
+    private suspend fun restorePhase3ManufacturingFromCloud(
+        cRef: com.google.firebase.firestore.DocumentReference,
+        invDao: ErpInventoryDao
+    ): Int {
+        var restored = 0
+        runCatching {
+            val prSnap = cRef.collection("purchase_receipts").get().await()
+            val prList = prSnap.documents.mapNotNull { doc ->
+                val grnNo = doc.getString("grnNo") ?: doc.id
+                val received = doc.safeDouble("receivedQty") ?: return@mapNotNull null
+                if (received <= 0.0) return@mapNotNull null
+                PurchaseReceiptEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: "PR-UUID-$grnNo",
+                    grnNo = grnNo,
+                    poNo = doc.getString("poNo") ?: "",
+                    receiptDate = doc.getString("receiptDate") ?: "",
+                    supplierName = doc.getString("supplierName") ?: "",
+                    warehouseId = doc.safeLong("warehouseId") ?: 5L,
+                    materialId = doc.safeLong("materialId") ?: 1L,
+                    materialCode = doc.getString("materialCode") ?: "",
+                    materialName = doc.getString("materialName") ?: "مادة خام",
+                    unit = doc.getString("unit") ?: "كجم",
+                    batchNumber = doc.getString("batchNumber") ?: "",
+                    expiryDate = doc.getString("expiryDate") ?: "",
+                    orderedQty = doc.safeDouble("orderedQty") ?: 0.0,
+                    receivedQty = received,
+                    acceptedQty = (doc.safeDouble("acceptedQty") ?: 0.0).coerceAtLeast(0.0),
+                    rejectedQty = (doc.safeDouble("rejectedQty") ?: 0.0).coerceAtLeast(0.0),
+                    unitCost = doc.safeDouble("unitCost") ?: 0.0,
+                    totalCost = doc.safeDouble("totalCost") ?: 0.0,
+                    currency = doc.getString("currency") ?: "EGP",
+                    discrepancyReason = doc.getString("discrepancyReason") ?: "",
+                    qcStatus = doc.getString("qcStatus") ?: "APPROVED",
+                    stockPosted = doc.safeBoolean("stockPosted") ?: false,
+                    notes = doc.getString("notes") ?: "",
+                    performedBy = doc.getString("performedBy") ?: "CLOUD_SYNC",
+                    approvedBy = doc.getString("approvedBy") ?: "",
+                    idempotencyKey = doc.getString("idempotencyKey") ?: "",
+                    recordVersion = doc.safeLong("recordVersion")?.toInt() ?: 1,
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (prList.isNotEmpty()) {
+                invDao.upsertPurchaseReceipts(prList)
+                restored += prList.size
+            }
+
+            val poSnap = cRef.collection("production_orders").get().await()
+            val poList = poSnap.documents.mapNotNull { doc ->
+                val orderNo = doc.getString("orderNo") ?: doc.id
+                val targetCartons = doc.safeLong("targetCartons")?.toInt() ?: return@mapNotNull null
+                if (targetCartons <= 0) return@mapNotNull null
+                val weight = doc.safeLong("packageWeightGrams")?.toInt() ?: 900
+                val cansPer = doc.safeLong("cansPerCarton")?.toInt() ?: 12
+                ProductionOrderEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: "PO-UUID-$orderNo",
+                    orderNo = orderNo,
+                    orderDate = doc.getString("orderDate") ?: "",
+                    formulaId = doc.safeLong("formulaId")?.takeIf { it > 0L },
+                    formulaNo = doc.getString("formulaNo") ?: "",
+                    productId = doc.safeLong("productId")?.takeIf { it > 0L },
+                    productName = doc.getString("productName") ?: "بوهية",
+                    paintColor = doc.getString("paintColor") ?: "أبيض",
+                    packageWeightGrams = weight,
+                    cansPerCarton = cansPer,
+                    targetCartons = targetCartons,
+                    targetCans = doc.safeLong("targetCans")?.toInt() ?: (targetCartons * cansPer),
+                    targetWeightKg = doc.safeDouble("targetWeightKg") ?: 0.0,
+                    actualGoodCans = doc.safeLong("actualGoodCans")?.toInt() ?: 0,
+                    rejectedCans = doc.safeLong("rejectedCans")?.toInt() ?: 0,
+                    reworkCans = doc.safeLong("reworkCans")?.toInt() ?: 0,
+                    producedFullCartons = doc.safeLong("producedFullCartons")?.toInt() ?: 0,
+                    producedLooseCans = doc.safeLong("producedLooseCans")?.toInt() ?: 0,
+                    wastedRawKg = doc.safeDouble("wastedRawKg") ?: 0.0,
+                    bomLinesJson = doc.getString("bomLinesJson") ?: "[]",
+                    machineName = doc.getString("machineName") ?: "",
+                    productionEngineer = doc.getString("productionEngineer") ?: "مهندس الإنتاج",
+                    status = doc.getString("status") ?: "APPROVED",
+                    batchNumber = doc.getString("batchNumber") ?: "",
+                    rawWarehouseId = doc.safeLong("rawWarehouseId") ?: 0L,
+                    fgWarehouseId = doc.safeLong("fgWarehouseId") ?: 0L,
+                    qcInspectedBy = doc.getString("qcInspectedBy") ?: "",
+                    qcNotes = doc.getString("qcNotes") ?: "",
+                    approvedBy = doc.getString("approvedBy") ?: "",
+                    idempotencyKey = doc.getString("idempotencyKey") ?: "",
+                    recordVersion = doc.safeLong("recordVersion")?.toInt() ?: 1,
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (poList.isNotEmpty()) {
+                invDao.upsertProductionOrders(poList)
+                restored += poList.size
+            }
+
+            val qcSnap = cRef.collection("qc_inspections").get().await()
+            val qcList = qcSnap.documents.mapNotNull { doc ->
+                val qcNo = doc.getString("qcNo") ?: doc.id
+                val inspected = doc.safeDouble("inspectedQty") ?: return@mapNotNull null
+                if (inspected <= 0.0) return@mapNotNull null
+                QcInspectionEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: "QC-UUID-$qcNo",
+                    qcNo = qcNo,
+                    sourceType = doc.getString("sourceType") ?: "PRODUCTION_ORDER",
+                    sourceDocId = doc.safeLong("sourceDocId")?.takeIf { it > 0L },
+                    sourceDocNo = doc.getString("sourceDocNo") ?: "",
+                    batchNumber = doc.getString("batchNumber") ?: "",
+                    itemCategory = doc.getString("itemCategory") ?: "FINISHED_GOOD",
+                    itemId = doc.safeLong("itemId") ?: 0L,
+                    itemName = doc.getString("itemName") ?: "منتج تام",
+                    inspectedQty = inspected,
+                    acceptedQty = (doc.safeDouble("acceptedQty") ?: 0.0).coerceAtLeast(0.0),
+                    rejectedQty = (doc.safeDouble("rejectedQty") ?: 0.0).coerceAtLeast(0.0),
+                    reworkQty = (doc.safeDouble("reworkQty") ?: 0.0).coerceAtLeast(0.0),
+                    measuredDensity = doc.safeDouble("measuredDensity") ?: 0.0,
+                    expectedMinDensity = doc.safeDouble("expectedMinDensity") ?: 0.0,
+                    expectedMaxDensity = doc.safeDouble("expectedMaxDensity") ?: 0.0,
+                    measuredViscosity = doc.getString("measuredViscosity") ?: "",
+                    colorMatchPassed = doc.safeBoolean("colorMatchPassed") ?: true,
+                    status = doc.getString("status") ?: "APPROVED",
+                    inspectorName = doc.getString("inspectorName") ?: "مسؤول الجودة",
+                    notes = doc.getString("notes") ?: "",
+                    postedToStock = doc.safeBoolean("postedToStock") ?: false,
+                    idempotencyKey = doc.getString("idempotencyKey") ?: "",
+                    recordVersion = doc.safeLong("recordVersion")?.toInt() ?: 1,
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (qcList.isNotEmpty()) {
+                invDao.upsertQcInspections(qcList)
+                restored += qcList.size
             }
         }
         return restored

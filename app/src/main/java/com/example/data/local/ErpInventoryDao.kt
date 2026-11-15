@@ -72,6 +72,22 @@ interface ErpInventoryDao {
 
     @Query(
         """
+        SELECT * FROM warehouse_stock_balances
+        WHERE warehouseId = :warehouseId
+          AND itemCategory = :itemCategory
+          AND itemId = :itemId
+          AND availableQty > 0
+        ORDER BY updatedAt ASC, id ASC
+        """
+    )
+    suspend fun getAvailableStockBalanceRows(
+        warehouseId: Long,
+        itemCategory: String,
+        itemId: Long
+    ): List<WarehouseStockBalanceEntity>
+
+    @Query(
+        """
         SELECT COALESCE(SUM(availableQty), 0.0)
         FROM warehouse_stock_balances
         WHERE warehouseId = :warehouseId
@@ -177,4 +193,67 @@ interface ErpInventoryDao {
 
     @Query("SELECT * FROM factory_items WHERE id = :itemId LIMIT 1")
     suspend fun getFactoryItemById(itemId: Long): FactoryItemEntity?
+
+    // --- Phase 3: Purchase Receipts (GRN) ---
+
+    @Query("SELECT * FROM purchase_receipts ORDER BY createdAt DESC, id DESC")
+    fun getAllPurchaseReceipts(): Flow<List<PurchaseReceiptEntity>>
+
+    @Query("SELECT * FROM purchase_receipts ORDER BY id DESC")
+    suspend fun getPurchaseReceiptsDirect(): List<PurchaseReceiptEntity>
+
+    @Query("SELECT * FROM purchase_receipts WHERE grnNo = :grnNo LIMIT 1")
+    suspend fun getPurchaseReceiptByGrnNo(grnNo: String): PurchaseReceiptEntity?
+
+    @Query("SELECT * FROM purchase_receipts WHERE idempotencyKey != '' AND idempotencyKey = :key LIMIT 1")
+    suspend fun getPurchaseReceiptByIdempotencyKey(key: String): PurchaseReceiptEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPurchaseReceipt(receipt: PurchaseReceiptEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPurchaseReceipts(receipts: List<PurchaseReceiptEntity>)
+
+    // --- Phase 3: Production Orders (BOM & Packaging) ---
+
+    @Query("SELECT * FROM production_orders ORDER BY createdAt DESC, id DESC")
+    fun getAllProductionOrders(): Flow<List<ProductionOrderEntity>>
+
+    @Query("SELECT * FROM production_orders ORDER BY id DESC")
+    suspend fun getProductionOrdersDirect(): List<ProductionOrderEntity>
+
+    @Query("SELECT * FROM production_orders WHERE id = :id LIMIT 1")
+    suspend fun getProductionOrderById(id: Long): ProductionOrderEntity?
+
+    @Query("SELECT * FROM production_orders WHERE orderNo = :orderNo LIMIT 1")
+    suspend fun getProductionOrderByNo(orderNo: String): ProductionOrderEntity?
+
+    @Query("SELECT * FROM production_orders WHERE idempotencyKey != '' AND idempotencyKey = :key LIMIT 1")
+    suspend fun getProductionOrderByIdempotencyKey(key: String): ProductionOrderEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertProductionOrder(order: ProductionOrderEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertProductionOrders(orders: List<ProductionOrderEntity>)
+
+    // --- Phase 3: Quality Control Inspections ---
+
+    @Query("SELECT * FROM qc_inspections ORDER BY createdAt DESC, id DESC")
+    fun getAllQcInspections(): Flow<List<QcInspectionEntity>>
+
+    @Query("SELECT * FROM qc_inspections ORDER BY id DESC")
+    suspend fun getQcInspectionsDirect(): List<QcInspectionEntity>
+
+    @Query("SELECT * FROM qc_inspections WHERE qcNo = :qcNo LIMIT 1")
+    suspend fun getQcInspectionByNo(qcNo: String): QcInspectionEntity?
+
+    @Query("SELECT * FROM qc_inspections WHERE idempotencyKey != '' AND idempotencyKey = :key LIMIT 1")
+    suspend fun getQcInspectionByIdempotencyKey(key: String): QcInspectionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertQcInspection(inspection: QcInspectionEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertQcInspections(inspections: List<QcInspectionEntity>)
 }

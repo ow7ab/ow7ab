@@ -45,7 +45,7 @@ class PmpDatabaseMigration11To12Test {
 
         // 2. Open with Room + MIGRATION_11_12 (Room automatically runs full schema validation on all 27 tables)
         val db = Room.databaseBuilder(context, PmpDatabase::class.java, dbName)
-            .addMigrations(PmpDatabase.MIGRATION_11_12)
+            .addMigrations(PmpDatabase.MIGRATION_11_12, PmpDatabase.MIGRATION_12_13)
             .allowMainThreadQueries()
             .build()
         migratedDb = db
