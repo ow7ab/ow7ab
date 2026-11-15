@@ -40,6 +40,8 @@ import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 
 type SalesSubTab = 'INVOICES' | 'NEW_INVOICE' | 'CUSTOMER_LEDGER' | 'CUSTOMERS';
 
@@ -91,7 +93,18 @@ export const SalesModuleView: React.FC = () => {
   // Customer Statement & Customers CRUD
   const [ledgerCustomerId, setLedgerCustomerId] = useState<number>(0);
   const [custForm, setCustForm] = useState({ name: '', phone: '', address: '', notes: '' });
-  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const invGuard = useTransactionGuard('sales_create_invoice', 'APPROVE_INVOICE');
+  const payGuard = useTransactionGuard('sales_collect_payment', 'PAYMENT');
+  const cancelGuard = useTransactionGuard('sales_cancel_invoice', 'UPDATE');
+  const deleteGuard = useTransactionGuard('sales_delete_invoice', 'DELETE');
+  const custGuard = useTransactionGuard('sales_save_customer', 'SAVE');
+  const isSubmitting =
+    invGuard.isSubmitting ||
+    payGuard.isSubmitting ||
+    cancelGuard.isSubmitting ||
+    deleteGuard.isSubmitting ||
+    custGuard.isSubmitting;
 
   useEffect(() => {
     const unsubs = [
@@ -277,172 +290,179 @@ export const SalesModuleView: React.FC = () => {
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      const now = Date.now();
-      const actorName = userProfile?.fullName || userProfile?.username || 'مبيعات';
-      let finalCustId = existingCust ? Number(existingCust.id) : now;
-      if (!existingCust && quickCustomerName.trim()) {
-        const newCust: Customer = {
-          id: finalCustId,
-          name: custName,
-          phone: '',
-          address: '',
-          notes: 'أُنشئ من فاتورة المبيعات',
-          active: true,
-          createdAt: now
-        };
-        await ErpDataService.upsertDocument('customers', `CUST-${finalCustId}`, newCust);
-      }
+    const res = await invGuard.runGuarded({
+      guardKey: 'sales_create_invoice',
+      operationType: 'APPROVE_INVOICE',
+      userId: userProfile?.username || 'sales',
+      documentReference: `INV-${custName}-${draftLines.length}`,
+      targetCollection: 'invoices',
+      payloadSummary: `فاتورة مبيعات للعميل ${custName} (${invCurrency})`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const actorName = userProfile?.fullName || userProfile?.username || 'مبيعات';
+        let finalCustId = existingCust ? Number(existingCust.id) : now;
+        if (!existingCust && quickCustomerName.trim()) {
+          const newCust: Customer = {
+            id: finalCustId,
+            name: custName,
+            phone: '',
+            address: '',
+            notes: 'أُنشئ من فاتورة المبيعات',
+            active: true,
+            createdAt: now
+          };
+          await ErpDataService.upsertDocument('customers', `CUST-${finalCustId}`, newCust);
+        }
 
-      const authoritativeSubtotal = draftLines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
-      const authoritativeDiscount = Math.min(authoritativeSubtotal, Math.max(0, rawDiscount || 0));
-      const authoritativeNetTotal = Math.max(0, authoritativeSubtotal - authoritativeDiscount);
-      const paidInit = Math.min(authoritativeNetTotal, Math.max(0, rawPaid || 0));
+        const authoritativeSubtotal = draftLines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
+        const authoritativeDiscount = Math.min(authoritativeSubtotal, Math.max(0, rawDiscount || 0));
+        const authoritativeNetTotal = Math.max(0, authoritativeSubtotal - authoritativeDiscount);
+        const paidInit = Math.min(authoritativeNetTotal, Math.max(0, rawPaid || 0));
 
-      const status =
-        paidInit >= authoritativeNetTotal && authoritativeNetTotal > 0
-          ? 'مدفوعة'
-          : paidInit > 0
-          ? 'سداد جزئي'
-          : 'غير مدفوعة';
+        const status =
+          paidInit >= authoritativeNetTotal && authoritativeNetTotal > 0
+            ? 'مدفوعة'
+            : paidInit > 0
+            ? 'سداد جزئي'
+            : 'غير مدفوعة';
 
-      const invoiceNo = `INV-${now.toString().slice(-6)}`;
-      const itemsList: InvoiceItem[] = draftLines.map((l) => ({
-        productId: l.productId,
-        warehouseId: l.warehouseId,
-        description: l.description,
-        quantity: l.quantity,
-        unitPrice: l.unitPrice,
-        lineTotal: l.quantity * l.unitPrice
-      }));
+        const invoiceNo = `INV-${idempotencyKey.slice(-8)}`;
+        const itemsList: InvoiceItem[] = draftLines.map((l) => ({
+          productId: l.productId,
+          warehouseId: l.warehouseId,
+          description: l.description,
+          quantity: l.quantity,
+          unitPrice: l.unitPrice,
+          lineTotal: l.quantity * l.unitPrice
+        }));
 
-      const resolvedCashbox = invCashbox || cashboxes[0]?.name || 'خزنة المبيعات';
+        const resolvedCashbox = invCashbox || cashboxes[0]?.name || 'خزنة المبيعات';
 
-      const newInv: SalesInvoice = {
-        id: now,
-        invoiceNo,
-        customerId: finalCustId,
-        customerName: custName,
-        branch: userProfile?.branch || 'الخرطوم',
-        warehouseId: invWarehouseId,
-        subtotal: authoritativeSubtotal,
-        discount: authoritativeDiscount,
-        discountAmount: authoritativeDiscount,
-        taxAmount: 0,
-        total: authoritativeNetTotal,
-        paidAmount: paidInit,
-        currency: invCurrency,
-        status,
-        cashbox: resolvedCashbox,
-        notes: invNotes.trim(),
-        itemsJson: JSON.stringify(itemsList),
-        createdBy: actorName,
-        createdAt: now,
-        timestamp: now
-      };
-
-      await ErpDataService.upsertDocument('invoices', invoiceNo, newInv);
-
-      // Deduct stock moves per line using fields synchronized 1:1 with Android CloudErpSyncRepository.kt
-      const whObj = warehouses.find((w) => Number(w.id) === Number(invWarehouseId));
-      for (let idx = 0; idx < draftLines.length; idx++) {
-        const line = draftLines[idx];
-        const moveTs = now + idx + 1;
-        const sm: StockMove = {
-          id: moveTs,
-          productId: line.productId,
-          productName: line.description,
-          warehouseId: line.warehouseId,
-          warehouseName: whObj?.name || 'المخزن الرئيسي',
-          kind: 'SALE',
-          quantity: line.quantity,
-          invoiceId: now,
-          note: `فاتورة مبيعات رقم ${invoiceNo} — العميل: ${custName}`,
-          referenceNo: invoiceNo,
-          createdBy: actorName,
-          actor: actorName,
-          createdAt: moveTs,
-          timestamp: moveTs
-        };
-        await ErpDataService.upsertDocument('stock_moves', `SM-${moveTs}`, sm);
-      }
-
-      // Record payment & treasury movement if paidInit > 0
-      if (paidInit > 0) {
-        const payDoc: InvoicePayment = {
-          id: now + 100,
-          invoiceId: now,
+        const newInv: SalesInvoice = {
+          id: now,
+          invoiceNo,
           customerId: finalCustId,
-          amount: paidInit,
+          customerName: custName,
+          branch: userProfile?.branch || 'الخرطوم',
+          warehouseId: invWarehouseId,
+          subtotal: authoritativeSubtotal,
+          discount: authoritativeDiscount,
+          discountAmount: authoritativeDiscount,
+          taxAmount: 0,
+          total: authoritativeNetTotal,
+          paidAmount: paidInit,
           currency: invCurrency,
+          status,
           cashbox: resolvedCashbox,
-          note: `دفعة مقدمة عند إصدار الفاتورة ${invoiceNo}`,
-          status: 'active',
+          notes: invNotes.trim(),
+          itemsJson: JSON.stringify(itemsList),
           createdBy: actorName,
-          receivedBy: actorName,
           createdAt: now,
           timestamp: now
         };
-        await ErpDataService.upsertDocument('invoice_payments', `PAY-${now + 100}`, payDoc);
 
-        const tm: TreasuryMovement = {
-          id: now + 101,
-          txDate: new Date(now).toISOString().split('T')[0],
-          cashbox: resolvedCashbox,
-          direction: 'وارد',
-          type: 'IN',
-          amount: paidInit,
+        await ErpDataService.upsertDocument('invoices', invoiceNo, newInv);
+
+        const whObj = warehouses.find((w) => Number(w.id) === Number(invWarehouseId));
+        for (let idx = 0; idx < draftLines.length; idx++) {
+          const line = draftLines[idx];
+          const moveTs = now + idx + 1;
+          const sm: StockMove = {
+            id: moveTs,
+            productId: line.productId,
+            productName: line.description,
+            warehouseId: line.warehouseId,
+            warehouseName: whObj?.name || 'المخزن الرئيسي',
+            kind: 'SALE',
+            quantity: line.quantity,
+            invoiceId: now,
+            note: `فاتورة مبيعات رقم ${invoiceNo} — العميل: ${custName}`,
+            referenceNo: invoiceNo,
+            createdBy: actorName,
+            actor: actorName,
+            createdAt: moveTs,
+            timestamp: moveTs
+          };
+          await ErpDataService.upsertDocument('stock_moves', `SM-${idempotencyKey}-${idx}`, sm);
+        }
+
+        if (paidInit > 0) {
+          const payDoc: InvoicePayment = {
+            id: now + 100,
+            invoiceId: now,
+            customerId: finalCustId,
+            amount: paidInit,
+            currency: invCurrency,
+            cashbox: resolvedCashbox,
+            note: `دفعة مقدمة عند إصدار الفاتورة ${invoiceNo}`,
+            status: 'active',
+            createdBy: actorName,
+            receivedBy: actorName,
+            createdAt: now,
+            timestamp: now
+          };
+          await ErpDataService.upsertDocument('invoice_payments', `PAY-${idempotencyKey}`, payDoc);
+
+          const tm: TreasuryMovement = {
+            id: now + 101,
+            txDate: new Date(now).toISOString().split('T')[0],
+            cashbox: resolvedCashbox,
+            direction: 'وارد',
+            type: 'IN',
+            amount: paidInit,
+            currency: invCurrency,
+            category: 'مبيعات نقدية',
+            description: `تحصيل فاتورة مبيعات ${invoiceNo} — ${custName}`,
+            note: `تحصيل فاتورة مبيعات ${invoiceNo} — ${custName}`,
+            reference: invoiceNo,
+            referenceNo: invoiceNo,
+            createdBy: actorName,
+            actor: actorName,
+            createdAt: now,
+            timestamp: now
+          };
+          await ErpDataService.upsertDocument('movements', `MOV-${idempotencyKey}`, tm);
+        }
+
+        const totalCogs = draftLines.reduce((sum, l) => {
+          const prod = products.find((p) => Number(p.id) === Number(l.productId));
+          const unitCost = Number(prod?.purchasePrice || prod?.costPrice || 0);
+          return sum + Math.max(0, l.quantity) * Math.max(0, unitCost);
+        }, 0);
+        const salesJournals = buildSalesInvoiceJournalPayloads({
+          invoiceId: now,
+          invoiceNo,
+          invoiceDate: new Date(now).toISOString().split('T')[0],
+          customerName: custName,
           currency: invCurrency,
-          category: 'مبيعات نقدية',
-          description: `تحصيل فاتورة مبيعات ${invoiceNo} — ${custName}`,
-          note: `تحصيل فاتورة مبيعات ${invoiceNo} — ${custName}`,
-          reference: invoiceNo,
-          referenceNo: invoiceNo,
-          createdBy: actorName,
-          actor: actorName,
-          createdAt: now,
-          timestamp: now
-        };
-        await ErpDataService.upsertDocument('movements', `MOV-${now + 101}`, tm);
+          totalRevenue: authoritativeNetTotal,
+          totalCogs,
+          paidAmount: paidInit,
+          cashbox: resolvedCashbox,
+          actor: actorName
+        });
+        await ErpDataService.persistJournalPayloads(salesJournals).catch(() => {});
+
+        await ErpDataService.logAudit(
+          userProfile?.username || 'sales',
+          'CREATE_INVOICE',
+          `إصدار فاتورة ${invoiceNo} للعميل ${custName} بقيمة ${authoritativeNetTotal.toLocaleString()} ${invCurrency}`
+        );
+
+        return { resultReference: invoiceNo };
       }
+    });
 
-      const totalCogs = draftLines.reduce((sum, l) => {
-        const prod = products.find((p) => Number(p.id) === Number(l.productId));
-        const unitCost = Number(prod?.purchasePrice || prod?.costPrice || 0);
-        return sum + Math.max(0, l.quantity) * Math.max(0, unitCost);
-      }, 0);
-      const salesJournals = buildSalesInvoiceJournalPayloads({
-        invoiceId: now,
-        invoiceNo,
-        invoiceDate: new Date(now).toISOString().split('T')[0],
-        customerName: custName,
-        currency: invCurrency,
-        totalRevenue: authoritativeNetTotal,
-        totalCogs,
-        paidAmount: paidInit,
-        cashbox: resolvedCashbox,
-        actor: actorName
-      });
-      await ErpDataService.persistJournalPayloads(salesJournals).catch(() => {});
-
-      await ErpDataService.logAudit(
-        userProfile?.username || 'sales',
-        'CREATE_INVOICE',
-        `إصدار فاتورة ${invoiceNo} للعميل ${custName} بقيمة ${authoritativeNetTotal.toLocaleString()} ${invCurrency}`
-      );
-
+    if (res.ok) {
       setDraftLines([]);
       setInvDiscount('0');
       setInvInitialPaid('0');
       setInvNotes('');
       setQuickCustomerName('');
       setSubTab('INVOICES');
-      showNotice('ok', `تم إصدار الفاتورة ${invoiceNo} وخصم المخزون وتحديث الخزنة`);
-    } catch (err: any) {
-      showNotice('err', err?.message || 'تعذر حفظ الفاتورة');
-    } finally {
-      setIsSubmitting(false);
+      showNotice('ok', res.replayed ? res.message : `تم إصدار الفاتورة ${res.resultReference} وخصم المخزون وتحديث الخزنة`);
+    } else {
+      showNotice('err', res.message);
     }
   };
 
@@ -472,90 +492,99 @@ export const SalesModuleView: React.FC = () => {
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      const now = Date.now();
-      const actorName = userProfile?.fullName || userProfile?.username || 'أمين الخزنة';
-      const newPaid = Math.min(netTotal, currentPaid + amt);
-      const newStatus = newPaid >= netTotal && netTotal > 0 ? 'مدفوعة' : 'سداد جزئي';
-      const invDocId = (payingInvoice as any)._docId || safeId(payingInvoice.invoiceNo, `INV-${payingInvoice.id}`);
-      const targetCashbox = payCashbox || payingInvoice.cashbox || 'خزنة المبيعات';
+    const res = await payGuard.runGuarded({
+      guardKey: `sales_collect_payment_${payingInvoice.invoiceNo}`,
+      operationType: 'PAYMENT',
+      userId: userProfile?.username || 'treasury',
+      documentReference: payingInvoice.invoiceNo,
+      targetCollection: 'invoice_payments',
+      payloadSummary: `تحصيل ${amt} ${payingInvoice.currency} على ${payingInvoice.invoiceNo}`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const actorName = userProfile?.fullName || userProfile?.username || 'أمين الخزنة';
+        const newPaid = Math.min(netTotal, currentPaid + amt);
+        const newStatus = newPaid >= netTotal && netTotal > 0 ? 'مدفوعة' : 'سداد جزئي';
+        const invDocId = (payingInvoice as any)._docId || safeId(payingInvoice.invoiceNo, `INV-${payingInvoice.id}`);
+        const targetCashbox = payCashbox || payingInvoice.cashbox || 'خزنة المبيعات';
+        const payDocId = `PAY-${idempotencyKey}`;
 
-      const payDoc: InvoicePayment = {
-        id: now,
-        invoiceId: Number(payingInvoice.id),
-        customerId: Number(payingInvoice.customerId),
-        amount: amt,
-        currency: payingInvoice.currency,
-        cashbox: targetCashbox,
-        note: payNote.trim() || `تحصيل دفعة على فاتورة ${payingInvoice.invoiceNo}`,
-        status: 'active',
-        createdBy: actorName,
-        receivedBy: actorName,
-        createdAt: now,
-        timestamp: now
-      };
+        const payDoc: InvoicePayment = {
+          id: now,
+          invoiceId: Number(payingInvoice.id),
+          customerId: Number(payingInvoice.customerId),
+          amount: amt,
+          currency: payingInvoice.currency,
+          cashbox: targetCashbox,
+          note: payNote.trim() || `تحصيل دفعة على فاتورة ${payingInvoice.invoiceNo}`,
+          status: 'active',
+          createdBy: actorName,
+          receivedBy: actorName,
+          createdAt: now,
+          timestamp: now
+        };
 
-      const tm: TreasuryMovement = {
-        id: now + 1,
-        txDate: new Date(now).toISOString().split('T')[0],
-        cashbox: targetCashbox,
-        direction: 'وارد',
-        type: 'IN',
-        amount: amt,
-        currency: payingInvoice.currency,
-        category: 'تحصيل عملاء',
-        description: `تحصيل فاتورة ${payingInvoice.invoiceNo} — ${payingInvoice.customerName}`,
-        note: `تحصيل فاتورة ${payingInvoice.invoiceNo} — ${payingInvoice.customerName}`,
-        reference: payingInvoice.invoiceNo,
-        referenceNo: payingInvoice.invoiceNo,
-        createdBy: actorName,
-        actor: actorName,
-        createdAt: now,
-        timestamp: now
-      };
+        const tm: TreasuryMovement = {
+          id: now + 1,
+          txDate: new Date(now).toISOString().split('T')[0],
+          cashbox: targetCashbox,
+          direction: 'وارد',
+          type: 'IN',
+          amount: amt,
+          currency: payingInvoice.currency,
+          category: 'تحصيل عملاء',
+          description: `تحصيل فاتورة ${payingInvoice.invoiceNo} — ${payingInvoice.customerName}`,
+          note: `تحصيل فاتورة ${payingInvoice.invoiceNo} — ${payingInvoice.customerName}`,
+          reference: payingInvoice.invoiceNo,
+          referenceNo: payingInvoice.invoiceNo,
+          createdBy: actorName,
+          actor: actorName,
+          createdAt: now,
+          timestamp: now
+        };
 
-      await Promise.all([
-        ErpDataService.upsertDocument('invoices', invDocId, {
-          ...payingInvoice,
-          paidAmount: newPaid,
-          status: newStatus
-        }),
-        ErpDataService.upsertDocument('invoice_payments', `PAY-${now}`, payDoc),
-        ErpDataService.upsertDocument('movements', `MOV-${now + 1}`, tm)
-      ]);
+        await Promise.all([
+          ErpDataService.upsertDocument('invoices', invDocId, {
+            ...payingInvoice,
+            paidAmount: newPaid,
+            status: newStatus
+          }),
+          ErpDataService.upsertDocument('invoice_payments', payDocId, payDoc),
+          ErpDataService.upsertDocument('movements', `MOV-${idempotencyKey}`, tm)
+        ]);
 
-      const cashCode = resolveCashAccountCode(targetCashbox, payingInvoice.currency);
-      const payJournal = createBalancedJournalPayload({
-        entryDate: new Date(now).toISOString().split('T')[0],
-        sourceType: 'CUSTOMER_PAYMENT',
-        sourceDocId: now,
-        sourceDocNo: payingInvoice.invoiceNo,
-        description: `تحصيل دفعة من العميل ${payingInvoice.customerName} في ${targetCashbox}`,
-        currency: payingInvoice.currency,
-        lines: [
-          { accountCode: cashCode, debit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: targetCashbox, memo: `وارد خزنة ${targetCashbox}` },
-          { accountCode: '1130', credit: amt, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: payingInvoice.customerName, memo: `تخفيض ذمة العميل ${payingInvoice.customerName}` }
-        ],
-        createdBy: actorName,
-        idempotencyKey: `JRN-PAY-${now}-${payingInvoice.invoiceNo}`
-      });
-      await ErpDataService.persistJournalPayload(payJournal).catch(() => {});
+        const cashCode = resolveCashAccountCode(targetCashbox, payingInvoice.currency);
+        const payJournal = createBalancedJournalPayload({
+          entryDate: new Date(now).toISOString().split('T')[0],
+          sourceType: 'CUSTOMER_PAYMENT',
+          sourceDocId: now,
+          sourceDocNo: payingInvoice.invoiceNo,
+          description: `تحصيل دفعة من العميل ${payingInvoice.customerName} في ${targetCashbox}`,
+          currency: payingInvoice.currency,
+          lines: [
+            { accountCode: cashCode, debit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: targetCashbox, memo: `وارد خزنة ${targetCashbox}` },
+            { accountCode: '1130', credit: amt, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: payingInvoice.customerName, memo: `تخفيض ذمة العميل ${payingInvoice.customerName}` }
+          ],
+          createdBy: actorName,
+          idempotencyKey: `JRN-PAY-${idempotencyKey}`
+        });
+        await ErpDataService.persistJournalPayload(payJournal).catch(() => {});
 
-      await ErpDataService.logAudit(
-        userProfile?.username || 'treasury',
-        'INVOICE_PAYMENT',
-        `تحصيل ${amt.toLocaleString()} ${payingInvoice.currency} على فاتورة ${payingInvoice.invoiceNo} (${targetCashbox})`
-      );
+        await ErpDataService.logAudit(
+          userProfile?.username || 'treasury',
+          'INVOICE_PAYMENT',
+          `تحصيل ${amt.toLocaleString()} ${payingInvoice.currency} على فاتورة ${payingInvoice.invoiceNo} (${targetCashbox})`
+        );
+        return { resultReference: payDocId };
+      }
+    });
 
+    if (res.ok) {
       setPayingInvoice(null);
       setPayAmount('');
       setPayNote('');
-      showNotice('ok', `تم تحصيل ${amt.toLocaleString()} ${payingInvoice.currency} وتحديث رصيد العميل والخزنة`);
-    } catch (err: any) {
-      showNotice('err', err?.message || 'فشل تسجيل التحصيل');
-    } finally {
-      setIsSubmitting(false);
+      showNotice('ok', res.replayed ? res.message : `تم تحصيل ${amt.toLocaleString()} ${payingInvoice.currency} وتحديث رصيد العميل والخزنة`);
+    } else {
+      showNotice('err', res.message);
     }
   };
 
@@ -571,8 +600,14 @@ export const SalesModuleView: React.FC = () => {
       return;
     }
 
-    setIsSubmitting(true);
-    try {
+    const res = await cancelGuard.runGuarded({
+      guardKey: `sales_cancel_${inv.invoiceNo}`,
+      operationType: 'UPDATE',
+      userId: userProfile?.username || 'admin',
+      documentReference: inv.invoiceNo,
+      targetCollection: 'invoices',
+      payloadSummary: `إلغاء فاتورة ${inv.invoiceNo}`,
+      execute: async () => {
       const now = Date.now();
       const actorName = userProfile?.fullName || userProfile?.username || 'المدير';
       const invDocId = (inv as any)._docId || safeId(inv.invoiceNo, `INV-${inv.id}`);
@@ -711,11 +746,13 @@ export const SalesModuleView: React.FC = () => {
         'CANCEL_INVOICE',
         `إلغاء فاتورة ${inv.invoiceNo} بقيد عكسي (استرجاع ${restoredCount} بنود مخزنية وعكس مدفوعات ${reversedTotal.toLocaleString()} ${inv.currency})`
       );
-      showNotice('ok', `تم إلغاء الفاتورة ${inv.invoiceNo} وإرجاع المخزون (${restoredCount} بند) وعكس القيود المالية`);
-    } catch (err: any) {
-      showNotice('err', err?.message || 'فشل إلغاء الفاتورة');
-    } finally {
-      setIsSubmitting(false);
+      return { resultReference: inv.invoiceNo };
+      }
+    });
+    if (res.ok) {
+      showNotice('ok', `تم إلغاء الفاتورة ${inv.invoiceNo} وإرجاع المخزون وعكس القيود المالية`);
+    } else {
+      showNotice('err', res.message);
     }
   };
 
@@ -726,63 +763,86 @@ export const SalesModuleView: React.FC = () => {
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      const actorName = userProfile?.fullName || userProfile?.username || 'المدير';
-      const invDocId = (inv as any)._docId || safeId(inv.invoiceNo, `INV-${inv.id}`);
+    const res = await deleteGuard.runGuarded({
+      guardKey: `sales_perm_delete_${inv.invoiceNo}`,
+      operationType: 'DELETE',
+      userId: userProfile?.username || 'admin',
+      documentReference: inv.invoiceNo,
+      targetCollection: 'invoices',
+      payloadSummary: `حذف نهائي للفاتورة ${inv.invoiceNo}`,
+      execute: async () => {
+        const actorName = userProfile?.fullName || userProfile?.username || 'المدير';
+        const invDocId = (inv as any)._docId || safeId(inv.invoiceNo, `INV-${inv.id}`);
 
-      // Delete invoice + record Android-compatible tombstone in deleted_records
-      await ErpDataService.deleteDocumentWithTombstone('invoices', invDocId, inv.id, actorName);
-      if (inv.invoiceNo && safeId(inv.invoiceNo, '') !== invDocId) {
-        await ErpDataService.deleteDocumentWithTombstone('invoices', safeId(inv.invoiceNo, `INV-${inv.id}`), inv.invoiceNo, actorName).catch(() => {});
-      }
-
-      // Clean up linked payments in Firestore if present
-      const linkedPays = payments.filter((p) => Number(p.invoiceId) === Number(inv.id));
-      for (const p of linkedPays) {
-        const payDocId = (p as any)._docId || `PAY-${p.id}`;
-        await ErpDataService.deleteDocumentWithTombstone('invoice_payments', payDocId, p.id, actorName).catch(() => {});
-      }
-
-      // Clean up linked invoice_items documents if stored separately
-      const allItems = await ErpDataService.fetchCollectionOnce<InvoiceItem>('invoice_items').catch(() => []);
-      for (const it of allItems) {
-        if (Number(it.invoiceId) === Number(inv.id)) {
-          const itemDocId = (it as any)._docId || `ITEM-${it.id ?? Date.now()}`;
-          await ErpDataService.deleteDocumentWithTombstone('invoice_items', itemDocId, it.id ?? itemDocId, actorName).catch(() => {});
+        await ErpDataService.deleteDocumentWithTombstone('invoices', invDocId, inv.id, actorName);
+        if (inv.invoiceNo && safeId(inv.invoiceNo, '') !== invDocId) {
+          await ErpDataService.deleteDocumentWithTombstone('invoices', safeId(inv.invoiceNo, `INV-${inv.id}`), inv.invoiceNo, actorName).catch(() => {});
         }
-      }
 
-      await ErpDataService.logAudit(
-        userProfile?.username || 'admin',
-        'INVOICE_PERMANENT_DELETE',
-        `حذف نهائي للفاتورة ${inv.invoiceNo} (${inv.customerName}) من السيرفر`
-      );
+        const linkedPays = payments.filter((p) => Number(p.invoiceId) === Number(inv.id));
+        for (const p of linkedPays) {
+          const payDocId = (p as any)._docId || `PAY-${p.id}`;
+          await ErpDataService.deleteDocumentWithTombstone('invoice_payments', payDocId, p.id, actorName).catch(() => {});
+        }
+
+        const allItems = await ErpDataService.fetchCollectionOnce<InvoiceItem>('invoice_items').catch(() => []);
+        for (const it of allItems) {
+          if (Number(it.invoiceId) === Number(inv.id)) {
+            const itemDocId = (it as any)._docId || `ITEM-${it.id ?? Date.now()}`;
+            await ErpDataService.deleteDocumentWithTombstone('invoice_items', itemDocId, it.id ?? itemDocId, actorName).catch(() => {});
+          }
+        }
+
+        await ErpDataService.logAudit(
+          userProfile?.username || 'admin',
+          'INVOICE_PERMANENT_DELETE',
+          `حذف نهائي للفاتورة ${inv.invoiceNo} (${inv.customerName}) من السيرفر`
+        );
+        return { resultReference: inv.invoiceNo };
+      }
+    });
+
+    if (res.ok) {
       setDeletingInvoice(null);
       showNotice('ok', `تم الحذف النهائي للفاتورة ${inv.invoiceNo} (${inv.customerName}) من السيرفر بنجاح`);
-    } catch (err: any) {
-      showNotice('err', err?.message || 'فشل الحذف النهائي للفاتورة من السيرفر');
-    } finally {
-      setIsSubmitting(false);
+    } else {
+      showNotice('err', res.message);
     }
   };
 
   const handleSaveCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate || !custForm.name.trim()) return;
-    const now = Date.now();
-    const cust: Customer = {
-      id: now,
-      name: custForm.name.trim(),
-      phone: custForm.phone.trim(),
-      address: custForm.address.trim(),
-      notes: custForm.notes.trim(),
-      active: true,
-      createdAt: now
-    };
-    await ErpDataService.upsertDocument('customers', `CUST-${now}`, cust);
-    setCustForm({ name: '', phone: '', address: '', notes: '' });
-    showNotice('ok', `تم حفظ العميل "${cust.name}" في الدليل السحابي`);
+    if (!canCreate || !custForm.name.trim() || custGuard.isSubmitting) return;
+    const cleanName = custForm.name.trim();
+    const res = await custGuard.runGuarded({
+      guardKey: `sales_save_customer_${cleanName}`,
+      operationType: 'SAVE',
+      userId: userProfile?.username || 'sales',
+      documentReference: cleanName,
+      targetCollection: 'customers',
+      payloadSummary: `إضافة عميل ${cleanName}`,
+      execute: async () => {
+        const now = Date.now();
+        const cust: Customer = {
+          id: now,
+          name: cleanName,
+          phone: custForm.phone.trim(),
+          address: custForm.address.trim(),
+          notes: custForm.notes.trim(),
+          active: true,
+          createdAt: now
+        };
+        const docId = `CUST-${now}`;
+        await ErpDataService.upsertDocument('customers', docId, cust);
+        return { resultReference: docId };
+      }
+    });
+    if (res.ok) {
+      setCustForm({ name: '', phone: '', address: '', notes: '' });
+      showNotice('ok', `تم حفظ العميل "${cleanName}" في الدليل السحابي`);
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const filteredInvoices = useMemo(() => {
@@ -1215,8 +1275,23 @@ export const SalesModuleView: React.FC = () => {
               </div>
             </div>
 
+            {invGuard.pendingRecord && (
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2">
+                <span>{invGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+                <GlassButton size="sm" variant="secondary" onClick={() => invGuard.verifyPending()}>
+                  التحقق من حالة العملية
+                </GlassButton>
+              </div>
+            )}
+
             <div className="flex justify-end">
-              <GlassButton type="submit" variant="primary" disabled={!canCreate || draftLines.length === 0}>
+              <GlassButton
+                type="submit"
+                variant="primary"
+                disabled={!canCreate || draftLines.length === 0}
+                isLoading={invGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.APPROVE_INVOICE}
+              >
                 اعتماد الفاتورة وخصم المخزون
               </GlassButton>
             </div>
@@ -1501,7 +1576,14 @@ export const SalesModuleView: React.FC = () => {
                 onChange={(e) => setCustForm({ ...custForm, notes: e.target.value })}
                 className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
               />
-              <GlassButton type="submit" variant="primary" className="w-full justify-center" disabled={!canCreate}>
+              <GlassButton
+                type="submit"
+                variant="primary"
+                className="w-full justify-center"
+                disabled={!canCreate}
+                isLoading={custGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.SAVE}
+              >
                 حفظ العميل
               </GlassButton>
             </form>
@@ -1608,11 +1690,24 @@ export const SalesModuleView: React.FC = () => {
               className="w-full px-3 py-2 rounded-lg bg-theme-surface border border-theme text-theme-primary"
             />
           </div>
+          {payGuard.pendingRecord && (
+            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2">
+              <span>{payGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+              <GlassButton size="sm" variant="secondary" onClick={() => payGuard.verifyPending()}>
+                التحقق من حالة العملية
+              </GlassButton>
+            </div>
+          )}
           <div className="flex justify-end gap-2">
-            <GlassButton variant="secondary" onClick={() => setPayingInvoice(null)}>
+            <GlassButton variant="secondary" disabled={payGuard.isSubmitting} onClick={() => setPayingInvoice(null)}>
               إلغاء
             </GlassButton>
-            <GlassButton type="submit" variant="primary">
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={payGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.PAYMENT}
+            >
               تأكيد التحصيل
             </GlassButton>
           </div>
@@ -1638,17 +1733,18 @@ export const SalesModuleView: React.FC = () => {
           <div className="flex justify-end gap-2">
             <GlassButton
               variant="secondary"
-              disabled={isSubmitting}
+              disabled={deleteGuard.isSubmitting}
               onClick={() => setDeletingInvoice(null)}
             >
               إلغاء
             </GlassButton>
             <GlassButton
               variant="primary"
-              disabled={isSubmitting}
+              isLoading={deleteGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.DELETE}
               onClick={() => deletingInvoice && handleDeleteInvoicePermanently(deletingInvoice)}
             >
-              {isSubmitting ? 'جارٍ الحذف...' : 'حذف نهائي من السيرفر'}
+              حذف نهائي من السيرفر
             </GlassButton>
           </div>
         </div>

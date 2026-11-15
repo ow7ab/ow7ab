@@ -34,6 +34,8 @@ import { evaluatePasswordStrength } from '../../services/PasswordSecurity';
 import { AccountService } from '../../services/AccountService';
 import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 
 type UsersSubTab = 'DIRECTORY' | 'CREATE' | 'PENDING';
 
@@ -113,7 +115,12 @@ export const EmployeeManagementCenter: React.FC = () => {
     permissions: [GRANULAR_ACTIONS.VIEW, GRANULAR_ACTIONS.CREATE, 'المبيعات'],
     isScopedAdmin: false
   });
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const createGuard = useTransactionGuard('emp_create_account', 'CREATE');
+  const editGuard = useTransactionGuard('emp_edit_account', 'UPDATE');
+  const approveGuard = useTransactionGuard('emp_approve_pending', 'APPROVE_INVOICE');
+  const statusGuard = useTransactionGuard('emp_status_delete', 'UPDATE');
+  const isSubmitting =
+    createGuard.isSubmitting || editGuard.isSubmitting || approveGuard.isSubmitting || statusGuard.isSubmitting;
 
   // Approve Pending Request Modal
   const [approvingReq, setApprovingReq] = useState<UserAccount | null>(null);
@@ -170,7 +177,7 @@ export const EmployeeManagementCenter: React.FC = () => {
   };
 
   const handleToggleStatus = async (emp: UserAccount) => {
-    if (!userProfile) return;
+    if (!userProfile || statusGuard.isSubmitting) return;
     if (isSuperAdminAccount(emp)) {
       showMessage('error', language === 'ar' ? 'لا يمكن تجميد الحساب الرئيسي لمدير النظام admin.' : 'Cannot suspend primary admin account.');
       return;
@@ -180,26 +187,38 @@ export const EmployeeManagementCenter: React.FC = () => {
       return;
     }
 
-    try {
-      const updated = { ...emp, active: !emp.active };
-      await AccountService.updateEmployee(
-        updated,
-        userProfile,
-        emp.active ? 'تجميد حساب الموظف' : 'إعادة تنشيط حساب الموظف'
-      );
+    const updated = { ...emp, active: !emp.active };
+    const res = await statusGuard.runGuarded({
+      guardKey: `emp_toggle_${emp.username}`,
+      operationType: 'UPDATE',
+      userId: userProfile.username,
+      documentReference: emp.userCode || emp.username,
+      targetCollection: 'user_accounts',
+      payloadSummary: `${updated.active ? 'تنشيط' : 'تجميد'} حساب @${emp.username}`,
+      execute: async () => {
+        await AccountService.updateEmployee(
+          updated,
+          userProfile,
+          emp.active ? 'تجميد حساب الموظف' : 'إعادة تنشيط حساب الموظف'
+        );
+        return { resultReference: emp.userCode || emp.username };
+      }
+    });
+
+    if (res.ok) {
       showMessage(
         'success',
         language === 'ar'
           ? `تم ${updated.active ? 'تنشيط' : 'تجميد'} حساب ${emp.fullName} بنجاح`
           : `Updated status for ${emp.fullName}`
       );
-    } catch (err: any) {
-      showMessage('error', err?.message || 'فشل تحديث حالة الحساب');
+    } else {
+      showMessage('error', res.message);
     }
   };
 
   const handleDeleteEmployee = async (emp: UserAccount) => {
-    if (!userProfile || !canModifyTarget(emp)) return;
+    if (!userProfile || !canModifyTarget(emp) || statusGuard.isSubmitting) return;
     if (isSuperAdminAccount(emp)) {
       showMessage('error', 'لا يمكن حذف الحساب الرئيسي admin');
       return;
@@ -211,36 +230,57 @@ export const EmployeeManagementCenter: React.FC = () => {
     );
     if (!ok) return;
 
-    try {
-      await AccountService.deleteEmployee(emp, userProfile);
+    const res = await statusGuard.runGuarded({
+      guardKey: `emp_delete_${emp.username}`,
+      operationType: 'DELETE',
+      userId: userProfile.username,
+      documentReference: emp.userCode || emp.username,
+      targetCollection: 'user_accounts',
+      payloadSummary: `حذف حساب @${emp.username}`,
+      execute: async () => {
+        await AccountService.deleteEmployee(emp, userProfile);
+        return { resultReference: emp.userCode || emp.username };
+      }
+    });
+
+    if (res.ok) {
       showMessage('success', `تم حذف حساب @${emp.username} وتسجيله في deleted_users`);
-    } catch (err: any) {
-      showMessage('error', err?.message || 'فشل حذف الحساب');
+    } else {
+      showMessage('error', res.message);
     }
   };
 
   const handleSaveEdit = async () => {
-    if (!selectedEmp || !userProfile) return;
+    if (!selectedEmp || !userProfile || editGuard.isSubmitting) return;
     if (resetPasswordInput.trim().length > 0 && resetPasswordInput.trim().length < 4) {
       showMessage('error', 'كلمة المرور الجديدة يجب أن تكون 4 خانات على الأقل');
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      await AccountService.updateEmployee(
-        selectedEmp,
-        userProfile,
-        editReason.trim() || 'تعديل الصلاحيات والدور الوظيفي',
-        resetPasswordInput.trim() || undefined
-      );
+    const res = await editGuard.runGuarded({
+      guardKey: `emp_edit_${selectedEmp.username}`,
+      operationType: 'UPDATE',
+      userId: userProfile.username,
+      documentReference: selectedEmp.userCode || selectedEmp.username,
+      targetCollection: 'user_accounts',
+      payloadSummary: `تحديث صلاحيات @${selectedEmp.username}`,
+      execute: async () => {
+        await AccountService.updateEmployee(
+          selectedEmp,
+          userProfile,
+          editReason.trim() || 'تعديل الصلاحيات والدور الوظيفي',
+          resetPasswordInput.trim() || undefined
+        );
+        return { resultReference: selectedEmp.userCode || selectedEmp.username };
+      }
+    });
+
+    if (res.ok) {
       setIsEditModalOpen(false);
       setResetPasswordInput('');
-      showMessage('success', `تم حفظ صلاحيات وبيانات ${selectedEmp.fullName} ومزامنتها سحابياً`);
-    } catch (err: any) {
-      showMessage('error', err?.message || 'فشل حفظ التعديلات');
-    } finally {
-      setIsSubmitting(false);
+      showMessage('success', res.replayed ? res.message : `تم حفظ صلاحيات وبيانات ${selectedEmp.fullName} ومزامنتها سحابياً`);
+    } else {
+      showMessage('error', res.message);
     }
   };
 
@@ -256,34 +296,44 @@ export const EmployeeManagementCenter: React.FC = () => {
   };
 
   const handleApplyTemporaryGrant = async () => {
-    if (!selectedEmp || !userProfile) return;
-    setIsSubmitting(true);
-    try {
-      const expiry = Date.now() + tempDurationHours * 3600 * 1000;
-      const tokenStr = `TEMP[${tempAction}|${expiry}|${userProfile.username}|${tempReason}|TMP-${Date.now().toString().slice(-4)}]`;
-      const existing = selectedEmp.permissions
-        .split(',')
-        .map((p) => p.trim())
-        .filter(Boolean);
-      const updated = { ...selectedEmp, permissions: [...existing, tokenStr].join(',') };
-      await AccountService.updateEmployee(
-        updated,
-        userProfile,
-        `منح صلاحية مؤقتة (${tempAction}) لمدة ${tempDurationHours} ساعة: ${tempReason}`
-      );
+    if (!selectedEmp || !userProfile || editGuard.isSubmitting) return;
+    const expiry = Date.now() + tempDurationHours * 3600 * 1000;
+    const tokenStr = `TEMP[${tempAction}|${expiry}|${userProfile.username}|${tempReason}|TMP-${Date.now().toString().slice(-4)}]`;
+    const existing = selectedEmp.permissions
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const updated = { ...selectedEmp, permissions: [...existing, tokenStr].join(',') };
+
+    const res = await editGuard.runGuarded({
+      guardKey: `emp_temp_grant_${selectedEmp.username}_${tempAction}`,
+      operationType: 'UPDATE',
+      userId: userProfile.username,
+      documentReference: selectedEmp.userCode || selectedEmp.username,
+      targetCollection: 'user_accounts',
+      payloadSummary: `تفويض مؤقت (${tempAction}) لحساب @${selectedEmp.username}`,
+      execute: async () => {
+        await AccountService.updateEmployee(
+          updated,
+          userProfile,
+          `منح صلاحية مؤقتة (${tempAction}) لمدة ${tempDurationHours} ساعة: ${tempReason}`
+        );
+        return { resultReference: selectedEmp.userCode || selectedEmp.username };
+      }
+    });
+
+    if (res.ok) {
       setSelectedEmp(updated);
       setTempGrantModalOpen(false);
-      showMessage('success', `تم اعتماد التفويض المؤقت لحساب @${selectedEmp.username}`);
-    } catch (err: any) {
-      showMessage('error', err?.message || 'فشل منح الصلاحية المؤقتة');
-    } finally {
-      setIsSubmitting(false);
+      showMessage('success', res.replayed ? res.message : `تم اعتماد التفويض المؤقت لحساب @${selectedEmp.username}`);
+    } else {
+      showMessage('error', res.message);
     }
   };
 
   const handleCreateEmployee = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userProfile || !canManageUsers) return;
+    if (!userProfile || !canManageUsers || createGuard.isSubmitting) return;
 
     const cleanName = newEmpData.fullName.trim();
     const cleanUser = newEmpData.username.trim();
@@ -302,26 +352,36 @@ export const EmployeeManagementCenter: React.FC = () => {
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      const perms = newEmpData.isScopedAdmin
-        ? Array.from(new Set([SCOPED_ADMIN_MARKER, ...newEmpData.permissions]))
-        : newEmpData.permissions;
+    const perms = newEmpData.isScopedAdmin
+      ? Array.from(new Set([SCOPED_ADMIN_MARKER, ...newEmpData.permissions]))
+      : newEmpData.permissions;
 
-      await AccountService.createEmployee(
-        {
-          fullName: cleanName,
-          username: cleanUser,
-          phoneOrEmail: newEmpData.phoneOrEmail.trim(),
-          rawPassword: cleanPass,
-          role: newEmpData.role,
-          branch: newEmpData.branch,
-          permissions: perms.join(','),
-          active: true
-        },
-        userProfile
-      );
+    const res = await createGuard.runGuarded({
+      guardKey: `emp_create_${cleanUser}`,
+      operationType: 'CREATE',
+      userId: userProfile.username,
+      documentReference: `USR-${cleanUser}`,
+      targetCollection: 'user_accounts',
+      payloadSummary: `إنشاء حساب @${cleanUser} (${cleanName})`,
+      execute: async () => {
+        await AccountService.createEmployee(
+          {
+            fullName: cleanName,
+            username: cleanUser,
+            phoneOrEmail: newEmpData.phoneOrEmail.trim(),
+            rawPassword: cleanPass,
+            role: newEmpData.role,
+            branch: newEmpData.branch,
+            permissions: perms.join(','),
+            active: true
+          },
+          userProfile
+        );
+        return { resultReference: `USR-${cleanUser}` };
+      }
+    });
 
+    if (res.ok) {
       setNewEmpData({
         fullName: '',
         username: '',
@@ -333,31 +393,38 @@ export const EmployeeManagementCenter: React.FC = () => {
         isScopedAdmin: false
       });
       setActiveSubTab('DIRECTORY');
-      showMessage('success', `تم إنشاء حساب @${cleanUser} وتشفيره بـ PBKDF2 ومزامنته مع الأندرويد`);
-    } catch (err: any) {
-      showMessage('error', err?.message || 'تعذر إنشاء الحساب');
-    } finally {
-      setIsSubmitting(false);
+      showMessage('success', res.replayed ? res.message : `تم إنشاء حساب @${cleanUser} وتشفيره بـ PBKDF2 ومزامنته مع الأندرويد`);
+    } else {
+      showMessage('error', res.message);
     }
   };
 
   const handleApprovePending = async () => {
-    if (!approvingReq || !userProfile || !canManageUsers) return;
-    setIsSubmitting(true);
-    try {
-      await AccountService.approvePendingRequest(
-        approvingReq,
-        userProfile,
-        approveRole,
-        approvePerms.join(','),
-        approveBranch
-      );
+    if (!approvingReq || !userProfile || !canManageUsers || approveGuard.isSubmitting) return;
+    const res = await approveGuard.runGuarded({
+      guardKey: `emp_approve_${approvingReq.userCode}`,
+      operationType: 'APPROVE_INVOICE',
+      userId: userProfile.username,
+      documentReference: approvingReq.userCode,
+      targetCollection: 'user_accounts',
+      payloadSummary: `اعتماد طلب انضمام ${approvingReq.fullName}`,
+      execute: async () => {
+        await AccountService.approvePendingRequest(
+          approvingReq,
+          userProfile,
+          approveRole,
+          approvePerms.join(','),
+          approveBranch
+        );
+        return { resultReference: approvingReq.userCode };
+      }
+    });
+
+    if (res.ok) {
       setApprovingReq(null);
-      showMessage('success', `تم اعتماد حساب ${approvingReq.fullName} وتفعيل دخوله الفوري`);
-    } catch (err: any) {
-      showMessage('error', err?.message || 'تعذر اعتماد الطلب');
-    } finally {
-      setIsSubmitting(false);
+      showMessage('success', res.replayed ? res.message : `تم اعتماد حساب ${approvingReq.fullName} وتفعيل دخوله الفوري`);
+    } else {
+      showMessage('error', res.message);
     }
   };
 
@@ -838,7 +905,12 @@ export const EmployeeManagementCenter: React.FC = () => {
               <GlassButton type="button" variant="secondary" onClick={() => setActiveSubTab('DIRECTORY')}>
                 إلغاء
               </GlassButton>
-              <GlassButton type="submit" variant="primary" isLoading={isSubmitting}>
+              <GlassButton
+                type="submit"
+                variant="primary"
+                isLoading={createGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.CREATE}
+              >
                 إنشاء الحساب ومزامنته مع السيرفر
               </GlassButton>
             </div>
@@ -1036,7 +1108,12 @@ export const EmployeeManagementCenter: React.FC = () => {
               <GlassButton variant="secondary" onClick={() => setIsEditModalOpen(false)}>
                 إلغاء
               </GlassButton>
-              <GlassButton variant="primary" onClick={handleSaveEdit} isLoading={isSubmitting}>
+              <GlassButton
+                variant="primary"
+                onClick={handleSaveEdit}
+                isLoading={editGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.UPDATE}
+              >
                 حفظ التعديلات في السحابة
               </GlassButton>
             </div>
@@ -1112,7 +1189,12 @@ export const EmployeeManagementCenter: React.FC = () => {
               <GlassButton variant="secondary" onClick={() => setApprovingReq(null)}>
                 إلغاء
               </GlassButton>
-              <GlassButton variant="primary" onClick={handleApprovePending} isLoading={isSubmitting}>
+              <GlassButton
+                variant="primary"
+                onClick={handleApprovePending}
+                isLoading={approveGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.APPROVE_INVOICE}
+              >
                 اعتماد وتفعيل الحساب
               </GlassButton>
             </div>
@@ -1178,7 +1260,12 @@ export const EmployeeManagementCenter: React.FC = () => {
               <GlassButton variant="secondary" onClick={() => setTempGrantModalOpen(false)}>
                 إلغاء
               </GlassButton>
-              <GlassButton variant="primary" onClick={handleApplyTemporaryGrant} isLoading={isSubmitting}>
+              <GlassButton
+                variant="primary"
+                onClick={handleApplyTemporaryGrant}
+                isLoading={editGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.UPDATE}
+              >
                 اعتماد التفويض المؤقت
               </GlassButton>
             </div>

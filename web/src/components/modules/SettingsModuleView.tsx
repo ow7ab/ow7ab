@@ -204,7 +204,7 @@ export const SettingsModuleView: React.FC = () => {
                 <span>إصدار تطبيق الأندرويد</span>
               </div>
               <div className="text-theme-muted mt-0.5 font-mono">
-                {apkVersionInfo?.versionName ? `${apkVersionInfo.versionName}` : 'الإصدار 18.0 المعتمد'}
+                {apkVersionInfo?.versionName ? `${apkVersionInfo.versionName}` : 'الإصدار 20.0 المعتمد'}
               </div>
             </div>
             <GlassBadge variant="cyan">محدث</GlassBadge>
@@ -223,7 +223,7 @@ export const SettingsModuleView: React.FC = () => {
                     : 'Windows Desktop Edition & Auto-Updates'}
                 </h3>
                 <GlassBadge variant="green">
-                  v{desktopInfo?.version || desktopUpdate?.currentVersion || '18.0.0'}
+                  v{desktopInfo?.version || desktopUpdate?.currentVersion || '20.0.0'}
                 </GlassBadge>
               </div>
               <p className="text-xs text-theme-secondary mt-1">

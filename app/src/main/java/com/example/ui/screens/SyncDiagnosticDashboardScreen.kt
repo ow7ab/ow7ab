@@ -5,6 +5,7 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -82,6 +83,7 @@ fun formatExactDateTime(timestamp: Long?): String {
 fun SyncDiagnosticDashboardView(
     viewModel: PmpViewModel,
     modifier: Modifier = Modifier,
+    initialTab: Int = 0,
     onClose: (() -> Unit)? = null
 ) {
     val isSyncing by viewModel.isSyncing.collectAsState()
@@ -91,15 +93,25 @@ fun SyncDiagnosticDashboardView(
     val syncDiagnostics by viewModel.syncDiagnostics.collectAsState()
     val lastSyncTime by viewModel.lastSuccessfulSyncTime.collectAsState()
     val pendingErrors by viewModel.pendingSyncErrors.collectAsState()
+    val operationTrackingRecords by viewModel.operationTrackingRecords.collectAsState()
+    val pendingOperationsCount by viewModel.pendingOperationsCount.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
 
     val invoices by viewModel.invoices.collectAsState()
     val movements by viewModel.movements.collectAsState()
     val products by viewModel.products.collectAsState()
     val userAccounts by viewModel.userAccounts.collectAsState()
 
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedTab by remember(initialTab) { mutableIntStateOf(initialTab.coerceIn(0, 3)) }
+    var opStatusFilter by remember { mutableStateOf("ALL") }
+    var opSearchQuery by remember { mutableStateOf("") }
     var showWipeConfirmDialog by remember { mutableStateOf(false) }
-    val tabs = listOf("نظرة عامة والوحدات", "الأخطاء المعلقة (${pendingErrors.size})", "سجل العمليات (${syncDiagnostics.size})")
+    val tabs = listOf(
+        "نظرة عامة والوحدات",
+        "متابعة العمليات (${pendingOperationsCount})",
+        "الأخطاء المعلقة (${pendingErrors.size})",
+        "سجل المزامنة (${syncDiagnostics.size})"
+    )
 
     val isOnline = serverHealthReport?.isOnline != false
     val numberFormat = remember { NumberFormat.getNumberInstance(Locale.US) }
@@ -478,7 +490,214 @@ fun SyncDiagnosticDashboardView(
                 }
 
                 1 -> {
-                    // Tab 1: Pending Errors & Resolution Queue
+                    // Tab 1: سجل متابعة العمليات (Operation Tracking & Idempotency Verification)
+                    item {
+                        GlassCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("operation_tracking_header_card"),
+                            backgroundColor = Color.White
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "سجل متابعة العمليات ومنع التكرار",
+                                        color = PmpBrandNavy,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp
+                                    )
+                                    GlassButton(
+                                        text = "فحص المعلقة",
+                                        icon = Icons.Default.Sync,
+                                        isLoading = activeGuardKeys.contains("recover_pending_ops"),
+                                        loadingText = "جاري التحقق...",
+                                        onClick = { viewModel.recoverPendingOperations() },
+                                        modifier = Modifier.testTag("operation_tracking_recover_btn")
+                                    )
+                                }
+
+                                OutlinedTextField(
+                                    value = opSearchQuery,
+                                    onValueChange = { opSearchQuery = it },
+                                    label = { Text("بحث برقم المستند أو المفتاح أو النوع...") },
+                                    singleLine = true,
+                                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("operation_tracking_search_input")
+                                )
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    listOf(
+                                        "ALL" to "الكل (${operationTrackingRecords.size})",
+                                        "PENDING_CONFIRMATION" to "بانتظار التأكيد",
+                                        "PROCESSING" to "قيد التنفيذ",
+                                        "COMPLETED" to "مكتملة",
+                                        "FAILED" to "فشلت"
+                                    ).forEach { (code, label) ->
+                                        FilterChip(
+                                            selected = opStatusFilter == code,
+                                            onClick = { opStatusFilter = code },
+                                            label = { Text(label, fontSize = 11.5.sp) }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    val filteredOps = operationTrackingRecords.filter { rec ->
+                        val matchesStatus = opStatusFilter == "ALL" || rec.requestStatus == opStatusFilter
+                        val q = opSearchQuery.trim()
+                        val matchesQuery = q.isBlank() ||
+                            rec.idempotencyKey.contains(q, ignoreCase = true) ||
+                            rec.documentReference.contains(q, ignoreCase = true) ||
+                            rec.operationType.contains(q, ignoreCase = true) ||
+                            rec.payloadSummary.contains(q, ignoreCase = true) ||
+                            rec.userId.contains(q, ignoreCase = true)
+                        matchesStatus && matchesQuery
+                    }
+
+                    if (filteredOps.isEmpty()) {
+                        item {
+                            GlassCard(
+                                modifier = Modifier.fillMaxWidth(),
+                                backgroundColor = Color.White
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(24.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(Icons.Default.FactCheck, contentDescription = null, tint = PmpGreen, modifier = Modifier.size(36.dp))
+                                    Text(
+                                        text = "لا توجد عمليات مطابقة في سجل المتابعة حالياً.",
+                                        color = PmpBrandNavy,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        items(filteredOps, key = { it.idempotencyKey }) { rec ->
+                            val statusEnum = com.example.util.IdempotencyRequestStatus.fromCode(rec.requestStatus)
+                            val badgeColor = when (statusEnum) {
+                                com.example.util.IdempotencyRequestStatus.COMPLETED -> PmpGreen
+                                com.example.util.IdempotencyRequestStatus.FAILED,
+                                com.example.util.IdempotencyRequestStatus.CANCELLED -> PmpRed
+                                com.example.util.IdempotencyRequestStatus.PENDING_CONFIRMATION -> PmpGold
+                                else -> PmpCyan
+                            }
+                            val verifyGuardKey = "verify_op_${rec.idempotencyKey}"
+                            val isVerifying = activeGuardKeys.contains(verifyGuardKey)
+
+                            GlassCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("operation_tracking_card_${rec.idempotencyKey}"),
+                                backgroundColor = Color.White,
+                                borderColor = badgeColor.copy(alpha = 0.45f)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "${rec.operationType} • ${rec.documentReference.ifBlank { rec.idempotencyKey.take(12) }}",
+                                            color = PmpBrandNavy,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        GlassBadge(text = statusEnum.titleAr, color = badgeColor)
+                                    }
+
+                                    if (rec.payloadSummary.isNotBlank()) {
+                                        Text(
+                                            text = rec.payloadSummary,
+                                            color = PmpBrandNavy,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+
+                                    Text(
+                                        text = "المفتاح: ${rec.idempotencyKey} • المنصة: ${rec.platform} • المستخدم: ${rec.userId}",
+                                        color = TextMuted,
+                                        fontSize = 10.5.sp
+                                    )
+
+                                    Text(
+                                        text = "توقيت الطلب: ${formatExactDateTime(rec.createdAt)}" +
+                                            if (rec.resultReference.isNotBlank()) " • النتيجة: ${rec.resultReference}" else "",
+                                        color = TextMuted,
+                                        fontSize = 10.5.sp
+                                    )
+
+                                    if (rec.errorDetails.isNotBlank()) {
+                                        Text(
+                                            text = rec.errorDetails,
+                                            color = if (statusEnum == com.example.util.IdempotencyRequestStatus.PENDING_CONFIRMATION) PmpGold else PmpRed,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        GlassButton(
+                                            text = "التحقق من حالة العملية",
+                                            icon = Icons.Default.Verified,
+                                            isLoading = isVerifying,
+                                            loadingText = "جاري التحقق...",
+                                            onClick = { viewModel.verifyOperationStatus(rec.idempotencyKey) },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("verify_operation_btn_${rec.idempotencyKey}")
+                                        )
+
+                                        if (statusEnum == com.example.util.IdempotencyRequestStatus.FAILED ||
+                                            statusEnum == com.example.util.IdempotencyRequestStatus.CANCELLED
+                                        ) {
+                                            TextButton(
+                                                onClick = { viewModel.dismissUnconfirmedOperation(rec.idempotencyKey) },
+                                                modifier = Modifier.heightIn(min = 48.dp)
+                                            ) {
+                                                Text("إزالة", color = TextMuted, fontSize = 12.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                2 -> {
+                    // Tab 2: Pending Errors & Resolution Queue
                     if (pendingErrors.isEmpty()) {
                         item {
                             GlassCard(
@@ -632,8 +851,8 @@ fun SyncDiagnosticDashboardView(
                     }
                 }
 
-                2 -> {
-                    // Tab 2: Live Diagnostics Stream / History
+                3 -> {
+                    // Tab 3: Live Diagnostics Stream / History
                     if (syncDiagnostics.isEmpty()) {
                         item {
                             GlassCard(
@@ -748,10 +967,11 @@ fun SyncDiagnosticDashboardView(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     GlassButton(
-                        text = if (isSyncing) "جارٍ المزامنة السحابية الآن..." else "مزامنة سحابية فورية شاملة الآن",
-                        icon = if (isSyncing) Icons.Default.Sync else Icons.Default.CloudUpload,
+                        text = "مزامنة سحابية فورية شاملة الآن",
+                        icon = Icons.Default.CloudUpload,
                         gradient = PmpLogoSwooshGradient,
-                        enabled = !isSyncing,
+                        isLoading = isSyncing,
+                        loadingText = "جارٍ المزامنة السحابية الآن...",
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("diagnostic_manual_sync_button"),
@@ -819,6 +1039,7 @@ fun SyncDiagnosticDashboardView(
 @Composable
 fun SyncDiagnosticDashboardDialog(
     viewModel: PmpViewModel,
+    initialTab: Int = 0,
     onDismiss: () -> Unit
 ) {
     Dialog(
@@ -838,6 +1059,7 @@ fun SyncDiagnosticDashboardDialog(
         ) {
             SyncDiagnosticDashboardView(
                 viewModel = viewModel,
+                initialTab = initialTab,
                 onClose = onDismiss,
                 modifier = Modifier.fillMaxSize()
             )

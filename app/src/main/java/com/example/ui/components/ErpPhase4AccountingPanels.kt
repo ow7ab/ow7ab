@@ -63,6 +63,8 @@ fun AccountingJournalLedgerPanel(
     val entries by viewModel.journalEntries.collectAsState()
     val lines by viewModel.journalLines.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     val format = remember { NumberFormat.getNumberInstance(Locale.US) }
 
     val effectiveAccounts = remember(accounts) {
@@ -376,26 +378,35 @@ fun AccountingJournalLedgerPanel(
     }
 
     if (showNewEntryDialog) {
+        val journalGuard = "phase4_post_journal"
+        val isPostingJournal = activeGuardKeys.contains(journalGuard)
         ManualJournalEntryDialog(
             accounts = effectiveAccounts,
-            onDismiss = { showNewEntryDialog = false },
+            isSubmitting = isPostingJournal,
+            loadingText = guardLoadingLabels[journalGuard] ?: "جاري الحفظ...",
+            onDismiss = { if (!isPostingJournal) showNewEntryDialog = false },
             onSubmit = { drCode, crCode, amount, cur, desc ->
                 viewModel.postManualJournalEntry(
                     debitAccountCode = drCode,
                     creditAccountCode = crCode,
                     amount = amount,
                     currency = cur,
-                    description = desc
+                    description = desc,
+                    guardKey = journalGuard,
+                    onComplete = { ok ->
+                        if (ok) showNewEntryDialog = false
+                    }
                 )
-                showNewEntryDialog = false
             }
         )
     }
 
     reversingTargetEntry?.let { target ->
         var reason by remember(target.id) { mutableStateOf("") }
+        val revJournalGuard = "phase4_reverse_journal_${target.id}"
+        val isReversingJournal = activeGuardKeys.contains(revJournalGuard)
         AlertDialog(
-            onDismissRequest = { reversingTargetEntry = null },
+            onDismissRequest = { if (!isReversingJournal) reversingTargetEntry = null },
             title = {
                 Text(
                     "عكس القيد ${target.entryNo}",
@@ -423,17 +434,29 @@ fun AccountingJournalLedgerPanel(
             confirmButton = {
                 GlassButton(
                     text = "تأكيد العكس",
+                    isLoading = isReversingJournal,
+                    loadingText = guardLoadingLabels[revJournalGuard] ?: "جاري تحديث البيانات...",
+                    enabled = reason.isNotBlank() && !isReversingJournal,
                     onClick = {
                         if (reason.isNotBlank()) {
-                            viewModel.reverseAccountingJournal(target.id, reason)
-                            reversingTargetEntry = null
+                            viewModel.reverseAccountingJournal(
+                                entryId = target.id,
+                                reason = reason,
+                                guardKey = revJournalGuard,
+                                onComplete = { ok ->
+                                    if (ok) reversingTargetEntry = null
+                                }
+                            )
                         }
                     },
                     gradient = SolidColor(PmpRed)
                 )
             },
             dismissButton = {
-                TextButton(onClick = { reversingTargetEntry = null }) {
+                TextButton(
+                    onClick = { reversingTargetEntry = null },
+                    enabled = !isReversingJournal
+                ) {
                     Text("إلغاء")
                 }
             },
@@ -445,6 +468,8 @@ fun AccountingJournalLedgerPanel(
 @Composable
 private fun ManualJournalEntryDialog(
     accounts: List<ChartAccountEntity>,
+    isSubmitting: Boolean = false,
+    loadingText: String = "جاري الحفظ...",
     onDismiss: () -> Unit,
     onSubmit: (String, String, Double, String, String) -> Unit
 ) {
@@ -455,7 +480,7 @@ private fun ManualJournalEntryDialog(
     var description by remember { mutableStateOf("") }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
         title = {
             Text(
                 "ترحيل قيد يومية مزدوج متوازن",
@@ -547,17 +572,19 @@ private fun ManualJournalEntryDialog(
             val amount = amountText.toDoubleOrNull() ?: 0.0
             GlassButton(
                 text = "ترحيل القيد",
+                isLoading = isSubmitting,
+                loadingText = loadingText,
                 onClick = {
                     if (amount > 0.0 && description.isNotBlank() && debitCode != creditCode) {
                         onSubmit(debitCode, creditCode, amount, currency, description)
                     }
                 },
-                enabled = amount > 0.0 && description.isNotBlank() && debitCode != creditCode,
+                enabled = amount > 0.0 && description.isNotBlank() && debitCode != creditCode && !isSubmitting,
                 gradient = SolidColor(PmpBrandNavy)
             )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("إلغاء") }
+            TextButton(onClick = onDismiss, enabled = !isSubmitting) { Text("إلغاء") }
         },
         containerColor = PmpWhiteCard
     )

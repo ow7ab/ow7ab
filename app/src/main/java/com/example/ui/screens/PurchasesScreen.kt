@@ -44,6 +44,8 @@ fun PurchasesScreen(
     val defaultAccountCurrency by viewModel.defaultAccountCurrency.collectAsState()
     val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
     val dataLoadError by viewModel.dataLoadError.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     var selectedPurchaseForDetail by remember { mutableStateOf<FactoryMoveEntity?>(null) }
 
     val isManager = currentUser.isSystemManager()
@@ -402,9 +404,14 @@ fun PurchasesScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
+                    val purchMoveGuard = "purchases_raw_move"
+                    val purchBoxGuard = "purchases_raw_cashbox"
+                    val isPurchLoading = activeGuardKeys.contains(purchMoveGuard) || activeGuardKeys.contains(purchBoxGuard)
                     GlassButton(
                         text = "تسجيل وإرسال المشتريات للمخزن",
                         icon = Icons.Default.AddShoppingCart,
+                        isLoading = isPurchLoading,
+                        loadingText = guardLoadingLabels[purchMoveGuard] ?: "جاري توريد الخامات...",
                         onClick = {
                             if (!viewModel.checkOnlineBeforeTransaction("تسجيل المشتريات وتوريد الخامات")) {
                                 return@GlassButton
@@ -417,7 +424,6 @@ fun PurchasesScreen(
                             val amountStr = if (purchaseAmountNum > 0) " • بمبلغ ${format.format(purchaseAmountNum)} $rawCurrency" else ""
                             val actorName = currentUser?.fullName ?: "مسؤول المشتريات"
 
-                            // 1. تسجيل حركة المصنع وتوريد الخامة للمخزن
                             viewModel.addFactoryMove(
                                 kind = "RAW_PURCHASE",
                                 itemId = itemId,
@@ -425,42 +431,45 @@ fun PurchasesScreen(
                                 qty = qty,
                                 note = if (rawNote.isBlank()) "شراء مادة خام$amountStr" else "${rawNote}$amountStr",
                                 counterparty = rawSupplier.ifBlank { "مورد مصر المعتمد ($rawCurrency)" },
-                                actor = actorName
-                            )
-
-                            // 2. تسجيل قيد منصرف بالخزنة المربوطة تلقائياً إذا تم تحديد قيمة مالية
-                            if (purchaseAmountNum > 0.0) {
-                                val linkedBox = when (rawCurrency.uppercase()) {
-                                    "EGP" -> "خزنة مصر"
-                                    "USD" -> "خزنة الدولار"
-                                    else -> "خزنة السودان"
+                                actor = actorName,
+                                guardKey = purchMoveGuard,
+                                onComplete = { ok ->
+                                    if (ok) {
+                                        if (purchaseAmountNum > 0.0) {
+                                            val linkedBox = when (rawCurrency.uppercase()) {
+                                                "EGP" -> "خزنة مصر"
+                                                "USD" -> "خزنة الدولار"
+                                                else -> "خزنة السودان"
+                                            }
+                                            viewModel.addMovement(
+                                                cashbox = linkedBox,
+                                                currency = rawCurrency,
+                                                direction = "منصرف",
+                                                amount = purchaseAmountNum,
+                                                reference = "PO-${System.currentTimeMillis() % 1000000}",
+                                                description = "فاتورة مشتريات خامات ($currentSelectedRaw) - المورد: ${rawSupplier.ifBlank { "مورد معتمد" }}",
+                                                guardKey = purchBoxGuard
+                                            )
+                                        }
+                                        val linkedBoxNotice = if (purchaseAmountNum > 0) " وقيد منصرف بقيمة ${format.format(purchaseAmountNum)} $rawCurrency في خزنة $rawCurrency" else ""
+                                        successRecord = FactorySuccessRecord(
+                                            title = "تم تسجيل وإرسال المادة الخام بنجاح",
+                                            subtitle = "تم توجيه المادة الخام لمخزن المواد الخام$linkedBoxNotice؛ بانتظار استلامها وإدخالها يدوياً بواسطة أمين المخزن المختص.",
+                                            itemName = currentSelectedRaw,
+                                            quantity = "$qty ${targetItem?.unit ?: "كجم/برميل"}",
+                                            destinationWarehouse = "مخزن المواد الخام (مرتبط بمستودع مصر)",
+                                            responsibleDepartment = "قسم المشتريات والمواد الخام ($rawCurrency)",
+                                            counterparty = rawSupplier.ifBlank { "مورد مصر المعتمد ($rawCurrency)" },
+                                            financialAmount = if (purchaseAmountNum > 0) "${format.format(purchaseAmountNum)} $rawCurrency" else null,
+                                            note = rawNote.ifBlank { null }
+                                        )
+                                        rawQty = "100"
+                                        rawPurchaseAmount = ""
+                                        rawSupplier = ""
+                                        rawNote = ""
+                                    }
                                 }
-                                viewModel.addMovement(
-                                    cashbox = linkedBox,
-                                    currency = rawCurrency,
-                                    direction = "منصرف",
-                                    amount = purchaseAmountNum,
-                                    reference = "PO-${System.currentTimeMillis() % 1000000}",
-                                    description = "فاتورة مشتريات خامات ($currentSelectedRaw) - المورد: ${rawSupplier.ifBlank { "مورد معتمد" }}"
-                                )
-                            }
-
-                            val linkedBoxNotice = if (purchaseAmountNum > 0) " وقيد منصرف بقيمة ${format.format(purchaseAmountNum)} $rawCurrency في خزنة $rawCurrency" else ""
-                            successRecord = FactorySuccessRecord(
-                                title = "تم تسجيل وإرسال المادة الخام بنجاح",
-                                subtitle = "تم توجيه المادة الخام لمخزن المواد الخام$linkedBoxNotice؛ بانتظار استلامها وإدخالها يدوياً بواسطة أمين المخزن المختص.",
-                                itemName = currentSelectedRaw,
-                                quantity = "$qty ${targetItem?.unit ?: "كجم/برميل"}",
-                                destinationWarehouse = "مخزن المواد الخام (مرتبط بمستودع مصر)",
-                                responsibleDepartment = "قسم المشتريات والمواد الخام ($rawCurrency)",
-                                counterparty = rawSupplier.ifBlank { "مورد مصر المعتمد ($rawCurrency)" },
-                                financialAmount = if (purchaseAmountNum > 0) "${format.format(purchaseAmountNum)} $rawCurrency" else null,
-                                note = rawNote.ifBlank { null }
                             )
-                            rawQty = "100"
-                            rawPurchaseAmount = ""
-                            rawSupplier = ""
-                            rawNote = ""
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -825,6 +834,8 @@ fun PurchasesScreen(
             confirmButton = {
                 GlassButton(
                     text = "حفظ المادة الخام",
+                    isLoading = activeGuardKeys.contains("purchases_add_raw_item"),
+                    loadingText = guardLoadingLabels["purchases_add_raw_item"] ?: "جاري إضافة العملية...",
                     onClick = {
                         if (!viewModel.checkOnlineBeforeTransaction("تعريف مادة خام جديدة")) {
                             return@GlassButton
@@ -839,21 +850,30 @@ fun PurchasesScreen(
                             } else {
                                 newItemKind
                             }
+                            val addItemGuard = "purchases_add_raw_item"
+                            val capturedName = newItemName.trim()
                             viewModel.addFactoryItem(
-                                name = newItemName.trim(),
+                                name = capturedName,
                                 category = finalCategory,
-                                unit = newItemUnit
+                                unit = newItemUnit,
+                                guardKey = addItemGuard,
+                                onSuccess = {
+                                    rawItemName = capturedName
+                                    newItemName = ""
+                                    newCustomKindText = ""
+                                    showAddItemDialog = false
+                                }
                             )
-                            rawItemName = newItemName.trim()
-                            newItemName = ""
-                            newCustomKindText = ""
-                            showAddItemDialog = false
                         }
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { showAddItemDialog = false })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains("purchases_add_raw_item"),
+                    onClick = { showAddItemDialog = false }
+                )
             },
             containerColor = PmpWhiteSurface
         )
@@ -861,6 +881,7 @@ fun PurchasesScreen(
 
     // Dialog 2: Edit Existing Raw Material (تعديل اسم المادة الخام ونوع الصنف)
     itemToEdit?.let { targetItem ->
+        val editItemGuard = "update_factory_item_${targetItem.id}"
         val editCategoryOptions = remember(availableCategories, targetItem.category, canEditItemCategory) {
             val base = (availableCategories + targetItem.category.trim()).filter { it.isNotBlank() }.distinct()
             if (canEditItemCategory) {
@@ -871,7 +892,7 @@ fun PurchasesScreen(
         }
 
         AlertDialog(
-            onDismissRequest = { itemToEdit = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(editItemGuard)) itemToEdit = null },
             title = {
                 Text(
                     text = "تعديل بيانات المادة الخام (${targetItem.name})",
@@ -933,6 +954,8 @@ fun PurchasesScreen(
             confirmButton = {
                 GlassButton(
                     text = "حفظ التعديلات",
+                    isLoading = activeGuardKeys.contains(editItemGuard),
+                    loadingText = guardLoadingLabels[editItemGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
                         val cleanName = editItemName.trim()
                         if (cleanName.isBlank()) {
@@ -956,6 +979,7 @@ fun PurchasesScreen(
                             newName = cleanName,
                             newCategory = resolvedCategory,
                             newUnit = editItemUnit,
+                            guardKey = editItemGuard,
                             onSuccess = {
                                 if (rawItemName == targetItem.name) {
                                     rawItemName = cleanName
@@ -968,7 +992,11 @@ fun PurchasesScreen(
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { itemToEdit = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(editItemGuard),
+                    onClick = { itemToEdit = null }
+                )
             },
             containerColor = PmpWhiteSurface
         )
@@ -976,8 +1004,9 @@ fun PurchasesScreen(
 
     // Dialog 3: Confirm Delete Raw Material (حذف المادة الخام بعد إضافتها)
     itemToDelete?.let { targetItem ->
+        val delItemGuard = "delete_factory_item_${targetItem.id}"
         AlertDialog(
-            onDismissRequest = { itemToDelete = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(delItemGuard)) itemToDelete = null },
             title = {
                 Text(
                     text = "تأكيد حذف المادة الخام",
@@ -997,18 +1026,31 @@ fun PurchasesScreen(
                 GlassButton(
                     text = "نعم، حذف المادة الخام",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(delItemGuard),
+                    loadingText = guardLoadingLabels[delItemGuard] ?: "جاري تنفيذ الحذف...",
                     onClick = {
-                        viewModel.deleteFactoryItem(targetItem)
-                        if (rawItemName == targetItem.name) {
-                            rawItemName = ""
-                        }
-                        itemToDelete = null
+                        viewModel.deleteFactoryItem(
+                            item = targetItem,
+                            guardKey = delItemGuard,
+                            onComplete = { ok ->
+                                if (ok) {
+                                    if (rawItemName == targetItem.name) {
+                                        rawItemName = ""
+                                    }
+                                    itemToDelete = null
+                                }
+                            }
+                        )
                     },
                     modifier = Modifier.testTag("confirm_delete_raw_item_button")
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { itemToDelete = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(delItemGuard),
+                    onClick = { itemToDelete = null }
+                )
             },
             containerColor = PmpWhiteSurface
         )
@@ -1016,8 +1058,9 @@ fun PurchasesScreen(
 
     // Dialog 4: Rename Item Category (تعديل اسم نوع الصنف)
     if (showRenameCategoryDialog && canEditItemCategory) {
+        val renameCatGuard = "rename_factory_cat"
         AlertDialog(
-            onDismissRequest = { showRenameCategoryDialog = false },
+            onDismissRequest = { if (!activeGuardKeys.contains(renameCatGuard)) showRenameCategoryDialog = false },
             title = {
                 Text(
                     text = "تعديل اسم نوع الصنف",
@@ -1054,6 +1097,8 @@ fun PurchasesScreen(
             confirmButton = {
                 GlassButton(
                     text = "حفظ اسم نوع الصنف",
+                    isLoading = activeGuardKeys.contains(renameCatGuard),
+                    loadingText = guardLoadingLabels[renameCatGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
                         val oldCat = selectedCategoryToRename.trim()
                         val newCat = renamedCategoryNewText.trim()
@@ -1066,6 +1111,7 @@ fun PurchasesScreen(
                         viewModel.renameFactoryItemCategory(
                             oldCategory = oldCat,
                             newCategory = newCat,
+                            guardKey = renameCatGuard,
                             onSuccess = {
                                 showRenameCategoryDialog = false
                             }

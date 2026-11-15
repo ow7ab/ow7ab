@@ -49,9 +49,10 @@ import kotlinx.coroutines.sync.withLock
         QcInspectionEntity::class,
         ChartAccountEntity::class,
         JournalEntryEntity::class,
-        JournalLineEntity::class
+        JournalLineEntity::class,
+        IdempotencyRequestEntity::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
@@ -59,6 +60,7 @@ abstract class PmpDatabase : RoomDatabase() {
     abstract fun pmpDao(): PmpDao
     abstract fun erpInventoryDao(): ErpInventoryDao
     abstract fun erpAccountingDao(): ErpAccountingDao
+    abstract fun idempotencyDao(): IdempotencyDao
 
     companion object {
         @Volatile
@@ -1071,6 +1073,42 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private fun upgradeSchemaToV15Idempotency(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `idempotency_requests` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `idempotencyKey` TEXT NOT NULL,
+                    `userId` TEXT NOT NULL,
+                    `operationType` TEXT NOT NULL,
+                    `documentReference` TEXT NOT NULL,
+                    `requestStatus` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    `completionTime` INTEGER,
+                    `resultReference` TEXT NOT NULL,
+                    `errorDetails` TEXT NOT NULL,
+                    `targetCollection` TEXT NOT NULL,
+                    `payloadSummary` TEXT NOT NULL,
+                    `platform` TEXT NOT NULL,
+                    `guardKey` TEXT NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_idemp_key` ON `idempotency_requests` (`idempotencyKey`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_idemp_status` ON `idempotency_requests` (`requestStatus`)")
+        }
+
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+                upgradeSchemaToV12AndBackfill(db)
+                upgradeSchemaToV13Phase3(db)
+                upgradeSchemaToV14Accounting(db)
+                upgradeSchemaToV15Idempotency(db)
+            }
+        }
+
         private val dbCallbackMutex = Mutex()
         private val dbCallbackScope = CoroutineScope(
             SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
@@ -1103,7 +1141,8 @@ abstract class PmpDatabase : RoomDatabase() {
                         MIGRATION_10_11,
                         MIGRATION_11_12,
                         MIGRATION_12_13,
-                        MIGRATION_13_14
+                        MIGRATION_13_14,
+                        MIGRATION_14_15
                     )
                     .addCallback(DatabaseCallback(appContext))
                     .build()

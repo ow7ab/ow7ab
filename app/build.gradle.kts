@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.pmppaints.erp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 18
-    versionName = "18.0"
+    versionCode = 20
+    versionName = "20.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -90,9 +90,9 @@ Thread.getAllStackTraces().keys
     .filter { it.name.startsWith("AWT-EventQueue") }
     .forEach { it.uncaughtExceptionHandler = kspAwtSafeHandler }
 
-val defaultConfiguredVersionCode: Int = android.defaultConfig.versionCode ?: 18
+val defaultConfiguredVersionCode: Int = android.defaultConfig.versionCode ?: 20
 val defaultConfiguredVersionName: String =
-    android.defaultConfig.versionName?.takeIf { it.isNotBlank() } ?: "18.0"
+    android.defaultConfig.versionName?.takeIf { it.isNotBlank() } ?: "20.0"
 val resolvedVersionCode: Int =
     (project.findProperty("versionCode")?.toString()?.toIntOrNull()) ?: defaultConfiguredVersionCode
 val resolvedVersionName: String =

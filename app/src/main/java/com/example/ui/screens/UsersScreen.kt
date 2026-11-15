@@ -44,6 +44,8 @@ fun UsersScreen(
     val userAccounts by viewModel.userAccounts.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
     val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     val isManager = currentUser.isSystemManager()
     val isSuperAdmin = currentUser.isSuperAdminAccount()
 
@@ -785,10 +787,13 @@ fun UsersScreen(
 
                                 Spacer(modifier = Modifier.height(4.dp))
 
+                                val createUserGuard = "create_user_account"
                                 GlassButton(
                                     text = "إنشاء الحساب",
                                     icon = Icons.Default.PersonAddAlt1,
                                     gradient = PmpBrandRedGradient,
+                                    isLoading = activeGuardKeys.contains(createUserGuard),
+                                    loadingText = guardLoadingLabels[createUserGuard] ?: "جاري إضافة العملية...",
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("submit_create_user_button"),
@@ -806,16 +811,19 @@ fun UsersScreen(
                                             role = finalRole,
                                             branch = selectedBranch,
                                             permissions = selectedPermissions.joinToString(","),
-                                            serverEndpoint = serverEndpointInput
+                                            serverEndpoint = serverEndpointInput,
+                                            guardKey = createUserGuard,
+                                            onComplete = { ok ->
+                                                if (ok && fullName.isNotBlank() && username.isNotBlank() && pinOrPassword.length >= 4) {
+                                                    fullName = ""
+                                                    username = ""
+                                                    phoneOrEmail = ""
+                                                    pinOrPassword = "1234"
+                                                    customRoleText = ""
+                                                    selectedTab = 0
+                                                }
+                                            }
                                         )
-                                        if (fullName.isNotBlank() && username.isNotBlank() && pinOrPassword.length >= 4) {
-                                            fullName = ""
-                                            username = ""
-                                            phoneOrEmail = ""
-                                            pinOrPassword = "1234"
-                                            customRoleText = ""
-                                            selectedTab = 0
-                                        }
                                     }
                                 )
                             }
@@ -1264,10 +1272,13 @@ fun UsersScreen(
                 }
             },
             confirmButton = {
+                val permGuard = "update_user_perms_${targetUser.id}"
                 GlassButton(
                     text = if (isPendingApproval) "اعتماد الحساب وتفعيل الدخول" else "حفظ الصلاحيات",
                     icon = if (isPendingApproval) Icons.Default.Verified else Icons.Default.Save,
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(permGuard),
+                    loadingText = guardLoadingLabels[permGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
                         val resolvedRole = if (editRoleState == "مسمى وظيفي آخر (كتابة يدوية)..." && editCustomRoleText.isNotBlank()) {
                             editCustomRoleText.trim()
@@ -1280,15 +1291,19 @@ fun UsersScreen(
                             newBranch = editBranchState,
                             newPermissions = editPermsState.joinToString(","),
                             approveAccount = true,
-                            changeReason = editChangeReason.ifBlank { "تحديث صلاحيات الموظف" }
+                            changeReason = editChangeReason.ifBlank { "تحديث صلاحيات الموظف" },
+                            guardKey = permGuard,
+                            onComplete = { ok -> if (ok) userPendingPermEdit = null }
                         )
-                        userPendingPermEdit = null
                     },
                     modifier = Modifier.testTag("confirm_save_permissions_button")
                 )
             },
             dismissButton = {
-                TextButton(onClick = { userPendingPermEdit = null }) {
+                TextButton(
+                    enabled = !activeGuardKeys.contains("update_user_perms_${targetUser.id}"),
+                    onClick = { userPendingPermEdit = null }
+                ) {
                     Text("إلغاء", color = TextMuted)
                 }
             }
@@ -1400,18 +1415,28 @@ fun UsersScreen(
                 }
             },
             confirmButton = {
+                val delUserGuard = "delete_user_${target.id}"
                 GlassButton(
                     text = "نعم، حذف نهائي",
                     icon = Icons.Default.DeleteForever,
                     gradient = Brush.horizontalGradient(listOf(Color(0xFFDC2626), Color(0xFF991B1B))),
+                    isLoading = activeGuardKeys.contains(delUserGuard),
+                    loadingText = guardLoadingLabels[delUserGuard] ?: "جاري تنفيذ الحذف...",
                     onClick = {
-                        viewModel.deleteUserAccountPermanently(target)
-                        userToDeletePermanently = null
+                        viewModel.deleteUserAccountPermanently(
+                            user = target,
+                            guardKey = delUserGuard,
+                            onComplete = { ok -> if (ok) userToDeletePermanently = null }
+                        )
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { userToDeletePermanently = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains("delete_user_${target.id}"),
+                    onClick = { userToDeletePermanently = null }
+                )
             },
             containerColor = PmpNavySurface
         )

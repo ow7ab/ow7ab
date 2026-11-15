@@ -379,5 +379,62 @@ test("13. Phase 4 Rules: journal_entries enforce DR==CR balance & append-only re
   await assertFails(lRef.delete());
 });
 
+test("14. Idempotency Protection: idempotency_requests enforce schema, block reverting COMPLETED status, and deny deletion", async () => {
+  const clientDb = testEnv.unauthenticatedContext().firestore();
+  const cRef = clientDb.collection("erp_clusters").doc("PMP-ERP-MAIN-CLUSTER");
+  const idemRef = cRef.collection("idempotency_requests").doc("IDEM-INV-2026-0001");
+
+  // Missing required fields or invalid status must fail
+  await assertFails(
+    cRef.collection("idempotency_requests").doc("IDEM-BAD-1").set({
+      idempotencyKey: "IDEM-BAD-1",
+      operationType: "CREATE_INVOICE",
+      requestStatus: "INVALID_STATE",
+    })
+  );
+
+  // Create in PROCESSING state succeeds
+  await assertSucceeds(
+    idemRef.set({
+      idempotencyKey: "IDEM-INV-2026-0001",
+      userId: "admin",
+      operationType: "CREATE_INVOICE",
+      documentReference: "INV-2026-0001",
+      requestStatus: "PROCESSING",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      platform: "WEB",
+    })
+  );
+
+  // Transition PROCESSING -> COMPLETED succeeds
+  await assertSucceeds(
+    idemRef.update({
+      requestStatus: "COMPLETED",
+      resultReference: "INV-2026-0001",
+      completionTime: Date.now(),
+      updatedAt: Date.now(),
+    })
+  );
+
+  // Reverting COMPLETED -> PROCESSING or FAILED must fail
+  await assertFails(
+    idemRef.update({
+      requestStatus: "PROCESSING",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertFails(
+    idemRef.update({
+      requestStatus: "FAILED",
+      updatedAt: Date.now(),
+    })
+  );
+
+  // Deleting idempotency request record must fail
+  await assertFails(idemRef.delete());
+});
+
+
 
 

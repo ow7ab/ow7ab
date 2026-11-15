@@ -69,6 +69,8 @@ fun SalesScreen(
     val defaultAccountCurrency by viewModel.defaultAccountCurrency.collectAsState()
     val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
     val dataLoadError by viewModel.dataLoadError.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
 
     val canExportPdf = remember(currentUser) {
         currentUser.hasModulePermission("تصدير PDF")
@@ -765,9 +767,12 @@ fun SalesScreen(
 
                             Spacer(modifier = Modifier.height(18.dp))
 
+                            val createInvGuard = "create_invoice"
                             GlassButton(
                                 text = "إصدار الفاتورة",
                                 icon = Icons.Default.CheckCircle,
+                                isLoading = activeGuardKeys.contains(createInvGuard),
+                                loadingText = guardLoadingLabels[createInvGuard] ?: "جاري اعتماد الفاتورة...",
                                 onClick = {
                                     val cid = invCustomerId ?: customers.firstOrNull()?.id ?: 1L
                                     val cname = invCustomerName.ifBlank { customers.find { it.id == cid }?.name ?: "عميل عام" }
@@ -781,15 +786,22 @@ fun SalesScreen(
                                         discount = disc,
                                         notes = invNotes,
                                         paymentCashbox = if (invPayNow) invPayCashbox else null,
-                                        paymentAmount = payAmt
+                                        paymentAmount = payAmt,
+                                        guardKey = createInvGuard,
+                                        onComplete = { ok ->
+                                            if (ok) {
+                                                draftItems.clear()
+                                                invDiscount = ""
+                                                invNotes = ""
+                                                invPayNow = false
+                                                selectedTab = 0
+                                            }
+                                        }
                                     )
-                                    draftItems.clear()
-                                    invDiscount = ""
-                                    invNotes = ""
-                                    invPayNow = false
-                                    selectedTab = 0
                                 },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("sales_create_invoice_button")
                             )
                         }
                     }
@@ -1377,17 +1389,28 @@ fun SalesScreen(
                 )
             },
             confirmButton = {
+                val clearCustGuard = "clear_customer_balance_${cust.id}"
                 GlassButton(
                     text = "نعم، تصفير الحساب",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(clearCustGuard),
+                    loadingText = guardLoadingLabels[clearCustGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
-                        viewModel.clearCustomerBalance(cust.id, cust.name)
-                        customerToClearBalance = null
+                        viewModel.clearCustomerBalance(
+                            customerId = cust.id,
+                            customerName = cust.name,
+                            guardKey = clearCustGuard,
+                            onComplete = { ok -> if (ok) customerToClearBalance = null }
+                        )
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { customerToClearBalance = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains("clear_customer_balance_${cust.id}"),
+                    onClick = { customerToClearBalance = null }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1395,8 +1418,9 @@ fun SalesScreen(
 
     // Modal: Confirmation Dialog for Permanent Customer Deletion
     customerToDeletePermanently?.let { cust ->
+        val delCustGuard = "delete_customer_${cust.id}"
         AlertDialog(
-            onDismissRequest = { customerToDeletePermanently = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(delCustGuard)) customerToDeletePermanently = null },
             title = {
                 Text(
                     text = "حذف العميل نهائياً من النظام",
@@ -1416,17 +1440,31 @@ fun SalesScreen(
                 GlassButton(
                     text = "نعم، حذف العميل نهائياً",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(delCustGuard),
+                    loadingText = guardLoadingLabels[delCustGuard] ?: "جاري تنفيذ الحذف...",
                     onClick = {
-                        viewModel.deleteCustomer(cust.id, cust.name)
-                        if (statementCustomerId == cust.id) {
-                            statementCustomerId = null
-                        }
-                        customerToDeletePermanently = null
+                        viewModel.deleteCustomer(
+                            customerId = cust.id,
+                            customerName = cust.name,
+                            guardKey = delCustGuard,
+                            onComplete = { ok ->
+                                if (ok) {
+                                    if (statementCustomerId == cust.id) {
+                                        statementCustomerId = null
+                                    }
+                                    customerToDeletePermanently = null
+                                }
+                            }
+                        )
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { customerToDeletePermanently = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(delCustGuard),
+                    onClick = { customerToDeletePermanently = null }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1880,12 +1918,19 @@ fun SalesScreen(
                             )
                         }
                         if (inv.status == "active") {
+                            val cancelInvGuard = "cancel_invoice_${inv.id}"
                             GlassButton(
                                 text = "إلغاء الفاتورة",
                                 gradient = Brush.horizontalGradient(listOf(PmpRed, PmpRedLight)),
+                                isLoading = activeGuardKeys.contains(cancelInvGuard),
+                                loadingText = guardLoadingLabels[cancelInvGuard] ?: "جاري تحديث البيانات...",
                                 onClick = {
-                                    viewModel.cancelInvoice(inv.id, "إلغاء بناء على طلب العميل")
-                                    selectedInvoiceForDetail = null
+                                    viewModel.cancelInvoice(
+                                        invoiceId = inv.id,
+                                        reason = "إلغاء بناء على طلب العميل",
+                                        guardKey = cancelInvGuard,
+                                        onComplete = { ok -> if (ok) selectedInvoiceForDetail = null }
+                                    )
                                 },
                                 modifier = Modifier.weight(1f)
                             )
@@ -2026,8 +2071,11 @@ fun SalesScreen(
                 }
             },
             confirmButton = {
+                val payGuard = "pay_invoice_${inv.id}"
                 GlassButton(
                     text = "تأكيد الدفعة",
+                    isLoading = activeGuardKeys.contains(payGuard),
+                    loadingText = guardLoadingLabels[payGuard] ?: "جاري تنفيذ السداد...",
                     onClick = {
                         val amt = payAmountText.toDoubleOrNull() ?: 0.0
                         viewModel.payInvoice(
@@ -2037,15 +2085,24 @@ fun SalesScreen(
                             currency = payCurrency,
                             cashbox = payCashbox,
                             amount = amt,
-                            note = payNote
+                            note = payNote,
+                            guardKey = payGuard,
+                            onComplete = { ok ->
+                                if (ok) {
+                                    showPaymentDialog = false
+                                    selectedInvoiceForDetail = null
+                                }
+                            }
                         )
-                        showPaymentDialog = false
-                        selectedInvoiceForDetail = null
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { showPaymentDialog = false })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains("pay_invoice_${inv.id}"),
+                    onClick = { showPaymentDialog = false }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -2053,8 +2110,9 @@ fun SalesScreen(
 
     // Modal: Add Customer Dialog
     if (showAddCustomerDialog) {
+        val addCustGuard = "add_customer"
         AlertDialog(
-            onDismissRequest = { showAddCustomerDialog = false },
+            onDismissRequest = { if (!activeGuardKeys.contains(addCustGuard)) showAddCustomerDialog = false },
             title = { Text(text = "إضافة عميل جديد", color = PmpCyan, fontWeight = FontWeight.Bold) },
             text = {
                 Column {
@@ -2086,20 +2144,36 @@ fun SalesScreen(
             confirmButton = {
                 GlassButton(
                     text = "حفظ العميل",
+                    isLoading = activeGuardKeys.contains(addCustGuard),
+                    loadingText = guardLoadingLabels[addCustGuard] ?: "جاري إضافة العملية...",
                     onClick = {
                         if (newCustName.isNotBlank()) {
-                            viewModel.addCustomer(newCustName, newCustPhone, newCustAddress, newCustNotes)
-                            newCustName = ""
-                            newCustPhone = ""
-                            newCustAddress = ""
-                            newCustNotes = ""
-                            showAddCustomerDialog = false
+                            viewModel.addCustomer(
+                                name = newCustName,
+                                phone = newCustPhone,
+                                address = newCustAddress,
+                                notes = newCustNotes,
+                                guardKey = addCustGuard,
+                                onComplete = { ok ->
+                                    if (ok) {
+                                        newCustName = ""
+                                        newCustPhone = ""
+                                        newCustAddress = ""
+                                        newCustNotes = ""
+                                        showAddCustomerDialog = false
+                                    }
+                                }
+                            )
                         }
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { showAddCustomerDialog = false })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(addCustGuard),
+                    onClick = { showAddCustomerDialog = false }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -2109,8 +2183,9 @@ fun SalesScreen(
     if (showCustomerPaymentDialog) {
         val targetCust = customers.find { it.id == statementCustomerId } ?: customers.firstOrNull()
         if (targetCust != null) {
+            val custPayGuard = "customer_payment_${targetCust.id}"
             AlertDialog(
-                onDismissRequest = { showCustomerPaymentDialog = false },
+                onDismissRequest = { if (!activeGuardKeys.contains(custPayGuard)) showCustomerPaymentDialog = false },
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Icon(Icons.Default.Payments, contentDescription = null, tint = PmpGreen)
@@ -2164,6 +2239,8 @@ fun SalesScreen(
                     GlassButton(
                         text = "تأكيد واستلام المبلغ",
                         gradient = GlassAccentGreenGradient,
+                        isLoading = activeGuardKeys.contains(custPayGuard),
+                        loadingText = guardLoadingLabels[custPayGuard] ?: "جاري تسجيل سند القبض...",
                         onClick = {
                             val amt = custPayAmountText.toDoubleOrNull() ?: 0.0
                             if (amt > 0) {
@@ -2173,17 +2250,26 @@ fun SalesScreen(
                                     amount = amt,
                                     currency = custPayCurrency,
                                     cashbox = custPayCashbox,
-                                    note = custPayNote
+                                    note = custPayNote,
+                                    guardKey = custPayGuard,
+                                    onComplete = { ok ->
+                                        if (ok) {
+                                            custPayAmountText = ""
+                                            custPayNote = ""
+                                            showCustomerPaymentDialog = false
+                                        }
+                                    }
                                 )
-                                custPayAmountText = ""
-                                custPayNote = ""
-                                showCustomerPaymentDialog = false
                             }
                         }
                     )
                 },
                 dismissButton = {
-                    GlassButton(text = "إلغاء", onClick = { showCustomerPaymentDialog = false })
+                    GlassButton(
+                        text = "إلغاء",
+                        enabled = !activeGuardKeys.contains(custPayGuard),
+                        onClick = { showCustomerPaymentDialog = false }
+                    )
                 },
                 containerColor = PmpNavySurface
             )
@@ -2191,8 +2277,9 @@ fun SalesScreen(
     }
 
     invoiceToDeletePermanently?.let { targetInv ->
+        val delInvGuard = "delete_invoice_${targetInv.id}"
         AlertDialog(
-            onDismissRequest = { invoiceToDeletePermanently = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(delInvGuard)) invoiceToDeletePermanently = null },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.Default.DeleteForever, contentDescription = null, tint = PmpRedLight)
@@ -2215,15 +2302,28 @@ fun SalesScreen(
                 GlassButton(
                     text = "تأكيد الحذف النهائي",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(delInvGuard),
+                    loadingText = guardLoadingLabels[delInvGuard] ?: "جاري تنفيذ الحذف...",
                     onClick = {
-                        viewModel.deleteInvoicePermanently(targetInv.id)
-                        invoiceToDeletePermanently = null
-                        selectedInvoiceForDetail = null
+                        viewModel.deleteInvoicePermanently(
+                            invoiceId = targetInv.id,
+                            guardKey = delInvGuard,
+                            onComplete = { ok ->
+                                if (ok) {
+                                    invoiceToDeletePermanently = null
+                                    selectedInvoiceForDetail = null
+                                }
+                            }
+                        )
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { invoiceToDeletePermanently = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(delInvGuard),
+                    onClick = { invoiceToDeletePermanently = null }
+                )
             },
             containerColor = PmpNavySurface
         )

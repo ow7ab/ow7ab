@@ -8,7 +8,8 @@ import {
   ShoppingCart,
   Users,
   ShieldCheck,
-  Filter
+  Filter,
+  Activity
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
@@ -27,13 +28,25 @@ import {
 import { ErpDataService } from '../../services/ErpDataService';
 import { ReportExporter } from '../../services/ReportExporter';
 import { AccountingModuleView } from '../modules/AccountingModuleView';
+import { OperationTrackingView } from '../modules/OperationTrackingView';
 import { useLanguage } from '../../context/LanguageContext';
 
-type ReportTab = 'المبيعات' | 'الخزنة' | 'المخزون' | 'المديونيات' | 'دفتر الأستاذ' | 'القوائم المالية' | 'سجل الرقابة';
+export type ReportTab =
+  | 'المبيعات'
+  | 'الخزنة'
+  | 'المخزون'
+  | 'المديونيات'
+  | 'دفتر الأستاذ'
+  | 'القوائم المالية'
+  | 'سجل الرقابة'
+  | 'متابعة العمليات';
 
-export const ReportsCenterView: React.FC = () => {
+export const ReportsCenterView: React.FC<{ initialTab?: ReportTab }> = ({ initialTab }) => {
   const { language } = useLanguage();
-  const [selectedReport, setSelectedReport] = useState<ReportTab>('المبيعات');
+  const [selectedReport, setSelectedReport] = useState<ReportTab>(initialTab || 'المبيعات');
+  useEffect(() => {
+    if (initialTab) setSelectedReport(initialTab);
+  }, [initialTab]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<number>(0); // 0 = كل العملاء
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number>(0); // 0 = كل المخازن
 
@@ -351,7 +364,8 @@ export const ReportsCenterView: React.FC = () => {
           { id: 'المديونيات' as const, label: 'كشف حساب عميل / المديونيات', icon: <Users className="w-4 h-4" /> },
           { id: 'دفتر الأستاذ' as const, label: 'دفتر الأستاذ والقيود المزدوجة', icon: <FileText className="w-4 h-4" /> },
           { id: 'القوائم المالية' as const, label: 'القوائم المالية والتسوية', icon: <FileText className="w-4 h-4" /> },
-          { id: 'سجل الرقابة' as const, label: 'سجل الرقابة والعمليات', icon: <ShieldCheck className="w-4 h-4" /> }
+          { id: 'سجل الرقابة' as const, label: 'سجل الرقابة والعمليات', icon: <ShieldCheck className="w-4 h-4" /> },
+          { id: 'متابعة العمليات' as const, label: 'سجل متابعة العمليات', icon: <Activity className="w-4 h-4" /> }
         ].map((tab) => (
           <button
             key={tab.id}
@@ -434,11 +448,13 @@ export const ReportsCenterView: React.FC = () => {
         </GlassCard>
       )}
 
-      {/* Phase 4 Accounting Views OR Standard Report Table */}
+      {/* Phase 4 Accounting Views OR Operation Tracking OR Standard Report Table */}
       {selectedReport === 'دفتر الأستاذ' ? (
         <AccountingModuleView initialMode="LEDGER" />
       ) : selectedReport === 'القوائم المالية' ? (
         <AccountingModuleView initialMode="STATEMENTS" />
+      ) : selectedReport === 'متابعة العمليات' ? (
+        <OperationTrackingView />
       ) : (
         <GlassCard className="p-5 space-y-4">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-theme pb-3">

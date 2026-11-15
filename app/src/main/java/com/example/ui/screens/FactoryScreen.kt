@@ -65,6 +65,8 @@ fun FactoryScreen(
     val formulations by viewModel.formulations.collectAsState()
     val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
     val dataLoadError by viewModel.dataLoadError.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
 
     var showBatchModal by remember { mutableStateOf(false) }
     var selectedFormulaForBatch by remember { mutableStateOf<FormulationEntity?>(null) }
@@ -265,10 +267,13 @@ fun FactoryScreen(
 
                             Spacer(modifier = Modifier.height(14.dp))
 
+                            val rcvRawGuard = "factory_move_RAW_RECEIPT"
                             GlassButton(
                                 text = "تأكيد الاستلام",
                                 icon = Icons.Default.CheckCircle,
                                 gradient = GlassAccentGreenGradient,
+                                isLoading = activeGuardKeys.contains(rcvRawGuard),
+                                loadingText = guardLoadingLabels[rcvRawGuard] ?: "جاري توريد الخامات...",
                                 onClick = {
                                     val qty = rcvQty.toDoubleOrNull() ?: 1.0
                                     val targetItem = factoryItems.find { it.name == currentRcvItem } ?: factoryItems.firstOrNull()
@@ -281,20 +286,25 @@ fun FactoryScreen(
                                         qty = qty,
                                         note = rcvNote.ifBlank { "استلام خامات واردة من مصر وقيدها بالجنيه المصري" },
                                         counterparty = rcvSupplier.ifBlank { "مورد مصر المعتمد (EGP)" },
-                                        actor = "أمين مخزن المواد الخام"
+                                        actor = "أمين مخزن المواد الخام",
+                                        guardKey = rcvRawGuard,
+                                        onComplete = { ok ->
+                                            if (ok) {
+                                                successRecord = FactorySuccessRecord(
+                                                    title = "تم تأكيد استلام المادة في مخزن المواد الخام",
+                                                    subtitle = "تم إدخال البيانات يدوياً وإيداع الكمية في الرصيد الفعلي لمخزن المواد الخام (ربط مصر).",
+                                                    itemName = currentRcvItem,
+                                                    quantity = "$qty ${targetItem?.unit ?: "كجم"}",
+                                                    destinationWarehouse = "مخزن المواد الخام (مرتبط بمستودع مصر)",
+                                                    responsibleDepartment = "أمين مخزن المواد الخام",
+                                                    counterparty = rcvSupplier.ifBlank { "مورد مصر المعتمد (EGP)" },
+                                                    note = rcvNote.ifBlank { null }
+                                                )
+                                                rcvQty = "50"
+                                                rcvNote = ""
+                                            }
+                                        }
                                     )
-                                    successRecord = FactorySuccessRecord(
-                                        title = "تم تأكيد استلام المادة في مخزن المواد الخام",
-                                        subtitle = "تم إدخال البيانات يدوياً وإيداع الكمية في الرصيد الفعلي لمخزن المواد الخام (ربط مصر).",
-                                        itemName = currentRcvItem,
-                                        quantity = "$qty ${targetItem?.unit ?: "كجم"}",
-                                        destinationWarehouse = "مخزن المواد الخام (مرتبط بمستودع مصر)",
-                                        responsibleDepartment = "أمين مخزن المواد الخام",
-                                        counterparty = rcvSupplier.ifBlank { "مورد مصر المعتمد (EGP)" },
-                                        note = rcvNote.ifBlank { null }
-                                    )
-                                    rcvQty = "50"
-                                    rcvNote = ""
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -358,10 +368,13 @@ fun FactoryScreen(
 
                             Spacer(modifier = Modifier.height(14.dp))
 
+                            val issueProdGuard = "factory_move_ISSUE_PRODUCTION"
                             GlassButton(
                                 text = "صرف للإنتاج",
                                 icon = Icons.Default.Sensors,
                                 gradient = PmpBrandRedGradient,
+                                isLoading = activeGuardKeys.contains(issueProdGuard),
+                                loadingText = guardLoadingLabels[issueProdGuard] ?: "جاري تنفيذ الصرف...",
                                 onClick = {
                                     val qty = issueQty.toDoubleOrNull() ?: 1.0
                                     val targetItem = factoryItems.find { it.name == currentIssueItem } ?: factoryItems.firstOrNull()
@@ -374,20 +387,25 @@ fun FactoryScreen(
                                         qty = qty,
                                         note = issueNote.ifBlank { "صرف خامات من المخزن إلى الإنتاج" },
                                         counterparty = issueEngineer,
-                                        actor = "أمين مخزن المواد الخام"
+                                        actor = "أمين مخزن المواد الخام",
+                                        guardKey = issueProdGuard,
+                                        onComplete = { ok ->
+                                            if (ok) {
+                                                successRecord = FactorySuccessRecord(
+                                                    title = "تم صرف المواد للإنتاج بنجاح",
+                                                    subtitle = "تم خصم الكمية من رصيد مخزن المواد الخام وتسليمها لخط الإنتاج.",
+                                                    itemName = currentIssueItem,
+                                                    quantity = "$qty ${targetItem?.unit ?: "كجم"}",
+                                                    destinationWarehouse = "خط تشغيل الإنتاج",
+                                                    responsibleDepartment = "أمين مخزن المواد الخام",
+                                                    counterparty = issueEngineer,
+                                                    note = issueNote.ifBlank { null }
+                                                )
+                                                issueQty = "25"
+                                                issueNote = ""
+                                            }
+                                        }
                                     )
-                                    successRecord = FactorySuccessRecord(
-                                        title = "تم صرف المواد للإنتاج بنجاح",
-                                        subtitle = "تم خصم الكمية من رصيد مخزن المواد الخام وتسليمها لخط الإنتاج.",
-                                        itemName = currentIssueItem,
-                                        quantity = "$qty ${targetItem?.unit ?: "كجم"}",
-                                        destinationWarehouse = "خط تشغيل الإنتاج",
-                                        responsibleDepartment = "أمين مخزن المواد الخام",
-                                        counterparty = issueEngineer,
-                                        note = issueNote.ifBlank { null }
-                                    )
-                                    issueQty = "25"
-                                    issueNote = ""
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -1117,10 +1135,13 @@ fun FactoryScreen(
 
                             Spacer(modifier = Modifier.height(16.dp))
 
+                            val prodOutGuard = "factory_move_PRODUCTION_OUTPUT"
                             GlassButton(
                                 text = "تسجيل الإنتاج (${prodCartonsCount} كرتونة)",
                                 icon = Icons.Default.PrecisionManufacturing,
                                 gradient = GlassAccentBlueGradient,
+                                isLoading = activeGuardKeys.contains(prodOutGuard),
+                                loadingText = guardLoadingLabels[prodOutGuard] ?: "جاري إضافة العملية...",
                                 onClick = {
                                     val cans = prodCansCount.toDoubleOrNull() ?: 120.0
                                     val matchedMachine = factoryMachines.find { it.name == prodMachineName }
@@ -1137,17 +1158,22 @@ fun FactoryScreen(
                                         machineName = matchedMachine?.name,
                                         batch = prodBatch,
                                         note = if (prodNote.isBlank()) "إنتاج $prodCartonsCount كرتونة ($cans علبة عبوة $prodWeight جم)" else "$prodNote ($prodCartonsCount كرتونة)",
-                                        actor = "مهندس الإنتاج"
-                                    )
-                                    successRecord = FactorySuccessRecord(
-                                        title = "تم تسجيل أمر الإنتاج وإضافة المنتج للمخزن",
-                                        subtitle = "تم تسجيل دفعة الإنتاج بنجاح وتوجيهها إلى مخزن المنتجات التامة بالمصنع.",
-                                        itemName = itemName,
-                                        quantity = "$prodCartonsCount كرتونة ($cans علبة)",
-                                        destinationWarehouse = "مخزن المنتجات تامة الصنع",
-                                        responsibleDepartment = "قسم الإنتاج والتعبئة (مهندس الإنتاج)",
-                                        counterparty = "ماكينة: ${matchedMachine?.name ?: prodMachineName} • تشغيلة: $prodBatch",
-                                        note = prodNote.ifBlank { null }
+                                        actor = "مهندس الإنتاج",
+                                        guardKey = prodOutGuard,
+                                        onComplete = { ok ->
+                                            if (ok) {
+                                                successRecord = FactorySuccessRecord(
+                                                    title = "تم تسجيل أمر الإنتاج وإضافة المنتج للمخزن",
+                                                    subtitle = "تم تسجيل دفعة الإنتاج بنجاح وتوجيهها إلى مخزن المنتجات التامة بالمصنع.",
+                                                    itemName = itemName,
+                                                    quantity = "$prodCartonsCount كرتونة ($cans علبة)",
+                                                    destinationWarehouse = "مخزن المنتجات تامة الصنع",
+                                                    responsibleDepartment = "قسم الإنتاج والتعبئة (مهندس الإنتاج)",
+                                                    counterparty = "ماكينة: ${matchedMachine?.name ?: prodMachineName} • تشغيلة: $prodBatch",
+                                                    note = prodNote.ifBlank { null }
+                                                )
+                                            }
+                                        }
                                     )
                                 },
                                 modifier = Modifier.fillMaxWidth()
@@ -1291,10 +1317,14 @@ fun FactoryScreen(
 
                             Spacer(modifier = Modifier.height(16.dp))
 
+                            val dispatchGuard = if (dispatchType == "HALFA") "dispatch_halfa" else "factory_move_DISPATCH_CUSTOMER"
                             GlassButton(
                                 text = if (dispatchType == "HALFA") "ترحيل إلى حلفا" else "تسليم للعميل",
                                 icon = Icons.Default.LocalShipping,
                                 gradient = if (dispatchType == "HALFA") GlassAccentGoldGradient else PmpBrandRedGradient,
+                                isLoading = activeGuardKeys.contains(dispatchGuard),
+                                loadingText = guardLoadingLabels[dispatchGuard]
+                                    ?: if (dispatchType == "HALFA") "جاري التحويل..." else "جاري تنفيذ الصرف...",
                                 onClick = {
                                     val cartons = dispatchCartons.toDoubleOrNull() ?: 1.0
                                     val unitPrice = dispatchPrice.toDoubleOrNull() ?: 0.0
@@ -1313,17 +1343,22 @@ fun FactoryScreen(
                                             cartons = cartons,
                                             unitPrice = unitPrice,
                                             note = dispatchNote,
-                                            actor = "مسؤول التحميل"
-                                        )
-                                        successRecord = FactorySuccessRecord(
-                                            title = "تم تسجيل ترحيل المنتج إلى مخزن حلفا",
-                                            subtitle = "تم إرسال الشحنة بنجاح وبانتظار الاستلام الفعلي في مخزن حلفا.",
-                                            itemName = dispatchProductText,
-                                            quantity = "$cartons كرتونة",
-                                            destinationWarehouse = "مخزن حلفا الإقليمي",
-                                            responsibleDepartment = "قسم التحميل والترحيل",
-                                            counterparty = "مخزن حلفا",
-                                            note = dispatchNote.ifBlank { null }
+                                            actor = "مسؤول التحميل",
+                                            guardKey = dispatchGuard,
+                                            onComplete = { ok ->
+                                                if (ok) {
+                                                    successRecord = FactorySuccessRecord(
+                                                        title = "تم تسجيل ترحيل المنتج إلى مخزن حلفا",
+                                                        subtitle = "تم إرسال الشحنة بنجاح وبانتظار الاستلام الفعلي في مخزن حلفا.",
+                                                        itemName = dispatchProductText,
+                                                        quantity = "$cartons كرتونة",
+                                                        destinationWarehouse = "مخزن حلفا الإقليمي",
+                                                        responsibleDepartment = "قسم التحميل والترحيل",
+                                                        counterparty = "مخزن حلفا",
+                                                        note = dispatchNote.ifBlank { null }
+                                                    )
+                                                }
+                                            }
                                         )
                                     } else {
                                         viewModel.addFactoryMove(
@@ -1333,18 +1368,23 @@ fun FactoryScreen(
                                             qty = cartons,
                                             note = if (dispatchNote.isBlank()) "تسليم وخروج $cartons كرتونة للعميل" else "$dispatchNote ($cartons كرتونة)",
                                             counterparty = dispatchCustomerName.ifBlank { "عميل مباشر" },
-                                            actor = "مسؤول التحميل والتسليم"
-                                        )
-                                        successRecord = FactorySuccessRecord(
-                                            title = "تم تسجيل خروج المنتج وتسليمه للعميل",
-                                            subtitle = "تم تسليم المنتج بنجاح وتحديث حركة خروج المصنع.",
-                                            itemName = dispatchProductText,
-                                            quantity = "$cartons كرتونة",
-                                            destinationWarehouse = "العميل المباشر",
-                                            responsibleDepartment = "قسم التحميل والتسليم",
-                                            counterparty = dispatchCustomerName.ifBlank { "عميل مباشر" },
-                                            financialAmount = if (dispatchPrice.isNotBlank()) "$dispatchPrice $dispatchCurrency" else null,
-                                            note = dispatchNote.ifBlank { null }
+                                            actor = "مسؤول التحميل والتسليم",
+                                            guardKey = dispatchGuard,
+                                            onComplete = { ok ->
+                                                if (ok) {
+                                                    successRecord = FactorySuccessRecord(
+                                                        title = "تم تسجيل خروج المنتج وتسليمه للعميل",
+                                                        subtitle = "تم تسليم المنتج بنجاح وتحديث حركة خروج المصنع.",
+                                                        itemName = dispatchProductText,
+                                                        quantity = "$cartons كرتونة",
+                                                        destinationWarehouse = "العميل المباشر",
+                                                        responsibleDepartment = "قسم التحميل والتسليم",
+                                                        counterparty = dispatchCustomerName.ifBlank { "عميل مباشر" },
+                                                        financialAmount = if (dispatchPrice.isNotBlank()) "$dispatchPrice $dispatchCurrency" else null,
+                                                        note = dispatchNote.ifBlank { null }
+                                                    )
+                                                }
+                                            }
                                         )
                                     }
                                 },
@@ -1535,9 +1575,12 @@ fun FactoryScreen(
                 }
             },
             confirmButton = {
+                val addItemGuard = "factory_add_item"
                 GlassButton(
                     text = "حفظ الصنف",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(addItemGuard),
+                    loadingText = guardLoadingLabels[addItemGuard] ?: "جاري إضافة العملية...",
                     onClick = {
                         val cleanName = newItemName.trim()
                         if (cleanName.isNotBlank()) {
@@ -1545,6 +1588,7 @@ fun FactoryScreen(
                                 name = cleanName,
                                 category = newItemKind,
                                 unit = newItemUnit,
+                                guardKey = addItemGuard,
                                 onSuccess = {
                                     showAddItemDialog = false
                                 }
@@ -1558,6 +1602,7 @@ fun FactoryScreen(
             dismissButton = {
                 GlassButton(
                     text = "إلغاء",
+                    enabled = !activeGuardKeys.contains("factory_add_item"),
                     onClick = { showAddItemDialog = false }
                 )
             },
@@ -1567,8 +1612,9 @@ fun FactoryScreen(
 
     // Modal: Confirm Delete Factory Item
     itemToDelete?.let { item ->
+        val delItemGuard = "delete_factory_item_${item.id}"
         AlertDialog(
-            onDismissRequest = { itemToDelete = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(delItemGuard)) itemToDelete = null },
             title = {
                 Text(
                     text = "تأكيد حذف الصنف من المصنع",
@@ -1588,15 +1634,21 @@ fun FactoryScreen(
                 GlassButton(
                     text = "تأكيد الحذف",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(delItemGuard),
+                    loadingText = guardLoadingLabels[delItemGuard] ?: "جاري تنفيذ الحذف...",
                     onClick = {
-                        viewModel.deleteFactoryItem(item)
-                        itemToDelete = null
+                        viewModel.deleteFactoryItem(
+                            item = item,
+                            guardKey = delItemGuard,
+                            onComplete = { ok -> if (ok) itemToDelete = null }
+                        )
                     }
                 )
             },
             dismissButton = {
                 GlassButton(
                     text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(delItemGuard),
                     onClick = { itemToDelete = null }
                 )
             },
@@ -1610,22 +1662,34 @@ fun FactoryScreen(
             availableFormulations = formulations,
             factoryMachines = factoryMachines,
             preSelectedFormula = selectedFormulaForBatch,
+            isSubmitting = activeGuardKeys.contains("log_production_batch"),
+            loadingText = guardLoadingLabels["log_production_batch"] ?: "جاري الحفظ...",
             onDismiss = {
-                showBatchModal = false
-                selectedFormulaForBatch = null
+                if (!activeGuardKeys.contains("log_production_batch")) {
+                    showBatchModal = false
+                    selectedFormulaForBatch = null
+                }
             },
             onSaveBatch = { batch ->
-                viewModel.logProductionBatch(batch)
-                showBatchModal = false
-                selectedFormulaForBatch = null
+                viewModel.logProductionBatch(
+                    batch = batch,
+                    guardKey = "log_production_batch",
+                    onCompleted = { ok ->
+                        if (ok) {
+                            showBatchModal = false
+                            selectedFormulaForBatch = null
+                        }
+                    }
+                )
             }
         )
     }
 
     // Modal: Confirm Delete Production Batch
     batchToDelete?.let { batch ->
+        val delBatchGuard = "delete_production_batch_${batch.id}"
         AlertDialog(
-            onDismissRequest = { batchToDelete = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(delBatchGuard)) batchToDelete = null },
             title = {
                 Text(
                     text = "تأكيد حذف تشغيلة الإنتاج",
@@ -1645,15 +1709,21 @@ fun FactoryScreen(
                 GlassButton(
                     text = "تأكيد الحذف",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(delBatchGuard),
+                    loadingText = guardLoadingLabels[delBatchGuard] ?: "جاري تنفيذ الحذف...",
                     onClick = {
-                        viewModel.deleteProductionBatch(batch)
-                        batchToDelete = null
+                        viewModel.deleteProductionBatch(
+                            batch = batch,
+                            guardKey = delBatchGuard,
+                            onComplete = { ok -> if (ok) batchToDelete = null }
+                        )
                     }
                 )
             },
             dismissButton = {
                 GlassButton(
                     text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(delBatchGuard),
                     onClick = { batchToDelete = null }
                 )
             },

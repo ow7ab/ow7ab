@@ -29,6 +29,8 @@ import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS, isSystemManager } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 import { WebThreeWarehouseTransferPanel } from './Phase3ErpPanels';
 
 type InventorySubTab = 'BALANCES' | 'WAREHOUSES_DIR' | 'STOCK_MOVES' | 'ADD_PRODUCT';
@@ -167,6 +169,11 @@ export const WarehousesModuleView: React.FC = () => {
   const canEdit = canPerformAction(GRANULAR_ACTIONS.EDIT);
   const canDelete = isSystemManager(userProfile) || canPerformAction(GRANULAR_ACTIONS.DELETE);
 
+  const moveGuard = useTransactionGuard('warehouses_stock_move', 'GOODS_ISSUE');
+  const whGuard = useTransactionGuard('warehouses_add_wh', 'CREATE');
+  const prodGuard = useTransactionGuard('warehouses_add_prod', 'CREATE');
+  const maintGuard = useTransactionGuard('warehouses_maint', 'DELETE');
+
   const showNotice = (type: 'ok' | 'err', text: string) => {
     setNotice({ type, text });
     setTimeout(() => setNotice(null), 4000);
@@ -174,6 +181,7 @@ export const WarehousesModuleView: React.FC = () => {
 
   const handleRecordStockMove = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (moveGuard.isSubmitting) return;
     if (!canCreate && !canEdit) {
       showNotice('err', 'لا تملك صلاحية تسجيل حركات المخزون');
       return;
@@ -190,7 +198,6 @@ export const WarehousesModuleView: React.FC = () => {
     let finalDeltaQty = rawQty;
 
     if (moveKind === 'SET') {
-      // Matches Android PmpViewModel.kt updateProductInventoryCount: computes exact delta against current stock in that warehouse (including merged alias IDs)
       const whAliasSet = resolveWarehouseFilterIds(Number(wh.id), warehouses) || new Set([Number(wh.id)]);
       const whMoves = stockMoves.filter(
         (m) => Number(m.productId) === Number(prod.id) && whAliasSet.has(Number(m.warehouseId))
@@ -213,41 +220,59 @@ export const WarehousesModuleView: React.FC = () => {
       finalDeltaQty = Math.abs(diff);
     }
 
-    const now = Date.now();
+    const opType = moveKind === 'SET' ? 'UPDATE' : finalKind === 'IN' ? 'RAW_MATERIAL_SUPPLY' : 'GOODS_ISSUE';
     const actorName = userProfile?.fullName || userProfile?.username || 'أمين المخزن';
-    const move: StockMove = {
-      id: now,
-      productId: Number(prod.id),
-      productName: prod.name,
-      warehouseId: Number(wh.id),
-      warehouseName: wh.name,
-      kind: finalKind,
-      quantity: finalDeltaQty,
-      note:
-        moveNote.trim() ||
-        (moveKind === 'SET'
-          ? `تعديل جرد مباشر للرصيد الفعلي (${rawQty}) بواسطة ${actorName}`
-          : finalKind === 'IN'
-          ? 'توريد مخزني'
-          : 'صرف مخزني'),
-      referenceNo: `SM-${now.toString().slice(-6)}`,
-      createdBy: actorName,
-      actor: actorName,
-      createdAt: now,
-      timestamp: now
-    };
 
-    await ErpDataService.upsertDocument('stock_moves', `SM-${now}`, move);
-    await ErpDataService.logAudit(
-      userProfile?.username || 'user',
-      moveKind === 'SET' ? 'INVENTORY_SET_STOCK' : `STOCK_${finalKind}`,
-      `${moveKind === 'SET' ? `تعديل رصيد فعلي إلى (${rawQty})` : finalKind === 'IN' ? 'وارد مخزني' : 'منصرف مخزني'} (${finalDeltaQty} ${prod.unit}) — ${prod.name} @ ${wh.name}`
-    );
+    const res = await moveGuard.runGuarded({
+      guardKey: `wh_move_${wh.id}_${prod.id}_${moveKind}_${rawQty}`,
+      operationType: opType,
+      userId: userProfile?.username || actorName,
+      documentReference: `SM-${wh.id}-${prod.id}-${finalKind}-${finalDeltaQty}`,
+      targetCollection: 'stock_moves',
+      payloadSummary: `${moveKind} ${finalDeltaQty} ${prod.unit || 'كرتونة'} — ${prod.name}`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const docId = `SM-${idempotencyKey}`;
+        const move: StockMove = {
+          id: now,
+          productId: Number(prod.id),
+          productName: prod.name,
+          warehouseId: Number(wh.id),
+          warehouseName: wh.name,
+          kind: finalKind,
+          quantity: finalDeltaQty,
+          note:
+            moveNote.trim() ||
+            (moveKind === 'SET'
+              ? `تعديل جرد مباشر للرصيد الفعلي (${rawQty}) بواسطة ${actorName}`
+              : finalKind === 'IN'
+              ? 'توريد مخزني'
+              : 'صرف مخزني'),
+          referenceNo: `SM-${idempotencyKey.slice(-6)}`,
+          createdBy: actorName,
+          actor: actorName,
+          createdAt: now,
+          timestamp: now
+        };
 
-    setMoveQty('');
-    setMoveNote('');
-    setIsQuickAdjustOpen(false);
-    showNotice('ok', 'تم تسجيل حركة المخزون وتحديث الرصيد الفوري بنجاح');
+        await ErpDataService.upsertDocument('stock_moves', docId, move);
+        await ErpDataService.logAudit(
+          userProfile?.username || 'user',
+          moveKind === 'SET' ? 'INVENTORY_SET_STOCK' : `STOCK_${finalKind}`,
+          `${moveKind === 'SET' ? `تعديل رصيد فعلي إلى (${rawQty})` : finalKind === 'IN' ? 'وارد مخزني' : 'منصرف مخزني'} (${finalDeltaQty} ${prod.unit}) — ${prod.name} @ ${wh.name}`
+        );
+        return { resultReference: docId };
+      }
+    });
+
+    if (res.ok) {
+      setMoveQty('');
+      setMoveNote('');
+      setIsQuickAdjustOpen(false);
+      showNotice('ok', res.replayed ? res.message : 'تم تسجيل حركة المخزون وتحديث الرصيد الفوري بنجاح');
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const openQuickAdjustModal = (prod: Product, defaultMode: 'IN' | 'OUT' | 'SET' = 'SET') => {
@@ -261,196 +286,299 @@ export const WarehousesModuleView: React.FC = () => {
 
   const handleAddWarehouse = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate || !whName.trim()) return;
-    const now = Date.now();
-    const wh: Warehouse = {
-      id: now,
-      code: `WH-${now.toString().slice(-4)}`,
-      name: whName.trim(),
-      branch: whBranch,
-      location: whLocation.trim() || whBranch,
-      manager: userProfile?.fullName || 'أمين المستودع',
-      active: true
-    };
-    await ErpDataService.upsertDocument('warehouses', `WH-${now}`, wh);
-    setWhName('');
-    setWhLocation('');
-    showNotice('ok', `تم إنشاء المستودع "${wh.name}"`);
+    if (!canCreate || !whName.trim() || whGuard.isSubmitting) return;
+    const cleanName = whName.trim();
+    const res = await whGuard.runGuarded({
+      guardKey: `wh_add_${cleanName}`,
+      operationType: 'CREATE',
+      userId: userProfile?.username || 'WEB_USER',
+      documentReference: `WH-${cleanName}`,
+      targetCollection: 'warehouses',
+      payloadSummary: `إنشاء مستودع ${cleanName}`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const docId = `WH-${idempotencyKey}`;
+        const wh: Warehouse = {
+          id: now,
+          code: `WH-${String(now).slice(-4)}`,
+          name: cleanName,
+          branch: whBranch,
+          location: whLocation.trim() || whBranch,
+          manager: userProfile?.fullName || 'أمين المستودع',
+          active: true
+        };
+        await ErpDataService.upsertDocument('warehouses', docId, wh);
+        return { resultReference: docId };
+      }
+    });
+    if (res.ok) {
+      setWhName('');
+      setWhLocation('');
+      showNotice('ok', res.replayed ? res.message : `تم إنشاء المستودع "${cleanName}"`);
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate || !prodForm.name.trim()) return;
-    const now = Date.now();
+    if (!canCreate || !prodForm.name.trim() || prodGuard.isSubmitting) return;
+    const cleanName = prodForm.name.trim();
     const actorName = userProfile?.fullName || userProfile?.username || 'النظام';
     const initQty = Math.max(0, Number(prodForm.initialStock) || 0);
     const minVal = Math.max(0, Number(prodForm.minLevel) || 10);
     const costVal = Math.max(0, Number(prodForm.costPrice) || 0);
-    const newProd: Product = {
-      id: now,
-      sku: prodForm.sku.trim() || `SKU-${now.toString().slice(-5)}`,
-      name: prodForm.name.trim(),
-      category: prodForm.category,
-      paintColor: prodForm.paintColor,
-      packageWeight: prodForm.packageWeight,
-      unit: prodForm.unit,
-      unitsPerCarton: Math.max(1, Number(prodForm.unitsPerCarton) || 12),
-      purchasePrice: costVal,
-      costPrice: costVal,
-      salePrice: Math.max(0, Number(prodForm.salePrice) || 0),
-      salePriceSdg: Math.max(0, Number(prodForm.salePrice) || 0),
-      salePriceEgp: Math.max(0, Number(prodForm.salePriceEgp) || 0),
-      minimumStock: minVal,
-      minLevel: minVal,
-      currentStock: initQty,
-      active: true
-    };
 
-    await ErpDataService.upsertDocument('products', `PRD-${now}`, newProd);
+    const res = await prodGuard.runGuarded({
+      guardKey: `wh_add_prod_${cleanName}`,
+      operationType: 'CREATE',
+      userId: userProfile?.username || actorName,
+      documentReference: `PRD-${cleanName}`,
+      targetCollection: 'products',
+      payloadSummary: `إضافة صنف ${cleanName}`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const docId = `PRD-${idempotencyKey}`;
+        const newProd: Product = {
+          id: now,
+          sku: prodForm.sku.trim() || `SKU-${now.toString().slice(-5)}`,
+          name: cleanName,
+          category: prodForm.category,
+          paintColor: prodForm.paintColor,
+          packageWeight: prodForm.packageWeight,
+          unit: prodForm.unit,
+          unitsPerCarton: Math.max(1, Number(prodForm.unitsPerCarton) || 12),
+          purchasePrice: costVal,
+          costPrice: costVal,
+          salePrice: Math.max(0, Number(prodForm.salePrice) || 0),
+          salePriceSdg: Math.max(0, Number(prodForm.salePrice) || 0),
+          salePriceEgp: Math.max(0, Number(prodForm.salePriceEgp) || 0),
+          minimumStock: minVal,
+          minLevel: minVal,
+          currentStock: initQty,
+          active: true
+        };
 
-    if (initQty > 0 && warehouses.length > 0) {
-      const targetWh =
-        warehouses.find((w) => Number(w.id) === Number(selectedWarehouseFilter)) || warehouses[0];
-      const sm: StockMove = {
-        id: now + 1,
-        productId: now,
-        productName: newProd.name,
-        warehouseId: Number(targetWh.id),
-        warehouseName: targetWh.name,
-        kind: 'IN',
-        quantity: initQty,
-        note: 'رصيد افتتاحي عند تعريف الصنف',
-        referenceNo: `INIT-${now.toString().slice(-5)}`,
-        createdBy: actorName,
-        actor: actorName,
-        createdAt: now,
-        timestamp: now
-      };
-      await ErpDataService.upsertDocument('stock_moves', `SM-${now + 1}`, sm);
-    }
+        await ErpDataService.upsertDocument('products', docId, newProd);
 
-    setProdForm({
-      ...prodForm,
-      sku: '',
-      name: '',
-      initialStock: '0'
+        if (initQty > 0 && warehouses.length > 0) {
+          const targetWh =
+            warehouses.find((w) => Number(w.id) === Number(selectedWarehouseFilter)) || warehouses[0];
+          const sm: StockMove = {
+            id: now + 1,
+            productId: now,
+            productName: newProd.name,
+            warehouseId: Number(targetWh.id),
+            warehouseName: targetWh.name,
+            kind: 'IN',
+            quantity: initQty,
+            note: 'رصيد افتتاحي عند تعريف الصنف',
+            referenceNo: `INIT-${idempotencyKey.slice(-5)}`,
+            createdBy: actorName,
+            actor: actorName,
+            createdAt: now,
+            timestamp: now
+          };
+          await ErpDataService.upsertDocument('stock_moves', `SM-INIT-${idempotencyKey}`, sm);
+        }
+        return { resultReference: docId };
+      }
     });
-    setSubTab('BALANCES');
-    showNotice('ok', `تمت إضافة الصنف "${newProd.name}" إلى الكتالوج والمخزون`);
+
+    if (res.ok) {
+      setProdForm({
+        ...prodForm,
+        sku: '',
+        name: '',
+        initialStock: '0'
+      });
+      setSubTab('BALANCES');
+      showNotice('ok', res.replayed ? res.message : `تمت إضافة الصنف "${cleanName}" إلى الكتالوج والمخزون`);
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const handleDeleteProduct = async (prod: Product) => {
-    if (!canDelete) return;
+    if (!canDelete || maintGuard.isSubmitting) return;
     if (!window.confirm(`تأكيد حذف الصنف "${prod.name}" نهائياً مع كافة حركاته المخزنية؟`)) return;
     const actor = userProfile?.username || 'admin';
     const docId = (prod as any)._docId || `PRD-${prod.id}`;
-    await ErpDataService.deleteDocumentWithTombstone('products', docId, prod.id, actor);
-    // Also clean any stock moves linked to this deleted product so no phantom balances remain
-    const linkedMoves = stockMoves.filter((m) => Number(m.productId) === Number(prod.id));
-    await Promise.all(
-      linkedMoves.map((m) =>
-        ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
-      )
-    );
-    await ErpDataService.logAudit(actor, 'DELETE_PRODUCT', `حذف الصنف "${prod.name}" (#${prod.id}) وتنظيف ${linkedMoves.length} حركة مرتبطة`);
-    showNotice('ok', `تم حذف الصنف "${prod.name}" وتنظيف حركاته بنجاح`);
+    const res = await maintGuard.runGuarded({
+      guardKey: `wh_del_prod_${docId}`,
+      operationType: 'DELETE',
+      userId: actor,
+      documentReference: docId,
+      targetCollection: 'products',
+      payloadSummary: `حذف الصنف ${prod.name}`,
+      execute: async () => {
+        await ErpDataService.deleteDocumentWithTombstone('products', docId, prod.id, actor);
+        const linkedMoves = stockMoves.filter((m) => Number(m.productId) === Number(prod.id));
+        await Promise.all(
+          linkedMoves.map((m) =>
+            ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
+          )
+        );
+        await ErpDataService.logAudit(actor, 'DELETE_PRODUCT', `حذف الصنف "${prod.name}" (#${prod.id}) وتنظيف ${linkedMoves.length} حركة مرتبطة`);
+        return { resultReference: docId };
+      }
+    });
+    if (res.ok) showNotice('ok', `تم حذف الصنف "${prod.name}" وتنظيف حركاته بنجاح`);
+    else showNotice('err', res.message);
   };
 
   const handleDeleteWarehouse = async (wh: Warehouse) => {
-    if (!canDelete) {
-      showNotice('err', 'لا تملك صلاحية حذف المستودعات');
-      return;
-    }
+    if (!canDelete || maintGuard.isSubmitting) return;
     if (!window.confirm(`هل تريد حذف المستودع "${wh.name}" نهائياً من النظام السحابي والموبايل وتنظيف حركاته؟`)) {
       return;
     }
     const actor = userProfile?.username || 'admin';
-    const aliasIds: number[] = Array.isArray((wh as any)._aliasIds) && (wh as any)._aliasIds.length > 0
-      ? (wh as any)._aliasIds
-      : [Number(wh.id)];
-    const aliasDocIds: string[] = Array.isArray((wh as any)._aliasDocIds) && (wh as any)._aliasDocIds.length > 0
-      ? (wh as any)._aliasDocIds
-      : [(wh as any)._docId || `WH-${wh.id}`];
+    const res = await maintGuard.runGuarded({
+      guardKey: `wh_del_wh_${wh.id}`,
+      operationType: 'DELETE',
+      userId: actor,
+      documentReference: `WH-${wh.id}`,
+      targetCollection: 'warehouses',
+      payloadSummary: `حذف المستودع ${wh.name}`,
+      execute: async () => {
+        const aliasIds: number[] = Array.isArray((wh as any)._aliasIds) && (wh as any)._aliasIds.length > 0
+          ? (wh as any)._aliasIds
+          : [Number(wh.id)];
+        const aliasDocIds: string[] = Array.isArray((wh as any)._aliasDocIds) && (wh as any)._aliasDocIds.length > 0
+          ? (wh as any)._aliasDocIds
+          : [(wh as any)._docId || `WH-${wh.id}`];
 
-    // Delete all duplicate Firestore documents for this warehouse + write tombstones using both name & IDs
-    await Promise.all([
-      ...aliasDocIds.map((dId) => ErpDataService.deleteDocumentWithTombstone('warehouses', dId, wh.name, actor)),
-      ...aliasIds.map((wid) => ErpDataService.deleteDocumentWithTombstone('warehouses', `WH-${wid}`, wid, actor))
-    ]);
+        await Promise.all([
+          ...aliasDocIds.map((dId) => ErpDataService.deleteDocumentWithTombstone('warehouses', dId, wh.name, actor)),
+          ...aliasIds.map((wid) => ErpDataService.deleteDocumentWithTombstone('warehouses', `WH-${wid}`, wid, actor))
+        ]);
 
-    const aliasSet = new Set(aliasIds.map(Number));
-    const linkedMoves = stockMoves.filter((m) => aliasSet.has(Number(m.warehouseId)));
-    await Promise.all(
-      linkedMoves.map((m) =>
-        ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
-      )
-    );
-
-    if (aliasSet.has(Number(selectedWarehouseFilter))) {
-      setSelectedWarehouseFilter(0);
-    }
-    await ErpDataService.logAudit(actor, 'DELETE_WAREHOUSE', `حذف المستودع "${wh.name}" مع ${linkedMoves.length} حركة مخزنية`);
-    showNotice('ok', `تم حذف المستودع "${wh.name}" ومزامنة الحذف مع تطبيق الموبايل`);
+        const aliasSet = new Set(aliasIds.map(Number));
+        const linkedMoves = stockMoves.filter((m) => aliasSet.has(Number(m.warehouseId)));
+        await Promise.all(
+          linkedMoves.map((m) =>
+            ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
+          )
+        );
+        if (aliasSet.has(Number(selectedWarehouseFilter))) {
+          setSelectedWarehouseFilter(0);
+        }
+        await ErpDataService.logAudit(actor, 'DELETE_WAREHOUSE', `حذف المستودع "${wh.name}" مع ${linkedMoves.length} حركة مخزنية`);
+        return { resultReference: `WH-${wh.id}` };
+      }
+    });
+    if (res.ok) showNotice('ok', `تم حذف المستودع "${wh.name}" ومزامنة الحذف مع تطبيق الموبايل`);
+    else showNotice('err', res.message);
   };
 
   const handleResetWarehouseStock = async (wh: Warehouse) => {
-    if (!canDelete) {
-      showNotice('err', 'لا تملك صلاحية تصفير أرصدة المستودعات');
-      return;
-    }
+    if (!canDelete || maintGuard.isSubmitting) return;
     if (!window.confirm(`تصفير كامل أرصدة وحركات مستودع "${wh.name}"؟`)) return;
     const actor = userProfile?.username || 'admin';
-    const aliasIds = resolveWarehouseFilterIds(Number(wh.id), warehouses) || new Set([Number(wh.id)]);
-    const linkedMoves = stockMoves.filter((m) => aliasIds.has(Number(m.warehouseId)));
-    await Promise.all(
-      linkedMoves.map((m) =>
-        ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
-      )
-    );
-    await ErpDataService.logAudit(actor, 'ZERO_WAREHOUSE', `تصفير أرصدة وحركات المستودع "${wh.name}" (${linkedMoves.length} حركة)`);
-    showNotice('ok', `تم تصفير رصيد مستودع "${wh.name}" وحذف ${linkedMoves.length} حركة`);
+    const res = await maintGuard.runGuarded({
+      guardKey: `wh_reset_${wh.id}`,
+      operationType: 'UPDATE',
+      userId: actor,
+      documentReference: `WH-RESET-${wh.id}`,
+      targetCollection: 'stock_moves',
+      payloadSummary: `تصفير أرصدة ${wh.name}`,
+      execute: async () => {
+        const aliasIds = resolveWarehouseFilterIds(Number(wh.id), warehouses) || new Set([Number(wh.id)]);
+        const linkedMoves = stockMoves.filter((m) => aliasIds.has(Number(m.warehouseId)));
+        await Promise.all(
+          linkedMoves.map((m) =>
+            ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
+          )
+        );
+        await ErpDataService.logAudit(actor, 'ZERO_WAREHOUSE', `تصفير أرصدة وحركات المستودع "${wh.name}" (${linkedMoves.length} حركة)`);
+        return { resultReference: `WH-${wh.id}`, result: linkedMoves.length };
+      }
+    });
+    if (res.ok) showNotice('ok', `تم تصفير رصيد مستودع "${wh.name}" وحذف ${res.data ?? 0} حركة`);
+    else showNotice('err', res.message);
   };
 
   const handleDeduplicateWarehouses = async () => {
-    if (!canDelete) return;
+    if (!canDelete || maintGuard.isSubmitting) return;
     const actor = userProfile?.username || 'admin';
-    let removedDocs = 0;
-    for (const w of warehouses) {
-      const canonicalDocId = (w as any)._docId || `WH-${w.id}`;
-      const docIds: string[] = Array.isArray((w as any)._aliasDocIds) ? (w as any)._aliasDocIds : [];
-      const extras = docIds.filter((d) => d && d !== canonicalDocId);
-      for (const extraDocId of extras) {
-        await ErpDataService.deleteDocument('warehouses', extraDocId);
-        removedDocs++;
+    const res = await maintGuard.runGuarded({
+      guardKey: 'wh_deduplicate',
+      operationType: 'UPDATE',
+      userId: actor,
+      documentReference: 'WH-DEDUPLICATE',
+      targetCollection: 'warehouses',
+      payloadSummary: 'تنظيف وتوحيد المستودعات المكررة',
+      execute: async () => {
+        let removedDocs = 0;
+        for (const w of warehouses) {
+          const canonicalDocId = (w as any)._docId || `WH-${w.id}`;
+          const docIds: string[] = Array.isArray((w as any)._aliasDocIds) ? (w as any)._aliasDocIds : [];
+          const extras = docIds.filter((d) => d && d !== canonicalDocId);
+          for (const extraDocId of extras) {
+            await ErpDataService.deleteDocument('warehouses', extraDocId);
+            removedDocs++;
+          }
+        }
+        await ErpDataService.logAudit(actor, 'DEDUPLICATE_WAREHOUSES', `تنظيف وتوحيد المستودعات المكررة (حذف ${removedDocs} مستند مكرر)`);
+        return { resultReference: 'WH-DEDUPLICATE', result: removedDocs };
       }
+    });
+    if (res.ok) {
+      const removed = Number(res.data || 0);
+      showNotice('ok', removed > 0 ? `تم توحيد المستودعات وحذف ${removed} مستند مكرر بنجاح` : 'المستودعات موحدة ولا توجد تكرارات حالياً');
+    } else {
+      showNotice('err', res.message);
     }
-    await ErpDataService.logAudit(actor, 'DEDUPLICATE_WAREHOUSES', `تنظيف وتوحيد المستودعات المكررة (حذف ${removedDocs} مستند مكرر)`);
-    showNotice('ok', removedDocs > 0 ? `تم توحيد المستودعات وحذف ${removedDocs} مستند مكرر بنجاح` : 'المستودعات موحدة ولا توجد تكرارات حالياً');
   };
 
   const handlePurgeOrphanStockMoves = async () => {
-    if (!canDelete && !canEdit) return;
-    if (orphanStockMoves.length === 0) return;
+    if ((!canDelete && !canEdit) || orphanStockMoves.length === 0 || maintGuard.isSubmitting) return;
     if (!window.confirm(`تأكيد حذف ${orphanStockMoves.length} حركة مخزنية يتيمة (لأصناف أو مستودعات محذوفة) من السحابة نهائياً؟`)) {
       return;
     }
     const actor = userProfile?.username || 'admin';
-    await Promise.all(
-      orphanStockMoves.map((m) =>
-        ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
-      )
-    );
-    await ErpDataService.logAudit(actor, 'PURGE_ORPHAN_STOCK_MOVES', `تنظيف وحذف ${orphanStockMoves.length} حركة مخزنية يتيمة`);
-    showNotice('ok', `تم تنظيف وحذف ${orphanStockMoves.length} حركة مخزنية يتيمة بنجاح`);
+    const count = orphanStockMoves.length;
+    const res = await maintGuard.runGuarded({
+      guardKey: 'wh_purge_orphans',
+      operationType: 'DELETE',
+      userId: actor,
+      documentReference: 'ORPHAN-STOCK-MOVES',
+      targetCollection: 'stock_moves',
+      payloadSummary: `حذف ${count} حركة مخزنية يتيمة`,
+      execute: async () => {
+        await Promise.all(
+          orphanStockMoves.map((m) =>
+            ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor)
+          )
+        );
+        await ErpDataService.logAudit(actor, 'PURGE_ORPHAN_STOCK_MOVES', `تنظيف وحذف ${count} حركة مخزنية يتيمة`);
+        return { resultReference: 'ORPHAN-STOCK-MOVES' };
+      }
+    });
+    if (res.ok) showNotice('ok', `تم تنظيف وحذف ${count} حركة مخزنية يتيمة بنجاح`);
+    else showNotice('err', res.message);
   };
 
   const handleDeleteStockMove = async (m: StockMove) => {
-    if (!canDelete) return;
+    if (!canDelete || maintGuard.isSubmitting) return;
     if (!window.confirm(`حذف حركة المخزون رقم ${m.referenceNo || m.id} (${m.quantity} كرتونة)؟`)) return;
     const actor = userProfile?.username || 'admin';
-    await ErpDataService.deleteDocumentWithTombstone('stock_moves', (m as any)._docId || `SM-${m.id}`, m.id, actor);
-    await ErpDataService.logAudit(actor, 'DELETE_STOCK_MOVE', `حذف حركة مخزنية #${m.id} (${m.quantity})`);
-    showNotice('ok', 'تم حذف الحركة المخزنية بنجاح');
+    const docId = (m as any)._docId || `SM-${m.id}`;
+    const res = await maintGuard.runGuarded({
+      guardKey: `wh_del_move_${docId}`,
+      operationType: 'DELETE',
+      userId: actor,
+      documentReference: docId,
+      targetCollection: 'stock_moves',
+      payloadSummary: `حذف حركة مخزنية ${m.referenceNo || m.id}`,
+      execute: async () => {
+        await ErpDataService.deleteDocumentWithTombstone('stock_moves', docId, m.id, actor);
+        await ErpDataService.logAudit(actor, 'DELETE_STOCK_MOVE', `حذف حركة مخزنية #${m.id} (${m.quantity})`);
+        return { resultReference: docId };
+      }
+    });
+    if (res.ok) showNotice('ok', 'تم حذف الحركة المخزنية بنجاح');
+    else showNotice('err', res.message);
   };
 
   const filteredProducts = computedProducts.filter(
@@ -1063,7 +1191,13 @@ export const WarehousesModuleView: React.FC = () => {
                   className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
                 />
               </div>
-              <GlassButton type="submit" variant="primary" className="w-full justify-center">
+              <GlassButton
+                type="submit"
+                variant="primary"
+                className="w-full justify-center"
+                isLoading={whGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.CREATE}
+              >
                 حفظ المستودع
               </GlassButton>
             </form>
@@ -1142,7 +1276,13 @@ export const WarehousesModuleView: React.FC = () => {
                   className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
                 />
               </div>
-              <GlassButton type="submit" variant="primary" className="w-full justify-center">
+              <GlassButton
+                type="submit"
+                variant="primary"
+                className="w-full justify-center"
+                isLoading={moveGuard.isSubmitting}
+                loadingText={moveGuard.loadingText}
+              >
                 اعتماد حركة المخزون
               </GlassButton>
             </form>
@@ -1339,7 +1479,13 @@ export const WarehousesModuleView: React.FC = () => {
               />
             </div>
             <div className="sm:col-span-2">
-              <GlassButton type="submit" variant="primary" className="w-full justify-center">
+              <GlassButton
+                type="submit"
+                variant="primary"
+                className="w-full justify-center"
+                isLoading={prodGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.CREATE}
+              >
                 حفظ الصنف في الكتالوج السحابي
               </GlassButton>
             </div>
@@ -1419,11 +1565,24 @@ export const WarehousesModuleView: React.FC = () => {
               className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
             />
           </div>
+          {moveGuard.pendingRecord && (
+            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2 text-[11px]">
+              <span>{moveGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+              <GlassButton size="sm" variant="secondary" onClick={() => moveGuard.verifyPending()}>
+                التحقق من حالة العملية
+              </GlassButton>
+            </div>
+          )}
           <div className="flex justify-end gap-2 pt-2">
-            <GlassButton type="button" variant="secondary" onClick={() => setIsQuickAdjustOpen(false)}>
+            <GlassButton type="button" variant="secondary" onClick={() => setIsQuickAdjustOpen(false)} disabled={moveGuard.isSubmitting}>
               إلغاء
             </GlassButton>
-            <GlassButton type="submit" variant="primary">
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={moveGuard.isSubmitting}
+              loadingText={moveGuard.loadingText}
+            >
               حفظ وتحديث الرصيد فوراً
             </GlassButton>
           </div>

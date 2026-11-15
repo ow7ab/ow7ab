@@ -10,6 +10,8 @@ import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 
 /**
  * Fallback base matrix from Android `PosterPriceScreen.kt` (merged live with Firestore `poster_prices`).
@@ -85,10 +87,12 @@ export const PricesModuleView: React.FC = () => {
   }, [mergedPrices, selectedCurrency, selectedWeight, searchTerm]);
 
   const canEdit = canPerformAction(GRANULAR_ACTIONS.EDIT) || canPerformAction(GRANULAR_ACTIONS.CREATE);
+  const savePriceGuard = useTransactionGuard('prices_save_price', 'UPDATE');
+  const addPriceGuard = useTransactionGuard('prices_add_kind', 'CREATE');
 
   const handleSavePrice = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingPrice || !canEdit) return;
+    if (!editingPrice || !canEdit || savePriceGuard.isSubmitting) return;
     const curr: CurrencyCode = editingPrice.currency || selectedCurrency;
     const canonicalId = curr === 'EGP' ? `${editingPrice.weight}_${editingPrice.kind}_EGP` : `${editingPrice.weight}_${editingPrice.kind}`;
     const docId = posterPriceDocId(editingPrice.weight, editingPrice.kind, curr);
@@ -102,34 +106,68 @@ export const PricesModuleView: React.FC = () => {
       currency: curr
     };
 
-    await ErpDataService.saveRecord('poster_prices', docId, payload, userProfile?.username);
-    setEditingPrice(null);
-    setNotice(`تم تحديث سعر ${payload.kind} (${payload.weight}جم - ${curr}) ومزامنته مع الأندرويد`);
-    setTimeout(() => setNotice(null), 3500);
+    const res = await savePriceGuard.runGuarded({
+      guardKey: `prices_save_${docId}`,
+      operationType: 'UPDATE',
+      userId: userProfile?.username || 'WEB_USER',
+      documentReference: docId,
+      targetCollection: 'poster_prices',
+      payloadSummary: `تعديل سعر ${payload.kind} (${payload.weight}جم - ${curr})`,
+      execute: async () => {
+        await ErpDataService.saveRecord('poster_prices', docId, payload, userProfile?.username);
+        return { resultReference: docId };
+      }
+    });
+
+    if (res.ok) {
+      setEditingPrice(null);
+      setNotice(res.replayed ? res.message : `تم تحديث سعر ${payload.kind} (${payload.weight}جم - ${curr}) ومزامنته مع الأندرويد`);
+      setTimeout(() => setNotice(null), 3500);
+    } else {
+      setNotice(res.message);
+    }
   };
 
   const handleAddKind = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canEdit || !newItem.kind.trim()) return;
+    if (!canEdit || !newItem.kind.trim() || addPriceGuard.isSubmitting) return;
+    const cleanKind = newItem.kind.trim();
     const val = Number(newItem.amount) || 0;
     const canonicalId =
       selectedCurrency === 'EGP'
-        ? `${newItem.weight}_${newItem.kind.trim()}_EGP`
-        : `${newItem.weight}_${newItem.kind.trim()}`;
-    const docId = posterPriceDocId(newItem.weight, newItem.kind.trim(), selectedCurrency);
+        ? `${newItem.weight}_${cleanKind}_EGP`
+        : `${newItem.weight}_${cleanKind}`;
+    const docId = posterPriceDocId(newItem.weight, cleanKind, selectedCurrency);
 
     const payload: PosterPrice = {
       id: canonicalId,
       weight: newItem.weight,
-      kind: newItem.kind.trim(),
+      kind: cleanKind,
       price: selectedCurrency === 'SDG' ? val : 0,
       priceEgp: selectedCurrency === 'EGP' ? val : 0,
       currency: selectedCurrency
     };
 
-    await ErpDataService.saveRecord('poster_prices', docId, payload, userProfile?.username);
-    setIsAddOpen(false);
-    setNewItem({ weight: '900', kind: '', amount: '' });
+    const res = await addPriceGuard.runGuarded({
+      guardKey: `prices_add_${docId}`,
+      operationType: 'CREATE',
+      userId: userProfile?.username || 'WEB_USER',
+      documentReference: docId,
+      targetCollection: 'poster_prices',
+      payloadSummary: `إضافة سعر ${cleanKind} (${newItem.weight}جم - ${selectedCurrency})`,
+      execute: async () => {
+        await ErpDataService.saveRecord('poster_prices', docId, payload, userProfile?.username);
+        return { resultReference: docId };
+      }
+    });
+
+    if (res.ok) {
+      setIsAddOpen(false);
+      setNewItem({ weight: '900', kind: '', amount: '' });
+      setNotice(res.replayed ? res.message : `تمت إضافة سعر ${cleanKind} بنجاح`);
+    } else {
+      setNotice(res.message);
+    }
   };
 
   const handleExportCsv = () => {
@@ -335,10 +373,15 @@ export const PricesModuleView: React.FC = () => {
               />
             </div>
             <div className="flex justify-end gap-2">
-              <GlassButton variant="secondary" onClick={() => setEditingPrice(null)}>
+              <GlassButton type="button" variant="secondary" onClick={() => setEditingPrice(null)} disabled={savePriceGuard.isSubmitting}>
                 إلغاء
               </GlassButton>
-              <GlassButton type="submit" variant="primary">
+              <GlassButton
+                type="submit"
+                variant="primary"
+                isLoading={savePriceGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.UPDATE}
+              >
                 حفظ السعر بالسحابة
               </GlassButton>
             </div>
@@ -378,10 +421,15 @@ export const PricesModuleView: React.FC = () => {
             className="w-full px-3 py-2 rounded-lg bg-theme-surface border border-theme text-theme-primary font-mono"
           />
           <div className="flex justify-end gap-2">
-            <GlassButton variant="secondary" onClick={() => setIsAddOpen(false)}>
+            <GlassButton type="button" variant="secondary" onClick={() => setIsAddOpen(false)} disabled={addPriceGuard.isSubmitting}>
               إلغاء
             </GlassButton>
-            <GlassButton type="submit" variant="primary">
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={addPriceGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.CREATE}
+            >
               إضافة
             </GlassButton>
           </div>

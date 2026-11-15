@@ -43,6 +43,7 @@ fun PosterPriceScreen(
     val posterPrices by viewModel.posterPrices.collectAsState()
     val availablePaintColors by viewModel.availablePaintColors.collectAsState()
     val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
     val format = remember { NumberFormat.getNumberInstance(Locale.US) }
 
     var searchQuery by remember { mutableStateOf("") }
@@ -534,7 +535,13 @@ fun PosterPriceScreen(
                 }
             },
             confirmButton = {
-                Button(
+                val editGuard = "poster_price_${editingWeight}_${editingKind}_$editingCurrency"
+                val isSaving = activeGuardKeys.contains(editGuard)
+                GlassButton(
+                    text = "حفظ وتحديث السعر",
+                    gradient = PmpBrandRedGradient,
+                    isLoading = isSaving,
+                    loadingText = "جاري تحديث البيانات...",
                     onClick = {
                         val newPrice = editingPriceText.toLongOrNull() ?: 0L
                         if (newPrice > 0L) {
@@ -542,20 +549,22 @@ fun PosterPriceScreen(
                                 weight = editingWeight,
                                 kind = editingKind,
                                 price = newPrice,
-                                currency = editingCurrency
+                                currency = editingCurrency,
+                                guardKey = editGuard,
+                                onComplete = { ok -> if (ok) showEditPriceDialog = false }
                             )
-                            showEditPriceDialog = false
                         } else {
                             viewModel.postMessage("يرجى كتابة سعر صحيح أكبر من الصفر", isError = true)
                         }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = PmpBrandRed)
-                ) {
-                    Text("حفظ وتحديث السعر")
-                }
+                    }
+                )
             },
             dismissButton = {
-                TextButton(onClick = { showEditPriceDialog = false }) {
+                val editGuard = "poster_price_${editingWeight}_${editingKind}_$editingCurrency"
+                TextButton(
+                    enabled = !activeGuardKeys.contains(editGuard),
+                    onClick = { showEditPriceDialog = false }
+                ) {
                     Text("إلغاء")
                 }
             }
@@ -602,7 +611,15 @@ fun PosterPriceScreen(
                 }
             },
             confirmButton = {
-                Button(
+                val cleanNameTrim = newKindName.trim()
+                val g250 = "poster_price_250_${cleanNameTrim}_$selectedCurrency"
+                val g900 = "poster_price_900_${cleanNameTrim}_$selectedCurrency"
+                val isSaving = activeGuardKeys.contains(g250) || activeGuardKeys.contains(g900)
+                GlassButton(
+                    text = "إضافة وحفظ",
+                    gradient = GlassAccentGreenGradient,
+                    isLoading = isSaving,
+                    loadingText = "جاري إضافة العملية...",
                     onClick = {
                         val cleanName = newKindName.trim()
                         val p250 = newKindPrice250.toLongOrNull() ?: 0L
@@ -610,46 +627,64 @@ fun PosterPriceScreen(
 
                         if (cleanName.isBlank()) {
                             viewModel.postMessage("يرجى كتابة اسم الصنف أو اللون", isError = true)
-                            return@Button
+                            return@GlassButton
                         }
                         if (p250 <= 0L && p900 <= 0L) {
                             viewModel.postMessage("يرجى إدخال سعر واحد على الأقل للعبوة", isError = true)
-                            return@Button
+                            return@GlassButton
                         }
 
-                        if (p250 > 0L) {
-                            viewModel.updatePosterPrice(
-                                weight = "250",
-                                kind = cleanName,
-                                price = p250,
-                                currency = selectedCurrency
-                            )
-                        }
-                        if (p900 > 0L) {
-                            viewModel.updatePosterPrice(
-                                weight = "900",
-                                kind = cleanName,
-                                price = p900,
-                                currency = selectedCurrency
-                            )
-                        }
-
-                        // Add to custom colors
                         val currentList = viewModel.customColorsList.value
                         if (!currentList.contains(cleanName)) {
                             viewModel.customColorsList.value = currentList + cleanName
                         }
 
-                        viewModel.postMessage("تمت إضافة $cleanName إلى قائمة الأسعار بنجاح ومزامنته سحابياً")
-                        showAddNewKindDialog = false
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = PmpGreen)
-                ) {
-                    Text("إضافة وحفظ")
-                }
+                        if (p250 > 0L && p900 <= 0L) {
+                            viewModel.updatePosterPrice(
+                                weight = "250",
+                                kind = cleanName,
+                                price = p250,
+                                currency = selectedCurrency,
+                                guardKey = g250,
+                                onComplete = { ok -> if (ok) showAddNewKindDialog = false }
+                            )
+                        } else if (p900 > 0L && p250 <= 0L) {
+                            viewModel.updatePosterPrice(
+                                weight = "900",
+                                kind = cleanName,
+                                price = p900,
+                                currency = selectedCurrency,
+                                guardKey = g900,
+                                onComplete = { ok -> if (ok) showAddNewKindDialog = false }
+                            )
+                        } else {
+                            viewModel.updatePosterPrice(
+                                weight = "250",
+                                kind = cleanName,
+                                price = p250,
+                                currency = selectedCurrency,
+                                guardKey = g250
+                            )
+                            viewModel.updatePosterPrice(
+                                weight = "900",
+                                kind = cleanName,
+                                price = p900,
+                                currency = selectedCurrency,
+                                guardKey = g900,
+                                onComplete = { ok -> if (ok) showAddNewKindDialog = false }
+                            )
+                        }
+                    }
+                )
             },
             dismissButton = {
-                TextButton(onClick = { showAddNewKindDialog = false }) {
+                val cleanNameTrim = newKindName.trim()
+                val isSaving = activeGuardKeys.contains("poster_price_250_${cleanNameTrim}_$selectedCurrency") ||
+                    activeGuardKeys.contains("poster_price_900_${cleanNameTrim}_$selectedCurrency")
+                TextButton(
+                    enabled = !isSaving,
+                    onClick = { showAddNewKindDialog = false }
+                ) {
                     Text("إلغاء")
                 }
             }

@@ -51,7 +51,8 @@ service cloud.firestore {
         'inventory_movements', 'warehouse_stock_balances', 'warehouse_transfers', 'warehouse_transfer_items', 'packaging_rules', 'stock_batches',
         'accounting_accounts', 'journal_entries', 'journal_lines',
         'deleted_records', 'system_metadata', 'system_config', 'app_updates',
-        'permission_audit_logs', 'config'
+        'permission_audit_logs', 'config',
+        'idempotency_requests'
       ];
     }
 
@@ -193,6 +194,10 @@ service cloud.firestore {
       return col in ['deleted_users', 'deleted_records'];
     }
 
+    function isIdempotencyCollection(col) {
+      return col == 'idempotency_requests';
+    }
+
     function isValidErpDocWrite(col) {
       let d = request.resource.data;
       return isReasonablePayload() &&
@@ -256,6 +261,13 @@ service cloud.firestore {
         (col != 'journal_lines' || (
           (!('debit' in d) || (d.debit is number && d.debit >= 0)) &&
           (!('credit' in d) || (d.credit is number && d.credit >= 0))
+        )) &&
+        (col != 'idempotency_requests' || (
+          isNonEmptyString(d.idempotencyKey, 128) &&
+          isNonEmptyString(d.operationType, 80) &&
+          d.requestStatus in ['DRAFT', 'PROCESSING', 'PENDING_CONFIRMATION', 'COMPLETED', 'FAILED', 'CANCELLED'] &&
+          (!('resultReference' in d) || d.resultReference == null || isOptionalString(d.resultReference, 256)) &&
+          (!('errorDetails' in d) || d.errorDetails == null || isOptionalString(d.errorDetails, 1000))
         ));
     }
 
@@ -269,8 +281,8 @@ service cloud.firestore {
     match /erp_clusters/{clusterCode}/{collectionName}/{docId} {
       allow get, list: if isValidId(clusterCode) && isAllowedErpCollection(collectionName);
       allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && isValidId(docId) && isValidErpDocWrite(collectionName);
-      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && !isImmutableJournalLineCollection(collectionName) && isValidId(docId) && isValidErpDocWrite(collectionName) && (!isAppendOnlyMovementCollection(collectionName) || (request.resource.data.status == 'REVERSED' && resource.data.status == 'POSTED' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reversedByEntryNo', 'reversalReason', 'recordVersion', 'updatedAt', 'serverUpdatedAt', 'serverUpdatedBy'])));
-      allow delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && !isAppendOnlyMovementCollection(collectionName) && !isImmutableJournalLineCollection(collectionName) && (!isProtectedTombstoneCollection(collectionName) || isSignedIn() || clusterCode == 'PMP-ERP-V16-CLUSTER') && isValidId(docId);
+      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && !isImmutableJournalLineCollection(collectionName) && isValidId(docId) && isValidErpDocWrite(collectionName) && (!isAppendOnlyMovementCollection(collectionName) || (request.resource.data.status == 'REVERSED' && resource.data.status == 'POSTED' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reversedByEntryNo', 'reversalReason', 'recordVersion', 'updatedAt', 'serverUpdatedAt', 'serverUpdatedBy']))) && (!isIdempotencyCollection(collectionName) || (resource.data.requestStatus != 'COMPLETED' && request.resource.data.idempotencyKey == resource.data.idempotencyKey && request.resource.data.operationType == resource.data.operationType));
+      allow delete: if isValidId(clusterCode) && isAllowedErpCollection(collectionName) && !isImmutableAuditCollection(collectionName) && !isAppendOnlyMovementCollection(collectionName) && !isImmutableJournalLineCollection(collectionName) && !isIdempotencyCollection(collectionName) && (!isProtectedTombstoneCollection(collectionName) || isSignedIn() || clusterCode == 'PMP-ERP-V16-CLUSTER') && isValidId(docId);
     }
 
     match /erp_clusters/{clusterCode}/{collectionName}/{docId}/{subCollection}/{subDocId} {

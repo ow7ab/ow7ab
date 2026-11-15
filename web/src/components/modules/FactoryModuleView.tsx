@@ -31,6 +31,8 @@ import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 import { WebProductionOrderQcPanel } from './Phase3ErpPanels';
 
 type FactorySubTab = 'STORAGE' | 'BATCHES' | 'ORDERS' | 'HALFA_OUTBOUND' | 'LOG';
@@ -123,6 +125,11 @@ export const FactoryModuleView: React.FC = () => {
   const canCreate = canPerformAction(GRANULAR_ACTIONS.CREATE) || canPerformAction(GRANULAR_ACTIONS.INVENTORY_OPS);
   const canDelete = canPerformAction(GRANULAR_ACTIONS.DELETE);
 
+  const batchGuard = useTransactionGuard('factory_create_batch', 'CREATE');
+  const moveGuard = useTransactionGuard('factory_save_move', 'GOODS_ISSUE');
+  const halfaGuard = useTransactionGuard('factory_halfa_outbound', 'GOODS_ISSUE');
+  const deleteGuard = useTransactionGuard('factory_delete_batch', 'DELETE');
+
   const showNotice = (type: 'ok' | 'err', text: string) => {
     setNotice({ type, text });
     setTimeout(() => setNotice(null), 4000);
@@ -130,139 +137,202 @@ export const FactoryModuleView: React.FC = () => {
 
   const handleCreateBatch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate) return;
-    const now = Date.now();
+    if (!canCreate || batchGuard.isSubmitting) return;
     const formula = formulations.find((f) => Number(f.id) === Number(batchForm.formulaId));
-    const batchNumber = `B-${new Date().getFullYear()}-${String(now).slice(-4)}`;
     const weight = Number(batchForm.targetWeightKg) || 1000;
     const cartons = Number(batchForm.cartonsCount) || 0;
+    const actor = userProfile?.fullName || userProfile?.username || 'مهندس الإنتاج';
 
-    const record: ProductionBatch = {
-      id: now,
-      batchNumber,
-      productionDate: new Date().toISOString().split('T')[0],
-      formulaId: formula ? Number(formula.id) : null,
-      formulaNo: formula?.formulaNo || 'CUSTOM',
-      productName: batchForm.productName.trim() || formula?.productName || 'منتج دهان',
-      paintType: formula?.paintType || 'مطاطي',
-      baseKind: batchForm.baseKind,
-      targetPvc: formula?.targetPvc || 40,
-      targetWeightKg: weight,
-      actualWeightKg: weight,
-      targetVolumeLiters: Math.round(weight / (formula?.calculatedDensity || 1.35)),
-      cartonsCount: cartons,
-      packageUnit: batchForm.packageUnit,
-      machineId: null,
-      machineName: batchForm.machineName || machines[0]?.name || 'خلاط رئيسي 1',
-      qualityStatus: batchForm.qualityStatus,
-      measuredDensity: formula?.calculatedDensity || 1.35,
-      measuredViscosity: '110 KU',
-      scaledIngredientsJson: formula?.ingredientsJson || '[]',
-      supervisorOrEngineer: userProfile?.fullName || userProfile?.username || 'مهندس الإنتاج',
-      shift: batchForm.shift,
-      notes: '',
-      syncStatus: 'SYNCED',
-      createdAt: now
-    };
+    const res = await batchGuard.runGuarded({
+      guardKey: `factory_create_batch_${batchForm.productName || 'default'}_${weight}_${cartons}`,
+      operationType: 'CREATE',
+      userId: userProfile?.username || actor,
+      documentReference: `BATCH-${batchForm.productName || 'CUSTOM'}-${cartons}`,
+      targetCollection: 'paint_batches',
+      payloadSummary: `تشغيلة إنتاج ${batchForm.productName || formula?.productName || ''} (${cartons} كرتونة)`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const batchNumber = `B-${new Date().getFullYear()}-${String(now).slice(-4)}`;
+        const record: ProductionBatch = {
+          id: now,
+          batchNumber,
+          productionDate: new Date().toISOString().split('T')[0],
+          formulaId: formula ? Number(formula.id) : null,
+          formulaNo: formula?.formulaNo || 'CUSTOM',
+          productName: batchForm.productName.trim() || formula?.productName || 'منتج دهان',
+          paintType: formula?.paintType || 'مطاطي',
+          baseKind: batchForm.baseKind,
+          targetPvc: formula?.targetPvc || 40,
+          targetWeightKg: weight,
+          actualWeightKg: weight,
+          targetVolumeLiters: Math.round(weight / (formula?.calculatedDensity || 1.35)),
+          cartonsCount: cartons,
+          packageUnit: batchForm.packageUnit,
+          machineId: null,
+          machineName: batchForm.machineName || machines[0]?.name || 'خلاط رئيسي 1',
+          qualityStatus: batchForm.qualityStatus,
+          measuredDensity: formula?.calculatedDensity || 1.35,
+          measuredViscosity: '110 KU',
+          scaledIngredientsJson: formula?.ingredientsJson || '[]',
+          supervisorOrEngineer: actor,
+          shift: batchForm.shift,
+          notes: '',
+          syncStatus: 'SYNCED',
+          createdAt: now
+        };
+        const docId = safeId(batchNumber, `BATCH-${idempotencyKey}`);
+        await ErpDataService.saveRecord('paint_batches', docId, record, userProfile?.username);
+        return { resultReference: docId, result: batchNumber };
+      }
+    });
 
-    try {
-      await ErpDataService.saveRecord(
-        'paint_batches',
-        safeId(batchNumber, `BATCH-${now}`),
-        record,
-        userProfile?.username
-      );
+    if (res.ok) {
       setIsNewBatchOpen(false);
-      showNotice('ok', `تم إصدار تشغيلة الإنتاج ${batchNumber} ومزامنتها`);
-    } catch (err: any) {
-      showNotice('err', err?.message || 'فشل حفظ تشغيلة الإنتاج');
+      showNotice('ok', res.replayed ? res.message : `تم إصدار تشغيلة الإنتاج ${res.data || ''} ومزامنتها`);
+    } else {
+      showNotice('err', res.message);
     }
   };
 
   const handleSaveFactoryMove = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate) return;
+    if (!canCreate || moveGuard.isSubmitting) return;
     const item = factoryItems.find((i) => Number(i.id) === Number(moveForm.itemId));
     const q = Number(moveForm.qty);
     if (!item || !Number.isFinite(q) || q <= 0) return;
 
-    const id = Date.now();
-    const record: FactoryMove = {
-      id,
-      moveDate: new Date().toISOString().split('T')[0],
-      kind: moveForm.kind,
-      itemId: Number(item.id),
-      itemName: item.name,
-      qty: q,
-      batch: moveForm.batch.trim() || `FM-${String(id).slice(-4)}`,
-      note: moveForm.note.trim(),
-      actor: userProfile?.fullName || userProfile?.username || 'WEB_FACTORY',
-      counterparty: 'صالة الإنتاج',
-      linked: Boolean(item.linkedToEgypt),
-      createdAt: id
-    };
+    const opType =
+      moveForm.kind === 'توريد خامات'
+        ? 'RAW_MATERIAL_SUPPLY'
+        : moveForm.kind === 'صرف خامات'
+        ? 'GOODS_ISSUE'
+        : 'CREATE';
 
-    await ErpDataService.saveRecord('factory_moves', `FM-${id}`, record, userProfile?.username);
-    setMoveForm((f) => ({ ...f, qty: '', batch: '', note: '' }));
-    showNotice('ok', 'تم تسجيل حركة المصنع');
+    const res = await moveGuard.runGuarded({
+      guardKey: `factory_save_move_${item.id}_${moveForm.kind}_${q}`,
+      operationType: opType,
+      userId: userProfile?.username || 'WEB_FACTORY',
+      documentReference: `FM-${item.id}-${q}`,
+      targetCollection: 'factory_moves',
+      payloadSummary: `${moveForm.kind}: ${q} ${item.unit} (${item.name})`,
+      execute: async ({ idempotencyKey }) => {
+        const id = Date.now();
+        const docId = `FM-${idempotencyKey}`;
+        const record: FactoryMove = {
+          id,
+          moveDate: new Date().toISOString().split('T')[0],
+          kind: moveForm.kind,
+          itemId: Number(item.id),
+          itemName: item.name,
+          qty: q,
+          batch: moveForm.batch.trim() || `FM-${String(id).slice(-4)}`,
+          note: moveForm.note.trim(),
+          actor: userProfile?.fullName || userProfile?.username || 'WEB_FACTORY',
+          counterparty: 'صالة الإنتاج',
+          linked: Boolean(item.linkedToEgypt),
+          createdAt: id
+        };
+        await ErpDataService.saveRecord('factory_moves', docId, record, userProfile?.username);
+        return { resultReference: docId };
+      }
+    });
+
+    if (res.ok) {
+      setMoveForm((f) => ({ ...f, qty: '', batch: '', note: '' }));
+      showNotice('ok', res.replayed ? res.message : 'تم تسجيل حركة المصنع');
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const handleCreateHalfaOutbound = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate) return;
+    if (!canCreate || halfaGuard.isSubmitting) return;
     const prod = products.find((p) => Number(p.id) === Number(halfaForm.productId));
     const q = Number(halfaForm.quantity);
     const price = Number(halfaForm.unitPrice) || Number(prod?.salePrice || 0);
     if (!prod || q <= 0) return;
 
-    const now = Date.now();
-    const invNo = `HINV-${String(now).slice(-5)}`;
-    const total = q * price;
-    const actor = userProfile?.fullName || userProfile?.username || 'WEB_FACTORY';
-    const wh = warehouses.find((w) => Number(w.id) === Number(halfaForm.warehouseId));
+    const res = await halfaGuard.runGuarded({
+      guardKey: `factory_halfa_outbound_${prod.id}_${q}`,
+      operationType: 'GOODS_ISSUE',
+      userId: userProfile?.username || 'WEB_FACTORY',
+      documentReference: `HINV-${prod.id}-${q}`,
+      targetCollection: 'halfa_invoices',
+      payloadSummary: `بوليصة خروج ${prod.name} (${q})`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const invNo = `HINV-${String(now).slice(-5)}`;
+        const total = q * price;
+        const actor = userProfile?.fullName || userProfile?.username || 'WEB_FACTORY';
+        const wh = warehouses.find((w) => Number(w.id) === Number(halfaForm.warehouseId));
 
-    const record: HalfaInvoice = {
-      id: now,
-      invoiceNo: invNo,
-      invoiceDate: new Date().toISOString().split('T')[0],
-      cashbox: halfaForm.cashbox || cashboxes[0]?.name || 'خزنة حلفا',
-      currency: wh?.currency || 'SDG',
-      warehouseId: Number(halfaForm.warehouseId) || 1,
-      productId: Number(prod.id),
-      productName: prod.name,
-      quantity: q,
-      unitPrice: price,
-      total,
-      note: halfaForm.note.trim() || 'ترحيل / خروج منتج تام عبر بوابة المصنع وحلفا',
-      status: 'active',
-      createdBy: actor,
-      createdAt: now
-    };
+        const record: HalfaInvoice = {
+          id: now,
+          invoiceNo: invNo,
+          invoiceDate: new Date().toISOString().split('T')[0],
+          cashbox: halfaForm.cashbox || cashboxes[0]?.name || 'خزنة حلفا',
+          currency: wh?.currency || 'SDG',
+          warehouseId: Number(halfaForm.warehouseId) || 1,
+          productId: Number(prod.id),
+          productName: prod.name,
+          quantity: q,
+          unitPrice: price,
+          total,
+          note: halfaForm.note.trim() || 'ترحيل / خروج منتج تام عبر بوابة المصنع وحلفا',
+          status: 'active',
+          createdBy: actor,
+          createdAt: now
+        };
 
-    const sm: StockMove = {
-      id: now + 1,
-      warehouseId: record.warehouseId,
-      productId: record.productId,
-      quantity: q,
-      kind: 'IN',
-      note: `توريد مخزن حلفا/المبيعات (${invNo})`,
-      createdBy: actor,
-      createdAt: now
-    };
+        const sm: StockMove = {
+          id: now + 1,
+          warehouseId: record.warehouseId,
+          productId: record.productId,
+          quantity: q,
+          kind: 'IN',
+          note: `توريد مخزن حلفا/المبيعات (${invNo})`,
+          createdBy: actor,
+          createdAt: now
+        };
 
-    await Promise.all([
-      ErpDataService.saveRecord('halfa_invoices', safeId(invNo, `HINV-${now}`), record, userProfile?.username),
-      ErpDataService.saveRecord('stock_moves', `SM-${sm.id}`, sm, userProfile?.username)
-    ]);
-    setHalfaForm((f) => ({ ...f, quantity: '', note: '' }));
-    showNotice('ok', `تم إصدار بوليصة الخروج ${invNo} وتحديث مخزن المنتج التام`);
+        const docId = safeId(invNo, `HINV-${idempotencyKey}`);
+        await Promise.all([
+          ErpDataService.saveRecord('halfa_invoices', docId, record, userProfile?.username),
+          ErpDataService.saveRecord('stock_moves', `SM-${idempotencyKey}`, sm, userProfile?.username)
+        ]);
+        return { resultReference: docId, result: invNo };
+      }
+    });
+
+    if (res.ok) {
+      setHalfaForm((f) => ({ ...f, quantity: '', note: '' }));
+      showNotice('ok', res.replayed ? res.message : `تم إصدار بوليصة الخروج ${res.data || ''} وتحديث مخزن المنتج التام`);
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const handleDeleteBatch = async (b: ProductionBatch) => {
-    if (!canDelete) return;
+    if (!canDelete || deleteGuard.isSubmitting) return;
     const docId = (b as any)._docId || safeId(b.batchNumber, `BATCH-${b.id}`);
-    await ErpDataService.deleteRecord('paint_batches', docId, b.id, userProfile?.username);
-    showNotice('ok', `تم حذف التشغيلة ${b.batchNumber}`);
+    const res = await deleteGuard.runGuarded({
+      guardKey: `factory_delete_batch_${docId}`,
+      operationType: 'DELETE',
+      userId: userProfile?.username || 'WEB_FACTORY',
+      documentReference: docId,
+      targetCollection: 'paint_batches',
+      payloadSummary: `حذف التشغيلة ${b.batchNumber}`,
+      execute: async () => {
+        await ErpDataService.deleteRecord('paint_batches', docId, b.id, userProfile?.username);
+        return { resultReference: docId };
+      }
+    });
+    if (res.ok) {
+      showNotice('ok', `تم حذف التشغيلة ${b.batchNumber}`);
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const filteredBatches = useMemo(() => {
@@ -570,8 +640,22 @@ export const FactoryModuleView: React.FC = () => {
                 className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
               />
             </div>
-            <div className="sm:col-span-2 flex justify-end">
-              <GlassButton type="submit" variant="primary" disabled={!canCreate}>
+            <div className="sm:col-span-2 flex flex-col items-end gap-2">
+              {moveGuard.pendingRecord && (
+                <div className="w-full p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2 text-[11px]">
+                  <span>{moveGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+                  <GlassButton size="sm" variant="secondary" onClick={() => moveGuard.verifyPending()}>
+                    التحقق من حالة العملية
+                  </GlassButton>
+                </div>
+              )}
+              <GlassButton
+                type="submit"
+                variant="primary"
+                disabled={!canCreate}
+                isLoading={moveGuard.isSubmitting}
+                loadingText={moveGuard.loadingText}
+              >
                 تسجيل حركة المصنع
               </GlassButton>
             </div>
@@ -634,7 +718,22 @@ export const FactoryModuleView: React.FC = () => {
                 onChange={(e) => setHalfaForm({ ...halfaForm, note: e.target.value })}
                 className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
               />
-              <GlassButton type="submit" variant="primary" className="w-full justify-center" disabled={!canCreate}>
+              {halfaGuard.pendingRecord && (
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2 text-[11px]">
+                  <span>{halfaGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+                  <GlassButton size="sm" variant="secondary" onClick={() => halfaGuard.verifyPending()}>
+                    التحقق من حالة العملية
+                  </GlassButton>
+                </div>
+              )}
+              <GlassButton
+                type="submit"
+                variant="primary"
+                className="w-full justify-center"
+                disabled={!canCreate}
+                isLoading={halfaGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.GOODS_ISSUE}
+              >
                 إصدار بوليصة خروج وتوريد للمخزن
               </GlassButton>
             </form>
@@ -791,11 +890,24 @@ export const FactoryModuleView: React.FC = () => {
               </select>
             </div>
           </div>
+          {batchGuard.pendingRecord && (
+            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2 text-[11px]">
+              <span>{batchGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+              <GlassButton size="sm" variant="secondary" onClick={() => batchGuard.verifyPending()}>
+                التحقق من حالة العملية
+              </GlassButton>
+            </div>
+          )}
           <div className="flex justify-end gap-2 pt-2">
-            <GlassButton variant="secondary" onClick={() => setIsNewBatchOpen(false)}>
+            <GlassButton type="button" variant="secondary" onClick={() => setIsNewBatchOpen(false)} disabled={batchGuard.isSubmitting}>
               إلغاء
             </GlassButton>
-            <GlassButton type="submit" variant="primary">
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={batchGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.CREATE}
+            >
               اعتماد وبدء التشغيلة
             </GlassButton>
           </div>

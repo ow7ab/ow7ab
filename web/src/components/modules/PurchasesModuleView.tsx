@@ -10,10 +10,13 @@ import {
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
+import { GlassButton } from '../ui/GlassButton';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
 import { ErpDataService } from '../../services/ErpDataService';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 import { Cashbox, CurrencyCode, FactoryItem, FactoryMove, TreasuryMovement } from '../../types/erp';
 import { WebProcurementGrnPanel } from './Phase3ErpPanels';
 
@@ -69,8 +72,13 @@ export const PurchasesModuleView: React.FC = () => {
   const canCreate = canPerformAction(GRANULAR_ACTIONS.CREATE) || canPerformAction(GRANULAR_ACTIONS.INVENTORY_OPS);
   const canDelete = canPerformAction(GRANULAR_ACTIONS.DELETE);
 
+  const supplyGuard = useTransactionGuard('purchases_raw_supply', 'RAW_MATERIAL_SUPPLY');
+  const itemGuard = useTransactionGuard('purchases_create_item', 'CREATE');
+  const deleteGuard = useTransactionGuard('purchases_delete_move', 'DELETE');
+
   const handleSavePurchase = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (supplyGuard.isSubmitting) return;
     if (!canCreate) {
       showNotice('err', 'لا تملك صلاحية تسجيل المشتريات وتوريد الخامات');
       return;
@@ -83,88 +91,130 @@ export const PurchasesModuleView: React.FC = () => {
       return;
     }
 
-    const moveId = Date.now();
     const actor = userProfile?.fullName || userProfile?.username || 'WEB_USER';
-    const newMove: FactoryMove = {
-      id: moveId,
-      moveDate: new Date().toISOString().split('T')[0],
-      kind: 'توريد خامات',
-      itemId: Number(item.id),
-      itemName: item.name,
-      qty: numQty,
-      batch: `PO-${String(moveId).slice(-5)}`,
-      note: `${note.trim() || 'شراء وتوريد خامات'}${numAmount > 0 ? ` • التكلفة: ${numAmount} ${currency}` : ''}`,
-      actor,
-      counterparty: supplier.trim() || 'مورد خامات',
-      linked: Boolean(item.linkedToEgypt),
-      createdAt: moveId
-    };
-
-    try {
-      await ErpDataService.saveRecord('factory_moves', `FM-${moveId}`, newMove, userProfile?.username);
-
-      if (paidCashbox && numAmount > 0) {
-        const boxObj = cashboxes.find((c) => c.name === paidCashbox);
-        const movId = moveId + 1;
-        const cashMov: TreasuryMovement = {
-          id: movId,
-          txDate: newMove.moveDate,
-          cashbox: paidCashbox,
-          currency: boxObj?.currency || currency,
-          direction: 'منصرف',
-          amount: numAmount,
-          description: `شراء ${item.name} (${numQty} ${item.unit}) — ${newMove.counterparty}`,
-          reference: newMove.batch,
-          createdBy: actor,
-          createdAt: movId
+    const docRef = `FM-${Date.now()}`;
+    const res = await supplyGuard.runGuarded({
+      guardKey: `purchases_raw_supply_${item.id}`,
+      operationType: 'RAW_MATERIAL_SUPPLY',
+      userId: userProfile?.username || actor,
+      documentReference: docRef,
+      targetCollection: 'factory_moves',
+      payloadSummary: `توريد ${numQty} ${item.unit} من ${item.name}`,
+      execute: async ({ idempotencyKey }) => {
+        const moveId = Date.now();
+        const safeDocId = `FM-${idempotencyKey}`;
+        const newMove: FactoryMove = {
+          id: moveId,
+          moveDate: new Date().toISOString().split('T')[0],
+          kind: 'توريد خامات',
+          itemId: Number(item.id),
+          itemName: item.name,
+          qty: numQty,
+          batch: `PO-${String(moveId).slice(-5)}`,
+          note: `${note.trim() || 'شراء وتوريد خامات'}${numAmount > 0 ? ` • التكلفة: ${numAmount} ${currency}` : ''}`,
+          actor,
+          counterparty: supplier.trim() || 'مورد خامات',
+          linked: Boolean(item.linkedToEgypt),
+          createdAt: moveId
         };
-        await ErpDataService.saveRecord('movements', `MOV-${movId}`, cashMov, userProfile?.username);
-      }
 
-      await ErpDataService.logAudit(
-        userProfile?.username || 'WEB',
-        'PURCHASE_SUPPLY',
-        `توريد ${numQty} ${item.unit} من ${item.name} — ${newMove.counterparty}`
-      );
+        await ErpDataService.saveRecord('factory_moves', safeDocId, newMove, userProfile?.username);
+
+        if (paidCashbox && numAmount > 0) {
+          const boxObj = cashboxes.find((c) => c.name === paidCashbox);
+          const movId = moveId + 1;
+          const cashMov: TreasuryMovement = {
+            id: movId,
+            txDate: newMove.moveDate,
+            cashbox: paidCashbox,
+            currency: boxObj?.currency || currency,
+            direction: 'منصرف',
+            amount: numAmount,
+            description: `شراء ${item.name} (${numQty} ${item.unit}) — ${newMove.counterparty}`,
+            reference: newMove.batch,
+            createdBy: actor,
+            createdAt: movId
+          };
+          await ErpDataService.saveRecord('movements', `MOV-${idempotencyKey}`, cashMov, userProfile?.username);
+        }
+
+        await ErpDataService.logAudit(
+          userProfile?.username || 'WEB',
+          'PURCHASE_SUPPLY',
+          `توريد ${numQty} ${item.unit} من ${item.name} — ${newMove.counterparty}`
+        );
+        return { resultReference: safeDocId };
+      }
+    });
+
+    if (res.ok) {
       setQty('');
       setPurchaseAmount('');
       setNote('');
-      showNotice('ok', 'تم تسجيل توريد المشتريات ومزامنته مع المخزن والخزينة بنجاح');
-    } catch (err: any) {
-      showNotice('err', err?.message || 'تعذر حفظ إذن التوريد');
+      showNotice('ok', res.replayed ? res.message : 'تم تسجيل توريد المشتريات ومزامنته مع المخزن والخزينة بنجاح');
+    } else {
+      showNotice('err', res.message);
     }
   };
 
   const handleCreateItem = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate || !newItemName.trim()) return;
+    if (itemGuard.isSubmitting || !canCreate || !newItemName.trim()) return;
 
-    const itemId = Date.now();
-    const newItem: FactoryItem = {
-      id: itemId,
-      name: newItemName.trim(),
-      unit: newItemUnit.trim() || 'كجم',
-      category: newItemCategory,
-      linkedToEgypt: newItemLinkedEgypt,
-      defaultCurrency: currency,
-      unitCostEgp: Number(newItemCost) || 0,
-      reorderLevel: 10
-    };
+    const cleanName = newItemName.trim();
+    const res = await itemGuard.runGuarded({
+      guardKey: `purchases_create_item_${cleanName}`,
+      operationType: 'CREATE',
+      userId: userProfile?.username || 'WEB_USER',
+      documentReference: cleanName,
+      targetCollection: 'factory_items',
+      payloadSummary: `إضافة صنف خام: ${cleanName}`,
+      execute: async () => {
+        const itemId = Date.now();
+        const newItem: FactoryItem = {
+          id: itemId,
+          name: cleanName,
+          unit: newItemUnit.trim() || 'كجم',
+          category: newItemCategory,
+          linkedToEgypt: newItemLinkedEgypt,
+          defaultCurrency: currency,
+          unitCostEgp: Number(newItemCost) || 0,
+          reorderLevel: 10
+        };
+        const docId = `FI-${itemId}`;
+        await ErpDataService.saveRecord('factory_items', docId, newItem, userProfile?.username);
+        return { resultReference: docId };
+      }
+    });
 
-    try {
-      await ErpDataService.saveRecord('factory_items', `FI-${itemId}`, newItem, userProfile?.username);
+    if (res.ok) {
       setNewItemName('');
-      showNotice('ok', `تمت إضافة الصنف "${newItem.name}" إلى دليل خامات المصنع`);
-    } catch (err: any) {
-      showNotice('err', err?.message || 'تعذر حفظ الصنف');
+      showNotice('ok', `تمت إضافة الصنف "${cleanName}" إلى دليل خامات المصنع`);
+    } else {
+      showNotice('err', res.message);
     }
   };
 
   const handleDeleteMove = async (move: FactoryMove) => {
-    if (!canDelete) return;
+    if (!canDelete || deleteGuard.isSubmitting) return;
     const docId = (move as any)._docId || `FM-${move.id}`;
-    await ErpDataService.deleteRecord('factory_moves', docId, move.id, userProfile?.username);
-    showNotice('ok', 'تم حذف حركة التوريد');
+    const res = await deleteGuard.runGuarded({
+      guardKey: `purchases_delete_${docId}`,
+      operationType: 'DELETE',
+      userId: userProfile?.username || 'WEB_USER',
+      documentReference: docId,
+      targetCollection: 'factory_moves',
+      payloadSummary: `حذف حركة توريد ${move.itemName}`,
+      execute: async () => {
+        await ErpDataService.deleteRecord('factory_moves', docId, move.id, userProfile?.username);
+        return { resultReference: docId };
+      }
+    });
+    if (res.ok) {
+      showNotice('ok', 'تم حذف حركة التوريد');
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const purchaseMoves = useMemo(
@@ -344,14 +394,26 @@ export const PurchasesModuleView: React.FC = () => {
                   </div>
                 </div>
 
-                <button
+                {supplyGuard.pendingRecord && (
+                  <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2">
+                    <span>{supplyGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+                    <GlassButton size="sm" variant="secondary" onClick={() => supplyGuard.verifyPending()}>
+                      التحقق من حالة العملية
+                    </GlassButton>
+                  </div>
+                )}
+
+                <GlassButton
                   type="submit"
+                  variant="primary"
                   disabled={!canCreate}
-                  className="w-full py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  isLoading={supplyGuard.isSubmitting}
+                  loadingText={OPERATION_LOADING_LABELS.RAW_MATERIAL_SUPPLY}
+                  icon={<CheckCircle className="w-4 h-4" />}
+                  className="w-full justify-center"
                 >
-                  <CheckCircle className="w-4 h-4" />
-                  <span>حفظ إذن التوريد وتحديث الأرصدة السحابية</span>
-                </button>
+                  حفظ إذن التوريد وتحديث الأرصدة السحابية
+                </GlassButton>
               </form>
             </GlassCard>
           </div>
@@ -456,13 +518,16 @@ export const PurchasesModuleView: React.FC = () => {
                 />
                 <span>توريد ومرتبط بمصنع مصر</span>
               </label>
-              <button
+              <GlassButton
                 type="submit"
+                variant="primary"
                 disabled={!canCreate}
-                className="w-full py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md disabled:opacity-50"
+                isLoading={itemGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.CREATE}
+                className="w-full justify-center"
               >
                 حفظ الصنف في السحابة
-              </button>
+              </GlassButton>
             </form>
           </GlassCard>
 

@@ -42,6 +42,8 @@ import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { useLanguage } from '../context/LanguageContext';
 import { ErpDataService } from '../services/ErpDataService';
+import { IdempotencyProtectionSystem } from '../services/IdempotencyService';
+import { ReportTab } from '../components/reports/ReportsCenterView';
 import {
   canConfigureEmployeePermissions,
   isSystemManager
@@ -94,6 +96,30 @@ export const PortalPage: React.FC<PortalPageProps> = ({
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [reportsInitialTab, setReportsInitialTab] = useState<ReportTab | undefined>(undefined);
+  const [pendingOpsCount, setPendingOpsCount] = useState<number>(() =>
+    IdempotencyProtectionSystem.getUnresolvedRecords().length
+  );
+
+  useEffect(() => {
+    const syncCount = () => {
+      setPendingOpsCount(IdempotencyProtectionSystem.getUnresolvedRecords().length);
+    };
+    const unsub = IdempotencyProtectionSystem.subscribe(syncCount);
+    void IdempotencyProtectionSystem.recoverPendingOperations().then(syncCount);
+    const onOnline = () => {
+      void IdempotencyProtectionSystem.recoverPendingOperations().then(syncCount);
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', onOnline);
+    }
+    return () => {
+      unsub();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', onOnline);
+      }
+    };
+  }, [userProfile?.userCode]);
 
   useEffect(() => {
     if (portalRoute === '/admin') {
@@ -356,6 +382,20 @@ export const PortalPage: React.FC<PortalPageProps> = ({
 
           {/* Right Toolbar */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {pendingOpsCount > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setReportsInitialTab('متابعة العمليات');
+                  setActiveTab('REPORTS');
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 text-xs min-h-[38px] font-bold"
+                title="توجد عمليات بانتظار تأكيد الخادم - لا تعِد إدخالها"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>{pendingOpsCount} معلقة</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setIsSearchOpen(true)}
@@ -598,7 +638,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
           {activeTab === 'CHEMISTRY_LAB' && <ChemistryLabModuleView />}
           {activeTab === 'USERS' && canAccessAdminArea && <EmployeeManagementCenter />}
           {activeTab === 'POSTER' && <PricesModuleView />}
-          {activeTab === 'REPORTS' && <ReportsCenterView />}
+          {activeTab === 'REPORTS' && <ReportsCenterView initialTab={reportsInitialTab} />}
           {activeTab === 'SETTINGS' && <SettingsModuleView />}
         </main>
       </div>

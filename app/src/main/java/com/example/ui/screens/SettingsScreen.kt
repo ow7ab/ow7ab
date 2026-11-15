@@ -375,10 +375,11 @@ fun SettingsScreen(
                     }
 
                     GlassButton(
-                        text = if (isProfileSaving) "جاري حفظ التعديلات..." else "تأكيد",
+                        text = "تأكيد",
                         icon = Icons.Default.Save,
                         gradient = PmpBrandRedGradient,
-                        enabled = !isProfileSaving,
+                        isLoading = isProfileSaving,
+                        loadingText = "جاري تحديث البيانات...",
                         onClick = {
                             if (profileFullName.trim().isBlank()) {
                                 viewModel.postMessage("الاسم لا يمكن أن يكون فارغاً", isError = true)
@@ -398,11 +399,15 @@ fun SettingsScreen(
                             viewModel.updateUserProfile(
                                 fullName = profileFullName,
                                 phoneOrEmail = profileEmail,
-                                newPassword = profileNewPassword.ifBlank { null }
+                                newPassword = profileNewPassword.ifBlank { null },
+                                onComplete = { ok ->
+                                    isProfileSaving = false
+                                    if (ok) {
+                                        profileNewPassword = ""
+                                        profileConfirmPassword = ""
+                                    }
+                                }
                             )
-                            isProfileSaving = false
-                            profileNewPassword = ""
-                            profileConfirmPassword = ""
                         },
                         modifier = Modifier.fillMaxWidth()
                     )

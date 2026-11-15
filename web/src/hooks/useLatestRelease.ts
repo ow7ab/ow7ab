@@ -1,9 +1,11 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
+  DEFAULT_DESKTOP_RELEASE,
   DEFAULT_STABLE_RELEASE,
   fetchReleaseFeed,
   ReleaseFeedResult,
-  StableApkRelease
+  StableApkRelease,
+  StableDesktopRelease
 } from '../services/ReleaseService';
 
 let cachedFeed: ReleaseFeedResult | null = null;
@@ -11,6 +13,7 @@ let inflightPromise: Promise<ReleaseFeedResult> | null = null;
 
 export interface UseLatestReleaseState {
   latestRelease: StableApkRelease | null;
+  latestDesktopRelease: StableDesktopRelease;
   releasesHistory: StableApkRelease[];
   sourceLabel: string;
   apkAvailable: boolean;
@@ -21,6 +24,7 @@ export interface UseLatestReleaseState {
 
 const INITIAL_FEED: ReleaseFeedResult = {
   latest: DEFAULT_STABLE_RELEASE,
+  latestDesktop: DEFAULT_DESKTOP_RELEASE,
   history: [DEFAULT_STABLE_RELEASE],
   sourceLabel: DEFAULT_STABLE_RELEASE.sourceLabel,
   apkAvailable: true,
@@ -66,6 +70,7 @@ export function useLatestRelease(): UseLatestReleaseState {
 
   return {
     latestRelease: feed.latest || DEFAULT_STABLE_RELEASE,
+    latestDesktopRelease: feed.latestDesktop || DEFAULT_DESKTOP_RELEASE,
     releasesHistory: feed.history.length > 0 ? feed.history : [DEFAULT_STABLE_RELEASE],
     sourceLabel: feed.sourceLabel,
     apkAvailable: true,

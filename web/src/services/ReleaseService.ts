@@ -19,8 +19,22 @@ export interface StableApkRelease {
   sourceLabel: string;
 }
 
+export interface StableDesktopRelease {
+  versionName: string;
+  tagName: string;
+  publishedAt: string;
+  setupUrl: string;
+  setupFileName: string;
+  setupSizeMb: number;
+  portableUrl: string;
+  portableFileName: string;
+  portableSizeMb: number;
+  releasesPageUrl: string;
+}
+
 export interface ReleaseFeedResult {
   latest: StableApkRelease | null;
+  latestDesktop: StableDesktopRelease;
   history: StableApkRelease[];
   sourceLabel: string;
   apkAvailable: boolean;
@@ -83,19 +97,32 @@ export function sanitizeApkDownloadUrl(rawUrl?: string | null): string {
 /**
  * Cleans markdown and technical jargon from release notes for end-user display.
  */
-export function cleanUserFacingReleaseNotes(rawNotes?: string | null, versionName = 'v18.0'): string {
+export function cleanUserFacingReleaseNotes(rawNotes?: string | null, versionName = 'v20.0'): string {
   const raw = String(rawNotes ?? '').trim();
   if (!raw || raw.includes('### ') || raw.includes('SHA-256') || raw.includes('Firestore') || raw.includes('R8/ProGuard')) {
-    return `• إصدار ${versionName} الرسمي المعتمد: تحسين سرعة واستقرار التطبيق وتوحيد شاشات الخزن والمخازن والمبيعات والمصنع عبر جميع الفروع.\n• ترقية سلسة ومباشرة على الهاتف مع الحفاظ الكامل على كافة البيانات والحسابات المسجلة.`;
+    return `• إصدار ${versionName} الرسمي المعتمد: نظام موحد لمنع تكرار العمليات وحماية التزامن وإدارة حالة التنفيذ عبر كافة الفروع.\n• ترقية سلسة ومباشرة على الهاتف مع الحفاظ الكامل على كافة البيانات والحسابات المسجلة.`;
   }
   return raw;
 }
+
+export const DEFAULT_DESKTOP_RELEASE: StableDesktopRelease = {
+  versionName: `v${APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME}`,
+  tagName: `desktop-v${APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME}`,
+  publishedAt: '2026-11-15T12:00:00Z',
+  setupUrl: APP_VERSION_CONTRACT.GITHUB_LATEST_WINDOWS_URL,
+  setupFileName: APP_VERSION_CONTRACT.WINDOWS_INSTALLER_FILENAME,
+  setupSizeMb: 0,
+  portableUrl: APP_VERSION_CONTRACT.GITHUB_LATEST_WINDOWS_PORTABLE_URL,
+  portableFileName: APP_VERSION_CONTRACT.WINDOWS_PORTABLE_FILENAME,
+  portableSizeMb: 0,
+  releasesPageUrl: APP_VERSION_CONTRACT.GITHUB_WINDOWS_RELEASES_URL
+};
 
 export const DEFAULT_STABLE_RELEASE: StableApkRelease = {
   versionCode: APP_VERSION_CONTRACT.CURRENT_VERSION_CODE,
   versionName: `v${APP_VERSION_CONTRACT.CURRENT_VERSION_NAME}`,
   buildId: `PMP-v${APP_VERSION_CONTRACT.CURRENT_VERSION_NAME}-b${APP_VERSION_CONTRACT.CURRENT_VERSION_CODE}`,
-  publishedAt: '2026-11-12T10:15:00Z',
+  publishedAt: '2026-11-15T12:00:00Z',
   fileSizeBytes: 32663762,
   fileSizeMb: 31.15,
   apkSha256: '5445d7d226aeb1480f6b75499254cb2019d8d46daa2f2cea79bd80ee1de2e57c',
@@ -104,12 +131,50 @@ export const DEFAULT_STABLE_RELEASE: StableApkRelease = {
   githubReleaseUrl: APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL,
   pagesDownloadUrl: APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL,
   releaseNotes:
-    '• إصدار v18.0 الرسمي المعتمد: تحسين سرعة واستقرار التطبيق وتوحيد شاشات الخزن والمخازن والمبيعات والمصنع عبر جميع الفروع.\n• ترقية سلسة ومباشرة على الهاتف مع الحفاظ الكامل على كافة البيانات والحسابات المسجلة.',
+    '• إصدار v20.0 الرسمي المعتمد: نظام موحد لمنع تكرار العمليات وحماية التزامن وإدارة حالة التنفيذ عبر الأندرويد والويب وسطح المكتب.\n• ترقية سلسة ومباشرة على الهاتف مع الحفاظ الكامل على كافة البيانات والحسابات المسجلة.',
   releaseStatus: 'PUBLISHED',
   assetFileName: APP_VERSION_CONTRACT.DOWNLOAD_APK_FILENAME,
   isAvailable: true,
   sourceLabel: 'الإصدار الرسمي المعتمد'
 };
+
+export function parseGitHubDesktopRelease(releaseJson: unknown): StableDesktopRelease | null {
+  if (!releaseJson || typeof releaseJson !== 'object') return null;
+  const rel = releaseJson as Record<string, unknown>;
+  if (rel.draft === true || rel.prerelease === true) return null;
+
+  const tagName = String(rel.tag_name ?? '').trim();
+  const assets = Array.isArray(rel.assets) ? rel.assets : [];
+  let setupAsset: Record<string, unknown> | null = null;
+  let portableAsset: Record<string, unknown> | null = null;
+
+  for (const rawAsset of assets) {
+    if (!rawAsset || typeof rawAsset !== 'object') continue;
+    const asset = rawAsset as Record<string, unknown>;
+    const name = String(asset.name ?? '');
+    const dlUrl = String(asset.browser_download_url ?? '');
+    if (!name.toLowerCase().endsWith('.exe') || !dlUrl.startsWith('https://')) continue;
+    if (/setup/i.test(name) && !setupAsset) setupAsset = asset;
+    if (/portable/i.test(name) && !portableAsset) portableAsset = asset;
+    if (!setupAsset && !/portable/i.test(name)) setupAsset = asset;
+  }
+
+  if (!setupAsset && !portableAsset && !tagName.startsWith('desktop-')) return null;
+
+  const versionClean = tagName.replace(/^desktop-v?/i, '').replace(/^v/i, '') || APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME;
+  return {
+    versionName: `v${versionClean}`,
+    tagName: tagName || `desktop-v${versionClean}`,
+    publishedAt: String(rel.published_at ?? rel.created_at ?? ''),
+    setupUrl: String(setupAsset?.browser_download_url || APP_VERSION_CONTRACT.GITHUB_LATEST_WINDOWS_URL),
+    setupFileName: String(setupAsset?.name || APP_VERSION_CONTRACT.WINDOWS_INSTALLER_FILENAME),
+    setupSizeMb: formatBytesToMb(Number(setupAsset?.size ?? 0)),
+    portableUrl: String(portableAsset?.browser_download_url || APP_VERSION_CONTRACT.GITHUB_LATEST_WINDOWS_PORTABLE_URL),
+    portableFileName: String(portableAsset?.name || APP_VERSION_CONTRACT.WINDOWS_PORTABLE_FILENAME),
+    portableSizeMb: formatBytesToMb(Number(portableAsset?.size ?? 0)),
+    releasesPageUrl: String(rel.html_url || APP_VERSION_CONTRACT.GITHUB_WINDOWS_RELEASES_URL)
+  };
+}
 
 /**
  * Parses a GitHub Release API response strictly excluding drafts, prereleases,
@@ -341,13 +406,18 @@ export async function fetchReleaseFeed(): Promise<ReleaseFeedResult> {
 
   registerHistoryItem(DEFAULT_STABLE_RELEASE);
 
-  // 1. Parse all live releases
+  // 1. Parse all live releases (Android + Windows Desktop)
+  let latestDesktop: StableDesktopRelease = DEFAULT_DESKTOP_RELEASE;
   if (Array.isArray(ghAllJson)) {
     for (const rel of ghAllJson) {
       const parsed = parseGitHubRelease(rel);
       if (parsed) {
         candidates.push(parsed);
         registerHistoryItem(parsed);
+      }
+      if (latestDesktop === DEFAULT_DESKTOP_RELEASE) {
+        const desktopParsed = parseGitHubDesktopRelease(rel);
+        if (desktopParsed) latestDesktop = desktopParsed;
       }
     }
   }
@@ -381,6 +451,7 @@ export async function fetchReleaseFeed(): Promise<ReleaseFeedResult> {
 
   return {
     latest,
+    latestDesktop,
     history: history.length > 0 ? history : [latest],
     sourceLabel: latest.sourceLabel,
     apkAvailable: true,

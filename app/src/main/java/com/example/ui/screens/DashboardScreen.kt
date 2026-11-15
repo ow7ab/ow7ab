@@ -62,8 +62,12 @@ fun DashboardScreen(
     val pendingErrors by viewModel.pendingSyncErrors.collectAsState()
     val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
     val dataLoadError by viewModel.dataLoadError.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val pendingOperationsCount by viewModel.pendingOperationsCount.collectAsState()
+    val guardStatusMessages by viewModel.guardStatusMessages.collectAsState()
 
     var showDiagnosticDashboard by remember { mutableStateOf(false) }
+    var diagnosticInitialTab by remember { mutableIntStateOf(0) }
 
     var searchQuery by remember { mutableStateOf("") }
     val format = remember { NumberFormat.getNumberInstance(Locale.US) }
@@ -171,6 +175,19 @@ fun DashboardScreen(
                 }
             }
 
+            if (pendingOperationsCount > 0 || guardStatusMessages.isNotEmpty()) {
+                item(key = "pending_operations_recovery_banner") {
+                    PendingOperationRecoveryBanner(
+                        pendingCount = pendingOperationsCount,
+                        latestStatusMessage = guardStatusMessages.values.lastOrNull(),
+                        onOpenTracking = {
+                            diagnosticInitialTab = 1
+                            showDiagnosticDashboard = true
+                        }
+                    )
+                }
+            }
+
             // Pending Account Creation Requests - Direct Manager Approval Card
             if (isManager && pendingAccounts.isNotEmpty()) {
                 item {
@@ -241,16 +258,29 @@ fun DashboardScreen(
                                             )
                                         }
 
+                                        val appGuardKey = "approve_user_${pendingUser.id}"
+                                        val isApproving = activeGuardKeys.contains(appGuardKey)
                                         Button(
-                                            onClick = { viewModel.approveUserAccount(pendingUser) },
+                                            onClick = { viewModel.approveUserAccount(pendingUser, guardKey = appGuardKey) },
+                                            enabled = !isApproving,
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
                                             shape = RoundedCornerShape(8.dp),
                                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                             modifier = Modifier.testTag("dashboard_approve_account_btn_${pendingUser.id}")
                                         ) {
-                                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text("موافقة واعتماد", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                            if (isApproving) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(14.dp),
+                                                    strokeWidth = 2.dp,
+                                                    color = Color.White
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("جاري الاعتماد...", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                            } else {
+                                                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("موافقة واعتماد", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                            }
                                         }
                                     }
                                 }
@@ -507,6 +537,7 @@ fun DashboardScreen(
     if (showDiagnosticDashboard) {
         SyncDiagnosticDashboardDialog(
             viewModel = viewModel,
+            initialTab = diagnosticInitialTab,
             onDismiss = { showDiagnosticDashboard = false }
         )
     }

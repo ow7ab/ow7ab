@@ -34,7 +34,7 @@ class PmpDatabaseMigration12To13Test {
     }
 
     @Test
-    fun `migration 11 to 12 to 13 preserves all historical records and validates Phase 3 schema`() = runBlocking {
+    fun `migration 11 to 12 to 13 preserves all historical records and validates Phase 3 schema`(): Unit = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         context.deleteDatabase(dbName)
 
@@ -43,7 +43,12 @@ class PmpDatabaseMigration12To13Test {
         helper.close()
 
         val db = Room.databaseBuilder(context, PmpDatabase::class.java, dbName)
-            .addMigrations(PmpDatabase.MIGRATION_11_12, PmpDatabase.MIGRATION_12_13, PmpDatabase.MIGRATION_13_14)
+            .addMigrations(
+                PmpDatabase.MIGRATION_11_12,
+                PmpDatabase.MIGRATION_12_13,
+                PmpDatabase.MIGRATION_13_14,
+                PmpDatabase.MIGRATION_14_15
+            )
             .allowMainThreadQueries()
             .build()
         migratedDb = db

@@ -33,7 +33,7 @@ class PmpDatabaseMigration11To12Test {
     }
 
     @Test
-    fun `migration 11 to 12 preserves all existing data and builds Three-Warehouse schema safely`() = runBlocking {
+    fun `migration 11 to 12 preserves all existing data and builds Three-Warehouse schema safely`(): Unit = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         context.deleteDatabase(dbName)
 
@@ -45,7 +45,12 @@ class PmpDatabaseMigration11To12Test {
 
         // 2. Open with Room + MIGRATION_11_12 (Room automatically runs full schema validation on all 27 tables)
         val db = Room.databaseBuilder(context, PmpDatabase::class.java, dbName)
-            .addMigrations(PmpDatabase.MIGRATION_11_12, PmpDatabase.MIGRATION_12_13, PmpDatabase.MIGRATION_13_14)
+            .addMigrations(
+                PmpDatabase.MIGRATION_11_12,
+                PmpDatabase.MIGRATION_12_13,
+                PmpDatabase.MIGRATION_13_14,
+                PmpDatabase.MIGRATION_14_15
+            )
             .allowMainThreadQueries()
             .build()
         migratedDb = db

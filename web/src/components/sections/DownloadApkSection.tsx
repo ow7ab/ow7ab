@@ -12,13 +12,15 @@ import {
   ShieldCheck,
   Calendar,
   HardDrive,
-  RefreshCw
+  RefreshCw,
+  Monitor
 } from 'lucide-react';
 
 export const DownloadApkSection: React.FC = () => {
   const { language } = useLanguage();
   const {
     latestRelease,
+    latestDesktopRelease,
     isLoading,
     refreshReleases
   } = useLatestRelease();
@@ -33,7 +35,7 @@ export const DownloadApkSection: React.FC = () => {
       : APP_VERSION_CONTRACT.downloadSize;
   const displayNotes =
     latestRelease?.releaseNotes ||
-    '• النسخة الرسمية المعتمدة لتطبيق PMP PAINTS لأجهزة أندرويد.\n• تحديث مباشر وسلس مع الحفاظ الكامل على كافة البيانات والحسابات.';
+    '• النسخة الرسمية المعتمدة لتطبيق PMP PAINTS لأجهزة أندرويد وسطح المكتب.\n• تحديث مباشر وسلس مع الحفاظ الكامل على كافة البيانات والحسابات.';
 
   const previewScreens = [
     {
@@ -83,13 +85,13 @@ export const DownloadApkSection: React.FC = () => {
           }}
         >
           {language === 'ar'
-            ? 'تنزيل تطبيق PMP PAINTS الرسمي لأجهزة أندرويد'
-            : 'Download Official PMP PAINTS Android Application'}
+            ? 'تنزيل تطبيق PMP PAINTS الرسمي (أندرويد و Windows)'
+            : 'Download Official PMP PAINTS (Android & Windows Desktop)'}
         </h2>
         <p style={{ fontSize: '15px', color: 'var(--text-secondary)', maxWidth: '680px', margin: '0 auto' }}>
           {language === 'ar'
-            ? 'احصل على النسخة الرسمية المعتمدة لهواتف وأجهزة التابلت الخاصة بمنسوبي وفروع شركة PMP Paints بنقرة واحدة مباشرة.'
-            : 'Get the official Android application for PMP Paints branches and staff with a single direct tap.'}
+            ? 'احصل على النسخة الرسمية المعتمدة لهواتف الأندرويد وأجهزة الكمبيوتر (Windows x64) الخاصة بمنسوبي وفروع شركة PMP Paints بنقرة واحدة مباشرة.'
+            : 'Get the official Android and Windows x64 Desktop application for PMP Paints branches and staff with a single direct tap.'}
         </p>
       </div>
 
@@ -232,8 +234,8 @@ export const DownloadApkSection: React.FC = () => {
             </div>
           </div>
 
-          {/* Primary Direct Download CTA Button */}
-          <div style={{ width: '100%', maxWidth: '520px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {/* Primary Direct Download CTA Buttons (Android APK + Windows Desktop) */}
+          <div style={{ width: '100%', maxWidth: '580px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <a
               href={directDownloadUrl}
               download={APP_VERSION_CONTRACT.DOWNLOAD_APK_FILENAME}
@@ -261,6 +263,53 @@ export const DownloadApkSection: React.FC = () => {
                   : `Direct Download Android App (${displayVersionName})`}
               </span>
             </a>
+
+            <a
+              href={latestDesktopRelease.setupUrl}
+              download={latestDesktopRelease.setupFileName}
+              data-testid="primary-windows-download-btn"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '12px',
+                padding: '16px 26px',
+                borderRadius: '16px',
+                background: 'linear-gradient(135deg, #0ea5e9 0%, #0369a1 100%)',
+                color: '#FFFFFF',
+                fontWeight: 900,
+                fontSize: '16px',
+                textDecoration: 'none',
+                boxShadow: '0 10px 26px rgba(14, 165, 233, 0.35)',
+                transition: 'transform 0.2s ease'
+              }}
+            >
+              <Monitor size={21} />
+              <span>
+                {language === 'ar'
+                  ? `تنزيل برنامج سطح المكتب لنظام Windows x64 (${latestDesktopRelease.versionName})`
+                  : `Download Windows x64 Desktop App (${latestDesktopRelease.versionName})`}
+              </span>
+            </a>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '14px', flexWrap: 'wrap', fontSize: '12px' }}>
+              <a
+                href={latestDesktopRelease.portableUrl}
+                download={latestDesktopRelease.portableFileName}
+                style={{ color: 'var(--pmp-cyan-light)', textDecoration: 'underline', fontWeight: 700 }}
+              >
+                {language === 'ar' ? 'النسخة المحمولة للكمبيوتر (Portable .exe)' : 'Windows Portable Edition (.exe)'}
+              </a>
+              <span style={{ color: 'var(--text-muted)' }}>•</span>
+              <a
+                href={latestDesktopRelease.releasesPageUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: 'var(--text-secondary)', textDecoration: 'underline', fontWeight: 600 }}
+              >
+                {language === 'ar' ? 'كل إصدارات سطح المكتب' : 'All Desktop Releases'}
+              </a>
+            </div>
 
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px', flexWrap: 'wrap', fontSize: '12.5px', color: 'var(--text-secondary)' }}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>

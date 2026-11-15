@@ -40,6 +40,8 @@ fun ProcurementGrnPhase3Card(
     note: String
 ) {
     val purchaseReceipts by viewModel.purchaseReceipts.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     var batchNumber by remember { mutableStateOf("") }
     var expiryDate by remember { mutableStateOf("") }
     var orderedQty by remember { mutableStateOf("100") }
@@ -164,10 +166,14 @@ fun ProcurementGrnPhase3Card(
             val rejVal = rejectedQty.toDoubleOrNull() ?: 0.0
             val uCost = unitCost.toDoubleOrNull() ?: 0.0
 
+            val grnGuard = "phase3_receive_raw_grn"
+            val isGrnSubmitting = activeGuardKeys.contains(grnGuard)
             GlassButton(
                 text = "اعتماد سند الاستلام GRN وترحيل للمواد الخام",
                 icon = Icons.Default.VerifiedUser,
                 gradient = GlassAccentGreenGradient,
+                isLoading = isGrnSubmitting,
+                loadingText = guardLoadingLabels[grnGuard] ?: "جاري توريد الخامات...",
                 onClick = {
                     val matId = selectedItem?.id ?: 1L
                     val matName = selectedItem?.name ?: fallbackMaterialName
@@ -187,7 +193,14 @@ fun ProcurementGrnPhase3Card(
                         currency = currency,
                         discrepancyReason = discrepancyReason,
                         cashboxAmount = if (uCost > 0.0) accVal * uCost else 0.0,
-                        notes = note
+                        notes = note,
+                        guardKey = grnGuard,
+                        onComplete = { ok ->
+                            if (ok) {
+                                batchNumber = ""
+                                discrepancyReason = ""
+                            }
+                        }
                     )
                 },
                 modifier = Modifier
@@ -254,6 +267,8 @@ fun ProductionOrderQcPhase3Panel(
 ) {
     val productionOrders by viewModel.productionOrdersDb.collectAsState()
     val qcInspections by viewModel.qcInspections.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     val rawMaterialsList = remember(factoryItems) {
         factoryItems.filter {
             it.category.contains("خام", ignoreCase = true) ||
@@ -376,10 +391,13 @@ fun ProductionOrderQcPhase3Panel(
                 fontSize = 11.5.sp
             )
 
+            val bomOrderGuard = "phase3_create_bom_order"
             GlassButton(
                 text = "إنشاء أمر إنتاج BOM جديد",
                 icon = Icons.Default.AddTask,
                 gradient = GlassAccentBlueGradient,
+                isLoading = activeGuardKeys.contains(bomOrderGuard),
+                loadingText = guardLoadingLabels[bomOrderGuard] ?: "جاري إضافة العملية...",
                 onClick = {
                     viewModel.createBomProductionOrder(
                         formula = selectedFormula,
@@ -388,7 +406,8 @@ fun ProductionOrderQcPhase3Panel(
                         packageWeightGrams = selectedWeightGrams,
                         targetCartons = cartonsNum,
                         machineName = selectedMachine,
-                        productionEngineer = engineerName
+                        productionEngineer = engineerName,
+                        guardKey = bomOrderGuard
                     )
                 },
                 modifier = Modifier
@@ -478,8 +497,10 @@ fun ProductionOrderQcPhase3Panel(
     // Issue Materials Dialog
     orderToIssue?.let { ord ->
         val selectedMat = rawMaterialsList.getOrNull(issueMatIndex) ?: rawMaterialsList.firstOrNull()
+        val issueGuard = "phase3_issue_materials_${ord.id}"
+        val isIssuing = activeGuardKeys.contains(issueGuard)
         AlertDialog(
-            onDismissRequest = { orderToIssue = null },
+            onDismissRequest = { if (!isIssuing) orderToIssue = null },
             title = { Text("صرف مواد خام لأمر ${ord.orderNo}", color = PmpBrandNavy, fontWeight = FontWeight.Bold, fontSize = 15.sp) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -504,6 +525,8 @@ fun ProductionOrderQcPhase3Panel(
             confirmButton = {
                 GlassButton(
                     text = "تأكيد الصرف",
+                    isLoading = isIssuing,
+                    loadingText = guardLoadingLabels[issueGuard] ?: "جاري تنفيذ الصرف...",
                     onClick = {
                         viewModel.issueMaterialsForProductionOrder(
                             order = ord,
@@ -513,21 +536,26 @@ fun ProductionOrderQcPhase3Panel(
                             returnedQty = returnQtyText.toDoubleOrNull() ?: 0.0,
                             wastedQty = wasteQtyText.toDoubleOrNull() ?: 0.0,
                             unit = selectedMat?.unit ?: "كجم",
-                            batchNumber = ord.batchNumber
+                            batchNumber = ord.batchNumber,
+                            guardKey = issueGuard,
+                            onComplete = { ok ->
+                                if (ok) orderToIssue = null
+                            }
                         )
-                        orderToIssue = null
                     }
                 )
             },
-            dismissButton = { GlassButton(text = "إلغاء", onClick = { orderToIssue = null }) },
+            dismissButton = { GlassButton(text = "إلغاء", enabled = !isIssuing, onClick = { orderToIssue = null }) },
             containerColor = PmpWhiteSurface
         )
     }
 
     // QC Inspection Dialog
     orderToInspect?.let { ord ->
+        val qcGuard = "phase3_qc_inspection_${ord.id}"
+        val isInspecting = activeGuardKeys.contains(qcGuard)
         AlertDialog(
-            onDismissRequest = { orderToInspect = null },
+            onDismissRequest = { if (!isInspecting) orderToInspect = null },
             title = { Text("فحص الجودة QC لأمر ${ord.orderNo}", color = PmpBrandNavy, fontWeight = FontWeight.Bold, fontSize = 15.sp) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -554,6 +582,8 @@ fun ProductionOrderQcPhase3Panel(
             confirmButton = {
                 GlassButton(
                     text = "اعتماد نتيجة الفحص",
+                    isLoading = isInspecting,
+                    loadingText = guardLoadingLabels[qcGuard] ?: "جاري الحفظ...",
                     onClick = {
                         viewModel.submitQcInspectionForProductionOrder(
                             order = ord,
@@ -564,13 +594,16 @@ fun ProductionOrderQcPhase3Panel(
                             measuredViscosity = qcViscosityText,
                             colorMatchPassed = qcColorMatch,
                             forceReject = qcForceReject,
-                            notes = qcNotes
+                            notes = qcNotes,
+                            guardKey = qcGuard,
+                            onComplete = { ok ->
+                                if (ok) orderToInspect = null
+                            }
                         )
-                        orderToInspect = null
                     }
                 )
             },
-            dismissButton = { GlassButton(text = "إلغاء", onClick = { orderToInspect = null }) },
+            dismissButton = { GlassButton(text = "إلغاء", enabled = !isInspecting, onClick = { orderToInspect = null }) },
             containerColor = PmpWhiteSurface
         )
     }
@@ -588,6 +621,8 @@ fun ThreeWarehouseTransferPanel(
     val erpBalances by viewModel.erpStockBalances.collectAsState()
     val erpTransfers by viewModel.erpTransfers.collectAsState()
     val erpMovements by viewModel.erpMovements.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     val format = remember { NumberFormat.getNumberInstance(Locale.US) }
 
     var classFilter by remember { mutableStateOf("ALL") } // ALL, RAW_MATERIALS, FINISHED_GOODS, SALES
@@ -671,8 +706,11 @@ fun ThreeWarehouseTransferPanel(
                         GlassTextField(value = trfQtyText, onValueChange = { trfQtyText = it }, label = "الكمية", isNumber = true, modifier = Modifier.weight(0.8f))
                         GlassTextField(value = trfNotes, onValueChange = { trfNotes = it }, label = "ملاحظات", modifier = Modifier.weight(1.2f))
                     }
+                    val trfCreateGuard = "phase3_create_transfer"
                     GlassButton(
                         text = "إنشاء مستند تحويل رسمي",
+                        isLoading = activeGuardKeys.contains(trfCreateGuard),
+                        loadingText = guardLoadingLabels[trfCreateGuard] ?: "جاري التحويل...",
                         onClick = {
                             val src = warehouses.find { it.name == srcWhName }
                             val dst = warehouses.find { it.name == dstWhName }
@@ -684,9 +722,12 @@ fun ThreeWarehouseTransferPanel(
                                     productId = pr.id,
                                     productName = pr.name,
                                     qty = trfQtyText.toDoubleOrNull() ?: 1.0,
-                                    notes = trfNotes
+                                    notes = trfNotes,
+                                    guardKey = trfCreateGuard,
+                                    onComplete = { ok ->
+                                        if (ok) showTransferForm = false
+                                    }
                                 )
-                                showTransferForm = false
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -736,18 +777,54 @@ fun ThreeWarehouseTransferPanel(
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             if (trf.status == "PENDING_APPROVAL" || trf.status == "DRAFT") {
-                                OutlinedButton(onClick = { viewModel.approveWarehouseTransfer(trf.id) }, modifier = Modifier.heightIn(min = 38.dp)) {
-                                    Text("اعتماد", fontSize = 11.sp)
+                                val appGuard = "phase3_approve_transfer_${trf.id}"
+                                val isApprovingTrf = activeGuardKeys.contains(appGuard)
+                                OutlinedButton(
+                                    onClick = { viewModel.approveWarehouseTransfer(trf.id, guardKey = appGuard) },
+                                    enabled = !isApprovingTrf,
+                                    modifier = Modifier.heightIn(min = 48.dp)
+                                ) {
+                                    if (isApprovingTrf) {
+                                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(guardLoadingLabels[appGuard] ?: "جاري تحديث البيانات...", fontSize = 11.sp)
+                                    } else {
+                                        Text("اعتماد", fontSize = 11.sp)
+                                    }
                                 }
                             }
                             if (trf.status == "APPROVED") {
-                                OutlinedButton(onClick = { viewModel.dispatchWarehouseTransfer(trf.id) }, modifier = Modifier.heightIn(min = 38.dp)) {
-                                    Text("شحن", fontSize = 11.sp)
+                                val dispGuard = "phase3_dispatch_transfer_${trf.id}"
+                                val isDispatchingTrf = activeGuardKeys.contains(dispGuard)
+                                OutlinedButton(
+                                    onClick = { viewModel.dispatchWarehouseTransfer(trf.id, guardKey = dispGuard) },
+                                    enabled = !isDispatchingTrf,
+                                    modifier = Modifier.heightIn(min = 48.dp)
+                                ) {
+                                    if (isDispatchingTrf) {
+                                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(guardLoadingLabels[dispGuard] ?: "جاري التحويل...", fontSize = 11.sp)
+                                    } else {
+                                        Text("شحن", fontSize = 11.sp)
+                                    }
                                 }
                             }
                             if (trf.status == "IN_TRANSIT") {
-                                Button(onClick = { viewModel.receiveWarehouseTransfer(trf.id) }, modifier = Modifier.heightIn(min = 38.dp)) {
-                                    Text("استلام نهائي", fontSize = 11.sp)
+                                val recGuard = "phase3_receive_transfer_${trf.id}"
+                                val isReceivingTrf = activeGuardKeys.contains(recGuard)
+                                Button(
+                                    onClick = { viewModel.receiveWarehouseTransfer(trf.id, guardKey = recGuard) },
+                                    enabled = !isReceivingTrf,
+                                    modifier = Modifier.heightIn(min = 48.dp)
+                                ) {
+                                    if (isReceivingTrf) {
+                                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Color.White)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(guardLoadingLabels[recGuard] ?: "جاري توريد الخامات...", fontSize = 11.sp)
+                                    } else {
+                                        Text("استلام نهائي", fontSize = 11.sp)
+                                    }
                                 }
                             }
                         }
@@ -783,8 +860,10 @@ fun ThreeWarehouseTransferPanel(
     }
 
     movementToReverse?.let { mv ->
+        val revGuard = "phase3_reverse_move_${mv.id}"
+        val isReversingMove = activeGuardKeys.contains(revGuard)
         AlertDialog(
-            onDismissRequest = { movementToReverse = null },
+            onDismissRequest = { if (!isReversingMove) movementToReverse = null },
             title = { Text("إنشاء قيد عكسي للحركة ${mv.documentNo}", color = PmpRed, fontWeight = FontWeight.Bold, fontSize = 15.sp) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -796,13 +875,21 @@ fun ThreeWarehouseTransferPanel(
                 GlassButton(
                     text = "تنفيذ القيد العكسي",
                     gradient = PmpBrandRedGradient,
+                    isLoading = isReversingMove,
+                    loadingText = guardLoadingLabels[revGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
-                        viewModel.reverseInventoryMovement(mv.id, reverseReason)
-                        movementToReverse = null
+                        viewModel.reverseInventoryMovement(
+                            movementId = mv.id,
+                            reason = reverseReason,
+                            guardKey = revGuard,
+                            onComplete = { ok ->
+                                if (ok) movementToReverse = null
+                            }
+                        )
                     }
                 )
             },
-            dismissButton = { GlassButton(text = "إلغاء", onClick = { movementToReverse = null }) },
+            dismissButton = { GlassButton(text = "إلغاء", enabled = !isReversingMove, onClick = { movementToReverse = null }) },
             containerColor = PmpWhiteSurface
         )
     }

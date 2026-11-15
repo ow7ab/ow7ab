@@ -80,7 +80,7 @@ test('Desktop Print & Update Isolation: strips auto window.print() and rejects A
   assert.equal(cleaned.includes('window.print()'), false);
   assert.equal(cleaned.includes('<h1>Report</h1>'), true);
 
-  assert.equal(security.isValidDesktopReleaseAssetName('pmp-paints-desktop-setup-18.0.0-x64.exe'), true);
+  assert.equal(security.isValidDesktopReleaseAssetName('pmp-paints-desktop-setup-20.0.0-x64.exe'), true);
   assert.equal(security.isValidDesktopReleaseAssetName('latest.yml'), true);
   assert.equal(security.isValidDesktopReleaseAssetName('pmp-paints-latest.apk'), false);
 });

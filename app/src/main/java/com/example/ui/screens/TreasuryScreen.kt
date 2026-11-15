@@ -58,6 +58,8 @@ fun TreasuryScreen(
     val defaultAccountCurrency by viewModel.defaultAccountCurrency.collectAsState()
     val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
     val dataLoadError by viewModel.dataLoadError.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
 
     var selectedMovementForDetail by remember { mutableStateOf<MovementEntity?>(null) }
     var selectedTransferForDetail by remember { mutableStateOf<TransferEntity?>(null) }
@@ -396,9 +398,15 @@ fun TreasuryScreen(
 
                             Spacer(modifier = Modifier.height(16.dp))
 
+                            val moveGuardKey = "treasury_movement"
+                            val isMoveLoading = activeGuardKeys.contains(moveGuardKey)
+                            val moveLoadingText = guardLoadingLabels[moveGuardKey]
+                                ?: if (moveDirection == "وارد") "جاري تسجيل سند القبض..." else "جاري تسجيل سند الصرف..."
                             GlassButton(
                                 text = "إضافة معاملة",
                                 icon = Icons.Default.Save,
+                                isLoading = isMoveLoading,
+                                loadingText = moveLoadingText,
                                 onClick = {
                                     val cleanAmtStr = moveAmount.replace("٬", "").replace(",", "").trim()
                                     val amt = cleanAmtStr.toDoubleOrNull() ?: 0.0
@@ -410,15 +418,20 @@ fun TreasuryScreen(
                                         direction = moveDirection,
                                         amount = amt,
                                         description = desc,
-                                        reference = ref
+                                        reference = ref,
+                                        guardKey = moveGuardKey,
+                                        onComplete = { ok ->
+                                            if (ok && amt > 0) {
+                                                moveAmount = ""
+                                                moveReference = "REC-${System.currentTimeMillis() % 1000000}"
+                                                moveDescription = ""
+                                            }
+                                        }
                                     )
-                                    if (amt > 0) {
-                                        moveAmount = ""
-                                        moveReference = "REC-${System.currentTimeMillis() % 1000000}"
-                                        moveDescription = ""
-                                    }
                                 },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("treasury_add_movement_button")
                             )
                         }
                     }
@@ -598,7 +611,8 @@ fun TreasuryScreen(
                                         Spacer(modifier = Modifier.width(6.dp))
                                         IconButton(
                                             onClick = { viewModel.deleteMovement(m.id) },
-                                            modifier = Modifier.size(28.dp)
+                                            enabled = !activeGuardKeys.contains("delete_movement_${m.id}"),
+                                            modifier = Modifier.size(48.dp)
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Default.DeleteOutline,
@@ -829,10 +843,13 @@ fun TreasuryScreen(
 
                             Spacer(modifier = Modifier.height(16.dp))
 
+                            val trfGuardKey = "treasury_transfer"
                             GlassButton(
                                 text = "تحويل",
                                 icon = Icons.Default.SwapHoriz,
                                 gradient = GlassAccentGoldGradient,
+                                isLoading = activeGuardKeys.contains(trfGuardKey),
+                                loadingText = guardLoadingLabels[trfGuardKey] ?: "جاري التحويل...",
                                 onClick = {
                                     val amt = trfAmount.toDoubleOrNull() ?: 0.0
                                     val rate = trfRate.toDoubleOrNull() ?: 1.0
@@ -846,15 +863,20 @@ fun TreasuryScreen(
                                         description = trfDescription,
                                         reference = trfReference,
                                         halfaInvoiceId = trfHalfaInvoiceId,
-                                        isInvertedRate = trfIsInvertedRate
+                                        isInvertedRate = trfIsInvertedRate,
+                                        guardKey = trfGuardKey,
+                                        onComplete = { ok ->
+                                            if (ok && amt > 0 && trfReference.isNotBlank()) {
+                                                trfAmount = ""
+                                                trfReference = ""
+                                                trfDescription = ""
+                                            }
+                                        }
                                     )
-                                    if (amt > 0 && trfReference.isNotBlank()) {
-                                        trfAmount = ""
-                                        trfReference = ""
-                                        trfDescription = ""
-                                    }
                                 },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("treasury_transfer_button")
                             )
                         }
                     }
@@ -1006,21 +1028,31 @@ fun TreasuryScreen(
 
                             Spacer(modifier = Modifier.height(16.dp))
 
+                            val closingGuardKey = "daily_closing"
                             GlassButton(
                                 text = "إقفال اليومية",
                                 icon = Icons.Default.Lock,
+                                isLoading = activeGuardKeys.contains(closingGuardKey),
+                                loadingText = guardLoadingLabels[closingGuardKey] ?: "جاري الحفظ...",
                                 onClick = {
                                     viewModel.performDailyClosing(
                                         cashbox = closeBox,
                                         currency = closeCur,
                                         bookBalance = bookBal,
                                         countedBalance = actualVal,
-                                        notes = closeNotes
+                                        notes = closeNotes,
+                                        guardKey = closingGuardKey,
+                                        onComplete = { ok ->
+                                            if (ok) {
+                                                closeActualAmount = ""
+                                                closeNotes = ""
+                                            }
+                                        }
                                     )
-                                    closeActualAmount = ""
-                                    closeNotes = ""
                                 },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("treasury_daily_closing_button")
                             )
                         }
                     }
@@ -1283,7 +1315,8 @@ fun TreasuryScreen(
                                         Spacer(modifier = Modifier.width(6.dp))
                                         IconButton(
                                             onClick = { viewModel.deleteMovement(m.id) },
-                                            modifier = Modifier.size(28.dp)
+                                            enabled = !activeGuardKeys.contains("delete_movement_${m.id}"),
+                                            modifier = Modifier.size(48.dp)
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Default.DeleteOutline,
@@ -1440,19 +1473,33 @@ fun TreasuryScreen(
                 }
             },
             confirmButton = {
+                val addBoxGuard = "add_cashbox"
                 GlassButton(
                     text = "حفظ الخزنة",
+                    isLoading = activeGuardKeys.contains(addBoxGuard),
+                    loadingText = guardLoadingLabels[addBoxGuard] ?: "جاري الحفظ...",
                     onClick = {
                         if (newCashboxName.isNotBlank()) {
-                            viewModel.addCashbox(newCashboxName)
-                            newCashboxName = ""
-                            showAddCashboxDialog = false
+                            viewModel.addCashbox(
+                                name = newCashboxName,
+                                guardKey = addBoxGuard,
+                                onComplete = { ok ->
+                                    if (ok) {
+                                        newCashboxName = ""
+                                        showAddCashboxDialog = false
+                                    }
+                                }
+                            )
                         }
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { showAddCashboxDialog = false })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains("add_cashbox"),
+                    onClick = { showAddCashboxDialog = false }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1460,8 +1507,9 @@ fun TreasuryScreen(
 
     // Modal: Edit Cashbox
     editingCashbox?.let { box ->
+        val updBoxGuard = "update_cashbox_${box.id}"
         AlertDialog(
-            onDismissRequest = { editingCashbox = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(updBoxGuard)) editingCashbox = null },
             title = { Text(text = "تعديل اسم الخزنة", color = PmpCyan, fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1475,16 +1523,26 @@ fun TreasuryScreen(
             confirmButton = {
                 GlassButton(
                     text = "حفظ التعديلات",
+                    isLoading = activeGuardKeys.contains(updBoxGuard),
+                    loadingText = guardLoadingLabels[updBoxGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
                         if (editCashboxName.isNotBlank()) {
-                            viewModel.updateCashbox(box.id, editCashboxName)
-                            editingCashbox = null
+                            viewModel.updateCashbox(
+                                id = box.id,
+                                name = editCashboxName,
+                                guardKey = updBoxGuard,
+                                onComplete = { ok -> if (ok) editingCashbox = null }
+                            )
                         }
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { editingCashbox = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(updBoxGuard),
+                    onClick = { editingCashbox = null }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1492,11 +1550,12 @@ fun TreasuryScreen(
 
     // Modal: Delete / Archive Cashbox Confirmation
     deletingCashbox?.let { box ->
+        val delBoxGuard = "delete_cashbox_${box.id}"
         val linkedMovesCount = remember(box.name, movements) {
             movements.count { it.cashbox.trim().equals(box.name.trim(), ignoreCase = true) }
         }
         AlertDialog(
-            onDismissRequest = { deletingCashbox = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(delBoxGuard)) deletingCashbox = null },
             title = {
                 Text(
                     text = if (linkedMovesCount > 0) "أرشفة وإلغاء تفعيل الخزنة" else "حذف الخزنة نهائياً",
@@ -1522,15 +1581,25 @@ fun TreasuryScreen(
                 GlassButton(
                     text = if (linkedMovesCount > 0) "تأكيد الأرشفة ومزامنة الحذف" else "نعم، حذف نهائي",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(delBoxGuard),
+                    loadingText = guardLoadingLabels[delBoxGuard] ?: "جاري تنفيذ الحذف...",
                     onClick = {
-                        viewModel.deleteCashbox(box.id, box.name)
-                        deletingCashbox = null
+                        viewModel.deleteCashbox(
+                            id = box.id,
+                            name = box.name,
+                            guardKey = delBoxGuard,
+                            onComplete = { ok -> if (ok) deletingCashbox = null }
+                        )
                     },
                     modifier = Modifier.testTag("confirm_delete_cashbox_button")
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { deletingCashbox = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(delBoxGuard),
+                    onClick = { deletingCashbox = null }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1538,8 +1607,9 @@ fun TreasuryScreen(
 
     // Modal: Zero Cashbox Balance Confirmation
     boxToZeroOut?.let { boxName ->
+        val resetBoxGuard = "reset_cashbox_$boxName"
         AlertDialog(
-            onDismissRequest = { boxToZeroOut = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(resetBoxGuard)) boxToZeroOut = null },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.Default.RestartAlt, contentDescription = null, tint = PmpGold)
@@ -1558,14 +1628,23 @@ fun TreasuryScreen(
                 GlassButton(
                     text = "نعم، تصفير الخزنة",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(resetBoxGuard),
+                    loadingText = guardLoadingLabels[resetBoxGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
-                        viewModel.resetCashboxBalance(boxName)
-                        boxToZeroOut = null
+                        viewModel.resetCashboxBalance(
+                            cashboxName = boxName,
+                            guardKey = resetBoxGuard,
+                            onComplete = { ok -> if (ok) boxToZeroOut = null }
+                        )
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { boxToZeroOut = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(resetBoxGuard),
+                    onClick = { boxToZeroOut = null }
+                )
             },
             containerColor = PmpNavySurface
         )

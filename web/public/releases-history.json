@@ -4,6 +4,20 @@
   "signingCertSha256": "1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05",
   "releases": [
     {
+      "versionCode": 20,
+      "versionName": "v20.0",
+      "buildId": "PMP-v20.0-b20",
+      "gitCommit": "624a52b9",
+      "publishedAt": "2026-11-15T12:00:00Z",
+      "fileSize": 32663762,
+      "fileSizeMb": 31.15,
+      "apkSha256": "5445d7d226aeb1480f6b75499254cb2019d8d46daa2f2cea79bd80ee1de2e57c",
+      "downloadUrl": "https://github.com/ow7ab/ow7ab/releases/latest/download/pmp-paints-latest.apk",
+      "pagesDownloadUrl": "https://github.com/ow7ab/ow7ab/releases/latest/download/pmp-paints-latest.apk",
+      "releaseStatus": "PUBLISHED",
+      "releaseNotes": "• إصدار v20.0: نظام موحد لمنع تكرار العمليات وحماية التزامن وإدارة حالة التنفيذ عبر الأندرويد والويب وسطح المكتب.\n• ترقية سلسة ومباشرة مع الحفاظ التام على كافة البيانات والفواتير."
+    },
+    {
       "versionCode": 18,
       "versionName": "v18.0",
       "buildId": "PMP-v18.0-b18-624a52b9",

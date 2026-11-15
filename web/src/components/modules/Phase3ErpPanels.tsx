@@ -16,6 +16,8 @@ import { GlassBadge } from '../ui/GlassBadge';
 import { GlassButton } from '../ui/GlassButton';
 import { Modal } from '../ui/Modal';
 import { useAuth } from '../../context/AuthContext';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 import {
   ErpDataService,
   DEFAULT_PACKAGING_RULES,
@@ -123,7 +125,7 @@ export const WebProcurementGrnPanel: React.FC<{
   const [currency, setCurrency] = useState<'EGP' | 'SDG' | 'USD'>('EGP');
   const [discrepancyReason, setDiscrepancyReason] = useState('');
   const [notes, setNotes] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+  const grnGuard = useTransactionGuard('phase3_grn_receipt', 'RAW_MATERIAL_SUPPLY');
 
   useEffect(() => {
     const unsubs = [
@@ -173,7 +175,7 @@ export const WebProcurementGrnPanel: React.FC<{
 
   const handleSubmitGrn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate || submitting) return;
+    if (!canCreate || grnGuard.isSubmitting) return;
     const rawWh = rawWarehouses.find((w) => Number(w.id) === Number(rawWarehouseId));
     if (!rawWh) {
       onNotice?.('err', 'يجب وجود مخزن مصنف (RAW_MATERIALS) لاستلام المشتريات');
@@ -185,81 +187,97 @@ export const WebProcurementGrnPanel: React.FC<{
       return;
     }
 
-    setSubmitting(true);
-    try {
-      const actor = userProfile?.fullName || userProfile?.username || 'WEB_PROCUREMENT';
-      const { receipt, state } = receivePurchaseToRawMaterialsInState(
-        { movements, balances },
-        {
-          poNo: poNo.trim() || undefined,
-          supplierName: supplierName.trim() || 'مورد خامات معتمد',
-          rawWarehouse: rawWh,
-          materialId: Number(item.id),
-          materialCode: item.itemCode || `RAW-${item.id}`,
-          materialName: item.name,
-          unit: item.unit || 'كجم',
-          batchNumber: batchNumber.trim() || undefined,
-          expiryDate: expiryDate.trim() || undefined,
-          orderedQty: Number(orderedQty) || 0,
-          receivedQty: Number(receivedQty) || 0,
-          acceptedQty: Number(acceptedQty) || 0,
-          rejectedQty: Number(rejectedQty) || 0,
-          unitCost: Number(unitCost) || item.unitCostEgp || 0,
-          currency,
-          discrepancyReason,
-          notes,
+    const actor = userProfile?.fullName || userProfile?.username || 'WEB_PROCUREMENT';
+    const res = await grnGuard.runGuarded({
+      guardKey: `grn_${rawWh.id}_${item.id}_${receivedQty}`,
+      operationType: 'RAW_MATERIAL_SUPPLY',
+      userId: userProfile?.username || actor,
+      documentReference: `GRN-${item.id}-${receivedQty}`,
+      targetCollection: 'purchase_receipts',
+      payloadSummary: `استلام GRN ${item.name} (${acceptedQty} مقبول / ${rejectedQty} حجر)`,
+      execute: async ({ idempotencyKey }) => {
+        const { receipt, state } = receivePurchaseToRawMaterialsInState(
+          { movements, balances },
+          {
+            poNo: poNo.trim() || undefined,
+            supplierName: supplierName.trim() || 'مورد خامات معتمد',
+            rawWarehouse: rawWh,
+            materialId: Number(item.id),
+            materialCode: item.itemCode || `RAW-${item.id}`,
+            materialName: item.name,
+            unit: item.unit || 'كجم',
+            batchNumber: batchNumber.trim() || undefined,
+            expiryDate: expiryDate.trim() || undefined,
+            orderedQty: Number(orderedQty) || 0,
+            receivedQty: Number(receivedQty) || 0,
+            acceptedQty: Number(acceptedQty) || 0,
+            rejectedQty: Number(rejectedQty) || 0,
+            unitCost: Number(unitCost) || item.unitCostEgp || 0,
+            currency,
+            discrepancyReason,
+            notes,
+            performedBy: actor
+          }
+        );
+
+        const safeGrnId = `GRN-${idempotencyKey}`;
+        await ErpDataService.saveRecord('purchase_receipts', safeGrnId, { ...receipt, syncUuid: safeGrnId }, userProfile?.username);
+        await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
+
+        const grnJournal = buildPurchaseReceiptJournalPayload({
+          grnSyncUuid: safeGrnId,
+          grnNo: receipt.grnNo,
+          receiptDate: receipt.receiptDate,
+          supplierName: receipt.supplierName,
+          materialName: receipt.materialName,
+          unit: receipt.unit,
+          acceptedQty: receipt.acceptedQty,
+          unitCost: receipt.unitCost,
+          currency: receipt.currency,
           performedBy: actor
+        });
+        await ErpDataService.persistJournalPayload(grnJournal).catch(() => {});
+
+        if (receipt.acceptedQty > 0) {
+          const fm: FactoryMove = {
+            id: receipt.createdAt + 2,
+            moveDate: receipt.receiptDate,
+            kind: 'توريد خامات',
+            itemId: Number(item.id),
+            itemName: item.name,
+            qty: receipt.acceptedQty,
+            batch: receipt.batchNumber,
+            note: `سند استلام GRN ${receipt.grnNo}${receipt.rejectedQty > 0 ? ` (مرفوض: ${receipt.rejectedQty})` : ''}`,
+            actor,
+            counterparty: receipt.supplierName,
+            linked: Boolean(item.linkedToEgypt),
+            createdAt: receipt.createdAt + 2
+          };
+          await ErpDataService.saveRecord('factory_moves', `FM-${idempotencyKey}`, fm, userProfile?.username);
         }
-      );
 
-      await ErpDataService.saveRecord('purchase_receipts', receipt.syncUuid, receipt);
-      await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
-
-      const grnJournal = buildPurchaseReceiptJournalPayload({
-        grnSyncUuid: receipt.syncUuid,
-        grnNo: receipt.grnNo,
-        receiptDate: receipt.receiptDate,
-        supplierName: receipt.supplierName,
-        materialName: receipt.materialName,
-        unit: receipt.unit,
-        acceptedQty: receipt.acceptedQty,
-        unitCost: receipt.unitCost,
-        currency: receipt.currency,
-        performedBy: actor
-      });
-      await ErpDataService.persistJournalPayload(grnJournal).catch(() => {});
-
-      if (receipt.acceptedQty > 0) {
-        const fm: FactoryMove = {
-          id: receipt.createdAt + 2,
-          moveDate: receipt.receiptDate,
-          kind: 'توريد خامات',
-          itemId: Number(item.id),
-          itemName: item.name,
-          qty: receipt.acceptedQty,
-          batch: receipt.batchNumber,
-          note: `سند استلام GRN ${receipt.grnNo}${receipt.rejectedQty > 0 ? ` (مرفوض: ${receipt.rejectedQty})` : ''}`,
+        await ErpDataService.logAudit(
           actor,
-          counterparty: receipt.supplierName,
-          linked: Boolean(item.linkedToEgypt),
-          createdAt: receipt.createdAt + 2
-        };
-        await ErpDataService.saveRecord('factory_moves', `FM-${fm.id}`, fm);
+          'PURCHASE_GRN_RECEIPT',
+          `سند استلام ${receipt.grnNo}: ${receipt.materialName} — مقبول ${receipt.acceptedQty}، مرفوض/حجر ${receipt.rejectedQty}`
+        );
+        return { resultReference: safeGrnId, result: receipt };
       }
+    });
 
-      await ErpDataService.logAudit(
-        actor,
-        'PURCHASE_GRN_RECEIPT',
-        `سند استلام ${receipt.grnNo}: ${receipt.materialName} — مقبول ${receipt.acceptedQty}، مرفوض/حجر ${receipt.rejectedQty}`
+    if (res.ok) {
+      const r = res.data as PurchaseReceipt | undefined;
+      onNotice?.(
+        'ok',
+        res.replayed
+          ? res.message
+          : `تم اعتماد سند الاستلام ${r?.grnNo || ''} وترحيل ${r?.acceptedQty || acceptedQty} ${r?.unit || ''} إلى مخزن المواد الخام`
       );
-      onNotice?.('ok', `تم اعتماد سند الاستلام ${receipt.grnNo} وترحيل ${receipt.acceptedQty} ${receipt.unit} إلى مخزن المواد الخام`);
       setBatchNumber('');
       setDiscrepancyReason('');
       setNotes('');
-    } catch (err: any) {
-      onNotice?.('err', err?.message || 'تعذر تسجيل سند الاستلام GRN');
-    } finally {
-      setSubmitting(false);
+    } else {
+      onNotice?.('err', res.message);
     }
   };
 
@@ -441,10 +459,12 @@ export const WebProcurementGrnPanel: React.FC<{
           <GlassButton
             type="submit"
             variant="primary"
-            disabled={!canCreate || submitting || rawWarehouses.length === 0}
+            disabled={!canCreate || rawWarehouses.length === 0}
+            isLoading={grnGuard.isSubmitting}
+            loadingText={OPERATION_LOADING_LABELS.RAW_MATERIAL_SUPPLY}
             className="w-full justify-center"
           >
-            {submitting ? 'جاري الترحيل...' : 'اعتماد GRN للمخزن الخام'}
+            اعتماد GRN للمخزن الخام
           </GlassButton>
         </div>
       </form>
@@ -572,10 +592,13 @@ export const WebProductionOrderQcPanel: React.FC<{
   );
 
   const canCreate = canPerformAction(GRANULAR_ACTIONS.CREATE) || canPerformAction(GRANULAR_ACTIONS.INVENTORY_OPS);
+  const createOrderGuard = useTransactionGuard('phase3_create_prod_order', 'CREATE');
+  const issueGuard = useTransactionGuard('phase3_issue_raw', 'GOODS_ISSUE');
+  const qcGuard = useTransactionGuard('phase3_submit_qc', 'APPROVE_INVOICE');
 
   const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate) return;
+    if (!canCreate || createOrderGuard.isSubmitting) return;
     if (!rawWarehouse || !fgWarehouse) {
       onNotice?.('err', 'يجب توفر مخزن مواد خام (RAW_MATERIALS) ومخزن إنتاج تام (FINISHED_GOODS) قبل إنشاء أمر الإنتاج');
       return;
@@ -584,82 +607,110 @@ export const WebProductionOrderQcPanel: React.FC<{
     const prod = products.find((p) => Number(p.id) === Number(productId)) || null;
     const actor = userProfile?.fullName || userProfile?.username || 'مهندس الإنتاج';
 
-    const ord = createProductionOrderModel({
-      formula,
-      productId: prod?.id ?? null,
-      productName: productName.trim() || prod?.name || formula?.productName || 'منتج دهان',
-      paintColor,
-      packageWeightGrams: weightGrams,
-      targetCartons: cartonsNum,
-      rawWarehouseId: rawWarehouse.id,
-      fgWarehouseId: fgWarehouse.id,
-      machineName,
-      productionEngineer: engineer || actor,
-      approvedBy: actor,
-      customRules: activeRules
+    const res = await createOrderGuard.runGuarded({
+      guardKey: `prod_order_${productName.trim()}_${weightGrams}_${cartonsNum}`,
+      operationType: 'CREATE',
+      userId: userProfile?.username || actor,
+      documentReference: `PO-${productName.trim()}-${cartonsNum}`,
+      targetCollection: 'production_orders',
+      payloadSummary: `أمر إنتاج ${productName.trim()} (${cartonsNum} كرتونة)`,
+      execute: async () => {
+        const ord = createProductionOrderModel({
+          formula,
+          productId: prod?.id ?? null,
+          productName: productName.trim() || prod?.name || formula?.productName || 'منتج دهان',
+          paintColor,
+          packageWeightGrams: weightGrams,
+          targetCartons: cartonsNum,
+          rawWarehouseId: rawWarehouse.id,
+          fgWarehouseId: fgWarehouse.id,
+          machineName,
+          productionEngineer: engineer || actor,
+          approvedBy: actor,
+          customRules: activeRules
+        });
+
+        await ErpDataService.saveRecord('production_orders', ord.syncUuid, ord);
+        await ErpDataService.logAudit(actor, 'CREATE_PRODUCTION_ORDER', `إنشاء أمر إنتاج ${ord.orderNo}: ${ord.productName} (${ord.targetCartons} كرتونة)`);
+        return { resultReference: ord.syncUuid, result: ord };
+      }
     });
 
-    await ErpDataService.saveRecord('production_orders', ord.syncUuid, ord);
-    await ErpDataService.logAudit(actor, 'CREATE_PRODUCTION_ORDER', `إنشاء أمر إنتاج ${ord.orderNo}: ${ord.productName} (${ord.targetCartons} كرتونة)`);
-    onNotice?.('ok', `تم اعتماد أمر الإنتاج ${ord.orderNo} (${ord.targetCartons} كرتونة × ${ord.cansPerCarton} = ${ord.targetCans} علبة)`);
+    if (res.ok) {
+      const ord = res.data as ProductionOrder | undefined;
+      onNotice?.('ok', res.replayed ? res.message : `تم اعتماد أمر الإنتاج ${ord?.orderNo || ''} (${cartonsNum} كرتونة × ${cansPerCarton} = ${totalCans} علبة)`);
+    } else {
+      onNotice?.('err', res.message);
+    }
   };
 
   const handleIssueMaterials = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!orderToIssue || !canCreate) return;
+    if (!orderToIssue || !canCreate || issueGuard.isSubmitting) return;
     const wh = warehouses.find((w) => Number(w.id) === Number(orderToIssue.rawWarehouseId)) || rawWarehouse;
     const mat = factoryItems.find((i) => Number(i.id) === Number(issueMatId));
     if (!wh || !mat) {
       onNotice?.('err', 'تحقق من مخزن المواد الخام والمادة المطلوب صرفها');
       return;
     }
-    try {
-      const actor = userProfile?.fullName || userProfile?.username || 'أمين مخزن الخام';
-      const { order: updatedOrder, state } = issueRawMaterialsForOrderInState(
-        { movements, balances },
-        orderToIssue,
-        wh,
-        [
-          {
-            itemId: Number(mat.id),
-            itemName: mat.name,
-            qty: Number(issueQty) || 0,
-            returnedQty: Number(returnQty) || 0,
-            wastedQty: Number(wasteQty) || 0,
-            unit: mat.unit || 'كجم',
-            batchNumber: orderToIssue.batchNumber
-          }
-        ],
-        actor
-      );
-      await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
-      await ErpDataService.saveRecord('production_orders', updatedOrder.syncUuid, updatedOrder);
+    const actor = userProfile?.fullName || userProfile?.username || 'أمين مخزن الخام';
+    const res = await issueGuard.runGuarded({
+      guardKey: `prod_issue_${orderToIssue.syncUuid}_${mat.id}_${issueQty}`,
+      operationType: 'GOODS_ISSUE',
+      userId: userProfile?.username || actor,
+      documentReference: `${orderToIssue.syncUuid}-ISSUE-${mat.id}`,
+      targetCollection: 'production_orders',
+      payloadSummary: `صرف ${issueQty} ${mat.unit} من ${mat.name} لأمر ${orderToIssue.orderNo}`,
+      execute: async () => {
+        const { order: updatedOrder, state } = issueRawMaterialsForOrderInState(
+          { movements, balances },
+          orderToIssue,
+          wh,
+          [
+            {
+              itemId: Number(mat.id),
+              itemName: mat.name,
+              qty: Number(issueQty) || 0,
+              returnedQty: Number(returnQty) || 0,
+              wastedQty: Number(wasteQty) || 0,
+              unit: mat.unit || 'كجم',
+              batchNumber: orderToIssue.batchNumber
+            }
+          ],
+          actor
+        );
+        await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
+        await ErpDataService.saveRecord('production_orders', updatedOrder.syncUuid, updatedOrder);
 
-      const unitCostEgp = Number(mat.unitCostEgp || 0);
-      const netUsedQty = Math.max(0, (Number(issueQty) || 0) - (Number(returnQty) || 0) - (Number(wasteQty) || 0));
-      const issueJournal = buildProductionIssueJournalPayload({
-        orderSyncUuid: updatedOrder.syncUuid,
-        orderNo: updatedOrder.orderNo,
-        orderDate: updatedOrder.orderDate,
-        productName: updatedOrder.productName,
-        netIssuedCost: netUsedQty * unitCostEgp,
-        wasteCost: (Number(wasteQty) || 0) * unitCostEgp,
-        actor,
-        currency: 'EGP'
-      });
-      await ErpDataService.persistJournalPayload(issueJournal).catch(() => {});
+        const unitCostEgp = Number(mat.unitCostEgp || 0);
+        const netUsedQty = Math.max(0, (Number(issueQty) || 0) - (Number(returnQty) || 0) - (Number(wasteQty) || 0));
+        const issueJournal = buildProductionIssueJournalPayload({
+          orderSyncUuid: updatedOrder.syncUuid,
+          orderNo: updatedOrder.orderNo,
+          orderDate: updatedOrder.orderDate,
+          productName: updatedOrder.productName,
+          netIssuedCost: netUsedQty * unitCostEgp,
+          wasteCost: (Number(wasteQty) || 0) * unitCostEgp,
+          actor,
+          currency: 'EGP'
+        });
+        await ErpDataService.persistJournalPayload(issueJournal).catch(() => {});
+        await ErpDataService.logAudit(actor, 'ISSUE_PRODUCTION_MATERIALS', `صرف ${issueQty} ${mat.unit} من ${mat.name} لأمر ${updatedOrder.orderNo}`);
+        return { resultReference: updatedOrder.syncUuid, result: updatedOrder };
+      }
+    });
 
-      await ErpDataService.logAudit(actor, 'ISSUE_PRODUCTION_MATERIALS', `صرف ${issueQty} ${mat.unit} من ${mat.name} لأمر ${updatedOrder.orderNo}`);
-      onNotice?.('ok', `تم صرف المواد الخام لأمر ${updatedOrder.orderNo} وتحديث رصيد مخزن المواد الخام`);
+    if (res.ok) {
+      onNotice?.('ok', res.replayed ? res.message : `تم صرف المواد الخام لأمر ${orderToIssue.orderNo} وتحديث رصيد مخزن المواد الخام`);
       setOrderToIssue(null);
-    } catch (err: any) {
-      onNotice?.('err', err?.message || 'فشل صرف المواد الخام');
+    } else {
+      onNotice?.('err', res.message);
     }
   };
 
   const handleSubmitQc = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!orderToInspect || !canCreate) return;
+    if (!orderToInspect || !canCreate || qcGuard.isSubmitting) return;
     const wh = warehouses.find((w) => Number(w.id) === Number(orderToInspect.fgWarehouseId)) || fgWarehouse;
     if (!wh) {
       onNotice?.('err', 'لم يتم العثور على مخزن الإنتاج التام FINISHED_GOODS');
@@ -671,62 +722,79 @@ export const WebProductionOrderQcPanel: React.FC<{
       products[0]?.id ||
       Date.now();
     const formula = formulations.find((f) => Number(f.id) === Number(orderToInspect.formulaId));
+    const actor = userProfile?.fullName || userProfile?.username || 'مسؤول الجودة';
 
-    try {
-      const actor = userProfile?.fullName || userProfile?.username || 'مسؤول الجودة';
-      const { qc, order: updatedOrder, state } = inspectQcAndPostToFinishedGoodsInState(
-        { movements, balances },
-        {
-          order: orderToInspect,
-          fgWarehouse: wh,
-          productId: Number(matchingProductId),
-          measuredDensity: Number(qcDensity) || 1.25,
-          expectedDensity: formula?.calculatedDensity || undefined,
-          measuredViscosity: qcViscosity,
-          colorMatchPassed: qcColorMatch,
-          goodCans: Number(qcGoodCans) || 0,
-          rejectedCans: Number(qcRejectedCans) || 0,
-          reworkCans: Number(qcReworkCans) || 0,
-          forceReject: qcForceReject,
-          inspectorName: actor,
-          notes: qcNotes
+    const res = await qcGuard.runGuarded({
+      guardKey: `prod_qc_${orderToInspect.syncUuid}`,
+      operationType: 'APPROVE_INVOICE',
+      userId: userProfile?.username || actor,
+      documentReference: `QC-${orderToInspect.syncUuid}`,
+      targetCollection: 'qc_inspections',
+      payloadSummary: `فحص جودة QC لأمر ${orderToInspect.orderNo}`,
+      execute: async () => {
+        const { qc, order: updatedOrder, state } = inspectQcAndPostToFinishedGoodsInState(
+          { movements, balances },
+          {
+            order: orderToInspect,
+            fgWarehouse: wh,
+            productId: Number(matchingProductId),
+            measuredDensity: Number(qcDensity) || 1.25,
+            expectedDensity: formula?.calculatedDensity || undefined,
+            measuredViscosity: qcViscosity,
+            colorMatchPassed: qcColorMatch,
+            goodCans: Number(qcGoodCans) || 0,
+            rejectedCans: Number(qcRejectedCans) || 0,
+            reworkCans: Number(qcReworkCans) || 0,
+            forceReject: qcForceReject,
+            inspectorName: actor,
+            notes: qcNotes
+          }
+        );
+
+        await ErpDataService.saveRecord('qc_inspections', qc.syncUuid, qc);
+        await ErpDataService.saveRecord('production_orders', updatedOrder.syncUuid, updatedOrder);
+        await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
+
+        if (qc.postedToStock) {
+          const matchedProd = products.find((p) => Number(p.id) === Number(matchingProductId));
+          const unitCost = Number(matchedProd?.purchasePrice || matchedProd?.costPrice || formula?.costPerKg || 0);
+          const fgJournal = buildQcFinishedGoodsJournalPayload({
+            qcSyncUuid: qc.syncUuid,
+            qcNo: qc.qcNo,
+            orderNo: updatedOrder.orderNo,
+            productName: updatedOrder.productName,
+            producedFullCartons: updatedOrder.producedFullCartons,
+            fgTotalCost: updatedOrder.producedFullCartons * unitCost,
+            inspectorName: actor,
+            currency: 'EGP'
+          });
+          await ErpDataService.persistJournalPayload(fgJournal).catch(() => {});
         }
-      );
 
-      await ErpDataService.saveRecord('qc_inspections', qc.syncUuid, qc);
-      await ErpDataService.saveRecord('production_orders', updatedOrder.syncUuid, updatedOrder);
-      await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
-
-      if (qc.postedToStock) {
-        const matchedProd = products.find((p) => Number(p.id) === Number(matchingProductId));
-        const unitCost = Number(matchedProd?.purchasePrice || matchedProd?.costPrice || formula?.costPerKg || 0);
-        const fgJournal = buildQcFinishedGoodsJournalPayload({
-          qcSyncUuid: qc.syncUuid,
-          qcNo: qc.qcNo,
-          orderNo: updatedOrder.orderNo,
-          productName: updatedOrder.productName,
-          producedFullCartons: updatedOrder.producedFullCartons,
-          fgTotalCost: updatedOrder.producedFullCartons * unitCost,
-          inspectorName: actor,
-          currency: 'EGP'
-        });
-        await ErpDataService.persistJournalPayload(fgJournal).catch(() => {});
+        await ErpDataService.logAudit(
+          actor,
+          'QC_INSPECTION_GATE',
+          `فحص الجودة ${qc.qcNo} لأمر ${updatedOrder.orderNo}: ${qc.status} (${qc.postedToStock ? 'مرحّل للإنتاج التام' : 'محجور'})`
+        );
+        return { resultReference: qc.syncUuid, result: { qc, updatedOrder } };
       }
+    });
 
-      await ErpDataService.logAudit(
-        actor,
-        'QC_INSPECTION_GATE',
-        `فحص الجودة ${qc.qcNo} لأمر ${updatedOrder.orderNo}: ${qc.status} (${qc.postedToStock ? 'مرحّل للإنتاج التام' : 'محجور'})`
-      );
-      onNotice?.(
-        qc.postedToStock ? 'ok' : 'err',
-        qc.postedToStock
-          ? `اجتاز الفحص (${qc.qcNo}): تم ترحيل ${updatedOrder.producedFullCartons} كرتونة إلى مخزن الإنتاج التام`
-          : `فشل الفحص أو حُجر (${qc.qcNo}): المنتجات محجورة ولا يُسمح ببيعها أو تحويلها للمبيعات`
-      );
+    if (res.ok) {
+      const payload = res.data as { qc: QcInspection; updatedOrder: ProductionOrder } | undefined;
+      if (payload?.qc) {
+        onNotice?.(
+          payload.qc.postedToStock ? 'ok' : 'err',
+          payload.qc.postedToStock
+            ? `اجتاز الفحص (${payload.qc.qcNo}): تم ترحيل ${payload.updatedOrder.producedFullCartons} كرتونة إلى مخزن الإنتاج التام`
+            : `فشل الفحص أو حُجر (${payload.qc.qcNo}): المنتجات محجورة ولا يُسمح ببيعها أو تحويلها للمبيعات`
+        );
+      } else {
+        onNotice?.('ok', res.message);
+      }
       setOrderToInspect(null);
-    } catch (err: any) {
-      onNotice?.('err', err?.message || 'فشل تسجيل فحص الجودة QC');
+    } else {
+      onNotice?.('err', res.message);
     }
   };
 
@@ -874,7 +942,14 @@ export const WebProductionOrderQcPanel: React.FC<{
         </div>
 
         <div className="flex items-end">
-          <GlassButton type="submit" variant="primary" disabled={!canCreate} className="w-full justify-center">
+          <GlassButton
+            type="submit"
+            variant="primary"
+            disabled={!canCreate}
+            isLoading={createOrderGuard.isSubmitting}
+            loadingText={OPERATION_LOADING_LABELS.CREATE}
+            className="w-full justify-center"
+          >
             + اعتماد أمر إنتاج BOM ({totalCans} علبة / {expectedKg.toFixed(1)} كجم)
           </GlassButton>
         </div>
@@ -1038,10 +1113,15 @@ export const WebProductionOrderQcPanel: React.FC<{
             </div>
           </div>
           <div className="flex justify-end gap-2 pt-2">
-            <GlassButton type="button" variant="secondary" onClick={() => setOrderToIssue(null)}>
+            <GlassButton type="button" variant="secondary" onClick={() => setOrderToIssue(null)} disabled={issueGuard.isSubmitting}>
               إلغاء
             </GlassButton>
-            <GlassButton type="submit" variant="primary">
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={issueGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.GOODS_ISSUE}
+            >
               تأكيد الصرف من المخزن الخام
             </GlassButton>
           </div>
@@ -1123,10 +1203,15 @@ export const WebProductionOrderQcPanel: React.FC<{
             />
           </div>
           <div className="flex justify-end gap-2 pt-2">
-            <GlassButton type="button" variant="secondary" onClick={() => setOrderToInspect(null)}>
+            <GlassButton type="button" variant="secondary" onClick={() => setOrderToInspect(null)} disabled={qcGuard.isSubmitting}>
               إلغاء
             </GlassButton>
-            <GlassButton type="submit" variant="primary">
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={qcGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.APPROVE_INVOICE}
+            >
               اعتماد قرار الجودة QC
             </GlassButton>
           </div>
@@ -1180,6 +1265,10 @@ export const WebThreeWarehouseTransferPanel: React.FC<{
   }, [warehouses, products]);
 
   const canOperate = canPerformAction(GRANULAR_ACTIONS.CREATE) || canPerformAction(GRANULAR_ACTIONS.INVENTORY_OPS);
+  const transferCreateGuard = useTransactionGuard('phase3_create_transfer', 'STOCK_TRANSFER');
+  const transferAdvanceGuard = useTransactionGuard('phase3_advance_transfer', 'STOCK_TRANSFER');
+  const reverseGuard = useTransactionGuard('phase3_reverse_movement', 'UPDATE');
+
   const filteredBalances = useMemo(
     () => (classFilter === 'ALL' ? balances : balances.filter((b) => b.warehouseClass === classFilter)),
     [balances, classFilter]
@@ -1187,7 +1276,7 @@ export const WebThreeWarehouseTransferPanel: React.FC<{
 
   const handleCreateTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canOperate) return;
+    if (!canOperate || transferCreateGuard.isSubmitting) return;
     const src = warehouses.find((w) => Number(w.id) === Number(srcWarehouseId));
     const dst = warehouses.find((w) => Number(w.id) === Number(dstWarehouseId));
     const prod = products.find((p) => Number(p.id) === Number(trfProductId));
@@ -1211,113 +1300,134 @@ export const WebThreeWarehouseTransferPanel: React.FC<{
       return;
     }
 
-    const now = Date.now();
-    const trfNo = `TRF-${String(now).slice(-6)}`;
     const actor = userProfile?.username || 'WEB_USER';
-    const transfer: WarehouseTransfer = {
-      id: now,
-      syncUuid: `TRF-${now}`,
-      transferNo: trfNo,
-      transferDate: new Date(now).toISOString().split('T')[0],
-      sourceWarehouseId: src.id,
-      sourceWarehouseName: src.name,
-      sourceWarehouseClass: srcCls,
-      destinationWarehouseId: dst.id,
-      destinationWarehouseName: dst.name,
-      destinationWarehouseClass: dstCls,
-      status: 'PENDING_APPROVAL',
-      totalCost: 0,
-      currency: dst.currency || 'SDG',
-      notes: trfNotes.trim(),
-      createdBy: actor,
-      recordVersion: 1,
-      createdAt: now,
-      updatedAt: now
-    };
-    const item: WarehouseTransferItem = {
-      id: now + 1,
-      transferId: now,
-      transferUuid: transfer.syncUuid,
-      itemCategory: 'FINISHED_GOOD',
-      itemId: Number(prod.id),
-      itemCode: prod.sku,
-      itemName: prod.name,
-      unit: prod.unit || 'كرتونة',
-      requestedQty: qty,
-      approvedQty: qty,
-      shippedQty: 0,
-      receivedQty: 0,
-      rejectedQty: 0,
-      unitCost: Number(prod.costPrice || 0),
-      totalCost: qty * Number(prod.costPrice || 0),
-      batchNumber: '',
-      qcApprovedRequired: srcCls === 'FINISHED_GOODS',
-      qcApproved: true
-    };
-    await ErpDataService.saveRecord('warehouse_transfers', transfer.syncUuid, transfer);
-    await ErpDataService.saveRecord('warehouse_transfer_items', `${transfer.syncUuid}-1`, item);
-    onNotice?.('ok', `تم إنشاء مستند التحويل ${trfNo} من (${src.name}) إلى (${dst.name})`);
-    setShowTransferForm(false);
-    setTrfNotes('');
+    const res = await transferCreateGuard.runGuarded({
+      guardKey: `trf_create_${src.id}_${dst.id}_${prod.id}_${qty}`,
+      operationType: 'STOCK_TRANSFER',
+      userId: actor,
+      documentReference: `TRF-${src.id}-${dst.id}-${prod.id}`,
+      targetCollection: 'warehouse_transfers',
+      payloadSummary: `تحويل ${qty} ${prod.name} من ${src.name} إلى ${dst.name}`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const trfNo = `TRF-${String(now).slice(-6)}`;
+        const trfUuid = `TRF-${idempotencyKey}`;
+        const transfer: WarehouseTransfer = {
+          id: now,
+          syncUuid: trfUuid,
+          transferNo: trfNo,
+          transferDate: new Date(now).toISOString().split('T')[0],
+          sourceWarehouseId: src.id,
+          sourceWarehouseName: src.name,
+          sourceWarehouseClass: srcCls,
+          destinationWarehouseId: dst.id,
+          destinationWarehouseName: dst.name,
+          destinationWarehouseClass: dstCls,
+          status: 'PENDING_APPROVAL',
+          totalCost: 0,
+          currency: dst.currency || 'SDG',
+          notes: trfNotes.trim(),
+          createdBy: actor,
+          recordVersion: 1,
+          createdAt: now,
+          updatedAt: now
+        };
+        const item: WarehouseTransferItem = {
+          id: now + 1,
+          transferId: now,
+          transferUuid: trfUuid,
+          itemCategory: 'FINISHED_GOOD',
+          itemId: Number(prod.id),
+          itemCode: prod.sku,
+          itemName: prod.name,
+          unit: prod.unit || 'كرتونة',
+          requestedQty: qty,
+          approvedQty: qty,
+          shippedQty: 0,
+          receivedQty: 0,
+          rejectedQty: 0,
+          unitCost: Number(prod.costPrice || 0),
+          totalCost: qty * Number(prod.costPrice || 0),
+          batchNumber: '',
+          qcApprovedRequired: srcCls === 'FINISHED_GOODS',
+          qcApproved: true
+        };
+        await ErpDataService.saveRecord('warehouse_transfers', trfUuid, transfer);
+        await ErpDataService.saveRecord('warehouse_transfer_items', `${trfUuid}-1`, item);
+        return { resultReference: trfUuid, result: trfNo };
+      }
+    });
+
+    if (res.ok) {
+      onNotice?.('ok', res.replayed ? res.message : `تم إنشاء مستند التحويل ${res.data || ''} من (${src.name}) إلى (${dst.name})`);
+      setShowTransferForm(false);
+      setTrfNotes('');
+    } else {
+      onNotice?.('err', res.message);
+    }
   };
 
   const handleAdvanceTransfer = async (trf: WarehouseTransfer, action: 'APPROVE' | 'DISPATCH' | 'RECEIVE') => {
-    if (!canOperate) return;
+    if (!canOperate || transferAdvanceGuard.isSubmitting) return;
     const items = transferItems.filter((it) => it.transferUuid === trf.syncUuid || it.transferId === trf.id);
     const actor = userProfile?.fullName || userProfile?.username || 'WEB_USER';
-    const now = Date.now();
 
-    try {
-      if (action === 'APPROVE') {
-        const sod = canApproveTransfer(trf, userProfile, true);
-        if (!sod.ok) throw new Error(sod.error || 'غير مسموح بالاعتماد');
-        await ErpDataService.saveRecord('warehouse_transfers', trf.syncUuid, {
-          ...trf,
-          status: 'APPROVED',
-          approvedBy: actor,
-          recordVersion: trf.recordVersion + 1,
-          updatedAt: now
-        });
-        onNotice?.('ok', `تم اعتماد مستند التحويل ${trf.transferNo}`);
-        return;
-      }
-
-      if (action === 'DISPATCH') {
-        const srcWh = warehouses.find((w) => Number(w.id) === Number(trf.sourceWarehouseId));
-        if (!srcWh) throw new Error('لم يتم العثور على مخزن المصدر');
-        let ledgerState = { movements, balances };
-        for (const it of items) {
-          ledgerState = postMovementInState(ledgerState, {
-            warehouse: srcWh,
-            movementType: 'WAREHOUSE_TRANSFER_OUT',
-            itemCategory: it.itemCategory,
-            itemId: it.itemId,
-            itemName: it.itemName,
-            quantity: it.approvedQty || it.requestedQty,
-            unit: it.unit,
-            referenceDocType: 'WAREHOUSE_TRANSFER',
-            referenceDocId: trf.id,
-            referenceDocNo: trf.transferNo,
-            reason: `شحن تحويل مخزني ${trf.transferNo} إلى ${trf.destinationWarehouseName}`,
-            qcApproved: it.qcApproved,
-            performedBy: actor,
-            idempotencyKey: `TRF-OUT-${trf.syncUuid}-${it.itemId}`
-          }).state;
+    const res = await transferAdvanceGuard.runGuarded({
+      guardKey: `trf_advance_${trf.syncUuid}_${action}`,
+      operationType: 'STOCK_TRANSFER',
+      userId: userProfile?.username || actor,
+      documentReference: `${trf.syncUuid}-${action}`,
+      targetCollection: 'warehouse_transfers',
+      payloadSummary: `تحويل مخزني ${trf.transferNo} (${action})`,
+      execute: async () => {
+        const now = Date.now();
+        if (action === 'APPROVE') {
+          const sod = canApproveTransfer(trf, userProfile, true);
+          if (!sod.ok) throw new Error(sod.error || 'غير مسموح بالاعتماد');
+          await ErpDataService.saveRecord('warehouse_transfers', trf.syncUuid, {
+            ...trf,
+            status: 'APPROVED',
+            approvedBy: actor,
+            recordVersion: trf.recordVersion + 1,
+            updatedAt: now
+          });
+          return { resultReference: trf.syncUuid, result: `تم اعتماد مستند التحويل ${trf.transferNo}` };
         }
-        await persistMovementLedgerDiff(movements, ledgerState.movements, balances, ledgerState.balances);
-        await ErpDataService.saveRecord('warehouse_transfers', trf.syncUuid, {
-          ...trf,
-          status: 'IN_TRANSIT',
-          dispatchedBy: actor,
-          dispatchedAt: now,
-          recordVersion: trf.recordVersion + 1,
-          updatedAt: now
-        });
-        onNotice?.('ok', `تم شحن التحويل ${trf.transferNo} وهو في الطريق الآن`);
-        return;
-      }
 
-      if (action === 'RECEIVE') {
+        if (action === 'DISPATCH') {
+          const srcWh = warehouses.find((w) => Number(w.id) === Number(trf.sourceWarehouseId));
+          if (!srcWh) throw new Error('لم يتم العثور على مخزن المصدر');
+          let ledgerState = { movements, balances };
+          for (const it of items) {
+            ledgerState = postMovementInState(ledgerState, {
+              warehouse: srcWh,
+              movementType: 'WAREHOUSE_TRANSFER_OUT',
+              itemCategory: it.itemCategory,
+              itemId: it.itemId,
+              itemName: it.itemName,
+              quantity: it.approvedQty || it.requestedQty,
+              unit: it.unit,
+              referenceDocType: 'WAREHOUSE_TRANSFER',
+              referenceDocId: trf.id,
+              referenceDocNo: trf.transferNo,
+              reason: `شحن تحويل مخزني ${trf.transferNo} إلى ${trf.destinationWarehouseName}`,
+              qcApproved: it.qcApproved,
+              performedBy: actor,
+              idempotencyKey: `TRF-OUT-${trf.syncUuid}-${it.itemId}`
+            }).state;
+          }
+          await persistMovementLedgerDiff(movements, ledgerState.movements, balances, ledgerState.balances);
+          await ErpDataService.saveRecord('warehouse_transfers', trf.syncUuid, {
+            ...trf,
+            status: 'IN_TRANSIT',
+            dispatchedBy: actor,
+            dispatchedAt: now,
+            recordVersion: trf.recordVersion + 1,
+            updatedAt: now
+          });
+          return { resultReference: trf.syncUuid, result: `تم شحن التحويل ${trf.transferNo} وهو في الطريق الآن` };
+        }
+
         const dstWh = warehouses.find((w) => Number(w.id) === Number(trf.destinationWarehouseId));
         if (!dstWh) throw new Error('لم يتم العثور على مخزن الوجهة');
         let ledgerState = { movements, balances };
@@ -1348,31 +1458,46 @@ export const WebThreeWarehouseTransferPanel: React.FC<{
           recordVersion: trf.recordVersion + 1,
           updatedAt: now
         });
-        onNotice?.('ok', `تم استلام التحويل ${trf.transferNo} في ${dstWh.name} بنجاح`);
+        return { resultReference: trf.syncUuid, result: `تم استلام التحويل ${trf.transferNo} في ${dstWh.name} بنجاح` };
       }
-    } catch (err: any) {
-      onNotice?.('err', err?.message || 'فشل تحديث حالة التحويل');
+    });
+
+    if (res.ok) {
+      onNotice?.('ok', res.replayed ? res.message : String(res.data || res.message));
+    } else {
+      onNotice?.('err', res.message);
     }
   };
 
   const handleReverseMovement = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!mvToReverse) return;
-    try {
-      const actor = userProfile?.fullName || userProfile?.username || 'المدير';
-      const { reversalMovement, state } = reverseMovementInState(
-        { movements, balances },
-        mvToReverse.id,
-        reverseReason,
-        actor
-      );
-      await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
-      await ErpDataService.logAudit(actor, 'REVERSE_INVENTORY_MOVEMENT', `قيد عكسي ${reversalMovement.documentNo} للحركة ${mvToReverse.documentNo}`);
-      onNotice?.('ok', `تم تنفيذ القيد العكسي ${reversalMovement.documentNo} بنجاح مع حفظ سجل التدقيق`);
+    if (!mvToReverse || reverseGuard.isSubmitting) return;
+    const actor = userProfile?.fullName || userProfile?.username || 'المدير';
+    const res = await reverseGuard.runGuarded({
+      guardKey: `rev_mv_${mvToReverse.syncUuid}`,
+      operationType: 'UPDATE',
+      userId: userProfile?.username || actor,
+      documentReference: mvToReverse.syncUuid,
+      targetCollection: 'inventory_movements',
+      payloadSummary: `قيد عكسي للحركة ${mvToReverse.documentNo}`,
+      execute: async () => {
+        const { reversalMovement, state } = reverseMovementInState(
+          { movements, balances },
+          mvToReverse.id,
+          reverseReason,
+          actor
+        );
+        await persistMovementLedgerDiff(movements, state.movements, balances, state.balances);
+        await ErpDataService.logAudit(actor, 'REVERSE_INVENTORY_MOVEMENT', `قيد عكسي ${reversalMovement.documentNo} للحركة ${mvToReverse.documentNo}`);
+        return { resultReference: reversalMovement.syncUuid, result: reversalMovement.documentNo };
+      }
+    });
+    if (res.ok) {
+      onNotice?.('ok', res.replayed ? res.message : `تم تنفيذ القيد العكسي ${res.data || ''} بنجاح مع حفظ سجل التدقيق`);
       setMvToReverse(null);
       setReverseReason('');
-    } catch (err: any) {
-      onNotice?.('err', err?.message || 'تعذر تنفيذ القيد العكسي');
+    } else {
+      onNotice?.('err', res.message);
     }
   };
 
@@ -1482,7 +1607,13 @@ export const WebThreeWarehouseTransferPanel: React.FC<{
             />
           </div>
           <div className="flex items-end">
-            <GlassButton type="submit" variant="primary" className="w-full justify-center">
+            <GlassButton
+              type="submit"
+              variant="primary"
+              className="w-full justify-center"
+              isLoading={transferCreateGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.STOCK_TRANSFER}
+            >
               إنشاء مستند تحويل
             </GlassButton>
           </div>
@@ -1535,17 +1666,35 @@ export const WebThreeWarehouseTransferPanel: React.FC<{
                   <div className="flex items-center gap-2">
                     <GlassBadge variant={trf.status === 'RECEIVED' ? 'green' : 'cyan'}>{trf.status}</GlassBadge>
                     {(trf.status === 'DRAFT' || trf.status === 'PENDING_APPROVAL') && canOperate && (
-                      <GlassButton size="sm" variant="secondary" onClick={() => handleAdvanceTransfer(trf, 'APPROVE')}>
+                      <GlassButton
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => handleAdvanceTransfer(trf, 'APPROVE')}
+                        isLoading={transferAdvanceGuard.isSubmitting}
+                        loadingText={OPERATION_LOADING_LABELS.STOCK_TRANSFER}
+                      >
                         <CheckCircle2 className="w-3.5 h-3.5 ml-1 inline" /> اعتماد
                       </GlassButton>
                     )}
                     {trf.status === 'APPROVED' && canOperate && (
-                      <GlassButton size="sm" variant="secondary" onClick={() => handleAdvanceTransfer(trf, 'DISPATCH')}>
+                      <GlassButton
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => handleAdvanceTransfer(trf, 'DISPATCH')}
+                        isLoading={transferAdvanceGuard.isSubmitting}
+                        loadingText={OPERATION_LOADING_LABELS.STOCK_TRANSFER}
+                      >
                         شحن
                       </GlassButton>
                     )}
                     {trf.status === 'IN_TRANSIT' && canOperate && (
-                      <GlassButton size="sm" variant="primary" onClick={() => handleAdvanceTransfer(trf, 'RECEIVE')}>
+                      <GlassButton
+                        size="sm"
+                        variant="primary"
+                        onClick={() => handleAdvanceTransfer(trf, 'RECEIVE')}
+                        isLoading={transferAdvanceGuard.isSubmitting}
+                        loadingText={OPERATION_LOADING_LABELS.STOCK_TRANSFER}
+                      >
                         استلام نهائي
                       </GlassButton>
                     )}
@@ -1618,10 +1767,15 @@ export const WebThreeWarehouseTransferPanel: React.FC<{
             />
           </div>
           <div className="flex justify-end gap-2 pt-2">
-            <GlassButton type="button" variant="secondary" onClick={() => setMvToReverse(null)}>
+            <GlassButton type="button" variant="secondary" onClick={() => setMvToReverse(null)} disabled={reverseGuard.isSubmitting}>
               إلغاء
             </GlassButton>
-            <GlassButton type="submit" variant="primary">
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={reverseGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.UPDATE}
+            >
               تنفيذ القيد العكسي
             </GlassButton>
           </div>

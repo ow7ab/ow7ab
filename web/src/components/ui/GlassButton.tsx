@@ -1,15 +1,18 @@
 import React from 'react';
+import { Loader2 } from 'lucide-react';
 
 interface GlassButtonProps {
   children: React.ReactNode;
   variant?: 'primary' | 'secondary' | 'cyan';
   icon?: React.ReactNode;
-  onClick?: () => void;
+  onClick?: (e: React.MouseEvent<HTMLButtonElement>) => void;
   className?: string;
   type?: 'button' | 'submit' | 'reset';
   disabled?: boolean;
   isLoading?: boolean;
+  loadingText?: string;
   size?: 'sm' | 'md' | 'lg';
+  title?: string;
 }
 
 export const GlassButton: React.FC<GlassButtonProps> = ({
@@ -21,7 +24,9 @@ export const GlassButton: React.FC<GlassButtonProps> = ({
   type = 'button',
   disabled = false,
   isLoading = false,
-  size = 'md'
+  loadingText,
+  size = 'md',
+  title
 }) => {
   const variantClass = {
     primary: 'btn-primary',
@@ -36,12 +41,27 @@ export const GlassButton: React.FC<GlassButtonProps> = ({
     <button
       type={type}
       disabled={isDisabled}
-      onClick={onClick}
+      aria-busy={isLoading}
+      title={title}
+      onClick={(e) => {
+        if (isDisabled) {
+          e.preventDefault();
+          return;
+        }
+        onClick?.(e);
+      }}
       className={`btn ${variantClass} ${sizeClass} ${className}`}
-      style={{ opacity: isDisabled ? 0.6 : 1, cursor: isDisabled ? 'not-allowed' : 'pointer' }}
+      style={{ opacity: isDisabled ? 0.65 : 1, cursor: isDisabled ? 'not-allowed' : 'pointer' }}
     >
-      {icon && <span style={{ display: 'inline-flex', alignItems: 'center' }}>{icon}</span>}
-      {children}
+      {isLoading ? (
+        <span style={{ display: 'inline-flex', alignItems: 'center' }}>
+          <Loader2 className="w-4 h-4 animate-spin" />
+        </span>
+      ) : (
+        icon && <span style={{ display: 'inline-flex', alignItems: 'center' }}>{icon}</span>
+      )}
+      {isLoading && loadingText ? loadingText : children}
     </button>
   );
 };
+

@@ -25,11 +25,11 @@ object PmpAppVersionContract {
     const val APPLICATION_ID: String = "com.aistudio.pmppaints.erp"
     val CURRENT_VERSION_CODE: Int = com.example.BuildConfig.VERSION_CODE
     val CURRENT_VERSION_NAME: String = com.example.BuildConfig.VERSION_NAME
-    const val LAST_PUBLISHED_VERSION_CODE: Int = 17
-    const val LAST_PUBLISHED_VERSION_NAME: String = "v4.2"
+    const val LAST_PUBLISHED_VERSION_CODE: Int = 19
+    const val LAST_PUBLISHED_VERSION_NAME: String = "v19.0"
     const val MINIMUM_SUPPORTED_VERSION_CODE: Int = 10
     private val cleanCurrentVersionName: String =
-        CURRENT_VERSION_NAME.removePrefix("v").removePrefix("V").trim().ifBlank { "18.0" }
+        CURRENT_VERSION_NAME.removePrefix("v").removePrefix("V").trim().ifBlank { "20.0" }
     val DEFAULT_RELEASE_BUILD_ID: String = com.example.BuildConfig.BUILD_ID
     val DEFAULT_APK_FILE_NAME: String = "pmp-paints-v${cleanCurrentVersionName}-b${CURRENT_VERSION_CODE}.apk"
     val DEFAULT_PAGES_APK_URL: String = "https://ow7ab.github.io/ow7ab/$DEFAULT_APK_FILE_NAME"
@@ -62,7 +62,7 @@ object PmpAppVersionContract {
             .substringBefore(" ")
         val parts = cleaned.split(".").mapNotNull { it.toIntOrNull() }
         return SemanticVersion(
-            major = parts.getOrElse(0) { 18 },
+            major = parts.getOrElse(0) { 20 },
             minor = parts.getOrElse(1) { 0 },
             patch = parts.getOrElse(2) { 0 }
         )

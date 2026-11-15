@@ -53,6 +53,8 @@ fun InventoryScreen(
     val currentUser by viewModel.currentUser.collectAsState()
     val isInitialDataLoading by viewModel.isInitialDataLoading.collectAsState()
     val dataLoadError by viewModel.dataLoadError.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     val isManager = currentUser.isSystemManager()
     val canDeleteOrZero = remember(currentUser) {
         currentUser.isSystemManager() || currentUser.hasModulePermission("صلاحية الحذف والتصفير")
@@ -807,9 +809,12 @@ fun InventoryScreen(
 
                             Spacer(modifier = Modifier.height(16.dp))
 
+                            val intakeGuard = "add_product_intake"
                             GlassButton(
                                 text = "حفظ",
                                 icon = Icons.Default.Save,
+                                isLoading = activeGuardKeys.contains(intakeGuard),
+                                loadingText = guardLoadingLabels[intakeGuard] ?: "جاري إضافة العملية...",
                                 onClick = {
                                     val qty = intakeCartons.toDoubleOrNull() ?: 1.0
                                     val pPrice = intakePurchasePrice.toDoubleOrNull() ?: 0.0
@@ -822,12 +827,19 @@ fun InventoryScreen(
                                         warehouseName = intakeWarehouse,
                                         purchasePrice = pPrice,
                                         salePrice = sPrice,
-                                        note = intakeNote
+                                        note = intakeNote,
+                                        guardKey = intakeGuard,
+                                        onComplete = { ok ->
+                                            if (ok) {
+                                                intakeCartons = "10"
+                                                selectedTab = 0
+                                            }
+                                        }
                                     )
-                                    intakeCartons = "10"
-                                    selectedTab = 0
                                 },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("inventory_intake_save_button")
                             )
 
                             Spacer(modifier = Modifier.height(8.dp))
@@ -1137,19 +1149,33 @@ fun InventoryScreen(
                 )
             },
             confirmButton = {
+                val addWhGuard = "add_warehouse"
                 GlassButton(
                     text = "حفظ المخزن",
+                    isLoading = activeGuardKeys.contains(addWhGuard),
+                    loadingText = guardLoadingLabels[addWhGuard] ?: "جاري الحفظ...",
                     onClick = {
                         if (newWarehouseName.isNotBlank()) {
-                            viewModel.addWarehouse(newWarehouseName)
-                            newWarehouseName = ""
-                            showAddWarehouseDialog = false
+                            viewModel.addWarehouse(
+                                name = newWarehouseName,
+                                guardKey = addWhGuard,
+                                onComplete = { ok ->
+                                    if (ok) {
+                                        newWarehouseName = ""
+                                        showAddWarehouseDialog = false
+                                    }
+                                }
+                            )
                         }
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { showAddWarehouseDialog = false })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains("add_warehouse"),
+                    onClick = { showAddWarehouseDialog = false }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1157,8 +1183,9 @@ fun InventoryScreen(
 
     // Modal: Edit Warehouse
     editingWarehouse?.let { wh ->
+        val updWhGuard = "update_warehouse_${wh.id}"
         AlertDialog(
-            onDismissRequest = { editingWarehouse = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(updWhGuard)) editingWarehouse = null },
             title = { Text(text = "تعديل بيانات المخزن", color = PmpCyan, fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1192,16 +1219,27 @@ fun InventoryScreen(
             confirmButton = {
                 GlassButton(
                     text = "حفظ التعديلات",
+                    isLoading = activeGuardKeys.contains(updWhGuard),
+                    loadingText = guardLoadingLabels[updWhGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
                         if (editWarehouseName.isNotBlank()) {
-                            viewModel.updateWarehouse(wh.id, editWarehouseName, editWarehouseActive)
-                            editingWarehouse = null
+                            viewModel.updateWarehouse(
+                                id = wh.id,
+                                name = editWarehouseName,
+                                active = editWarehouseActive,
+                                guardKey = updWhGuard,
+                                onComplete = { ok -> if (ok) editingWarehouse = null }
+                            )
                         }
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { editingWarehouse = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(updWhGuard),
+                    onClick = { editingWarehouse = null }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1209,8 +1247,9 @@ fun InventoryScreen(
 
     // Modal: Delete Warehouse Confirmation
     deletingWarehouse?.let { wh ->
+        val delWhGuard = "delete_warehouse_${wh.id}"
         AlertDialog(
-            onDismissRequest = { deletingWarehouse = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(delWhGuard)) deletingWarehouse = null },
             title = { Text(text = "حذف المخزن نهائياً", color = PmpRedLight, fontWeight = FontWeight.Bold) },
             text = {
                 Text(
@@ -1224,14 +1263,24 @@ fun InventoryScreen(
                 GlassButton(
                     text = "نعم، حذف نهائي",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(delWhGuard),
+                    loadingText = guardLoadingLabels[delWhGuard] ?: "جاري تنفيذ الحذف...",
                     onClick = {
-                        viewModel.deleteWarehouse(wh.id, wh.name)
-                        deletingWarehouse = null
+                        viewModel.deleteWarehouse(
+                            id = wh.id,
+                            name = wh.name,
+                            guardKey = delWhGuard,
+                            onComplete = { ok -> if (ok) deletingWarehouse = null }
+                        )
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { deletingWarehouse = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(delWhGuard),
+                    onClick = { deletingWarehouse = null }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1326,8 +1375,11 @@ fun InventoryScreen(
                 }
             },
             confirmButton = {
+                val addProdGuard = "add_product"
                 GlassButton(
                     text = "حفظ الصنف",
+                    isLoading = activeGuardKeys.contains(addProdGuard),
+                    loadingText = guardLoadingLabels[addProdGuard] ?: "جاري إضافة العملية...",
                     onClick = {
                         if (newProdName.isNotBlank()) {
                             val p = newProdPurchase.toDoubleOrNull() ?: 0.0
@@ -1338,18 +1390,27 @@ fun InventoryScreen(
                                 weight = newProdWeight,
                                 purchasePrice = p,
                                 salePrice = s,
-                                minimumStock = 10.0
+                                minimumStock = 10.0,
+                                guardKey = addProdGuard,
+                                onComplete = { ok ->
+                                    if (ok) {
+                                        newProdName = ""
+                                        newProdPurchase = ""
+                                        newProdSale = ""
+                                        showAddProductDialog = false
+                                    }
+                                }
                             )
-                            newProdName = ""
-                            newProdPurchase = ""
-                            newProdSale = ""
-                            showAddProductDialog = false
                         }
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { showAddProductDialog = false })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains("add_product"),
+                    onClick = { showAddProductDialog = false }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1357,8 +1418,9 @@ fun InventoryScreen(
 
     // Modal: Confirmation Dialog for Resetting Warehouse Stock
     warehouseToResetStock?.let { wh ->
+        val resetWhGuard = "reset_warehouse_stock_${wh.id}"
         AlertDialog(
-            onDismissRequest = { warehouseToResetStock = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(resetWhGuard)) warehouseToResetStock = null },
             title = {
                 Text(
                     text = "تصفير رصيد المخزن بالكامل",
@@ -1378,14 +1440,24 @@ fun InventoryScreen(
                 GlassButton(
                     text = "نعم، تصفير رصيد المخزن",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(resetWhGuard),
+                    loadingText = guardLoadingLabels[resetWhGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
-                        viewModel.resetWarehouseStock(wh.id, wh.name)
-                        warehouseToResetStock = null
+                        viewModel.resetWarehouseStock(
+                            warehouseId = wh.id,
+                            warehouseName = wh.name,
+                            guardKey = resetWhGuard,
+                            onComplete = { ok -> if (ok) warehouseToResetStock = null }
+                        )
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { warehouseToResetStock = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(resetWhGuard),
+                    onClick = { warehouseToResetStock = null }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1393,8 +1465,9 @@ fun InventoryScreen(
 
     // Modal: Confirmation Dialog for Deleting Product
     productToDelete?.let { pr ->
+        val delProdGuard = "delete_product_${pr.id}"
         AlertDialog(
-            onDismissRequest = { productToDelete = null },
+            onDismissRequest = { if (!activeGuardKeys.contains(delProdGuard)) productToDelete = null },
             title = {
                 Text(
                     text = "حذف الصنف نهائياً",
@@ -1414,14 +1487,24 @@ fun InventoryScreen(
                 GlassButton(
                     text = "نعم، حذف الصنف نهائياً",
                     gradient = PmpBrandRedGradient,
+                    isLoading = activeGuardKeys.contains(delProdGuard),
+                    loadingText = guardLoadingLabels[delProdGuard] ?: "جاري تنفيذ الحذف...",
                     onClick = {
-                        viewModel.deleteProduct(pr.id, pr.name)
-                        productToDelete = null
+                        viewModel.deleteProduct(
+                            productId = pr.id,
+                            productName = pr.name,
+                            guardKey = delProdGuard,
+                            onComplete = { ok -> if (ok) productToDelete = null }
+                        )
                     }
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { productToDelete = null })
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(delProdGuard),
+                    onClick = { productToDelete = null }
+                )
             },
             containerColor = PmpNavySurface
         )
@@ -1537,9 +1620,12 @@ fun InventoryScreen(
                 }
             },
             confirmButton = {
+                val adjGuard = "adjust_stock_${targetColor}_$currentWeightNorm"
                 GlassButton(
                     text = "حفظ وتحديث الرصيد",
                     gradient = GlassAccentBlueGradient,
+                    isLoading = activeGuardKeys.contains(adjGuard),
+                    loadingText = guardLoadingLabels[adjGuard] ?: "جاري تحديث البيانات...",
                     onClick = {
                         val qty = adjustQtyInput.trim().toDoubleOrNull()
                         if (qty != null) {
@@ -1549,9 +1635,10 @@ fun InventoryScreen(
                                 warehouseName = adjustWarehouseName,
                                 quantityInput = qty,
                                 operationMode = adjustOperationMode,
-                                note = adjustNoteInput
+                                note = adjustNoteInput,
+                                guardKey = adjGuard,
+                                onComplete = { ok -> if (ok) adjustingColorRow = null }
                             )
-                            adjustingColorRow = null
                         } else {
                             viewModel.postMessage("يرجى إدخال رقم صحيح للكمية", isError = true)
                         }
@@ -1559,7 +1646,12 @@ fun InventoryScreen(
                 )
             },
             dismissButton = {
-                GlassButton(text = "إلغاء", onClick = { adjustingColorRow = null })
+                val adjGuard = "adjust_stock_${targetColor}_$currentWeightNorm"
+                GlassButton(
+                    text = "إلغاء",
+                    enabled = !activeGuardKeys.contains(adjGuard),
+                    onClick = { adjustingColorRow = null }
+                )
             },
             containerColor = PmpNavySurface
         )

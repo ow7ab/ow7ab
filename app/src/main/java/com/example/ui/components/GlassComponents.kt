@@ -314,15 +314,21 @@ fun GlassButton(
     gradient: Brush = GlassAccentBlueGradient,
     textColor: Color = TextPureWhite,
     enabled: Boolean = true,
+    isLoading: Boolean = false,
+    loadingText: String? = null,
     contentPadding: PaddingValues = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
 ) {
+    val effectivelyEnabled = enabled && !isLoading
+    val displayText = if (isLoading && !loadingText.isNullOrBlank()) loadingText else text
+    val effectiveTextColor = if (effectivelyEnabled) textColor else TextMuted
+
     Box(
         modifier = modifier
-            .heightIn(min = 44.dp)
+            .heightIn(min = 48.dp)
             .clip(SharedButtonShape)
-            .background(if (enabled) gradient else DisabledButtonBrush)
-            .border(1.dp, Color.White.copy(alpha = if (enabled) 0.50f else 0.2f), SharedButtonShape)
-            .clickable(enabled = enabled, onClick = onClick)
+            .background(if (effectivelyEnabled) gradient else DisabledButtonBrush)
+            .border(1.dp, Color.White.copy(alpha = if (effectivelyEnabled) 0.50f else 0.25f), SharedButtonShape)
+            .clickable(enabled = effectivelyEnabled, onClick = onClick)
             .padding(contentPadding),
         contentAlignment = Alignment.Center
     ) {
@@ -330,24 +336,104 @@ fun GlassButton(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
-            if (icon != null) {
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = effectiveTextColor
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            } else if (icon != null) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = textColor,
+                    tint = effectiveTextColor,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
             }
             Text(
-                text = text,
-                color = textColor,
+                text = displayText,
+                color = effectiveTextColor,
                 fontWeight = FontWeight.Bold,
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+    }
+}
+
+@Composable
+fun PendingOperationRecoveryBanner(
+    pendingCount: Int,
+    latestStatusMessage: String? = null,
+    onOpenTracking: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    if (pendingCount <= 0 && latestStatusMessage.isNullOrBlank()) return
+    val isPendingWarning = pendingCount > 0
+    val accent = if (isPendingWarning) PmpGold else PmpCyan
+    GlassCard(
+        modifier = modifier.fillMaxWidth(),
+        cornerRadius = 14.dp,
+        borderColor = accent.copy(alpha = 0.6f),
+        glowAccentColor = accent
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                if (!isPendingWarning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = accent
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Column {
+                    Text(
+                        text = if (isPendingWarning) {
+                            "توجد ($pendingCount) عملية بانتظار التأكيد من الخادم — لا تعِد إدخالها."
+                        } else {
+                            latestStatusMessage.orEmpty()
+                        },
+                        color = TextDark,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                    if (isPendingWarning && !latestStatusMessage.isNullOrBlank()) {
+                        Text(
+                            text = latestStatusMessage,
+                            color = TextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+            if (onOpenTracking != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                TextButton(
+                    onClick = onOpenTracking,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
+                    Text(
+                        text = "سجل العمليات",
+                        color = accent,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+            }
         }
     }
 }

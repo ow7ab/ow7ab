@@ -27,6 +27,8 @@ import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAuth } from '../../context/AuthContext';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 
 type LabSubTab = 'FORMULATIONS' | 'MATERIALS_GUIDE' | 'SAFETY';
 
@@ -103,6 +105,10 @@ export const ChemistryLabModuleView: React.FC = () => {
   const canCreate = canPerformAction(GRANULAR_ACTIONS.CREATE);
   const canDelete = canPerformAction(GRANULAR_ACTIONS.DELETE);
 
+  const formulaGuard = useTransactionGuard('lab_create_formula', 'CREATE');
+  const sdsGuard = useTransactionGuard('lab_save_sds', 'SAVE');
+  const deleteGuard = useTransactionGuard('lab_delete_formula', 'DELETE');
+
   const showNotice = (type: 'ok' | 'err', text: string) => {
     setNotice({ type, text });
     setTimeout(() => setNotice(null), 4000);
@@ -128,88 +134,129 @@ export const ChemistryLabModuleView: React.FC = () => {
 
   const handleCreateFormula = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate || !formulaMeta.productName.trim()) return;
+    if (!canCreate || !formulaMeta.productName.trim() || formulaGuard.isSubmitting) return;
 
-    const now = Date.now();
-    const formulaNo = `FORM-${String(now).slice(-5)}`;
-    const record: LabFormulation = {
-      id: now,
-      formulaNo,
-      productName: formulaMeta.productName.trim(),
-      paintType: formulaMeta.paintType,
-      baseKind: formulaMeta.baseKind,
-      targetPvc: pvcResult.calculatedPvc,
-      calculatedPvc: pvcResult.calculatedPvc,
-      cpvcEstimated: pvcResult.cpvcEstimated,
-      totalSolidsWeight: pvcResult.totalSolidsWeight,
-      totalSolidsVolume: pvcResult.totalSolidsVolume,
-      totalBatchWeight: pvcResult.totalBatchWeight,
-      totalBatchVolume: pvcResult.totalBatchVolume,
-      calculatedDensity: pvcResult.calculatedDensity,
-      totalCost: pvcResult.totalCost,
-      costPerKg: pvcResult.costPerKg,
-      ingredientsJson: ingredientsToJson(ingredients),
-      technicalAnalysis: pvcResult.technicalAnalysisText,
-      notes: formulaMeta.notes.trim() || pvcResult.paintClassification,
-      approvedForProduction: formulaMeta.approvedForProduction,
-      createdBy: userProfile?.fullName || userProfile?.username || 'WEB_LAB',
-      createdAt: now
-    };
+    const cleanProd = formulaMeta.productName.trim();
+    const res = await formulaGuard.runGuarded({
+      guardKey: `lab_create_formula_${cleanProd}`,
+      operationType: 'CREATE',
+      userId: userProfile?.username || 'WEB_LAB',
+      documentReference: `FORM-${cleanProd}`,
+      targetCollection: 'lab_formulations',
+      payloadSummary: `تركيبة كيميائية ${cleanProd}`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const formulaNo = `FORM-${String(now).slice(-5)}`;
+        const record: LabFormulation = {
+          id: now,
+          formulaNo,
+          productName: cleanProd,
+          paintType: formulaMeta.paintType,
+          baseKind: formulaMeta.baseKind,
+          targetPvc: pvcResult.calculatedPvc,
+          calculatedPvc: pvcResult.calculatedPvc,
+          cpvcEstimated: pvcResult.cpvcEstimated,
+          totalSolidsWeight: pvcResult.totalSolidsWeight,
+          totalSolidsVolume: pvcResult.totalSolidsVolume,
+          totalBatchWeight: pvcResult.totalBatchWeight,
+          totalBatchVolume: pvcResult.totalBatchVolume,
+          calculatedDensity: pvcResult.calculatedDensity,
+          totalCost: pvcResult.totalCost,
+          costPerKg: pvcResult.costPerKg,
+          ingredientsJson: ingredientsToJson(ingredients),
+          technicalAnalysis: pvcResult.technicalAnalysisText,
+          notes: formulaMeta.notes.trim() || pvcResult.paintClassification,
+          approvedForProduction: formulaMeta.approvedForProduction,
+          createdBy: userProfile?.fullName || userProfile?.username || 'WEB_LAB',
+          createdAt: now
+        };
+        const docId = safeId(formulaNo, `FORM-${idempotencyKey}`);
+        await ErpDataService.saveRecord('lab_formulations', docId, record, userProfile?.username);
+        return { resultReference: docId, result: formulaNo };
+      }
+    });
 
-    try {
-      await ErpDataService.saveRecord(
-        'lab_formulations',
-        safeId(formulaNo, `FORM-${now}`),
-        record,
-        userProfile?.username
-      );
+    if (res.ok) {
       setIsNewFormulaOpen(false);
       setFormulaMeta((m) => ({ ...m, productName: '', notes: '' }));
-      showNotice('ok', `تم حفظ التركيبة الكيميائية ${formulaNo} مع حسابات PVC الدقيقة`);
-    } catch (err: any) {
-      showNotice('err', err?.message || 'تعذر حفظ التركيبة');
+      showNotice('ok', res.replayed ? res.message : `تم حفظ التركيبة الكيميائية ${res.data || ''} مع حسابات PVC الدقيقة`);
+    } else {
+      showNotice('err', res.message);
     }
   };
 
   const handleDeleteFormula = async (f: LabFormulation) => {
-    if (!canDelete) return;
+    if (!canDelete || deleteGuard.isSubmitting) return;
     const docId = (f as any)._docId || safeId(f.formulaNo, `FORM-${f.id}`);
-    await ErpDataService.deleteRecord('lab_formulations', docId, f.id, userProfile?.username);
-    showNotice('ok', `تم حذف التركيبة ${f.formulaNo}`);
+    const res = await deleteGuard.runGuarded({
+      guardKey: `lab_delete_formula_${docId}`,
+      operationType: 'DELETE',
+      userId: userProfile?.username || 'WEB_LAB',
+      documentReference: docId,
+      targetCollection: 'lab_formulations',
+      payloadSummary: `حذف التركيبة ${f.formulaNo}`,
+      execute: async () => {
+        await ErpDataService.deleteRecord('lab_formulations', docId, f.id, userProfile?.username);
+        return { resultReference: docId };
+      }
+    });
+    if (res.ok) {
+      showNotice('ok', `تم حذف التركيبة ${f.formulaNo}`);
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const handleSaveSafety = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate || !safetyForm.chemicalName.trim()) return;
-    const id = Date.now();
-    const record: ChemicalSafety = {
-      id,
-      chemicalName: safetyForm.chemicalName.trim(),
-      commonName: safetyForm.chemicalName.trim(),
-      casNumber: safetyForm.casNumber.trim(),
-      molecularFormula: '',
-      molecularWeight: 0,
-      ghsPictograms: '',
-      signalWord: safetyForm.signalWord,
-      hazardStatements: safetyForm.hazardStatements.trim(),
-      precautionaryStatements: '',
-      storageConditions: safetyForm.storageConditions.trim(),
-      firstAidMeasures: safetyForm.firstAidMeasures.trim(),
-      sdsSupplierName: '',
-      sdsFileUrlOrUri: '',
-      notes: '',
-      createdAt: id
-    };
-    await ErpDataService.saveRecord('chemical_safety', `SAFE-${id}`, record, userProfile?.username);
-    setSafetyForm({
-      chemicalName: '',
-      casNumber: '',
-      signalWord: 'تحذير',
-      hazardStatements: '',
-      storageConditions: '',
-      firstAidMeasures: ''
+    if (!canCreate || !safetyForm.chemicalName.trim() || sdsGuard.isSubmitting) return;
+    const chemName = safetyForm.chemicalName.trim();
+    const res = await sdsGuard.runGuarded({
+      guardKey: `lab_save_sds_${chemName}`,
+      operationType: 'SAVE',
+      userId: userProfile?.username || 'WEB_LAB',
+      documentReference: `SDS-${chemName}`,
+      targetCollection: 'chemical_safety',
+      payloadSummary: `بطاقة سلامة كيميائية ${chemName}`,
+      execute: async ({ idempotencyKey }) => {
+        const id = Date.now();
+        const docId = `SAFE-${idempotencyKey}`;
+        const record: ChemicalSafety = {
+          id,
+          chemicalName: chemName,
+          commonName: chemName,
+          casNumber: safetyForm.casNumber.trim(),
+          molecularFormula: '',
+          molecularWeight: 0,
+          ghsPictograms: '',
+          signalWord: safetyForm.signalWord,
+          hazardStatements: safetyForm.hazardStatements.trim(),
+          precautionaryStatements: '',
+          storageConditions: safetyForm.storageConditions.trim(),
+          firstAidMeasures: safetyForm.firstAidMeasures.trim(),
+          sdsSupplierName: '',
+          sdsFileUrlOrUri: '',
+          notes: '',
+          createdAt: id
+        };
+        await ErpDataService.saveRecord('chemical_safety', docId, record, userProfile?.username);
+        return { resultReference: docId };
+      }
     });
-    showNotice('ok', 'تم حفظ بطاقة السلامة الكيميائية (SDS)');
+
+    if (res.ok) {
+      setSafetyForm({
+        chemicalName: '',
+        casNumber: '',
+        signalWord: 'تحذير',
+        hazardStatements: '',
+        storageConditions: '',
+        firstAidMeasures: ''
+      });
+      showNotice('ok', res.replayed ? res.message : 'تم حفظ بطاقة السلامة الكيميائية (SDS)');
+    } else {
+      showNotice('err', res.message);
+    }
   };
 
   const filtered = useMemo(() => {
@@ -472,7 +519,14 @@ export const ChemistryLabModuleView: React.FC = () => {
                 onChange={(e) => setSafetyForm({ ...safetyForm, firstAidMeasures: e.target.value })}
                 className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
               />
-              <GlassButton type="submit" variant="primary" className="w-full justify-center" disabled={!canCreate}>
+              <GlassButton
+                type="submit"
+                variant="primary"
+                className="w-full justify-center"
+                disabled={!canCreate}
+                isLoading={sdsGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.SAVE}
+              >
                 حفظ بطاقة السلامة
               </GlassButton>
             </form>
@@ -607,11 +661,24 @@ export const ChemistryLabModuleView: React.FC = () => {
             <p className="text-[11px] text-theme-secondary">{pvcResult.technicalAnalysisText}</p>
           </div>
 
+          {formulaGuard.pendingRecord && (
+            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2 text-[11px]">
+              <span>{formulaGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+              <GlassButton size="sm" variant="secondary" onClick={() => formulaGuard.verifyPending()}>
+                التحقق من حالة العملية
+              </GlassButton>
+            </div>
+          )}
           <div className="flex justify-end gap-2">
-            <GlassButton variant="secondary" onClick={() => setIsNewFormulaOpen(false)}>
+            <GlassButton type="button" variant="secondary" onClick={() => setIsNewFormulaOpen(false)} disabled={formulaGuard.isSubmitting}>
               إلغاء
             </GlassButton>
-            <GlassButton type="submit" variant="primary">
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={formulaGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.CREATE}
+            >
               حفظ واعتماد التركيبة الكيميائية
             </GlassButton>
           </div>

@@ -2707,13 +2707,13 @@ class UpdateManager(private val context: Context) {
         val DEFAULT_APK_DOWNLOAD_URL = com.example.core.architecture.PmpAppVersionContract.DEFAULT_PAGES_APK_URL
 
         /**
-         * بيانات الإصدار المرجعي المنشور والمتحقق منه فعلياً (Version v4.0 / Build 15)
+         * بيانات الإصدار المرجعي المنشور والمتحقق منه فعلياً (Version v20.0 / Build 20)
          */
         val LATEST_CLOUD_RELEASE_INFO = UpdateInfo(
             versionCode = BuildConfig.VERSION_CODE.coerceAtLeast(com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE),
             versionName = BuildConfig.VERSION_NAME.ifBlank { com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME },
             downloadUrl = DEFAULT_APK_DOWNLOAD_URL,
-            releaseNotes = "إصدار v4.0 الشامل: بنية معيارية متطورة جاهزة للتوسع والتحويل لمنصات iOS والويب، الوضع المظلم الأسود الفائق، واستقرار شامل لمنظومة التحديثات السحابية.",
+            releaseNotes = "إصدار v20.0 الشامل: منظومة Idempotency Protection System وحارس منع تكرار العمليات TransactionSubmissionGuard وشاشة متابعة العمليات عبر Android وDesktop وWeb.",
             isMandatory = false,
             sha256Checksum = "9bb5d7bc646468b5d838303cd7e08846a3e14b939615e9a8e00600d8a146f57a",
             minSupportedVersionCode = 1,

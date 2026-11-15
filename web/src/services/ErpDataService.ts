@@ -250,7 +250,8 @@ export type ErpCollectionName =
   | 'journal_entries'
   | 'journal_lines'
   | 'audit_logs'
-  | 'permission_audit_logs';
+  | 'permission_audit_logs'
+  | 'idempotency_requests';
 
 const STORAGE_CLUSTER_KEY = 'pmp_active_erp_cluster';
 const REMOVED_V16_CLUSTER = 'PMP-ERP-V16-CLUSTER';

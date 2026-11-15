@@ -4512,5 +4512,223 @@ class CloudErpSyncRepository(
             }
         }
     }
+
+    // --- Phase 5: Server-Side Atomic Idempotency Protection System (Firestore runTransaction) ---
+
+    suspend fun claimOrGetIdempotencyRequest(
+        clusterCode: String = DEFAULT_CLUSTER,
+        request: IdempotencyRequestEntity
+    ): com.example.util.IdempotencyClaimOutcome = withContext(Dispatchers.IO) {
+        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        val cleanKey = safeId(request.idempotencyKey, "IDEMP-${System.currentTimeMillis()}")
+        val docRef = firestore.collection("erp_clusters")
+            .document(cleanCluster)
+            .collection("idempotency_requests")
+            .document(cleanKey)
+
+        try {
+            firestore.runTransaction { tx ->
+                val snap = tx.get(docRef)
+                if (snap.exists()) {
+                    val existingStatus = snap.getString("requestStatus")?.trim()?.uppercase().orEmpty()
+                    val existingResultRef = snap.getString("resultReference").orEmpty()
+                    if (existingStatus == "COMPLETED") {
+                        return@runTransaction com.example.util.IdempotencyClaimOutcome.DuplicateCompleted(
+                            idempotencyKey = request.idempotencyKey,
+                            existingResultReference = existingResultRef
+                        )
+                    }
+                    if (existingStatus == "PROCESSING" || existingStatus == "PENDING_CONFIRMATION") {
+                        return@runTransaction com.example.util.IdempotencyClaimOutcome.DuplicateInProgress(
+                            idempotencyKey = request.idempotencyKey,
+                            existingStatus = existingStatus
+                        )
+                    }
+                }
+
+                val payload = hashMapOf<String, Any?>(
+                    "idempotencyKey" to request.idempotencyKey,
+                    "userId" to request.userId,
+                    "operationType" to request.operationType,
+                    "documentReference" to request.documentReference,
+                    "requestStatus" to com.example.util.IdempotencyRequestStatus.PROCESSING.code,
+                    "createdAt" to request.createdAt,
+                    "updatedAt" to System.currentTimeMillis(),
+                    "completionTime" to null,
+                    "resultReference" to "",
+                    "errorDetails" to "",
+                    "targetCollection" to request.targetCollection,
+                    "payloadSummary" to request.payloadSummary,
+                    "platform" to "ANDROID",
+                    "guardKey" to request.guardKey,
+                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                )
+                tx.set(docRef, payload, SetOptions.merge())
+                com.example.util.IdempotencyClaimOutcome.Claimed(request.idempotencyKey)
+            }.await()
+        } catch (e: Exception) {
+            Log.w(TAG, "claimOrGetIdempotencyRequest notice ($cleanKey): ${e.message}")
+            com.example.util.IdempotencyClaimOutcome.NetworkUncertain(
+                idempotencyKey = request.idempotencyKey,
+                reason = e.message ?: "تعذر تأكيد القفل على السيرفر"
+            )
+        }
+    }
+
+    suspend fun markIdempotencyCompleted(
+        clusterCode: String = DEFAULT_CLUSTER,
+        idempotencyKey: String,
+        resultReference: String
+    ) = withContext(Dispatchers.IO) {
+        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        val cleanKey = safeId(idempotencyKey, idempotencyKey)
+        val now = System.currentTimeMillis()
+        runCatching {
+            firestore.collection("erp_clusters")
+                .document(cleanCluster)
+                .collection("idempotency_requests")
+                .document(cleanKey)
+                .set(
+                    mapOf(
+                        "idempotencyKey" to idempotencyKey,
+                        "requestStatus" to com.example.util.IdempotencyRequestStatus.COMPLETED.code,
+                        "updatedAt" to now,
+                        "completionTime" to now,
+                        "resultReference" to resultReference,
+                        "errorDetails" to "",
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                .await()
+        }
+    }
+
+    suspend fun markIdempotencyStatus(
+        clusterCode: String = DEFAULT_CLUSTER,
+        idempotencyKey: String,
+        status: com.example.util.IdempotencyRequestStatus,
+        errorDetails: String
+    ) = withContext(Dispatchers.IO) {
+        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        val cleanKey = safeId(idempotencyKey, idempotencyKey)
+        runCatching {
+            firestore.collection("erp_clusters")
+                .document(cleanCluster)
+                .collection("idempotency_requests")
+                .document(cleanKey)
+                .set(
+                    mapOf(
+                        "idempotencyKey" to idempotencyKey,
+                        "requestStatus" to status.code,
+                        "updatedAt" to System.currentTimeMillis(),
+                        "errorDetails" to errorDetails,
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                .await()
+        }
+    }
+
+    suspend fun fetchIdempotencyRequest(
+        clusterCode: String = DEFAULT_CLUSTER,
+        idempotencyKey: String
+    ): IdempotencyRequestEntity? = withContext(Dispatchers.IO) {
+        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        val cleanKey = safeId(idempotencyKey, idempotencyKey)
+        runCatching {
+            val snap = firestore.collection("erp_clusters")
+                .document(cleanCluster)
+                .collection("idempotency_requests")
+                .document(cleanKey)
+                .get()
+                .await()
+            if (!snap.exists()) return@runCatching null
+            IdempotencyRequestEntity(
+                idempotencyKey = snap.safeString("idempotencyKey") ?: idempotencyKey,
+                userId = snap.safeString("userId").orEmpty(),
+                operationType = snap.safeString("operationType").orEmpty(),
+                documentReference = snap.safeString("documentReference").orEmpty(),
+                requestStatus = snap.safeString("requestStatus") ?: "PENDING_CONFIRMATION",
+                createdAt = snap.safeLong("createdAt") ?: 0L,
+                updatedAt = snap.safeLong("updatedAt") ?: 0L,
+                completionTime = snap.safeLong("completionTime"),
+                resultReference = snap.safeString("resultReference").orEmpty(),
+                errorDetails = snap.safeString("errorDetails").orEmpty(),
+                targetCollection = snap.safeString("targetCollection").orEmpty(),
+                payloadSummary = snap.safeString("payloadSummary").orEmpty(),
+                platform = snap.safeString("platform") ?: "ANDROID",
+                guardKey = snap.safeString("guardKey").orEmpty()
+            )
+        }.getOrNull()
+    }
+
+    suspend fun checkClusterDocumentExists(
+        clusterCode: String = DEFAULT_CLUSTER,
+        targetCollection: String,
+        documentReference: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (targetCollection.isBlank() || documentReference.isBlank()) return@withContext false
+        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        val cleanDocId = safeId(documentReference, documentReference)
+        runCatching {
+            val docSnap = firestore.collection("erp_clusters")
+                .document(cleanCluster)
+                .collection(targetCollection)
+                .document(cleanDocId)
+                .get()
+                .await()
+            if (docSnap.exists()) return@runCatching true
+            val querySnap = firestore.collection("erp_clusters")
+                .document(cleanCluster)
+                .collection(targetCollection)
+                .whereEqualTo("idempotencyKey", documentReference)
+                .limit(1)
+                .get()
+                .await()
+            !querySnap.isEmpty
+        }.getOrDefault(false)
+    }
+
+    fun asIdempotencyBackendAdapter(): com.example.util.IdempotencyBackendAdapter =
+        object : com.example.util.IdempotencyBackendAdapter {
+            override suspend fun claimOrGetRequest(
+                clusterCode: String,
+                request: IdempotencyRequestEntity
+            ): com.example.util.IdempotencyClaimOutcome =
+                claimOrGetIdempotencyRequest(clusterCode, request)
+
+            override suspend fun markCompleted(
+                clusterCode: String,
+                idempotencyKey: String,
+                resultReference: String
+            ) {
+                markIdempotencyCompleted(clusterCode, idempotencyKey, resultReference)
+            }
+
+            override suspend fun markPendingOrFailed(
+                clusterCode: String,
+                idempotencyKey: String,
+                status: com.example.util.IdempotencyRequestStatus,
+                errorDetails: String
+            ) {
+                markIdempotencyStatus(clusterCode, idempotencyKey, status, errorDetails)
+            }
+
+            override suspend fun fetchRequest(
+                clusterCode: String,
+                idempotencyKey: String
+            ): IdempotencyRequestEntity? =
+                fetchIdempotencyRequest(clusterCode, idempotencyKey)
+
+            override suspend fun checkClusterDocumentExists(
+                clusterCode: String,
+                targetCollection: String,
+                documentReference: String
+            ): Boolean =
+                checkClusterDocumentExists(clusterCode, targetCollection, documentReference)
+        }
 }
+
 

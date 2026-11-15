@@ -196,6 +196,8 @@ fun ChemistryLabScreen(
 fun PvcEngineTab(viewModel: PmpViewModel) {
     val context = LocalContext.current
     val formulations by viewModel.formulations.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     val numberFormat = remember { NumberFormat.getNumberInstance(Locale.US).apply { maximumFractionDigits = 2 } }
 
     var currentFormulaId by remember { mutableLongStateOf(0L) }
@@ -791,8 +793,11 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    val saveFormulaGuard = "save_formulation"
+                    val isSavingFormula = activeGuardKeys.contains(saveFormulaGuard)
                     Button(
                         onClick = {
+                            if (isSavingFormula) return@Button
                             val entity = FormulationEntity(
                                 id = currentFormulaId,
                                 formulaNo = formulaNo,
@@ -813,20 +818,27 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                                 technicalAnalysis = calcResult.technicalAnalysisText,
                                 notes = notesInput
                             )
-                            viewModel.saveFormulation(entity)
+                            viewModel.saveFormulation(entity, guardKey = saveFormulaGuard)
                         },
+                        enabled = !isSavingFormula,
                         modifier = Modifier
                             .weight(1f)
-                            .height(46.dp),
+                            .height(48.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xFF059669),
                             contentColor = Color.White
                         ),
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("حفظ الصيغة", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                        if (isSavingFormula) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(guardLoadingLabels[saveFormulaGuard] ?: "جاري الحفظ...", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        } else {
+                            Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("حفظ الصيغة", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
 
                     OutlinedButton(
@@ -924,11 +936,18 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                                             fontSize = 11.sp
                                         )
                                     }
+                                    val delFormulaGuard = "delete_formulation_${form.id}"
+                                    val isDeletingFormula = activeGuardKeys.contains(delFormulaGuard)
                                     IconButton(
-                                        onClick = { viewModel.deleteFormulation(form) },
-                                        modifier = Modifier.size(28.dp)
+                                        onClick = { viewModel.deleteFormulation(form, guardKey = delFormulaGuard) },
+                                        enabled = !isDeletingFormula,
+                                        modifier = Modifier.size(48.dp)
                                     ) {
-                                        Icon(Icons.Default.Delete, contentDescription = "حذف", tint = Color.Red, modifier = Modifier.size(16.dp))
+                                        if (isDeletingFormula) {
+                                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.Red)
+                                        } else {
+                                            Icon(Icons.Default.Delete, contentDescription = "حذف", tint = Color.Red, modifier = Modifier.size(18.dp))
+                                        }
                                     }
                                 }
                             }
@@ -957,8 +976,10 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
 
     // Dialog: Create Factory Production Work Order
     if (showProductionOrderDialog) {
+        val orderGuard = "create_prod_order_formula_$currentFormulaId"
+        val isCreatingOrder = activeGuardKeys.contains(orderGuard)
         AlertDialog(
-            onDismissRequest = { showProductionOrderDialog = false },
+            onDismissRequest = { if (!isCreatingOrder) showProductionOrderDialog = false },
             containerColor = PmpWhiteSurface,
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1045,17 +1066,34 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
             confirmButton = {
                 Button(
                     onClick = {
+                        if (isCreatingOrder) return@Button
                         val mult = batchOrderMultiplierInput.toDoubleOrNull() ?: 1.0
-                        viewModel.createProductionOrderFromFormula(currentFormulaId, mult)
-                        showProductionOrderDialog = false
+                        viewModel.createProductionOrderFromFormula(
+                            formulaId = currentFormulaId,
+                            batchMultiplier = mult,
+                            guardKey = orderGuard,
+                            onComplete = { ok ->
+                                if (ok) showProductionOrderDialog = false
+                            }
+                        )
                     },
+                    enabled = !isCreatingOrder,
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E40AF))
                 ) {
-                    Text("تأكيد وإرسال للمصنع")
+                    if (isCreatingOrder) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(guardLoadingLabels[orderGuard] ?: "جاري إضافة العملية...")
+                    } else {
+                        Text("تأكيد وإرسال للمصنع")
+                    }
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showProductionOrderDialog = false }) {
+                TextButton(
+                    onClick = { showProductionOrderDialog = false },
+                    enabled = !isCreatingOrder
+                ) {
                     Text("إلغاء")
                 }
             }
@@ -1094,10 +1132,21 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
             availableFormulations = listOf(currentActiveFormula) + formulations.filter { it.id != currentFormulaId },
             factoryMachines = factoryMachines,
             preSelectedFormula = currentActiveFormula,
-            onDismiss = { showBatchModalFromLab = false },
+            isSubmitting = activeGuardKeys.contains("log_production_batch"),
+            loadingText = guardLoadingLabels["log_production_batch"] ?: "جاري الحفظ...",
+            onDismiss = {
+                if (!activeGuardKeys.contains("log_production_batch")) {
+                    showBatchModalFromLab = false
+                }
+            },
             onSaveBatch = { batch ->
-                viewModel.logProductionBatch(batch)
-                showBatchModalFromLab = false
+                viewModel.logProductionBatch(
+                    batch = batch,
+                    guardKey = "log_production_batch",
+                    onCompleted = { ok ->
+                        if (ok) showBatchModalFromLab = false
+                    }
+                )
             }
         )
     }
@@ -1611,6 +1660,8 @@ fun PubChemTab(viewModel: PmpViewModel) {
     val isSearching by viewModel.isSearchingPubChem.collectAsState()
     val searchResults by viewModel.pubChemResults.collectAsState()
     val errorMessage by viewModel.pubChemErrorMessage.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
 
     // Trigger initial search
     LaunchedEffect(Unit) {
@@ -1758,10 +1809,13 @@ fun PubChemTab(viewModel: PmpViewModel) {
             }
         } else {
             items(searchResults) { comp ->
+                val pubGuard = "add_pubchem_${comp.cid}"
                 PubChemCompoundCard(
                     compound = comp,
+                    isAdding = activeGuardKeys.contains(pubGuard),
+                    loadingText = guardLoadingLabels[pubGuard] ?: "جاري إضافة العملية...",
                     onAddToCatalog = {
-                        viewModel.addPubChemCompoundToFactoryCatalog(comp)
+                        viewModel.addPubChemCompoundToFactoryCatalog(comp, guardKey = pubGuard)
                     },
                     onOpenWeb = {
                         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(comp.pubChemUrl))
@@ -1777,6 +1831,8 @@ fun PubChemTab(viewModel: PmpViewModel) {
 @Composable
 fun PubChemCompoundCard(
     compound: PubChemService.PubChemCompound,
+    isAdding: Boolean = false,
+    loadingText: String = "جاري إضافة العملية...",
     onAddToCatalog: () -> Unit,
     onOpenWeb: () -> Unit
 ) {
@@ -1855,13 +1911,22 @@ fun PubChemCompoundCard(
             ) {
                 Button(
                     onClick = onAddToCatalog,
+                    enabled = !isAdding,
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E40AF)),
                     shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.weight(1.3f)
+                    modifier = Modifier
+                        .weight(1.3f)
+                        .heightIn(min = 48.dp)
                 ) {
-                    Icon(Icons.Default.AddBusiness, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("إضافة لخامات المصنع", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    if (isAdding) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(loadingText, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    } else {
+                        Icon(Icons.Default.AddBusiness, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("إضافة لخامات المصنع", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
 
                 OutlinedButton(
@@ -1901,6 +1966,8 @@ fun PropertyChip(label: String, value: String) {
 fun GhsSafetyTab(viewModel: PmpViewModel) {
     val context = LocalContext.current
     val safetyList by viewModel.chemicalSafetyList.collectAsState()
+    val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
+    val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     var searchQuery by remember { mutableStateOf("") }
     var showAddDialog by remember { mutableStateOf(false) }
 
@@ -1984,9 +2051,11 @@ fun GhsSafetyTab(viewModel: PmpViewModel) {
         }
 
         items(filteredList) { item ->
+            val delSafetyGuard = "delete_chemical_safety_${item.id}"
             ChemicalSafetyCard(
                 item = item,
-                onDelete = { viewModel.deleteChemicalSafety(item) },
+                isDeleting = activeGuardKeys.contains(delSafetyGuard),
+                onDelete = { viewModel.deleteChemicalSafety(item, guardKey = delSafetyGuard) },
                 onViewSds = {
                     val sendIntent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
@@ -2015,11 +2084,23 @@ fun GhsSafetyTab(viewModel: PmpViewModel) {
 
     // Dialog: Add Chemical Safety Item
     if (showAddDialog) {
+        val saveSafetyGuard = "save_chemical_safety"
         AddSafetyDialog(
-            onDismiss = { showAddDialog = false },
+            isSaving = activeGuardKeys.contains(saveSafetyGuard),
+            loadingText = guardLoadingLabels[saveSafetyGuard] ?: "جاري الحفظ...",
+            onDismiss = {
+                if (!activeGuardKeys.contains(saveSafetyGuard)) {
+                    showAddDialog = false
+                }
+            },
             onSave = { newSafety ->
-                viewModel.saveChemicalSafety(newSafety)
-                showAddDialog = false
+                viewModel.saveChemicalSafety(
+                    item = newSafety,
+                    guardKey = saveSafetyGuard,
+                    onComplete = { ok ->
+                        if (ok) showAddDialog = false
+                    }
+                )
             }
         )
     }
@@ -2029,6 +2110,7 @@ fun GhsSafetyTab(viewModel: PmpViewModel) {
 @Composable
 fun ChemicalSafetyCard(
     item: ChemicalSafetyEntity,
+    isDeleting: Boolean = false,
     onDelete: () -> Unit,
     onViewSds: () -> Unit
 ) {
@@ -2135,8 +2217,16 @@ fun ChemicalSafetyCard(
                         Text("مشاركة SDS", fontSize = 11.sp)
                     }
 
-                    IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.DeleteOutline, contentDescription = "حذف", tint = Color.Red, modifier = Modifier.size(18.dp))
+                    IconButton(
+                        onClick = onDelete,
+                        enabled = !isDeleting,
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        if (isDeleting) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.Red)
+                        } else {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = "حذف", tint = Color.Red, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
             }
@@ -2178,6 +2268,8 @@ fun GhsPictogramRow(pictogramsStr: String) {
 // Dialog: Add Safety Card
 @Composable
 fun AddSafetyDialog(
+    isSaving: Boolean = false,
+    loadingText: String = "جاري الحفظ...",
     onDismiss: () -> Unit,
     onSave: (ChemicalSafetyEntity) -> Unit
 ) {
@@ -2191,7 +2283,7 @@ fun AddSafetyDialog(
     var storage by remember { mutableStateOf("") }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isSaving) onDismiss() },
         title = { Text("إضافة بطاقة سلامة كيميائية SDS جديدة", fontWeight = FontWeight.Bold, fontSize = 14.sp) },
         text = {
             Column(
@@ -2249,7 +2341,7 @@ fun AddSafetyDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    if (chemicalName.isNotBlank()) {
+                    if (!isSaving && chemicalName.isNotBlank()) {
                         onSave(
                             ChemicalSafetyEntity(
                                 chemicalName = chemicalName.trim(),
@@ -2265,13 +2357,20 @@ fun AddSafetyDialog(
                         )
                     }
                 },
+                enabled = !isSaving && chemicalName.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E40AF))
             ) {
-                Text("حفظ البطاقة")
+                if (isSaving) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(loadingText)
+                } else {
+                    Text("حفظ البطاقة")
+                }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("إلغاء") }
+            TextButton(onClick = onDismiss, enabled = !isSaving) { Text("إلغاء") }
         }
     )
 }

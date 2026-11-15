@@ -41,6 +41,8 @@ fun DailyProductionBatchModal(
     availableFormulations: List<FormulationEntity>,
     factoryMachines: List<FactoryMachineEntity>,
     preSelectedFormula: FormulationEntity? = null,
+    isSubmitting: Boolean = false,
+    loadingText: String = "جاري الحفظ...",
     onDismiss: () -> Unit,
     onSaveBatch: (ProductionBatchEntity) -> Unit
 ) {
@@ -133,7 +135,7 @@ fun DailyProductionBatchModal(
     )
 
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
@@ -191,6 +193,7 @@ fun DailyProductionBatchModal(
 
                     IconButton(
                         onClick = onDismiss,
+                        enabled = !isSubmitting,
                         modifier = Modifier.testTag("close_batch_modal_btn")
                     ) {
                         Icon(
@@ -749,6 +752,7 @@ fun DailyProductionBatchModal(
                 ) {
                     OutlinedButton(
                         onClick = onDismiss,
+                        enabled = !isSubmitting,
                         modifier = Modifier
                             .weight(1f)
                             .height(48.dp),
@@ -759,6 +763,7 @@ fun DailyProductionBatchModal(
 
                     Button(
                         onClick = {
+                            if (isSubmitting) return@Button
                             val form = selectedFormula
                             val finalActualWeight = actualWeightInput.toDoubleOrNull() ?: batchWeight
                             val machine = factoryMachines.find { it.name == selectedMachine }
@@ -789,6 +794,7 @@ fun DailyProductionBatchModal(
                             )
                             onSaveBatch(newBatch)
                         },
+                        enabled = !isSubmitting,
                         modifier = Modifier
                             .weight(2f)
                             .height(48.dp)
@@ -796,14 +802,29 @@ fun DailyProductionBatchModal(
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E40AF))
                     ) {
-                        Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "تسجيل وحفظ التشغيلة في السحابة (Firestore)",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
-                            color = Color.White
-                        )
+                        if (isSubmitting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = loadingText,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = Color.White
+                            )
+                        } else {
+                            Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "تسجيل وحفظ التشغيلة في السحابة (Firestore)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = Color.White
+                            )
+                        }
                     }
                 }
             }

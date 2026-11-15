@@ -700,6 +700,31 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     val permissionChangeHistory: StateFlow<List<com.example.util.EnterpriseRbacManager.PermissionChangeAuditEntry>> =
         _permissionChangeHistory.asStateFlow()
 
+    // --- Phase 5 TransactionSubmissionGuard & Idempotency Protection System (Declared strictly before init) ---
+    val idempotencyGuard: com.example.util.TransactionSubmissionGuard = com.example.util.TransactionSubmissionGuard(
+        idempotencyDao = database.idempotencyDao(),
+        backendAdapter = cloudErpSyncRepo.asIdempotencyBackendAdapter(),
+        clusterCodeProvider = { serverClusterCode.value },
+        userIdProvider = { resolveUserActor("SYSTEM") },
+        isOnlineProvider = { isConnectedToCloud() }
+    )
+    val operationTrackingRecords: StateFlow<List<IdempotencyRequestEntity>> = database.idempotencyDao()
+        .observeAll()
+        .catch { emit(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    val activeGuardKeys: StateFlow<Set<String>> = idempotencyGuard.activeGuardKeys
+    val guardLoadingLabels: StateFlow<Map<String, String>> = idempotencyGuard.guardLoadingLabels
+    val guardStatusMessages: StateFlow<Map<String, String>> = idempotencyGuard.guardStatusMessages
+    val pendingOperationsCount: StateFlow<Int> = operationTrackingRecords
+        .map { list ->
+            list.count {
+                it.requestStatus == com.example.util.IdempotencyRequestStatus.PROCESSING.code ||
+                    it.requestStatus == com.example.util.IdempotencyRequestStatus.PENDING_CONFIRMATION.code
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Lazily, 0)
+    private var wasNetworkOnlineForRecovery: Boolean = isConnectedToCloud()
+
     init {
         val initialMode = _themeMode.value
         val isDarkInitial = when (initialMode) {
@@ -925,6 +950,24 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Deferred cloud cluster sync: ${e.message}")
             }
+
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { idempotencyGuard.recoverPendingOperations() }
+                isNetworkOnline.collect { online ->
+                    if (online && !wasNetworkOnlineForRecovery) {
+                        runCatching {
+                            val recovered = idempotencyGuard.recoverPendingOperations()
+                            val confirmed = recovered.count {
+                                it.resolvedStatus == com.example.util.IdempotencyRequestStatus.COMPLETED
+                            }
+                            if (confirmed > 0) {
+                                postMessage("تم التحقق التلقائي بعد عودة الاتصال: تم تأكيد $confirmed عملية سابقة.")
+                            }
+                        }
+                    }
+                    wasNetworkOnlineForRecovery = online
+                }
+            }
         }
         startCloudRealtimeSyncIfAuthenticated()
     }
@@ -946,6 +989,102 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // --- Phase 5 Transaction Submission Guard & Operation Tracking Actions ---
+
+    fun isGuardActive(guardKey: String): Boolean = activeGuardKeys.value.contains(guardKey)
+
+    fun loadingLabelFor(guardKey: String, defaultLabel: String = ""): String =
+        guardLoadingLabels.value[guardKey] ?: defaultLabel
+
+    fun verifyOperationStatus(
+        idempotencyKey: String,
+        onVerified: ((com.example.util.OperationVerificationResult) -> Unit)? = null
+    ) {
+        viewModelScope.launch {
+            val result = idempotencyGuard.verifyOperationStatus(idempotencyKey)
+            postMessage(
+                result.message,
+                isError = result.resolvedStatus == com.example.util.IdempotencyRequestStatus.PENDING_CONFIRMATION ||
+                    result.resolvedStatus == com.example.util.IdempotencyRequestStatus.FAILED
+            )
+            onVerified?.invoke(result)
+        }
+    }
+
+    fun recoverPendingOperations() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val results = idempotencyGuard.recoverPendingOperations()
+            if (results.isNotEmpty()) {
+                val confirmedCount = results.count {
+                    it.resolvedStatus == com.example.util.IdempotencyRequestStatus.COMPLETED
+                }
+                if (confirmedCount > 0) {
+                    postMessage("تم التحقق من حالة العمليات المعلقة وتأكيد $confirmedCount عملية.")
+                }
+            }
+        }
+    }
+
+    fun dismissUnconfirmedOperation(idempotencyKey: String) {
+        viewModelScope.launch {
+            idempotencyGuard.dismissCancelledOrFailedOperation(idempotencyKey)
+        }
+    }
+
+    private fun <T> launchGuardedTransaction(
+        guardKey: String,
+        operationType: com.example.util.IdempotencyOperationType,
+        actionLabel: String,
+        documentReference: String = "",
+        targetCollection: String = "",
+        payloadSummary: String = "",
+        requiresOnline: Boolean = true,
+        requiresServerClaim: Boolean = true,
+        onComplete: ((Boolean) -> Unit)? = null,
+        block: suspend (idempotencyKey: String) -> Result<Pair<String, T>>
+    ) {
+        if (idempotencyGuard.isProcessing(guardKey)) {
+            postMessage(com.example.util.IdempotencyStatusMessages.IN_PROGRESS)
+            return
+        }
+        if (requiresOnline && !checkOnlineBeforeTransaction(actionLabel)) {
+            onComplete?.invoke(false)
+            return
+        }
+        viewModelScope.launch {
+            val result = idempotencyGuard.executeGuarded(
+                guardKey = guardKey,
+                operationType = operationType,
+                documentReference = documentReference,
+                targetCollection = targetCollection,
+                payloadSummary = payloadSummary,
+                requiresServerClaim = requiresServerClaim && requiresOnline,
+                scopeForSlowMonitor = viewModelScope,
+                block = block
+            )
+            if (result.blockedAsDuplicate) {
+                if (result.alreadyRecorded) {
+                    postMessage(com.example.util.IdempotencyStatusMessages.ALREADY_RECORDED)
+                } else if (result.pendingConfirmation) {
+                    postMessage(com.example.util.IdempotencyStatusMessages.PENDING_DO_NOT_REENTER, isError = true)
+                } else {
+                    postMessage(com.example.util.IdempotencyStatusMessages.IN_PROGRESS)
+                }
+                onComplete?.invoke(result.alreadyRecorded)
+                return@launch
+            }
+            if (!result.success) {
+                val errMsg = if (result.pendingConfirmation) {
+                    com.example.util.IdempotencyStatusMessages.PENDING_DO_NOT_REENTER
+                } else {
+                    result.message.ifBlank { com.example.util.IdempotencyStatusMessages.FAILED }
+                }
+                postMessage(errMsg, isError = true)
+            }
+            onComplete?.invoke(result.success)
+        }
+    }
+
     // --- Actions ---
 
     fun addMovement(
@@ -955,19 +1094,32 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         amount: Double,
         description: String,
         reference: String,
-        user: String = resolveUserActor("المدير")
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "treasury_movement",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("تسجيل حركة مالية")) return
-        viewModelScope.launch {
-            val autoRef = reference.trim().ifBlank { "REC-${System.currentTimeMillis() % 1000000}" }
+        val autoRef = reference.trim().ifBlank { "REC-${System.currentTimeMillis() % 1000000}" }
+        val opType = if (direction == "وارد") {
+            com.example.util.IdempotencyOperationType.RECEIPT_VOUCHER
+        } else {
+            com.example.util.IdempotencyOperationType.PAYMENT_VOUCHER
+        }
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = opType,
+            actionLabel = "تسجيل حركة مالية",
+            documentReference = autoRef,
+            targetCollection = "movements",
+            payloadSummary = "$direction $amount $currency في $cashbox",
+            onComplete = onComplete
+        ) { _ ->
             val autoDesc = description.trim().ifBlank { "حركة $direction بمبلغ $amount $currency في $cashbox" }
             val res = repository.recordMovement(cashbox, currency, direction, amount, autoDesc, autoRef, user)
-            res.onSuccess { movId ->
+            res.map { movId ->
                 DeletedRecordsRegistry.unregisterDeleted("movements", movId)
                 DeletedRecordsRegistry.unregisterDeleted("movements", "MOV-$movId")
                 DeletedRecordsRegistry.unregisterDeleted("movements", autoRef)
                 postMessage("تم تسجيل الحركة بنجاح: $autoRef")
-                // Fast background cloud sync (<100ms) for just this movement
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
                         val m = MovementEntity(
@@ -986,8 +1138,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         Log.w("PmpViewModel", "Direct movement sync deferred: ${e.message}")
                     }
                 }
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تسجيل الحركة", isError = true)
+                "MOV-$movId" to movId
             }
         }
     }
@@ -1004,17 +1155,26 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         user: String = resolveUserActor("المدير"),
         halfaInvoiceId: Long? = null,
         halfaAmount: Double? = null,
-        isInvertedRate: Boolean = false
+        isInvertedRate: Boolean = false,
+        guardKey: String = "treasury_transfer",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("تحويل بين الخزن")) return
-        viewModelScope.launch {
-            val autoRef = reference.trim().ifBlank { "TRF-${System.currentTimeMillis() % 1000000}" }
+        val autoRef = reference.trim().ifBlank { "TRF-${System.currentTimeMillis() % 1000000}" }
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.STOCK_TRANSFER,
+            actionLabel = "تحويل بين الخزن",
+            documentReference = autoRef,
+            targetCollection = "transfers",
+            payloadSummary = "$sourceCashbox -> $destinationCashbox ($sourceAmount $sourceCurrency)",
+            onComplete = onComplete
+        ) { _ ->
             val res = repository.recordTransfer(
                 sourceCashbox, destinationCashbox, sourceCurrency, destinationCurrency,
                 sourceAmount, rate, description, autoRef, user, halfaInvoiceId, halfaAmount,
                 isInvertedRate
             )
-            res.onSuccess { trfId ->
+            res.map { trfId ->
                 postMessage("تم إتمام التحويل بنجاح برقم: $autoRef")
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
@@ -1040,29 +1200,39 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         Log.w("PmpViewModel", "Direct transfer sync deferred: ${e.message}")
                     }
                 }
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تنفيذ التحويل", isError = true)
+                "TRF-$trfId" to trfId
             }
         }
     }
 
-    fun deleteMovement(id: Long) {
-        if (!checkOnlineBeforeTransaction("حذف حركة مالية")) return
-        viewModelScope.launch {
+    fun deleteMovement(
+        id: Long,
+        guardKey: String = "delete_movement_$id",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف حركة مالية",
+            documentReference = "MOV-$id",
+            targetCollection = "movements",
+            payloadSummary = "حذف الحركة المالية #$id",
+            onComplete = onComplete
+        ) { _ ->
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
-                postMessage("عفواً، حذف الحركات المالية متاح لمدير النظام أو الحسابات المصرح لها فقط", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، حذف الحركات المالية متاح لمدير النظام أو الحسابات المصرح لها فقط")
+                )
             }
             val res = repository.deleteMovement(id, resolveUserActor("المدير"))
-            res.onSuccess {
+            res.map {
                 DeletedRecordsRegistry.registerDeleted("movements", id, "MOV-$id", resolveUserActor("المدير"))
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "movements", "MOV-$id")
                 }
                 postMessage("تم حذف الحركة المالية بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف الحركة المالية", isError = true)
+                "MOV-$id" to Unit
             }
         }
     }
@@ -1073,10 +1243,19 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         amount: Double,
         currency: String,
         cashbox: String,
-        note: String
+        note: String,
+        guardKey: String = "customer_payment_$customerId",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("سداد دفعة العميل")) return
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.RECEIPT_VOUCHER,
+            actionLabel = "سداد دفعة العميل",
+            documentReference = "CUST-PAY-$customerId-${System.currentTimeMillis() / 1000L}",
+            targetCollection = "movements",
+            payloadSummary = "تحصيل $amount $currency من $customerName",
+            onComplete = onComplete
+        ) { _ ->
             val res = repository.recordCustomerPayment(
                 customerId = customerId,
                 customerName = customerName,
@@ -1086,31 +1265,41 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 note = note,
                 user = resolveUserActor("محاسب المبيعات")
             )
-            res.onSuccess {
+            res.map {
                 postMessage("تم تسجيل سداد وتحصيل مبلغ $amount $currency من العميل ($customerName) بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تسجيل سداد العميل", isError = true)
+                "CUST-PAY-$customerId" to Unit
             }
         }
     }
 
-    fun resetCashboxBalance(cashboxName: String) {
-        if (!checkOnlineBeforeTransaction("تصفير الخزنة")) return
-        viewModelScope.launch {
+    fun resetCashboxBalance(
+        cashboxName: String,
+        guardKey: String = "reset_cashbox_$cashboxName",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "تصفير الخزنة",
+            documentReference = "RESET-BOX-$cashboxName",
+            targetCollection = "movements",
+            payloadSummary = "تصفير خزنة $cashboxName",
+            onComplete = onComplete
+        ) { _ ->
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
-                postMessage("عفواً، تصفير الخزن متاح لمدير النظام أو الحسابات المصرح لها فقط", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، تصفير الخزن متاح لمدير النظام أو الحسابات المصرح لها فقط")
+                )
             }
             val res = repository.resetCashboxBalance(cashboxName, resolveUserActor("المدير"))
-            res.onSuccess {
+            res.map {
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.clearCashboxMovementsFromCloud(serverClusterCode.value, cashboxName)
                 }
                 postMessage("تم تصفير رصيد وحركات خزنة ($cashboxName) بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تصفير الخزنة", isError = true)
+                "RESET-BOX-$cashboxName" to Unit
             }
         }
     }
@@ -1121,59 +1310,112 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         bookBalance: Double,
         countedBalance: Double,
         notes: String,
-        user: String = resolveUserActor("المدير")
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "daily_closing",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("إقفال اليومية")) return
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SAVE,
+            actionLabel = "إقفال اليومية",
+            documentReference = "CLOSE-$cashbox-${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}",
+            targetCollection = "daily_closings",
+            payloadSummary = "إقفال يومية $cashbox ($currency)",
+            onComplete = onComplete
+        ) { _ ->
             repository.recordDailyClosing(cashbox, currency, bookBalance, countedBalance, notes, user)
             postMessage("تم إقفال اليومية لخزنة $cashbox بنجاح")
             persistAndSyncToServer()
+            Result.success("CLOSE-$cashbox" to Unit)
         }
     }
 
-    fun addCustomer(name: String, phone: String, address: String, notes: String, user: String = resolveUserActor("المدير")) {
-        if (!checkOnlineBeforeTransaction("إضافة عميل جديد")) return
-        viewModelScope.launch {
-            repository.addCustomer(name, phone, address, notes, user)
+    fun addCustomer(
+        name: String,
+        phone: String,
+        address: String,
+        notes: String,
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "add_customer",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إضافة عميل جديد",
+            documentReference = "CUST-${name.trim()}",
+            targetCollection = "customers",
+            payloadSummary = "إضافة عميل $name",
+            onComplete = onComplete
+        ) { _ ->
+            if (name.isBlank()) {
+                return@launchGuardedTransaction Result.failure(IllegalArgumentException("يرجى إدخال اسم العميل"))
+            }
+            val custId = repository.addCustomer(name, phone, address, notes, user)
             postMessage("تمت إضافة العميل $name بنجاح")
             persistAndSyncToServer()
+            Result.success("CUST-$custId" to custId)
         }
     }
 
-    fun deleteCustomer(customerId: Long, customerName: String) {
-        if (!checkOnlineBeforeTransaction("حذف عميل")) return
-        viewModelScope.launch {
+    fun deleteCustomer(
+        customerId: Long,
+        customerName: String,
+        guardKey: String = "delete_customer_$customerId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف عميل",
+            documentReference = "CUST-$customerId",
+            targetCollection = "customers",
+            payloadSummary = "حذف عميل $customerName",
+            onComplete = onComplete
+        ) { _ ->
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
-                postMessage("عفواً، حذف العملاء متاح لحساب مدير النظام فقط", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، حذف العملاء متاح لحساب مدير النظام فقط")
+                )
             }
             val res = repository.deleteCustomer(customerId, customerName, resolveUserActor("المدير"))
-            res.onSuccess {
+            res.map {
                 DeletedRecordsRegistry.registerDeleted("customers", customerId, "CUST-$customerId", resolveUserActor("المدير"))
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "customers", "CUST-$customerId")
                 }
                 postMessage("تم حذف العميل ($customerName) وسجلاته بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف العميل", isError = true)
+                "CUST-$customerId" to Unit
             }
         }
     }
 
-    fun clearCustomerBalance(customerId: Long, customerName: String) {
-        if (!checkOnlineBeforeTransaction("تصفير حساب عميل")) return
-        viewModelScope.launch {
+    fun clearCustomerBalance(
+        customerId: Long,
+        customerName: String,
+        guardKey: String = "clear_customer_$customerId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تصفير حساب عميل",
+            documentReference = "CUST-CLR-$customerId",
+            targetCollection = "customers",
+            payloadSummary = "تسوية رصيد العميل $customerName",
+            onComplete = onComplete
+        ) { _ ->
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
-                postMessage("عفواً، تصفير وحذف حسابات العملاء متاح لمدير النظام فقط", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، تصفير وحذف حسابات العملاء متاح لمدير النظام فقط")
+                )
             }
             val res = repository.clearCustomerBalance(customerId, customerName, resolveUserActor("المدير"))
-            res.onSuccess {
+            res.map {
                 postMessage("تمت تسوية وإقفال المديونية المسجلة على العميل ($customerName) بقيد تسوية معتمد مع الحفاظ على سجل الدفاتر")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تسوية حساب العميل", isError = true)
+                "CUST-CLR-$customerId" to Unit
             }
         }
     }
@@ -1187,18 +1429,26 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         notes: String,
         user: String = resolveUserActor("المدير"),
         paymentCashbox: String? = null,
-        paymentAmount: Double? = null
+        paymentAmount: Double? = null,
+        guardKey: String = "create_invoice",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("إصدار فاتورة مبيعات")) return
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.APPROVE_INVOICE,
+            actionLabel = "إصدار فاتورة مبيعات",
+            documentReference = "INV-CUST-$customerId-${items.sumOf { it.lineTotal }.toLong()}",
+            targetCollection = "invoices",
+            payloadSummary = "فاتورة مبيعات للعميل $customerName (${items.size} صنف)",
+            onComplete = onComplete
+        ) { _ ->
             val res = repository.createInvoice(
                 customerId, customerName, currency, items, discount, notes, user, paymentCashbox, paymentAmount
             )
-            res.onSuccess {
+            res.map { invId ->
                 postMessage("تم إصدار الفاتورة بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر إصدار الفاتورة", isError = true)
+                "INV-$invId" to invId
             }
         }
     }
@@ -1211,44 +1461,77 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         cashbox: String,
         amount: Double,
         note: String,
-        user: String = resolveUserActor("المدير")
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "pay_invoice_$invoiceId",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("سداد فاتورة مبيعات")) return
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.PAYMENT,
+            actionLabel = "سداد فاتورة مبيعات",
+            documentReference = invoiceNo.ifBlank { "INV-$invoiceId" },
+            targetCollection = "invoice_payments",
+            payloadSummary = "سداد $amount $currency لفاتورة $invoiceNo",
+            onComplete = onComplete
+        ) { _ ->
             val res = repository.recordInvoicePayment(invoiceId, invoiceNo, customerName, currency, cashbox, amount, note, user)
-            res.onSuccess {
+            res.map {
                 postMessage("تم تسجيل سداد مبلغ $amount $currency بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تسجيل السداد", isError = true)
+                "PAY-$invoiceNo" to Unit
             }
         }
     }
 
-    fun cancelInvoice(invoiceId: Long, reason: String, user: String = resolveUserActor("المدير")) {
-        if (!checkOnlineBeforeTransaction("إلغاء فاتورة")) return
-        viewModelScope.launch {
+    fun cancelInvoice(
+        invoiceId: Long,
+        reason: String,
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "cancel_invoice_$invoiceId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "إلغاء فاتورة",
+            documentReference = "INV-$invoiceId",
+            targetCollection = "invoices",
+            payloadSummary = "إلغاء فاتورة #$invoiceId",
+            onComplete = onComplete
+        ) { _ ->
             val res = repository.cancelInvoice(invoiceId, reason, user)
-            res.onSuccess {
+            res.map {
                 postMessage("تم إلغاء الفاتورة وإرجاع الأصناف للمخزن")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر إلغاء الفاتورة", isError = true)
+                "INV-$invoiceId" to Unit
             }
         }
     }
 
-    fun deleteInvoicePermanently(invoiceId: Long, user: String = resolveUserActor("المدير")) {
-        if (!checkOnlineBeforeTransaction("حذف فاتورة نهائياً")) return
+    fun deleteInvoicePermanently(
+        invoiceId: Long,
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "delete_invoice_$invoiceId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
         val userObj = currentUser.value
         val allowed = userObj.isSystemManager() || userObj.hasModulePermission("صلاحية الحذف والتصفير")
         if (!allowed) {
             postMessage("لا تملك صلاحية الحذف النهائي للفواتير", isError = true)
+            onComplete?.invoke(false)
             return
         }
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف فاتورة نهائياً",
+            documentReference = "INV-$invoiceId",
+            targetCollection = "invoices",
+            payloadSummary = "حذف نهائي للفاتورة #$invoiceId",
+            onComplete = onComplete
+        ) { _ ->
             val res = repository.deleteInvoicePermanently(invoiceId, user)
-            res.onSuccess { deletedInv ->
+            res.map { deletedInv ->
                 cloudErpSyncRepo.deleteInvoiceFromCloud(
                     clusterCode = serverClusterCode.value,
                     invoiceId = deletedInv.id,
@@ -1257,23 +1540,32 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 postMessage("تم الحذف النهائي للفاتورة ${deletedInv.invoiceNo} (${deletedInv.customerName}) من السيرفر")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر الحذف النهائي للفاتورة", isError = true)
+                deletedInv.invoiceNo to deletedInv
             }
         }
     }
 
-    fun addCashbox(name: String, user: String = resolveUserActor("المدير")) {
-        if (!checkOnlineBeforeTransaction("إضافة خزنة")) return
-        viewModelScope.launch {
+    fun addCashbox(
+        name: String,
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "add_cashbox",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إضافة خزنة",
+            documentReference = "BOX-${name.trim()}",
+            targetCollection = "cashboxes",
+            payloadSummary = "إضافة خزنة ${name.trim()}",
+            onComplete = onComplete
+        ) { _ ->
             if (!currentUser.value.isSystemManager()) {
-                postMessage("عفواً، إضافة الخزن الجديدة متاحة لمدير النظام فقط", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(IllegalStateException("عفواً، إضافة الخزن الجديدة متاحة لمدير النظام فقط"))
             }
             val cleanName = name.trim()
             if (cleanName.isBlank()) {
-                postMessage("يرجى إدخال اسم الخزنة", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(IllegalArgumentException("يرجى إدخال اسم الخزنة"))
             }
             val newId = repository.addCashbox(cleanName, user)
             viewModelScope.launch(Dispatchers.IO) {
@@ -1281,40 +1573,66 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             postMessage("تمت إضافة الخزنة ($cleanName) ومزامنتها بنجاح")
             persistAndSyncToServer()
+            Result.success("BOX-$newId" to newId)
         }
     }
 
-    fun updateCashbox(id: Long, name: String, user: String = resolveUserActor("المدير")) {
-        if (!checkOnlineBeforeTransaction("تعديل اسم الخزنة")) return
-        viewModelScope.launch {
+    fun updateCashbox(
+        id: Long,
+        name: String,
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "update_cashbox_$id",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        val cleanName = name.trim()
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تعديل اسم الخزنة",
+            documentReference = "BOX-$id",
+            targetCollection = "cashboxes",
+            payloadSummary = "تعديل الخزنة #$id إلى $cleanName",
+            onComplete = onComplete
+        ) { _ ->
             if (!currentUser.value.isSystemManager()) {
-                postMessage("عفواً، تعديل الخزن متاح لمدير النظام فقط", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(IllegalStateException("عفواً، تعديل الخزن متاح لمدير النظام فقط"))
             }
-            val cleanName = name.trim()
             val res = repository.updateCashbox(id, cleanName, user)
-            res.onSuccess {
+            res.map {
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.syncSingleCashboxToCloud(serverClusterCode.value, id, cleanName)
                 }
                 postMessage("تم تعديل اسم الخزنة إلى ($cleanName) بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تعديل الخزنة", isError = true)
+                "BOX-$id" to Unit
             }
         }
     }
 
-    fun deleteCashbox(id: Long, name: String, user: String = resolveUserActor("المدير")) {
-        if (!checkOnlineBeforeTransaction("حذف الخزنة")) return
-        viewModelScope.launch {
+    fun deleteCashbox(
+        id: Long,
+        name: String,
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "delete_cashbox_$id",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        val cleanName = name.trim()
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف الخزنة",
+            documentReference = "BOX-$id",
+            targetCollection = "cashboxes",
+            payloadSummary = "حذف/أرشفة خزنة $cleanName",
+            onComplete = onComplete
+        ) { _ ->
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
-                postMessage("عفواً، حذف أو أرشفة الخزن متاح لمدير النظام أو الحسابات المصرح لها فقط", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، حذف أو أرشفة الخزن متاح لمدير النظام أو الحسابات المصرح لها فقط")
+                )
             }
-            val cleanName = name.trim()
             val res = repository.deleteCashbox(id, cleanName, user)
-            res.onSuccess { hadFinancialHistory ->
+            res.map { hadFinancialHistory ->
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.deleteCashboxFromCloud(serverClusterCode.value, id, cleanName)
                     DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
@@ -1326,8 +1644,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     "تم حذف الخزنة ($cleanName) نهائياً ومزامنة الحذف عبر جميع الأجهزة"
                 }
                 postMessage(msg)
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف الخزنة", isError = true)
+                "BOX-$id" to hadFinancialHistory
             }
         }
     }
@@ -1337,12 +1654,24 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         currency: String = "SDG",
         linkedCashbox: String = "خزنة السودان",
         warehouseType: String = "مبيعات",
-        user: String = resolveUserActor("المدير")
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "add_warehouse",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        viewModelScope.launch {
-            repository.addWarehouse(name, currency, linkedCashbox, warehouseType, user)
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إضافة مخزن",
+            documentReference = "WH-${name.trim()}",
+            targetCollection = "warehouses",
+            payloadSummary = "إضافة مخزن $name",
+            requiresOnline = false,
+            onComplete = onComplete
+        ) { _ ->
+            val id = repository.addWarehouse(name, currency, linkedCashbox, warehouseType, user)
             postMessage("تمت إضافة المخزن $name بنجاح")
             persistAndSyncToServer()
+            Result.success("WH-$id" to id)
         }
     }
 
@@ -1353,23 +1682,48 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         currency: String = "SDG",
         linkedCashbox: String = "خزنة السودان",
         warehouseType: String = "مبيعات",
-        user: String = resolveUserActor("المدير")
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "update_warehouse_$id",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تعديل بيانات المخزن",
+            documentReference = "WH-$id",
+            targetCollection = "warehouses",
+            payloadSummary = "تعديل مخزن $name",
+            requiresOnline = false,
+            onComplete = onComplete
+        ) { _ ->
             val res = repository.updateWarehouse(id, name, active, currency, linkedCashbox, warehouseType, user)
-            res.onSuccess {
+            res.map {
                 postMessage("تم تعديل بيانات المخزن $name بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تعديل المخزن", isError = true)
+                "WH-$id" to Unit
             }
         }
     }
 
-    fun deleteWarehouse(id: Long, name: String, user: String = resolveUserActor("المدير")) {
-        viewModelScope.launch {
+    fun deleteWarehouse(
+        id: Long,
+        name: String,
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "delete_warehouse_$id",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف مخزن",
+            documentReference = "WH-$id",
+            targetCollection = "warehouses",
+            payloadSummary = "حذف مخزن $name",
+            requiresOnline = false,
+            onComplete = onComplete
+        ) { _ ->
             val res = repository.deleteWarehouse(id, user)
-            res.onSuccess {
+            res.map {
                 DeletedRecordsRegistry.registerDeleted("warehouses", id, "WH-$id", user)
                 if (name.isNotBlank()) {
                     DeletedRecordsRegistry.registerDeleted("warehouses", name.trim(), "WH-$id", user)
@@ -1379,8 +1733,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 postMessage("تم حذف المخزن $name بنجاح من النظام والسحابة")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف المخزن", isError = true)
+                "WH-$id" to Unit
             }
         }
     }
@@ -1408,15 +1761,25 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         salePrice: Double,
         salePriceEgp: Double = 0.0,
         minimumStock: Double = 10.0,
-        user: String = resolveUserActor("المدير")
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "add_product",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("إضافة صنف")) return
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إضافة صنف",
+            documentReference = "PROD-${name.trim()}",
+            targetCollection = "products",
+            payloadSummary = "إضافة الصنف $name",
+            onComplete = onComplete
+        ) { _ ->
             val prodId = repository.addProduct(name, color, weight, purchasePrice, salePrice, salePriceEgp, minimumStock, user)
             DeletedRecordsRegistry.unregisterDeleted("products", prodId)
             DeletedRecordsRegistry.unregisterDeleted("products", "PROD-$prodId")
             postMessage("تمت إضافة الصنف $name بنجاح")
             persistAndSyncToServer()
+            Result.success("PROD-$prodId" to prodId)
         }
     }
 
@@ -1427,11 +1790,20 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         warehouseName: String,
         purchasePrice: Double,
         salePrice: Double,
-        note: String
+        note: String,
+        guardKey: String = "product_intake",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("توريد أصناف للمخزن")) return
-        viewModelScope.launch {
-            val prodName = "بوهية $color $weight جم"
+        val prodName = "بوهية $color $weight جم"
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SUPPLY_RAW,
+            actionLabel = "توريد أصناف للمخزن",
+            documentReference = "INTAKE-$color-$weight-${cartons.toInt()}-$warehouseName",
+            targetCollection = "stock_moves",
+            payloadSummary = "توريد $cartons كرتونة من $prodName إلى $warehouseName",
+            onComplete = onComplete
+        ) { _ ->
             val existing = repository.getDao().getProductsDirect().firstOrNull {
                 it.paintColor.equals(color, ignoreCase = true) && it.packageWeight == weight
             }
@@ -1457,7 +1829,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             } ?: repository.getDao().getWarehousesDirect().firstOrNull()
 
             val whId = targetWh?.id ?: 1L
-            repository.recordStockMove(
+            val smId = repository.recordStockMove(
                 warehouseId = whId,
                 productId = productId,
                 quantity = cartons,
@@ -1467,6 +1839,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             )
             postMessage("تم توريد $cartons كرتونة من ($prodName) بنجاح إلى $warehouseName")
             persistAndSyncToServer()
+            Result.success("SM-$smId" to smId)
         }
     }
 
@@ -1476,13 +1849,23 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         quantity: Double,
         kind: String,
         note: String,
-        user: String = resolveUserActor("المدير")
+        user: String = resolveUserActor("المدير"),
+        guardKey: String = "stock_move_${warehouseId}_$productId",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("حركة مخزون")) return
-        viewModelScope.launch {
-            repository.recordStockMove(warehouseId, productId, quantity, kind, note, user)
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DISPATCH_GOODS,
+            actionLabel = "حركة مخزون",
+            documentReference = "SM-$warehouseId-$productId-$kind-${quantity.toInt()}",
+            targetCollection = "stock_moves",
+            payloadSummary = "حركة مخزن ($kind) بكمية $quantity",
+            onComplete = onComplete
+        ) { _ ->
+            val id = repository.recordStockMove(warehouseId, productId, quantity, kind, note, user)
             postMessage("تم تسجيل حركة المخزون بنجاح ومزامنتها")
             persistAndSyncToServer()
+            Result.success("SM-$id" to id)
         }
     }
 
@@ -1563,16 +1946,26 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         warehouseName: String,
         quantityInput: Double,
         operationMode: String,
-        note: String
+        note: String,
+        guardKey: String = "adjust_stock",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("تحديث كمية المخزون")) return
         if (!quantityInput.isFinite()) {
             postMessage("القيمة المدخلة غير صالحة", isError = true)
+            onComplete?.invoke(false)
             return
         }
-        viewModelScope.launch {
-            val cleanColor = color.trim().ifBlank { "أبيض" }
-            val cleanWeight = com.example.util.InventoryWeightManager.normalizeWeightValue(weight).ifBlank { weight.trim() }
+        val cleanColor = color.trim().ifBlank { "أبيض" }
+        val cleanWeight = com.example.util.InventoryWeightManager.normalizeWeightValue(weight).ifBlank { weight.trim() }
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تحديث كمية المخزون",
+            documentReference = "ADJ-$cleanColor-$cleanWeight-$operationMode-${quantityInput.toInt()}",
+            targetCollection = "stock_moves",
+            payloadSummary = "تعديل مخزون ($cleanColor - $cleanWeight جم) نمط $operationMode في $warehouseName",
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("أمين المخزن")
 
             val product = repository.ensureProductForColorAndWeight(
@@ -1591,8 +1984,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             when (operationMode.uppercase()) {
                 "IN" -> {
                     if (quantityInput <= 0.0) {
-                        postMessage("يرجى إدخال كمية أكبر من صفر للإضافة", isError = true)
-                        return@launch
+                        return@launchGuardedTransaction Result.failure(IllegalArgumentException("يرجى إدخال كمية أكبر من صفر للإضافة"))
                     }
                     repository.recordStockMove(
                         warehouseId = whId,
@@ -1606,8 +1998,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 "OUT" -> {
                     if (quantityInput <= 0.0) {
-                        postMessage("يرجى إدخال كمية أكبر من صفر للخصم", isError = true)
-                        return@launch
+                        return@launchGuardedTransaction Result.failure(IllegalArgumentException("يرجى إدخال كمية أكبر من صفر للخصم"))
                     }
                     repository.recordStockMove(
                         warehouseId = whId,
@@ -1621,8 +2012,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 "SET" -> {
                     if (quantityInput < 0.0) {
-                        postMessage("لا يمكن أن يكون الرصيد بالسالب", isError = true)
-                        return@launch
+                        return@launchGuardedTransaction Result.failure(IllegalArgumentException("لا يمكن أن يكون الرصيد بالسالب"))
                     }
                     val currentMoves = repository.getDao().getStockMovesDirect().filter {
                         it.productId == product.id && it.warehouseId == whId
@@ -1634,7 +2024,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     val delta = quantityInput - currentBalance
                     if (kotlin.math.abs(delta) < 0.0001) {
                         postMessage("الرصيد الفعلي مطابق للرصيد الحالي (${quantityInput.toInt()})")
-                        return@launch
+                        return@launchGuardedTransaction Result.success("ADJ-NOOP" to Unit)
                     }
                     val moveKind = if (delta > 0.0) "IN" else "ADJUST"
                     val moveQty = kotlin.math.abs(delta)
@@ -1652,19 +2042,33 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             persistAndSyncToServer()
+            Result.success("ADJ-${product.id}" to Unit)
         }
     }
 
-    fun deleteProduct(productId: Long, productName: String) {
-        if (!checkOnlineBeforeTransaction("حذف صنف")) return
-        viewModelScope.launch {
+    fun deleteProduct(
+        productId: Long,
+        productName: String,
+        guardKey: String = "delete_product_$productId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف صنف",
+            documentReference = "PROD-$productId",
+            targetCollection = "products",
+            payloadSummary = "حذف صنف $productName",
+            onComplete = onComplete
+        ) { _ ->
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
-                postMessage("عفواً، حذف الأصناف متاح لمدير النظام أو الحسابات المصرح لها فقط", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، حذف الأصناف متاح لمدير النظام أو الحسابات المصرح لها فقط")
+                )
             }
             val actor = resolveUserActor("المدير")
             val res = repository.deleteProduct(productId, productName, actor)
-            res.onSuccess {
+            res.map {
                 DeletedRecordsRegistry.registerDeleted("products", productId, "PROD-$productId", actor)
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "products", "PROD-$productId")
@@ -1672,28 +2076,39 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 postMessage("تم حذف الصنف ($productName) وحركاته بنجاح من النظام والسحابة")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف الصنف", isError = true)
+                "PROD-$productId" to Unit
             }
         }
     }
 
-    fun resetWarehouseStock(warehouseId: Long, warehouseName: String) {
-        if (!checkOnlineBeforeTransaction("تصفير رصيد المخزن")) return
-        viewModelScope.launch {
+    fun resetWarehouseStock(
+        warehouseId: Long,
+        warehouseName: String,
+        guardKey: String = "reset_warehouse_$warehouseId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "تصفير رصيد المخزن",
+            documentReference = "RESET-WH-$warehouseId",
+            targetCollection = "stock_moves",
+            payloadSummary = "تصفير مخزن $warehouseName",
+            onComplete = onComplete
+        ) { _ ->
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("صلاحية الحذف والتصفير")) {
-                postMessage("عفواً، تصفير رصيد المخزن متاح لمدير النظام أو المصرح لهم فقط", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، تصفير رصيد المخزن متاح لمدير النظام أو المصرح لهم فقط")
+                )
             }
             val res = repository.resetWarehouseStock(warehouseId, warehouseName, resolveUserActor("المدير"))
-            res.onSuccess {
+            res.map {
                 viewModelScope.launch(Dispatchers.IO) {
                     cloudErpSyncRepo.deleteStockMovesByWarehouseFromCloud(serverClusterCode.value, warehouseId)
                 }
                 postMessage("تم تصفير كامل رصيد مخزن ($warehouseName) وحذف حركاته من السحابة")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تصفير المخزن", isError = true)
+                "RESET-WH-$warehouseId" to Unit
             }
         }
     }
@@ -1708,13 +2123,28 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         batch: String = "",
         note: String = "",
         actor: String = resolveUserActor("مهندس الإنتاج"),
-        counterparty: String = ""
+        counterparty: String = "",
+        guardKey: String = "factory_move_$kind",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("تسجيل حركة المصنع أو التشغيلة")) return
-        viewModelScope.launch {
-            repository.recordFactoryMove(kind, itemId, itemName, qty, machineId, machineName, batch, note, actor, counterparty)
+        val opType = when (kind.uppercase()) {
+            "RAW_PURCHASE", "RAW_RECEIPT" -> com.example.util.IdempotencyOperationType.SUPPLY_RAW
+            "ISSUE_PRODUCTION", "DISPATCH_CUSTOMER" -> com.example.util.IdempotencyOperationType.DISPATCH_GOODS
+            else -> com.example.util.IdempotencyOperationType.CREATE
+        }
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = opType,
+            actionLabel = "تسجيل حركة المصنع أو التشغيلة",
+            documentReference = "FM-$kind-$itemId-${qty.toLong()}-$batch",
+            targetCollection = "factory_moves",
+            payloadSummary = "$kind • $itemName ($qty)",
+            onComplete = onComplete
+        ) { _ ->
+            val fmId = repository.recordFactoryMove(kind, itemId, itemName, qty, machineId, machineName, batch, note, actor, counterparty)
             persistAndSyncToServer()
             postMessage("تم تسجيل ومزامنة حركة المصنع والتشغيلة بنجاح")
+            Result.success("FM-$fmId" to fmId)
         }
     }
 
@@ -1727,22 +2157,47 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         cartons: Double,
         unitPrice: Double,
         note: String,
-        actor: String = resolveUserActor("مسؤول التحميل")
+        actor: String = resolveUserActor("مسؤول التحميل"),
+        guardKey: String = "dispatch_halfa",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("ترحيل شحنة حلفا")) return
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.STOCK_TRANSFER,
+            actionLabel = "ترحيل شحنة حلفا",
+            documentReference = "HALFA-$productId-${cartons.toInt()}",
+            targetCollection = "halfa_invoices",
+            payloadSummary = "ترحيل $cartons كرتونة $productName إلى حلفا",
+            onComplete = onComplete
+        ) { _ ->
             val res = repository.dispatchHalfa(itemId, itemName, qty, productId, productName, cartons, unitPrice, note, actor)
             postMessage("تم ترحيل البضاعة إلى حلفا وإنشاء فاتورة ${res.second}")
             persistAndSyncToServer()
+            Result.success(res.second to res)
         }
     }
 
-    fun updatePosterPrice(weight: String, kind: String, price: Long, currency: String = "SDG") {
-        if (!checkOnlineBeforeTransaction("تعديل قائمة الأسعار")) return
-        viewModelScope.launch {
+    fun updatePosterPrice(
+        weight: String,
+        kind: String,
+        price: Long,
+        currency: String = "SDG",
+        guardKey: String = "poster_price_${weight}_${kind}_$currency",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تعديل قائمة الأسعار",
+            documentReference = "POSTER-${weight}_${kind}_$currency",
+            targetCollection = "poster_prices",
+            payloadSummary = "تحديث سعر $kind ($weight جم) = $price $currency",
+            onComplete = onComplete
+        ) { _ ->
             repository.updatePosterPrice(weight, kind, price, currency)
             postMessage("تم تحديث سعر $kind ($weight جم) بالعملة $currency ومزامنته مع السيرفر السحابي")
             persistAndSyncToServer()
+            Result.success("POSTER-${weight}_${kind}_$currency" to Unit)
         }
     }
 
@@ -1755,13 +2210,23 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         role: String,
         branch: String,
         permissions: String,
-        serverEndpoint: String = "https://api.pmp-paints-erp.com/v1"
+        serverEndpoint: String = "https://api.pmp-paints-erp.com/v1",
+        guardKey: String = "create_user_account",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("إنشاء حساب موظف جديد")) return@launch
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إنشاء حساب موظف جديد",
+            documentReference = "USR-${username.trim().lowercase()}",
+            targetCollection = "user_accounts",
+            payloadSummary = "إنشاء حساب $fullName ($username)",
+            onComplete = onComplete
+        ) { _ ->
             if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
-                postMessage("عفواً، حساب Admin هو الحساب الوحيد الذي يملك صلاحية إنشاء حسابات الموظفين وتحديد صلاحياتهم.", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، حساب Admin هو الحساب الوحيد الذي يملك صلاحية إنشاء حسابات الموظفين وتحديد صلاحياتهم.")
+                )
             }
             val res = repository.createUserAccount(
                 fullName = fullName,
@@ -1774,12 +2239,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 serverEndpoint = serverEndpoint,
                 actor = resolveUserActor("Admin")
             )
-            res.onSuccess {
+            res.map { createdUser ->
                 postMessage("تم إنشاء حساب المستخدم ($fullName) ورفعه إلى سيرفر Google Cloud للمزامنة الفورية")
                 persistAndSyncToServer()
                 syncAllAccountsToGoogleCloud(clusterCode = serverClusterCode.value, silent = true)
-            }.onFailure {
-                postMessage(it.message ?: "تعذر إنشاء حساب المستخدم", isError = true)
+                "USR-$createdUser" to createdUser
             }
         }
     }
@@ -1795,15 +2259,27 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun toggleUserAccountActive(user: UserAccountEntity) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("تعديل حالة تفعيل الحساب")) return@launch
+    fun toggleUserAccountActive(
+        user: UserAccountEntity,
+        guardKey: String = "toggle_user_${user.id}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تعديل حالة تفعيل الحساب",
+            documentReference = "USR-TOGGLE-${user.id}",
+            targetCollection = "user_accounts",
+            payloadSummary = "تبديل حالة حساب ${user.fullName}",
+            onComplete = onComplete
+        ) { _ ->
             if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
-                postMessage("عفواً، تفعيل أو إيقاف حسابات المستخدمين متاح لحساب Admin فقط.", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، تفعيل أو إيقاف حسابات المستخدمين متاح لحساب Admin فقط.")
+                )
             }
             val res = repository.toggleUserAccountActive(user, resolveUserActor("Admin"))
-            res.onSuccess {
+            res.map {
                 val updatedUser = user.copy(active = !user.active)
                 val stateLabel = if (updatedUser.active) "تفعيل" else "إيقاف"
                 postMessage("تم $stateLabel حساب ${user.fullName} ومزامنته على سيرفر Google Cloud")
@@ -1812,18 +2288,29 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     cloudSyncRepo.syncLocalAccountToCloud(updatedUser)
                 }
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تحديث حالة الحساب", isError = true)
+                "USR-TOGGLE-${user.id}" to Unit
             }
         }
     }
 
-    fun deleteUserAccountPermanently(user: UserAccountEntity) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("حذف حساب الموظف نهائياً")) return@launch
+    fun deleteUserAccountPermanently(
+        user: UserAccountEntity,
+        guardKey: String = "delete_user_${user.id}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف حساب الموظف نهائياً",
+            documentReference = "USR-DEL-${user.id}",
+            targetCollection = "user_accounts",
+            payloadSummary = "حذف حساب ${user.fullName}",
+            onComplete = onComplete
+        ) { _ ->
             if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
-                postMessage("عفواً، الحذف النهائي لحسابات المستخدمين متاح لحساب Admin فقط.", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، الحذف النهائي لحسابات المستخدمين متاح لحساب Admin فقط.")
+                )
             }
             val actor = resolveUserActor("Admin")
             DeletedAccountsRegistry.registerDeleted(user.userCode, user.username, user.phoneOrEmail, actor)
@@ -1834,7 +2321,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 email = user.phoneOrEmail,
                 user = actor
             )
-            res.onSuccess {
+            res.map {
                 cloudErpSyncRepo.deleteUserFromCloud(
                     clusterCode = serverClusterCode.value,
                     userCode = user.userCode,
@@ -1845,26 +2332,36 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 cloudSyncRepo.deleteLinkedAccount(user.userCode, user.username)
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
                 postMessage("تم حذف الحساب (${user.fullName}) نهائياً من النظام وكافة السيرفرات السحابية")
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف الحساب", isError = true)
+                "USR-DEL-${user.id}" to Unit
             }
         }
     }
 
-    fun restoreUserAccount(user: UserAccountEntity) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("استرداد حساب الموظف")) return@launch
+    fun restoreUserAccount(
+        user: UserAccountEntity,
+        guardKey: String = "restore_user_${user.id}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "استرداد حساب الموظف",
+            documentReference = "USR-RESTORE-${user.id}",
+            targetCollection = "user_accounts",
+            payloadSummary = "استرداد حساب ${user.fullName}",
+            onComplete = onComplete
+        ) { _ ->
             if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(currentUser.value)) {
-                postMessage("عفواً، استرداد الحسابات متاح لحساب Admin فقط.", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، استرداد الحسابات متاح لحساب Admin فقط.")
+                )
             }
             val res = repository.restoreUserAccount(user.id, resolveUserActor("Admin"))
-            res.onSuccess { restored ->
+            res.map { restored ->
                 cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, restored)
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
                 postMessage("تم استرداد وتنشيط حساب (${restored.fullName}) بنجاح ومزامنته")
-            }.onFailure {
-                postMessage(it.message ?: "تعذر استرداد الحساب", isError = true)
+                "USR-RESTORE-${user.id}" to restored
             }
         }
     }
@@ -1900,13 +2397,26 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         newPermissions: String,
         newLinkedUid: String = account.remoteServerId,
         approveAccount: Boolean = true,
-        changeReason: String = "تحديث صلاحيات الموظف من لوحة الصلاحيات"
+        changeReason: String = "تحديث صلاحيات الموظف من لوحة الصلاحيات",
+        guardKey: String = "update_user_perms_${account.id}",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تحديث صلاحيات الموظف",
+            documentReference = "USR-PERM-${account.id}",
+            targetCollection = "user_accounts",
+            payloadSummary = "تحديث صلاحيات ${account.fullName} ($newRole)",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             val actorUser = currentUser.value
             if (!com.example.util.ErpLifecycleEngine.canManageUsersAndPermissions(actorUser)) {
-                postMessage("عفواً، حساب Admin أو المسؤول المفوض بإدارة المستخدمين هو الوحيد المخول بتحديد أو تعديل صلاحيات المستخدمين.", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، حساب Admin أو المسؤول المفوض بإدارة المستخدمين هو الوحيد المخول بتحديد أو تعديل صلاحيات المستخدمين.")
+                )
             }
             val configRes = com.example.util.EnterpriseRbacManager.configureEmployeePermissions(
                 actor = actorUser,
@@ -1917,8 +2427,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 context = getApplication()
             )
             if (configRes.isFailure) {
-                postMessage(configRes.exceptionOrNull()?.message ?: "تعذر التحقق من صلاحية تعديل الحساب", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    configRes.exceptionOrNull() ?: IllegalStateException("تعذر التحقق من صلاحية تعديل الحساب")
+                )
             }
             val wasPending = account.syncStatus == "PENDING_MANAGER_APPROVAL"
             val res = repository.updateEmployeePermissionsAndRole(
@@ -1932,7 +2443,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 actorAccount = actorUser,
                 reason = changeReason
             )
-            res.onSuccess { updated ->
+            res.map { updated ->
                 refreshPermissionChangeHistory()
                 val actionMsg = if (wasPending && approveAccount) {
                     "تمت الموافقة على إنشاء حساب (${updated.fullName}) واعتماد صلاحياته للدخول"
@@ -1951,8 +2462,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     postMessage(actionMsg)
                 }
                 checkServerHealth()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تحديث صلاحيات الموظف", isError = true)
+                "USR-PERM-${account.id}" to updated
             }
         }
     }
@@ -1964,9 +2474,21 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         account: UserAccountEntity,
         permissionToken: String,
         durationHours: Int,
-        reason: String = "تفويض مؤقت للعمل"
+        reason: String = "تفويض مؤقت للعمل",
+        guardKey: String = "grant_temp_perm_${account.id}",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "منح صلاحية مؤقتة",
+            documentReference = "USR-TEMP-${account.id}-$permissionToken",
+            targetCollection = "user_accounts",
+            payloadSummary = "منح $permissionToken للموظف ${account.fullName}",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             val actorUser = currentUser.value
             val expiresAt = System.currentTimeMillis() + (durationHours.coerceAtLeast(1) * 3600_000L)
             val grantResult = com.example.util.EnterpriseRbacManager.grantTemporaryPermission(
@@ -1977,7 +2499,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 reason = reason,
                 context = getApplication()
             )
-            grantResult.onSuccess { updatedAccount ->
+            grantResult.map { updatedAccount ->
                 repository.updateEmployeePermissionsAndRole(
                     account = account,
                     newRole = updatedAccount.role,
@@ -1992,8 +2514,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 refreshPermissionChangeHistory()
                 cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updatedAccount)
                 postMessage("تم منح صلاحية مؤقتة ($permissionToken) للموظف ${account.fullName} لمدة $durationHours ساعة")
-            }.onFailure { err ->
-                postMessage(err.message ?: "تعذر منح الصلاحية المؤقتة", isError = true)
+                "USR-TEMP-${account.id}-$permissionToken" to updatedAccount
             }
         }
     }
@@ -2004,7 +2525,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun approveUserAccount(
         account: UserAccountEntity,
         newRole: String = "محاسب ومبيعات",
-        newPermissions: String = "المبيعات,الأسعار,المخازن"
+        newPermissions: String = "المبيعات,الأسعار,المخازن",
+        guardKey: String = "approve_user_${account.id}",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
         val targetRole = if (account.role.contains("بانتظار موافقة") || account.role.isBlank()) newRole else account.role
         val targetPerms = if (account.permissions.isBlank()) newPermissions else account.permissions
@@ -2015,20 +2538,37 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             newPermissions = targetPerms,
             newLinkedUid = account.remoteServerId,
             approveAccount = true,
-            changeReason = "اعتماد حساب جديد وتفعيل صلاحياته الافتراضية"
+            changeReason = "اعتماد حساب جديد وتفعيل صلاحياته الافتراضية",
+            guardKey = guardKey,
+            onComplete = onComplete
         )
     }
 
     // --- User Profile Management ---
-    fun updateUserProfile(fullName: String, phoneOrEmail: String, newPassword: String?) {
-        viewModelScope.launch {
+    fun updateUserProfile(
+        fullName: String,
+        phoneOrEmail: String,
+        newPassword: String?,
+        guardKey: String = "update_user_profile",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تحديث الملف الشخصي",
+            documentReference = "USR-PROFILE-${currentUser.value?.id ?: 0L}",
+            targetCollection = "user_accounts",
+            payloadSummary = "تحديث ملف $fullName",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             val app = getApplication<Application>()
-            val user = currentUser.value ?: run {
-                postMessage("يجب تسجيل الدخول أولاً لتعديل الملف الشخصي", isError = true)
-                return@launch
-            }
+            val user = currentUser.value ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("يجب تسجيل الدخول أولاً لتعديل الملف الشخصي")
+            )
             val res = repository.updateUserProfile(user.id, fullName, phoneOrEmail, newPassword)
-            res.onSuccess { updated ->
+            res.map { updated ->
                 activeSessionOverride.value = updated
                 DeviceSessionStore.saveActiveUserSession(app, updated)
                 if (com.example.util.BiometricPreferenceManager.isBoundToUser(app, updated)) {
@@ -2037,8 +2577,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 postMessage("تم تحديث بيانات الملف الشخصي بنجاح")
                 cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, updated)
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تحديث الملف الشخصي", isError = true)
+                "USR-PROFILE-${updated.id}" to updated
             }
         }
     }
@@ -3904,21 +4443,27 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         name: String,
         category: String,
         unit: String,
+        guardKey: String = "add_factory_item",
         onSuccess: () -> Unit = {}
     ) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("إضافة صنف لمخزن المصنع")) return@launch
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إضافة صنف لمخزن المصنع",
+            documentReference = "FI-NEW-${name.trim()}",
+            targetCollection = "factory_items",
+            payloadSummary = "إضافة مادة $name ($unit)",
+            onComplete = { ok -> if (ok) onSuccess() }
+        ) { _ ->
             val actor = resolveUserActor("إدارة المصنع")
             val res = repository.addFactoryItem(name, category, unit, actor)
-            res.onSuccess { itemId ->
+            res.map { itemId ->
                 DeletedRecordsRegistry.unregisterDeleted("factory_items", itemId)
                 DeletedRecordsRegistry.unregisterDeleted("factory_items", "FI-$itemId")
                 DeletedRecordsRegistry.unregisterDeleted("factory_items", name.trim())
                 postMessage("تمت إضافة الصنف ($name) إلى منظومة المصنع بنجاح")
                 persistAndSyncToServer()
-                onSuccess()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر إضافة الصنف", isError = true)
+                "FI-$itemId" to itemId
             }
         }
     }
@@ -3928,26 +4473,33 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         newName: String,
         newCategory: String,
         newUnit: String,
+        guardKey: String = "update_factory_item_${item.id}",
         onSuccess: () -> Unit = {}
     ) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("تعديل بيانات المادة الخام")) return@launch
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تعديل بيانات المادة الخام",
+            documentReference = "FI-${item.id}",
+            targetCollection = "factory_items",
+            payloadSummary = "تعديل المادة $newName ($newUnit)",
+            onComplete = { ok -> if (ok) onSuccess() }
+        ) { _ ->
             val categoryChanged = item.category.trim() != newCategory.trim()
             if (categoryChanged && !currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("تعديل نوع الصنف")) {
-                postMessage("عفواً، تعديل نوع الصنف يتطلب صلاحية (تعديل نوع الصنف)", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، تعديل نوع الصنف يتطلب صلاحية (تعديل نوع الصنف)")
+                )
             }
             val actor = resolveUserActor("إدارة المشتريات والمصنع")
             val res = repository.updateFactoryItem(item.id, newName, newCategory, newUnit, actor)
-            res.onSuccess {
+            res.map {
                 DeletedRecordsRegistry.unregisterDeleted("factory_items", item.id)
                 DeletedRecordsRegistry.unregisterDeleted("factory_items", "FI-${item.id}")
                 DeletedRecordsRegistry.unregisterDeleted("factory_items", newName.trim())
                 postMessage("تم تعديل بيانات المادة الخام ($newName) بنجاح ومزامنتها")
                 persistAndSyncToServer()
-                onSuccess()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تعديل المادة الخام", isError = true)
+                "FI-${item.id}" to Unit
             }
         }
     }
@@ -3955,32 +4507,50 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun renameFactoryItemCategory(
         oldCategory: String,
         newCategory: String,
+        guardKey: String = "rename_factory_cat",
         onSuccess: () -> Unit = {}
     ) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("تعديل اسم نوع الصنف")) return@launch
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تعديل اسم نوع الصنف",
+            documentReference = "FI-CAT-${oldCategory.trim()}",
+            targetCollection = "factory_items",
+            payloadSummary = "تغيير فئة $oldCategory إلى $newCategory",
+            onComplete = { ok -> if (ok) onSuccess() }
+        ) { _ ->
             if (!currentUser.value.isSystemManager() && !currentUser.value.hasModulePermission("تعديل نوع الصنف")) {
-                postMessage("عفواً، هذه العملية تتطلب صلاحية (تعديل نوع الصنف)", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("عفواً، هذه العملية تتطلب صلاحية (تعديل نوع الصنف)")
+                )
             }
             val actor = resolveUserActor("إدارة الأصناف")
             val res = repository.renameFactoryItemCategory(oldCategory, newCategory, actor)
-            res.onSuccess {
+            res.map {
                 postMessage("تم تعديل اسم نوع الصنف من ($oldCategory) إلى ($newCategory) بنجاح")
                 persistAndSyncToServer()
-                onSuccess()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر تعديل اسم نوع الصنف", isError = true)
+                "FI-CAT-${newCategory.trim()}" to Unit
             }
         }
     }
 
-    fun deleteFactoryItem(item: FactoryItemEntity) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("حذف المادة الخام / الصنف")) return@launch
+    fun deleteFactoryItem(
+        item: FactoryItemEntity,
+        guardKey: String = "delete_factory_item_${item.id}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف المادة الخام / الصنف",
+            documentReference = "FI-${item.id}",
+            targetCollection = "factory_items",
+            payloadSummary = "حذف ${item.name}",
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("إدارة المصنع")
             val res = repository.deleteFactoryItem(item.id, item.name, actor)
-            res.onSuccess {
+            res.map {
                 com.example.data.local.DeletedRecordsRegistry.registerDeleted(
                     "factory_items",
                     "FI-${item.id}",
@@ -3998,8 +4568,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 postMessage("تم حذف المادة الخام (${item.name}) من النظام والسحابة بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف الصنف", isError = true)
+                "FI-DEL-${item.id}" to Unit
             }
         }
     }
@@ -4022,12 +4591,23 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveFormulation(formulation: FormulationEntity) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("حفظ تركيبة دهانات بالمختبر")) return@launch
+    fun saveFormulation(
+        formulation: FormulationEntity,
+        guardKey: String = "save_formulation",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = if (formulation.id > 0L) com.example.util.IdempotencyOperationType.UPDATE else com.example.util.IdempotencyOperationType.SAVE,
+            actionLabel = "حفظ تركيبة دهانات بالمختبر",
+            documentReference = "FRM-${formulation.formulaNo}",
+            targetCollection = "formulations",
+            payloadSummary = "حفظ تركيبة ${formulation.productName}",
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("مهندس المختبر")
             val res = repository.saveFormulation(formulation, actor)
-            res.onSuccess { savedId ->
+            res.map { savedId ->
                 val entityToSync = formulation.copy(id = savedId)
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
@@ -4037,18 +4617,28 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 postMessage("تم حفظ ومزامنة التركيبة (${formulation.productName}) على السحابة | PVC: ${formulation.calculatedPvc}%")
-            }.onFailure {
-                postMessage(it.message ?: "فشل حفظ التركيبة", isError = true)
+                "FRM-$savedId" to savedId
             }
         }
     }
 
-    fun deleteFormulation(formulation: FormulationEntity) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("حذف تركيبة من المختبر")) return@launch
+    fun deleteFormulation(
+        formulation: FormulationEntity,
+        guardKey: String = "delete_formulation_${formulation.id}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف تركيبة من المختبر",
+            documentReference = "FRM-${formulation.id}",
+            targetCollection = "formulations",
+            payloadSummary = "حذف تركيبة ${formulation.formulaNo}",
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("مهندس المختبر")
             val res = repository.deleteFormulation(formulation.id, actor)
-            res.onSuccess {
+            res.map {
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
                         cloudErpSyncRepo.deleteFormulationFromCloud(serverClusterCode.value, formulation.id, formulation.formulaNo)
@@ -4057,21 +4647,28 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 postMessage("تم حذف التركيبة المعملية #${formulation.formulaNo} بنجاح من السجل والسحابة")
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف التركيبة", isError = true)
+                "FRM-DEL-${formulation.id}" to Unit
             }
         }
     }
 
-    fun logProductionBatch(batch: ProductionBatchEntity, onCompleted: ((Boolean) -> Unit)? = null) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("تسجيل تشغيلة إنتاج بالمصنع")) {
-                onCompleted?.invoke(false)
-                return@launch
-            }
+    fun logProductionBatch(
+        batch: ProductionBatchEntity,
+        guardKey: String = "log_production_batch",
+        onCompleted: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SAVE,
+            actionLabel = "تسجيل تشغيلة إنتاج بالمصنع",
+            documentReference = "BATCH-${batch.batchNumber}",
+            targetCollection = "production_batches",
+            payloadSummary = "تسجيل تشغيلة #${batch.batchNumber}",
+            onComplete = onCompleted
+        ) { _ ->
             val actor = resolveUserActor("مهندس الإنتاج")
             val res = repository.saveProductionBatch(batch, actor)
-            res.onSuccess { savedId ->
+            res.map { savedId ->
                 val entityToSync = batch.copy(id = savedId)
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
@@ -4081,20 +4678,28 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 postMessage("تم تسجيل تشغيلة الإنتاج #${batch.batchNumber} بنجاح وحفظها في Firestore | الحالة: ${batch.qualityStatus}")
-                onCompleted?.invoke(true)
-            }.onFailure {
-                postMessage(it.message ?: "فشل تسجيل تشغيلة الإنتاج", isError = true)
-                onCompleted?.invoke(false)
+                "BATCH-$savedId" to savedId
             }
         }
     }
 
-    fun deleteProductionBatch(batch: ProductionBatchEntity) {
-        viewModelScope.launch {
-            if (!checkOnlineBeforeTransaction("حذف تشغيلة إنتاج من المصنع")) return@launch
+    fun deleteProductionBatch(
+        batch: ProductionBatchEntity,
+        guardKey: String = "delete_production_batch_${batch.id}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف تشغيلة إنتاج من المصنع",
+            documentReference = "BATCH-${batch.id}",
+            targetCollection = "production_batches",
+            payloadSummary = "حذف تشغيلة #${batch.batchNumber}",
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("مهندس الإنتاج")
             val res = repository.deleteProductionBatch(batch.id, batch.batchNumber, actor)
-            res.onSuccess {
+            res.map {
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
                         cloudErpSyncRepo.deleteProductionBatchFromCloud(serverClusterCode.value, batch.id, batch.batchNumber)
@@ -4103,56 +4708,109 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 postMessage("تم حذف تشغيلة الإنتاج #${batch.batchNumber} من السجل والسحابة")
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف التشغيلة", isError = true)
+                "BATCH-DEL-${batch.id}" to Unit
             }
         }
     }
 
-    fun saveChemicalSafety(item: ChemicalSafetyEntity) {
-        viewModelScope.launch {
+    fun saveChemicalSafety(
+        item: ChemicalSafetyEntity,
+        guardKey: String = "save_chemical_safety",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SAVE,
+            actionLabel = "حفظ بطاقة السلامة الكيميائية",
+            documentReference = "MSDS-${item.chemicalName}",
+            targetCollection = "chemical_safety",
+            payloadSummary = "حفظ بطاقة ${item.chemicalName}",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("مسؤول السلامة والجودة")
             val res = repository.saveChemicalSafety(item, actor)
-            res.onSuccess {
+            res.map { savedId ->
                 postMessage("تم تحديث بطاقة السلامة الكيميائية (${item.chemicalName}) بنجاح")
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حفظ بطاقة السلامة", isError = true)
+                "MSDS-$savedId" to savedId
             }
         }
     }
 
-    fun deleteChemicalSafety(item: ChemicalSafetyEntity) {
-        viewModelScope.launch {
+    fun deleteChemicalSafety(
+        item: ChemicalSafetyEntity,
+        guardKey: String = "delete_chemical_safety_${item.id}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DELETE,
+            actionLabel = "حذف بطاقة السلامة الكيميائية",
+            documentReference = "MSDS-${item.id}",
+            targetCollection = "chemical_safety",
+            payloadSummary = "حذف بطاقة ${item.chemicalName}",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("مسؤول السلامة والجودة")
             val res = repository.deleteChemicalSafety(item.id, actor)
-            res.onSuccess {
+            res.map {
                 postMessage("تم حذف بطاقة السلامة (${item.chemicalName}) بنجاح")
-            }.onFailure {
-                postMessage(it.message ?: "تعذر حذف بطاقة السلامة", isError = true)
+                "MSDS-DEL-${item.id}" to Unit
             }
         }
     }
 
-    fun createProductionOrderFromFormula(formulaId: Long, batchMultiplier: Double = 1.0) {
-        viewModelScope.launch {
+    fun createProductionOrderFromFormula(
+        formulaId: Long,
+        batchMultiplier: Double = 1.0,
+        guardKey: String = "create_prod_order_formula_$formulaId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إنشاء أمر تشغيل مصنعي من التركيبة",
+            documentReference = "ORD-FRM-$formulaId",
+            targetCollection = "factory_moves",
+            payloadSummary = "أمر تشغيل لتركيبة #$formulaId (x$batchMultiplier)",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("مدير الإنتاج")
             val res = repository.createFactoryOrderFromFormulation(formulaId, batchMultiplier, actor)
-            res.onSuccess { moveId ->
+            res.map { moveId ->
                 postMessage("تم بنجاح إنشاء أمر التشغيل المصنعي وتوريد الخامات رقم #$moveId وحجز كميات الإنتاج")
                 persistAndSyncToServer()
-            }.onFailure { err ->
-                postMessage(err.message ?: "تعذر إنشاء أمر التشغيل المصنعي", isError = true)
+                "ORD-FRM-$moveId" to moveId
             }
         }
     }
 
-    fun addPubChemCompoundToFactoryCatalog(compound: com.example.util.PubChemService.PubChemCompound) {
-        viewModelScope.launch {
+    fun addPubChemCompoundToFactoryCatalog(
+        compound: com.example.util.PubChemService.PubChemCompound,
+        guardKey: String = "add_pubchem_${compound.cid}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إضافة مركب كيميائي لكتالوج المصنع",
+            documentReference = "PUBCHEM-${compound.cid}",
+            targetCollection = "factory_items",
+            payloadSummary = "إضافة ${compound.name} من PubChem",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("مهندس المختبر والمصنع")
             val existing = factoryItems.value.find { it.name.trim().equals(compound.name.trim(), ignoreCase = true) }
             if (existing != null) {
                 postMessage("المادة (${compound.name}) مضافة مسبقاً في كتالوج خامات المصنع")
-                return@launch
+                return@launchGuardedTransaction Result.success("FI-${existing.id}" to existing.id)
             }
             val res = repository.addFactoryItem(
                 name = compound.name,
@@ -4160,11 +4818,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 category = "raw",
                 actor = actor
             )
-            res.onSuccess {
+            res.map { itemId ->
                 postMessage("تمت إضافة المادة (${compound.name}) كخامة معتمدة في المصنع بنجاح")
                 persistAndSyncToServer()
-            }.onFailure {
-                postMessage(it.message ?: "تعذر إضافة المادة لكتالوج المصنع", isError = true)
+                "FI-$itemId" to itemId
             }
         }
     }
@@ -4215,13 +4872,26 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         additionalExpenses: Double = 0.0,
         supplierName: String,
         expectedDeliveryDate: String = "",
-        notes: String = ""
+        notes: String = "",
+        guardKey: String = "create_enterprise_po",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
         if (orderedQty <= 0.0) {
             postMessage("يرجى إدخال كمية مطلوبة أكبر من صفر", isError = true)
+            onComplete?.invoke(false)
             return
         }
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إصدار أمر شراء خامات",
+            documentReference = "PO-$materialId-${orderedQty.toInt()}",
+            targetCollection = "purchase_orders",
+            payloadSummary = "أمر شراء $orderedQty $unit من $materialName",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             val actor = resolveUserActor("مسؤول المشتريات")
             val poNo = "PO-${System.currentTimeMillis().toString().takeLast(6)}"
             val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
@@ -4245,7 +4915,6 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             )
             _purchaseOrders.value = com.example.util.ErpLifecycleEngine.savePurchaseOrder(getApplication(), po)
 
-            // تسجيل الحركة المالية لأمر الشراء في حال وجود تكلفة مدفوعة دون زيادة مخزون الخام قبل الاستلام والفحص
             val totalCost = po.totalCost
             if (totalCost > 0.0) {
                 val targetCashbox = if (currency.equals("EGP", ignoreCase = true)) "خزنة مصر" else "خزنة السودان"
@@ -4259,7 +4928,6 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     user = actor
                 )
             }
-            // نسجل حركة RAW_PURCHASE كسجل تعاقدي فقط (والرصيد المتاح يعتمد على RAW_RECEIPT بعد الفحص والاعتماد)
             repository.recordFactoryMove(
                 kind = "RAW_PURCHASE",
                 itemId = materialId,
@@ -4271,6 +4939,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             )
             postMessage("تم إصدار أمر الشراء رقم $poNo بنجاح. لن يزاد رصيد المخزن إلا بعد الاستلام والفحص والاعتماد.")
             persistAndSyncToServer()
+            Result.success(poNo to po)
         }
     }
 
@@ -4284,9 +4953,21 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         rejectedQty: Double,
         discrepancyReason: String,
         notes: String = "",
-        autoApproveIfManagerOrNoDiscrepancy: Boolean = true
+        autoApproveIfManagerOrNoDiscrepancy: Boolean = true,
+        guardKey: String = "receive_match_po_${po.poNumber}",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SUPPLY_RAW,
+            actionLabel = "استلام ومطابقة شحنة المشتريات",
+            documentReference = "GRN-${po.poNumber}",
+            targetCollection = "goods_receipts",
+            payloadSummary = "استلام ${po.poNumber} مقبول $acceptedQty",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             val storekeeper = resolveUserActor("أمين مخزن الخام")
             val grnResult = runCatching {
                 com.example.util.ErpLifecycleEngine.evaluateGoodsReceipt(
@@ -4299,9 +4980,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     notes = notes
                 )
             }
-            grnResult.onFailure { err ->
-                postMessage(err.message ?: "خطأ في بيانات مطابقة الشحنة", isError = true)
-                return@launch
+            if (grnResult.isFailure) {
+                return@launchGuardedTransaction Result.failure(
+                    grnResult.exceptionOrNull() ?: IllegalStateException("خطأ في بيانات مطابقة الشحنة")
+                )
             }
             var grn = grnResult.getOrThrow()
             val canApproveNow = !grn.hasDiscrepancy ||
@@ -4345,25 +5027,43 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             postMessage(statusMsg)
             persistAndSyncToServer()
+            Result.success(grn.grnNumber to grn)
         }
     }
 
     /**
      * اعتماد تقرير استلام يحتوي على فروقات بواسطة المدير أو Admin وإدخال الكمية المقبولة للمخزون
      */
-    fun approveDiscrepantGoodsReceipt(grn: com.example.util.GoodsReceiptNoteRecord) {
+    fun approveDiscrepantGoodsReceipt(
+        grn: com.example.util.GoodsReceiptNoteRecord,
+        guardKey: String = "approve_grn_${grn.grnNumber}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
         if (!currentUser.value.isSystemManager()) {
             postMessage("اعتماد فروقات الاستلام متاح للمدير أو Admin فقط", isError = true)
+            onComplete?.invoke(false)
             return
         }
         if (grn.stockPosted) {
             postMessage("تم ترحيل هذا الاستلام إلى المخزون مسبقاً", isError = true)
+            onComplete?.invoke(false)
             return
         }
-        viewModelScope.launch {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "اعتماد فروقات استلام الخامات",
+            documentReference = grn.grnNumber,
+            targetCollection = "goods_receipts",
+            payloadSummary = "اعتماد GRN ${grn.grnNumber}",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
             if (!com.example.util.ErpLifecycleEngine.markAndCheckIdempotencyKey(getApplication(), grn.idempotencyKey)) {
-                postMessage("تم اعتماد وترحيل هذا المستند مسبقاً (منع التكرار)", isError = true)
-                return@launch
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("تم اعتماد وترحيل هذا المستند مسبقاً (منع التكرار)")
+                )
             }
             val approver = resolveUserActor("المدير")
             if (grn.acceptedQty > 0.0) {
@@ -4399,6 +5099,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             postMessage("تم اعتماد تقرير الاستلام ${grn.grnNumber} وإضافة ${grn.acceptedQty} ${grn.unit} للمخزن المتاح")
             persistAndSyncToServer()
+            Result.success(grn.grnNumber to updatedGrn)
         }
     }
 
@@ -4412,58 +5113,89 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         targetCartons: Int,
         machineName: String,
         productionEngineer: String,
-        notes: String = ""
+        notes: String = "",
+        guardKey: String = "create_enterprise_prod_order",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
         if (targetCartons <= 0) {
             postMessage("يرجى إدخال عدد كراتين مستهدف أكبر من صفر", isError = true)
+            onComplete?.invoke(false)
             return
         }
-        val pkgRule = com.example.util.ErpLifecycleEngine.resolvePackagingRule(
-            packageWeightGrams.toString(),
-            _packagingRules.value
-        )
-        val expectedCans = pkgRule.calculateExpectedCans(targetCartons)
-        val targetWeightKg = pkgRule.netPaintWeightKgForCans(expectedCans)
-        val bomLines = if (formula != null) {
-            com.example.util.ErpLifecycleEngine.calculateTheoreticalBomRequirements(formula, targetWeightKg)
-        } else {
-            emptyList()
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إنشاء أمر إنتاج معتمد",
+            documentReference = "ORD-ENT-$paintColor-$packageWeightGrams-$targetCartons",
+            targetCollection = "production_orders",
+            payloadSummary = "أمر إنتاج $targetCartons كرتونة $paintColor",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
+            val pkgRule = com.example.util.ErpLifecycleEngine.resolvePackagingRule(
+                packageWeightGrams.toString(),
+                _packagingRules.value
+            )
+            val expectedCans = pkgRule.calculateExpectedCans(targetCartons)
+            val targetWeightKg = pkgRule.netPaintWeightKgForCans(expectedCans)
+            val bomLines = if (formula != null) {
+                com.example.util.ErpLifecycleEngine.calculateTheoreticalBomRequirements(formula, targetWeightKg)
+            } else {
+                emptyList()
+            }
+            val orderNo = "PO-PRD-${System.currentTimeMillis().toString().takeLast(6)}"
+            val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+            val order = com.example.util.ProductionOrderRecord(
+                orderNumber = orderNo,
+                createdDate = dateStr,
+                executionDate = dateStr.substringBefore(" "),
+                productType = formula?.paintType ?: "دهان مائي",
+                formulaId = formula?.id,
+                formulaNo = formula?.formulaNo ?: "STD-BOM",
+                formulaName = formula?.productName ?: "بوهية $paintColor $packageWeightGrams جم",
+                paintColor = paintColor,
+                packageWeightGrams = pkgRule.weightGrams,
+                targetWeightKg = targetWeightKg,
+                targetCartons = targetCartons,
+                machineName = machineName,
+                productionEngineer = productionEngineer,
+                status = com.example.util.ProductionOrderStatus.APPROVED,
+                approvedBy = resolveUserActor("المدير"),
+                bomRequirements = bomLines,
+                notes = notes
+            )
+            _productionOrders.value = com.example.util.ErpLifecycleEngine.saveProductionOrder(getApplication(), order)
+            postMessage("تم إصدار واعتماد أمر الإنتاج $orderNo ($targetCartons كرتونة = $expectedCans علبة، الوزن الصافي: $targetWeightKg كجم)")
+            Result.success(orderNo to order)
         }
-        val orderNo = "PO-PRD-${System.currentTimeMillis().toString().takeLast(6)}"
-        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
-        val order = com.example.util.ProductionOrderRecord(
-            orderNumber = orderNo,
-            createdDate = dateStr,
-            executionDate = dateStr.substringBefore(" "),
-            productType = formula?.paintType ?: "دهان مائي",
-            formulaId = formula?.id,
-            formulaNo = formula?.formulaNo ?: "STD-BOM",
-            formulaName = formula?.productName ?: "بوهية $paintColor $packageWeightGrams جم",
-            paintColor = paintColor,
-            packageWeightGrams = pkgRule.weightGrams,
-            targetWeightKg = targetWeightKg,
-            targetCartons = targetCartons,
-            machineName = machineName,
-            productionEngineer = productionEngineer,
-            status = com.example.util.ProductionOrderStatus.APPROVED,
-            approvedBy = resolveUserActor("المدير"),
-            bomRequirements = bomLines,
-            notes = notes
-        )
-        _productionOrders.value = com.example.util.ErpLifecycleEngine.saveProductionOrder(getApplication(), order)
-        postMessage("تم إصدار واعتماد أمر الإنتاج $orderNo ($targetCartons كرتونة = $expectedCans علبة، الوزن الصافي: $targetWeightKg كجم)")
     }
 
     /**
      * صرف المواد الخام لأمر إنتاج معتمد وتأكيد استلام مهندس الإنتاج مع منع الخصم المكرر (Section 8)
      */
-    fun issueAndConfirmRawMaterialsForOrder(order: com.example.util.ProductionOrderRecord) {
-        val idempotencyKey = "ISSUE-${order.orderNumber}"
-        if (!com.example.util.ErpLifecycleEngine.markAndCheckIdempotencyKey(getApplication(), idempotencyKey)) {
-            postMessage("تم صرف المواد الخام لأمر الإنتاج ${order.orderNumber} مسبقاً (منع الخصم المكرر)", isError = true)
-            return
-        }
-        viewModelScope.launch {
+    fun issueAndConfirmRawMaterialsForOrder(
+        order: com.example.util.ProductionOrderRecord,
+        guardKey: String = "issue_raw_order_${order.orderNumber}",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DISPATCH_GOODS,
+            actionLabel = "صرف المواد الخام لأمر الإنتاج",
+            documentReference = "ISSUE-${order.orderNumber}",
+            targetCollection = "production_orders",
+            payloadSummary = "صرف خامات لأمر ${order.orderNumber}",
+            requiresOnline = false,
+            requiresServerClaim = isConnectedToCloud(),
+            onComplete = onComplete
+        ) { _ ->
+            val idempotencyKey = "ISSUE-${order.orderNumber}"
+            if (!com.example.util.ErpLifecycleEngine.markAndCheckIdempotencyKey(getApplication(), idempotencyKey)) {
+                return@launchGuardedTransaction Result.failure(
+                    IllegalStateException("تم صرف المواد الخام لأمر الإنتاج ${order.orderNumber} مسبقاً (منع الخصم المكرر)")
+                )
+            }
             val storekeeper = resolveUserActor("أمين مخزن الخام")
             val rawItem = factoryItems.value.firstOrNull {
                 it.category.contains("raw", ignoreCase = true) || it.category.contains("خام", ignoreCase = true)
@@ -4490,6 +5222,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             _productionOrders.value = com.example.util.ErpLifecycleEngine.saveProductionOrder(getApplication(), updated)
             postMessage("تم صرف الخامات (${order.targetWeightKg} كجم) وتأكيد استلام مهندس الإنتاج لأمر ${order.orderNumber}")
             persistAndSyncToServer()
+            Result.success(updated.issueVoucherNo to updated)
         }
     }
 
@@ -4510,15 +5243,22 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         currency: String,
         discrepancyReason: String,
         cashboxAmount: Double = 0.0,
-        notes: String = ""
+        notes: String = "",
+        guardKey: String = "phase3_receive_raw_grn",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("استلام وفحص شحنة المشتريات")) return
-        viewModelScope.launch {
-            val coordinator = repository.phase3Engine
-            if (coordinator == null) {
-                postMessage("محرك الاستلام غير مهيأ حالياً", isError = true)
-                return@launch
-            }
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SUPPLY_RAW,
+            actionLabel = "استلام وفحص شحنة المشتريات",
+            documentReference = "GRN-$materialId-$batchNumber",
+            targetCollection = "purchase_receipts",
+            payloadSummary = "استلام $acceptedQty $unit من $materialName ($supplierName)",
+            onComplete = onComplete
+        ) { _ ->
+            val coordinator = repository.phase3Engine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("محرك الاستلام غير مهيأ حالياً")
+            )
             val actor = resolveUserActor("أمين مخزن الخام")
             val result = coordinator.receivePurchaseToRawMaterials(
                 com.example.domain.inventory.PurchaseReceiptInput(
@@ -4540,7 +5280,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     approver = currentUser.value
                 )
             )
-            result.onSuccess { receipt ->
+            result.map { receipt ->
                 if (cashboxAmount > 0.0) {
                     val linkedBox = resolveCashboxForCurrency(currency)
                     repository.recordMovement(
@@ -4556,8 +5296,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 postMessage("تم اعتماد استلام ${receipt.grnNo}: مقبول ${receipt.acceptedQty} ${receipt.unit} في مخزن المواد الخام" +
                     if (receipt.rejectedQty > 0.0) " • وحجر ${receipt.rejectedQty} مرفوضة" else "")
                 persistAndSyncToServer()
-            }.onFailure { err ->
-                postMessage(err.message ?: "تعذر إتمام استلام المشتريات", isError = true)
+                receipt.grnNo to receipt
             }
         }
     }
@@ -4570,11 +5309,22 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         targetCartons: Int,
         machineName: String,
         productionEngineer: String,
-        notes: String = ""
+        notes: String = "",
+        guardKey: String = "phase3_create_bom_order",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("إنشاء أمر إنتاج BOM")) return
-        viewModelScope.launch {
-            val coordinator = repository.phase3Engine ?: return@launch
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.CREATE,
+            actionLabel = "إنشاء أمر إنتاج BOM",
+            documentReference = "BOM-ORD-$paintColor-$packageWeightGrams-$targetCartons",
+            targetCollection = "production_orders",
+            payloadSummary = "أمر إنتاج $productName ($targetCartons كرتونة)",
+            onComplete = onComplete
+        ) { _ ->
+            val coordinator = repository.phase3Engine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("محرك الإنتاج غير مهيأ حالياً")
+            )
             val matchedProduct = products.value.firstOrNull {
                 it.name.equals(productName, ignoreCase = true) ||
                     (it.paintColor.equals(paintColor, ignoreCase = true) && it.packageWeight == packageWeightGrams.toString())
@@ -4593,11 +5343,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     notes = notes
                 )
             )
-            result.onSuccess { order ->
+            result.map { order ->
                 postMessage("تم إنشاء أمر الإنتاج ${order.orderNo}: ${order.targetCartons} كرتونة = ${order.targetCans} علبة (${order.packageWeightGrams} جم)")
                 persistAndSyncToServer()
-            }.onFailure { err ->
-                postMessage(err.message ?: "تعذر إنشاء أمر الإنتاج", isError = true)
+                order.orderNo to order
             }
         }
     }
@@ -4610,11 +5359,22 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         returnedQty: Double = 0.0,
         wastedQty: Double = 0.0,
         unit: String = "كجم",
-        batchNumber: String = ""
+        batchNumber: String = "",
+        guardKey: String = "phase3_issue_materials_${order.id}",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("صرف خامات لأمر الإنتاج")) return
-        viewModelScope.launch {
-            val coordinator = repository.phase3Engine ?: return@launch
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.DISPATCH_GOODS,
+            actionLabel = "صرف خامات لأمر الإنتاج",
+            documentReference = "ISSUE-${order.orderNo}-$materialId",
+            targetCollection = "production_orders",
+            payloadSummary = "صرف $issueQty $unit من $materialName لأمر ${order.orderNo}",
+            onComplete = onComplete
+        ) { _ ->
+            val coordinator = repository.phase3Engine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("محرك الإنتاج غير مهيأ حالياً")
+            )
             val result = coordinator.issueRawMaterialsForOrder(
                 orderId = order.id,
                 materials = listOf(
@@ -4630,11 +5390,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 ),
                 actor = resolveUserActor("أمين مخزن الخام")
             )
-            result.onSuccess { updated ->
+            result.map { updated ->
                 postMessage("تم صرف الخامات لأمر ${updated.orderNo} من مخزن المواد الخام")
                 persistAndSyncToServer()
-            }.onFailure { err ->
-                postMessage(err.message ?: "تعذر صرف الخامات", isError = true)
+                updated.orderNo to updated
             }
         }
     }
@@ -4649,11 +5408,22 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         colorMatchPassed: Boolean,
         wastedRawKg: Double = 0.0,
         forceReject: Boolean = false,
-        notes: String = ""
+        notes: String = "",
+        guardKey: String = "phase3_qc_inspection_${order.id}",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("فحص الجودة وترحيل الإنتاج التام")) return
-        viewModelScope.launch {
-            val coordinator = repository.phase3Engine ?: return@launch
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SAVE,
+            actionLabel = "فحص الجودة وترحيل الإنتاج التام",
+            documentReference = "QC-${order.orderNo}",
+            targetCollection = "qc_inspections",
+            payloadSummary = "فحص QC لأمر ${order.orderNo} (مطابق: $goodCans علبة)",
+            onComplete = onComplete
+        ) { _ ->
+            val coordinator = repository.phase3Engine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("محرك الجودة غير مهيأ حالياً")
+            )
             val result = coordinator.inspectQcAndPostToFinishedGoods(
                 com.example.domain.inventory.QcProductionInspectionInput(
                     productionOrderId = order.id,
@@ -4669,15 +5439,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     notes = notes
                 )
             )
-            result.onSuccess { (qc, updatedOrder) ->
+            result.map { (qc, updatedOrder) ->
                 if (qc.postedToStock) {
                     postMessage("تم اعتماد الجودة ${qc.qcNo}: دخول ${updatedOrder.producedFullCartons} كرتونة (${updatedOrder.producedLooseCans} علبة) إلى مخزن الإنتاج التام")
                 } else {
                     postMessage("بوابة الجودة ${qc.qcNo}: تم رفض/حجر التشغيلة ومنع دخولها لمخزن الإنتاج التام", isError = true)
                 }
                 persistAndSyncToServer()
-            }.onFailure { err ->
-                postMessage(err.message ?: "فشل تسجيل فحص الجودة", isError = true)
+                qc.qcNo to (qc to updatedOrder)
             }
         }
     }
@@ -4689,11 +5458,22 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         productName: String,
         qty: Double,
         batchNumber: String = "",
-        notes: String = ""
+        notes: String = "",
+        guardKey: String = "phase3_create_transfer",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("إنشاء تحويل مخزني")) return
-        viewModelScope.launch {
-            val eng = repository.inventoryEngine ?: return@launch
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.STOCK_TRANSFER,
+            actionLabel = "إنشاء تحويل مخزني",
+            documentReference = "TRF-$sourceWarehouseId-$destinationWarehouseId-$productId",
+            targetCollection = "warehouse_transfers",
+            payloadSummary = "تحويل $qty من $productName",
+            onComplete = onComplete
+        ) { _ ->
+            val eng = repository.inventoryEngine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("محرك المخازن غير مهيأ حالياً")
+            )
             val res = eng.createTransferDraft(
                 com.example.domain.inventory.TransferCreateRequest(
                     sourceWarehouseId = sourceWarehouseId,
@@ -4713,60 +5493,116 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 )
             )
-            res.onSuccess { trf ->
+            res.map { trf ->
                 postMessage("تم إنشاء مسودة التحويل ${trf.transferNo} بانتظار الاعتماد")
                 persistAndSyncToServer()
-            }.onFailure { err ->
-                postMessage(err.message ?: "تعذر إنشاء مستند التحويل", isError = true)
+                trf.transferNo to trf
             }
         }
     }
 
-    fun approveWarehouseTransfer(transferId: Long) {
-        if (!checkOnlineBeforeTransaction("اعتماد التحويل المخزني")) return
-        viewModelScope.launch {
-            val eng = repository.inventoryEngine ?: return@launch
+    fun approveWarehouseTransfer(
+        transferId: Long,
+        guardKey: String = "phase3_approve_transfer_$transferId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "اعتماد التحويل المخزني",
+            documentReference = "TRF-APP-$transferId",
+            targetCollection = "warehouse_transfers",
+            payloadSummary = "اعتماد تحويل #$transferId",
+            onComplete = onComplete
+        ) { _ ->
+            val eng = repository.inventoryEngine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("محرك المخازن غير مهيأ حالياً")
+            )
             eng.approveTransfer(transferId, currentUser.value, allowCreatorOverride = currentUser.value.isSuperAdminAccount())
-                .onSuccess {
+                .map {
                     postMessage("تم اعتماد التحويل ${it.transferNo} وحجز الكمية")
                     persistAndSyncToServer()
-                }.onFailure { postMessage(it.message ?: "تعذر اعتماد التحويل", isError = true) }
+                    it.transferNo to it
+                }
         }
     }
 
-    fun dispatchWarehouseTransfer(transferId: Long) {
-        if (!checkOnlineBeforeTransaction("شحن التحويل المخزني")) return
-        viewModelScope.launch {
-            val eng = repository.inventoryEngine ?: return@launch
+    fun dispatchWarehouseTransfer(
+        transferId: Long,
+        guardKey: String = "phase3_dispatch_transfer_$transferId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.STOCK_TRANSFER,
+            actionLabel = "شحن التحويل المخزني",
+            documentReference = "TRF-DISP-$transferId",
+            targetCollection = "warehouse_transfers",
+            payloadSummary = "شحن تحويل #$transferId",
+            onComplete = onComplete
+        ) { _ ->
+            val eng = repository.inventoryEngine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("محرك المخازن غير مهيأ حالياً")
+            )
             eng.dispatchTransfer(transferId, resolveUserActor("مسؤول الشحن"))
-                .onSuccess {
+                .map {
                     postMessage("تم خروج التحويل ${it.transferNo} (في الطريق / In Transit)")
                     persistAndSyncToServer()
-                }.onFailure { postMessage(it.message ?: "تعذر شحن التحويل", isError = true) }
+                    it.transferNo to it
+                }
         }
     }
 
-    fun receiveWarehouseTransfer(transferId: Long) {
-        if (!checkOnlineBeforeTransaction("استلام التحويل المخزني")) return
-        viewModelScope.launch {
-            val eng = repository.inventoryEngine ?: return@launch
+    fun receiveWarehouseTransfer(
+        transferId: Long,
+        guardKey: String = "phase3_receive_transfer_$transferId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SUPPLY_RAW,
+            actionLabel = "استلام التحويل المخزني",
+            documentReference = "TRF-REC-$transferId",
+            targetCollection = "warehouse_transfers",
+            payloadSummary = "استلام تحويل #$transferId",
+            onComplete = onComplete
+        ) { _ ->
+            val eng = repository.inventoryEngine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("محرك المخازن غير مهيأ حالياً")
+            )
             eng.receiveTransfer(transferId, resolveUserActor("أمين مخزن المبيعات"))
-                .onSuccess {
+                .map {
                     postMessage("تم استلام التحويل ${it.transferNo} في ${it.destinationWarehouseName}")
                     persistAndSyncToServer()
-                }.onFailure { postMessage(it.message ?: "تعذر استلام التحويل", isError = true) }
+                    it.transferNo to it
+                }
         }
     }
 
-    fun reverseInventoryMovement(movementId: Long, reason: String) {
-        if (!checkOnlineBeforeTransaction("عكس حركة مخزنية")) return
-        viewModelScope.launch {
-            val eng = repository.inventoryEngine ?: return@launch
+    fun reverseInventoryMovement(
+        movementId: Long,
+        reason: String,
+        guardKey: String = "phase3_reverse_move_$movementId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "عكس حركة مخزنية",
+            documentReference = "INV-REV-$movementId",
+            targetCollection = "inventory_movements",
+            payloadSummary = "عكس حركة #$movementId",
+            onComplete = onComplete
+        ) { _ ->
+            val eng = repository.inventoryEngine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("محرك المخازن غير مهيأ حالياً")
+            )
             eng.reverseMovement(movementId, reason, resolveUserActor("المدير"))
-                .onSuccess {
+                .map {
                     postMessage("تم إنشاء قيد عكسي ${it.documentNo} مع الاحتفاظ بالسجل الأصلي للتدقيق")
                     persistAndSyncToServer()
-                }.onFailure { postMessage(it.message ?: "تعذر عكس الحركة", isError = true) }
+                    it.documentNo to it
+                }
         }
     }
 
@@ -4778,11 +5614,22 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         amount: Double,
         currency: String,
         description: String,
-        sourceType: String = "MANUAL_ADJUSTMENT"
+        sourceType: String = "MANUAL_ADJUSTMENT",
+        guardKey: String = "phase4_post_journal",
+        onComplete: ((Boolean) -> Unit)? = null
     ) {
-        if (!checkOnlineBeforeTransaction("ترحيل قيد يومية محاسبي")) return
-        viewModelScope.launch {
-            val accEng = repository.accountingEngine ?: return@launch
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SAVE,
+            actionLabel = "ترحيل قيد يومية محاسبي",
+            documentReference = "JRN-$debitAccountCode-$creditAccountCode-${amount.toLong()}",
+            targetCollection = "accounting_journals",
+            payloadSummary = "قيد يومية $amount $currency: $description",
+            onComplete = onComplete
+        ) { _ ->
+            val accEng = repository.accountingEngine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("المحرك المحاسبي غير مهيأ حالياً")
+            )
             val actor = resolveUserActor("المحاسب")
             accEng.postJournalEntry(
                 com.example.domain.accounting.JournalPostRequest(
@@ -4804,25 +5651,37 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     createdBy = actor,
                     approvedBy = actor
                 )
-            ).onSuccess { (entry, _) ->
+            ).map { (entry, pair) ->
                 postMessage("تم ترحيل القيد المزدوج المتوازن ${entry.entryNo} (${entry.totalDebit} ${entry.currency})")
                 persistAndSyncToServer()
-            }.onFailure { err ->
-                postMessage(err.message ?: "تعذر ترحيل القيد المحاسبي", isError = true)
+                entry.entryNo to (entry to pair)
             }
         }
     }
 
-    fun reverseAccountingJournal(entryId: Long, reason: String) {
-        if (!checkOnlineBeforeTransaction("عكس قيد يومية محاسبي")) return
-        viewModelScope.launch {
-            val accEng = repository.accountingEngine ?: return@launch
+    fun reverseAccountingJournal(
+        entryId: Long,
+        reason: String,
+        guardKey: String = "phase4_reverse_journal_$entryId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "عكس قيد يومية محاسبي",
+            documentReference = "JRN-REV-$entryId",
+            targetCollection = "accounting_journals",
+            payloadSummary = "عكس قيد #$entryId: $reason",
+            onComplete = onComplete
+        ) { _ ->
+            val accEng = repository.accountingEngine ?: return@launchGuardedTransaction Result.failure(
+                IllegalStateException("المحرك المحاسبي غير مهيأ حالياً")
+            )
             accEng.reverseJournalEntry(entryId, reason, resolveUserActor("المدير"))
-                .onSuccess { (rev, _) ->
+                .map { (rev, lines) ->
                     postMessage("تم إنشاء القيد العكسي ${rev.entryNo} مع حفظ القيد الأصلي للتدقيق")
                     persistAndSyncToServer()
-                }.onFailure { err ->
-                    postMessage(err.message ?: "تعذر عكس القيد المحاسبي", isError = true)
+                    rev.entryNo to (rev to lines)
                 }
         }
     }

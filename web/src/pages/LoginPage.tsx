@@ -500,7 +500,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             </div>
           )}
 
-          {/* Mandatory Official Android App Download Button on Login Screen */}
+          {/* Mandatory Official Android & Windows App Download Buttons on Login Screen */}
           <div className="pt-4 border-t border-theme space-y-3" data-testid="login-android-download-box">
             <a
               href={latestRelease?.downloadUrl || APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL}
@@ -527,6 +527,29 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               <Smartphone className="w-5 h-5 text-emerald-400 shrink-0" />
             </a>
 
+            <a
+              href={APP_VERSION_CONTRACT.GITHUB_LATEST_WINDOWS_URL}
+              download={APP_VERSION_CONTRACT.WINDOWS_INSTALLER_FILENAME}
+              data-testid="login-download-windows-btn"
+              className="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-sky-600/15 hover:bg-sky-600/25 border border-sky-500/40 text-theme-primary transition-all shadow-md min-h-[52px] group"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-xl bg-sky-500/20 border border-sky-500/40 text-sky-400 flex items-center justify-center shrink-0">
+                  <Download className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
+                </div>
+                <div className="text-start min-w-0">
+                  <span className="text-xs sm:text-sm font-extrabold text-theme-primary block truncate">
+                    {language === 'ar'
+                      ? 'تنزيل برنامج الكمبيوتر Windows x64'
+                      : 'Download Windows x64 Desktop'}
+                  </span>
+                  <span className="text-[11px] text-sky-400 font-bold block truncate">
+                    {`v${APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME} • Windows Setup (.exe)`}
+                  </span>
+                </div>
+              </div>
+            </a>
+
             {downloadNotice && (
               <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-400 flex items-start gap-2 leading-relaxed">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -543,8 +566,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 <Download className="w-3.5 h-3.5" />
                 <span>
                   {language === 'ar'
-                    ? 'صفحة تحميل تطبيق الأندرويد'
-                    : 'Official Android App Download Page'}
+                    ? 'صفحة التحميل (الأندرويد والكمبيوتر)'
+                    : 'Official App Download Page'}
                 </span>
               </button>
               <span className="text-theme-muted">•</span>

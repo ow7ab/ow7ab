@@ -17,6 +17,8 @@ import { GlassBadge } from '../ui/GlassBadge';
 import { GlassButton } from '../ui/GlassButton';
 import { Modal } from '../ui/Modal';
 import { useAuth } from '../../context/AuthContext';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 import {
   ErpDataService,
   DEFAULT_CHART_OF_ACCOUNTS,
@@ -85,7 +87,10 @@ export const AccountingModuleView: React.FC<{ initialMode?: AccountingViewMode }
 
   const [reversingEntry, setReversingEntry] = useState<JournalEntry | null>(null);
   const [reverseReason, setReverseReason] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+
+  const manualGuard = useTransactionGuard('accounting_manual_journal', 'CREATE');
+  const reverseGuard = useTransactionGuard('accounting_reverse_journal', 'UPDATE');
+  const seedCoaGuard = useTransactionGuard('accounting_seed_coa', 'SAVE');
 
   useEffect(() => {
     setMode(initialMode);
@@ -178,21 +183,33 @@ export const AccountingModuleView: React.FC<{ initialMode?: AccountingViewMode }
   );
 
   const handleSeedChartOfAccounts = async () => {
-    try {
-      await Promise.all(
-        DEFAULT_CHART_OF_ACCOUNTS.map((acc) =>
-          ErpDataService.saveRecord('accounting_accounts', acc.syncUuid, acc)
-        )
-      );
-      notify('ok', 'تمت مزامنة دليل الحسابات القياسي (18 حساباً) إلى السحابة بنجاح');
-    } catch (err: any) {
-      notify('err', err?.message || 'تعذر مزامنة دليل الحسابات');
+    if (seedCoaGuard.isSubmitting) return;
+    const res = await seedCoaGuard.runGuarded({
+      guardKey: 'accounting_seed_coa',
+      operationType: 'SAVE',
+      userId: userProfile?.username || 'ACCOUNTANT',
+      documentReference: 'COA-STANDARD-18',
+      targetCollection: 'accounting_accounts',
+      payloadSummary: 'مزامنة دليل الحسابات القياسي (18 حساباً)',
+      execute: async () => {
+        await Promise.all(
+          DEFAULT_CHART_OF_ACCOUNTS.map((acc) =>
+            ErpDataService.saveRecord('accounting_accounts', acc.syncUuid, acc)
+          )
+        );
+        return { resultReference: 'COA-STANDARD-18' };
+      }
+    });
+    if (res.ok) {
+      notify('ok', res.replayed ? res.message : 'تمت مزامنة دليل الحسابات القياسي (18 حساباً) إلى السحابة بنجاح');
+    } else {
+      notify('err', res.message);
     }
   };
 
   const handlePostManualEntry = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate || submitting) return;
+    if (!canCreate || manualGuard.isSubmitting) return;
     const amt = Number(manualAmount);
     if (!Number.isFinite(amt) || amt <= 0) {
       notify('err', 'أدخل مبلغاً موجباً صحيحاً');
@@ -203,87 +220,105 @@ export const AccountingModuleView: React.FC<{ initialMode?: AccountingViewMode }
       return;
     }
 
-    setSubmitting(true);
-    try {
-      const actor = userProfile?.fullName || userProfile?.username || 'المحاسب';
-      const { entry, lines: createdLines } = createBalancedJournalPayload(
-        {
-          sourceType: 'MANUAL_ADJUSTMENT',
-          sourceDocNo: `MAN-${Date.now().toString().slice(-6)}`,
-          description: manualDesc.trim(),
-          currency: manualCurrency,
-          lines: [
-            { accountCode: manualDebitCode, debit: amt, memo: manualDesc.trim() },
-            { accountCode: manualCreditCode, credit: amt, memo: manualDesc.trim() }
-          ],
-          createdBy: actor,
-          approvedBy: actor
-        },
-        effectiveAccounts,
-        entries
-      );
+    const actor = userProfile?.fullName || userProfile?.username || 'المحاسب';
+    const res = await manualGuard.runGuarded({
+      guardKey: `accounting_manual_${manualCurrency}_${manualDebitCode}_${manualCreditCode}_${amt}`,
+      operationType: 'CREATE',
+      userId: userProfile?.username || actor,
+      documentReference: `MAN-${manualCurrency}-${amt}`,
+      targetCollection: 'journal_entries',
+      payloadSummary: `قيد يدوي متوازن ${amt} ${manualCurrency}: ${manualDesc.trim()}`,
+      execute: async ({ idempotencyKey }) => {
+        const { entry, lines: createdLines } = createBalancedJournalPayload(
+          {
+            sourceType: 'MANUAL_ADJUSTMENT',
+            sourceDocNo: `MAN-${idempotencyKey.slice(-6)}`,
+            description: manualDesc.trim(),
+            currency: manualCurrency,
+            lines: [
+              { accountCode: manualDebitCode, debit: amt, memo: manualDesc.trim() },
+              { accountCode: manualCreditCode, credit: amt, memo: manualDesc.trim() }
+            ],
+            createdBy: actor,
+            approvedBy: actor
+          },
+          effectiveAccounts,
+          entries
+        );
 
-      await Promise.all([
-        ErpDataService.saveRecord('journal_entries', entry.syncUuid, entry),
-        ...createdLines.map((ln) => ErpDataService.saveRecord('journal_lines', ln.syncUuid, ln))
-      ]);
-      await ErpDataService.logAudit(
-        actor,
-        'POST_MANUAL_JOURNAL',
-        `ترحيل قيد يومية يدوي متوازن ${entry.entryNo}: ${amt} ${manualCurrency} (مدين ${manualDebitCode} / دائن ${manualCreditCode})`
-      );
+        await Promise.all([
+          ErpDataService.saveRecord('journal_entries', entry.syncUuid, entry),
+          ...createdLines.map((ln) => ErpDataService.saveRecord('journal_lines', ln.syncUuid, ln))
+        ]);
+        await ErpDataService.logAudit(
+          actor,
+          'POST_MANUAL_JOURNAL',
+          `ترحيل قيد يومية يدوي متوازن ${entry.entryNo}: ${amt} ${manualCurrency} (مدين ${manualDebitCode} / دائن ${manualCreditCode})`
+        );
+        return { resultReference: entry.syncUuid, result: entry.entryNo };
+      }
+    });
+
+    if (res.ok) {
       setIsManualModalOpen(false);
       setManualDesc('');
       setManualAmount('');
-      notify('ok', `تم ترحيل القيد المزدوج المتوازن ${entry.entryNo} بنجاح`);
-    } catch (err: any) {
-      notify('err', err?.message || 'فشل ترحيل القيد المحاسبي');
-    } finally {
-      setSubmitting(false);
+      notify('ok', res.replayed ? res.message : `تم ترحيل القيد المزدوج المتوازن ${res.data || ''} بنجاح`);
+    } else {
+      notify('err', res.message);
     }
   };
 
   const handleConfirmReverse = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!reversingEntry || !canReverse || submitting) return;
-    setSubmitting(true);
-    try {
-      const actor = userProfile?.fullName || userProfile?.username || 'المدير';
-      const origLines =
-        linesByEntryUuid.get(reversingEntry.syncUuid) ||
-        lines.filter((l) => Number(l.journalEntryId) === Number(reversingEntry.id));
+    if (!reversingEntry || !canReverse || reverseGuard.isSubmitting) return;
+    const actor = userProfile?.fullName || userProfile?.username || 'المدير';
+    const res = await reverseGuard.runGuarded({
+      guardKey: `accounting_reverse_${reversingEntry.syncUuid}`,
+      operationType: 'UPDATE',
+      userId: userProfile?.username || actor,
+      documentReference: reversingEntry.syncUuid,
+      targetCollection: 'journal_entries',
+      payloadSummary: `عكس قيد ${reversingEntry.entryNo}`,
+      execute: async () => {
+        const origLines =
+          linesByEntryUuid.get(reversingEntry.syncUuid) ||
+          lines.filter((l) => Number(l.journalEntryId) === Number(reversingEntry.id));
 
-      const { updatedOriginal, reversalEntry, reversalLines } = buildReversalJournalPayloads(
-        reversingEntry,
-        origLines,
-        reverseReason,
-        actor,
-        effectiveAccounts
-      );
+        const { updatedOriginal, reversalEntry, reversalLines } = buildReversalJournalPayloads(
+          reversingEntry,
+          origLines,
+          reverseReason,
+          actor,
+          effectiveAccounts
+        );
 
-      await Promise.all([
-        ErpDataService.saveRecord('journal_entries', updatedOriginal.syncUuid, {
-          status: updatedOriginal.status,
-          reversedByEntryNo: updatedOriginal.reversedByEntryNo,
-          reversalReason: updatedOriginal.reversalReason,
-          recordVersion: updatedOriginal.recordVersion,
-          updatedAt: updatedOriginal.updatedAt
-        }),
-        ErpDataService.saveRecord('journal_entries', reversalEntry.syncUuid, reversalEntry),
-        ...reversalLines.map((ln) => ErpDataService.saveRecord('journal_lines', ln.syncUuid, ln))
-      ]);
-      await ErpDataService.logAudit(
-        actor,
-        'REVERSE_JOURNAL_ENTRY',
-        `عكس قيد ${reversingEntry.entryNo} بقيد عكسي ${reversalEntry.entryNo} — السبب: ${reverseReason}`
-      );
+        await Promise.all([
+          ErpDataService.saveRecord('journal_entries', updatedOriginal.syncUuid, {
+            status: updatedOriginal.status,
+            reversedByEntryNo: updatedOriginal.reversedByEntryNo,
+            reversalReason: updatedOriginal.reversalReason,
+            recordVersion: updatedOriginal.recordVersion,
+            updatedAt: updatedOriginal.updatedAt
+          }),
+          ErpDataService.saveRecord('journal_entries', reversalEntry.syncUuid, reversalEntry),
+          ...reversalLines.map((ln) => ErpDataService.saveRecord('journal_lines', ln.syncUuid, ln))
+        ]);
+        await ErpDataService.logAudit(
+          actor,
+          'REVERSE_JOURNAL_ENTRY',
+          `عكس قيد ${reversingEntry.entryNo} بقيد عكسي ${reversalEntry.entryNo} — السبب: ${reverseReason}`
+        );
+        return { resultReference: reversalEntry.syncUuid, result: reversalEntry.entryNo };
+      }
+    });
+
+    if (res.ok) {
       setReversingEntry(null);
       setReverseReason('');
-      notify('ok', `تم إنشاء القيد العكسي ${reversalEntry.entryNo} وتعليم القيد الأصلي كـ REVERSED`);
-    } catch (err: any) {
-      notify('err', err?.message || 'تعذر عكس القيد المحاسبي');
-    } finally {
-      setSubmitting(false);
+      notify('ok', res.replayed ? res.message : `تم إنشاء القيد العكسي ${res.data || ''} وتعليم القيد الأصلي كـ REVERSED`);
+    } else {
+      notify('err', res.message);
     }
   };
 
@@ -419,7 +454,13 @@ export const AccountingModuleView: React.FC<{ initialMode?: AccountingViewMode }
             </div>
             <div className="flex items-center gap-2">
               {accounts.length < DEFAULT_CHART_OF_ACCOUNTS.length && canCreate && (
-                <GlassButton size="sm" variant="secondary" onClick={handleSeedChartOfAccounts}>
+                <GlassButton
+                  size="sm"
+                  variant="secondary"
+                  onClick={handleSeedChartOfAccounts}
+                  isLoading={seedCoaGuard.isSubmitting}
+                  loadingText={OPERATION_LOADING_LABELS.SAVE}
+                >
                   مزامنة الدليل للسحابة
                 </GlassButton>
               )}
@@ -816,15 +857,30 @@ export const AccountingModuleView: React.FC<{ initialMode?: AccountingViewMode }
               className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
             />
           </div>
+          {manualGuard.pendingRecord && (
+            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2 text-[11px]">
+              <span>{manualGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+              <GlassButton size="sm" variant="secondary" onClick={() => manualGuard.verifyPending()}>
+                التحقق من حالة العملية
+              </GlassButton>
+            </div>
+          )}
           <div className="flex justify-end gap-2 pt-2">
-            <GlassButton type="button" variant="secondary" onClick={() => setIsManualModalOpen(false)}>إلغاء</GlassButton>
-            <GlassButton type="submit" variant="primary" disabled={submitting}>ترحيل القيد المتوازن</GlassButton>
+            <GlassButton type="button" variant="secondary" onClick={() => setIsManualModalOpen(false)} disabled={manualGuard.isSubmitting}>إلغاء</GlassButton>
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={manualGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.CREATE}
+            >
+              ترحيل القيد المتوازن
+            </GlassButton>
           </div>
         </form>
       </Modal>
 
       {/* Reverse Entry Modal */}
-      <Modal isOpen={Boolean(reversingEntry)} onClose={() => setReversingEntry(null)} title={`عكس القيد المحاسبي ${reversingEntry?.entryNo || ''}`}>
+      <Modal isOpen={Boolean(reversingEntry)} onClose={() => { if (!reverseGuard.isSubmitting) setReversingEntry(null); }} title={`عكس القيد المحاسبي ${reversingEntry?.entryNo || ''}`}>
         <form onSubmit={handleConfirmReverse} className="space-y-3 text-xs">
           <p className="text-theme-secondary">
             سيتم إنشاء قيد عكسي معاكس بالكامل (Append-Only) دون حذف القيد الأصلي حفاظاً على المسار الرقابي.
@@ -839,9 +895,24 @@ export const AccountingModuleView: React.FC<{ initialMode?: AccountingViewMode }
               className="w-full px-3 py-2 rounded-xl bg-theme-surface border border-theme text-theme-primary"
             />
           </div>
+          {reverseGuard.pendingRecord && (
+            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2 text-[11px]">
+              <span>{reverseGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+              <GlassButton size="sm" variant="secondary" onClick={() => reverseGuard.verifyPending()}>
+                التحقق من حالة العملية
+              </GlassButton>
+            </div>
+          )}
           <div className="flex justify-end gap-2 pt-2">
-            <GlassButton type="button" variant="secondary" onClick={() => setReversingEntry(null)}>تراجع</GlassButton>
-            <GlassButton type="submit" variant="primary" disabled={submitting}>اعتماد القيد العكسي</GlassButton>
+            <GlassButton type="button" variant="secondary" onClick={() => setReversingEntry(null)} disabled={reverseGuard.isSubmitting}>تراجع</GlassButton>
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={reverseGuard.isSubmitting}
+              loadingText={OPERATION_LOADING_LABELS.UPDATE}
+            >
+              اعتماد القيد العكسي
+            </GlassButton>
           </div>
         </form>
       </Modal>

@@ -38,6 +38,8 @@ import { DistinctCashboxSummary, normalizeEntityKey } from '../../services/ErpCa
 import { GRANULAR_ACTIONS, isSystemManager } from '../../services/SecurityService';
 import { CurrencyCode } from '../../types/erp';
 import { ReportExporter } from '../../services/ReportExporter';
+import { useTransactionGuard } from '../../hooks/useTransactionGuard';
+import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
 
 /**
  * Exact 5 Android Treasury Sub-tabs from `TreasuryScreen.kt`:
@@ -119,7 +121,21 @@ export const TreasuryModuleView: React.FC = () => {
   const [boxNameInput, setBoxNameInput] = useState('');
   const [boxCurrencyInput, setBoxCurrencyInput] = useState<CurrencyCode>('SDG');
   const [boxBranchInput, setBoxBranchInput] = useState('SD-001');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const movGuard = useTransactionGuard(
+    'treasury_movement',
+    movForm.direction === 'وارد' ? 'RECEIPT_VOUCHER' : 'PAYMENT_VOUCHER'
+  );
+  const trfGuard = useTransactionGuard('treasury_transfer', 'STOCK_TRANSFER');
+  const closeGuard = useTransactionGuard('treasury_daily_closing', 'SAVE');
+  const boxGuard = useTransactionGuard('treasury_save_cashbox', 'SAVE');
+  const actionGuard = useTransactionGuard('treasury_admin_op', 'DELETE');
+  const isSubmitting =
+    movGuard.isSubmitting ||
+    trfGuard.isSubmitting ||
+    closeGuard.isSubmitting ||
+    boxGuard.isSubmitting ||
+    actionGuard.isSubmitting;
 
   useEffect(() => {
     setLoading(true);
@@ -239,103 +255,125 @@ export const TreasuryModuleView: React.FC = () => {
   // Tab 1: Add Movement
   const handleAddMovement = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate) return;
+    if (!canCreate || movGuard.isSubmitting) return;
     const amt = Number(movForm.amount);
     if (!amt || amt <= 0) {
       notify('error', 'الرجاء إدخال مبلغ صحيح أكبر من الصفر');
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      const id = Date.now();
-      const today = new Date().toISOString().split('T')[0];
-      const ref = movForm.reference.trim() || `REC-${id.toString().slice(-6)}`;
-      const desc = movForm.description.trim() || `حركة ${movForm.direction} نقدية في ${movForm.cashbox}`;
+    const opType = movForm.direction === 'وارد' ? 'RECEIPT_VOUCHER' : 'PAYMENT_VOUCHER';
+    const refPreview = movForm.reference.trim() || `REC-${Date.now().toString().slice(-6)}`;
 
-      const newMov: TreasuryMovement = {
-        id,
-        txDate: today,
-        cashbox: movForm.cashbox.trim(),
-        currency: movForm.currency,
-        direction: movForm.direction,
-        amount: amt,
-        description: desc,
-        reference: ref,
-        createdBy: userProfile?.fullName || userProfile?.username || 'المدير',
-        createdAt: id
-      };
+    const res = await movGuard.runGuarded({
+      guardKey: 'treasury_movement',
+      operationType: opType,
+      userId: userProfile?.username || 'WEB_USER',
+      documentReference: refPreview,
+      targetCollection: 'movements',
+      payloadSummary: `${movForm.direction} ${amt} ${movForm.currency} — ${movForm.cashbox}`,
+      execute: async ({ idempotencyKey }) => {
+        const id = Date.now();
+        const today = new Date().toISOString().split('T')[0];
+        const ref = movForm.reference.trim() || `REC-${id.toString().slice(-6)}`;
+        const desc = movForm.description.trim() || `حركة ${movForm.direction} نقدية في ${movForm.cashbox}`;
+        const movDocId = `MOV-${idempotencyKey}`;
 
-      await ErpDataService.saveDocument('movements', `MOV-${id}`, newMov);
+        const newMov: TreasuryMovement = {
+          id,
+          txDate: today,
+          cashbox: movForm.cashbox.trim(),
+          currency: movForm.currency,
+          direction: movForm.direction,
+          amount: amt,
+          description: desc,
+          reference: ref,
+          createdBy: userProfile?.fullName || userProfile?.username || 'المدير',
+          createdAt: id
+        };
 
-      // Update or create cashbox balance snapshot without creating a duplicate cashbox
-      const matchedBox = distinctCashboxes.find(
-        (c) => normalizeEntityKey(c.name) === normalizeEntityKey(movForm.cashbox)
-      );
-      const boxId = matchedBox?.id || 1;
-      const newBal =
-        getBalanceForBoxAndCurrency(movForm.cashbox, movForm.currency) +
-        (movForm.direction === 'وارد' ? amt : -amt);
+        await ErpDataService.saveDocument('movements', movDocId, newMov);
 
-      await ErpDataService.saveDocument('cashboxes', cashboxDocId(movForm.cashbox, boxId), {
-        id: boxId,
-        name: movForm.cashbox.trim(),
-        balance: newBal,
-        currency: matchedBox?.primaryCurrency || movForm.currency,
-        branch: matchedBox?.branch || userProfile?.branch || 'SD-001',
-        active: true,
-        updatedAt: Date.now()
-      });
+        const matchedBox = distinctCashboxes.find(
+          (c) => normalizeEntityKey(c.name) === normalizeEntityKey(movForm.cashbox)
+        );
+        const boxId = matchedBox?.id || 1;
+        const newBal =
+          getBalanceForBoxAndCurrency(movForm.cashbox, movForm.currency) +
+          (movForm.direction === 'وارد' ? amt : -amt);
 
-      const movJournal = buildTreasuryMovementJournalPayload({
-        id,
-        txDate: today,
-        cashbox: movForm.cashbox.trim(),
-        currency: movForm.currency,
-        direction: movForm.direction,
-        amount: amt,
-        description: desc,
-        reference: ref,
-        createdBy: userProfile?.fullName || userProfile?.username || 'المدير'
-      });
-      await ErpDataService.persistJournalPayload(movJournal).catch(() => {});
+        await ErpDataService.saveDocument('cashboxes', cashboxDocId(movForm.cashbox, boxId), {
+          id: boxId,
+          name: movForm.cashbox.trim(),
+          balance: newBal,
+          currency: matchedBox?.primaryCurrency || movForm.currency,
+          branch: matchedBox?.branch || userProfile?.branch || 'SD-001',
+          active: true,
+          updatedAt: Date.now()
+        });
 
-      await ErpDataService.logAudit(
-        userProfile?.username || 'admin',
-        'ADD_TREASURY_MOVEMENT',
-        `${movForm.direction} بقيمة ${amt.toLocaleString()} ${movForm.currency} في ${movForm.cashbox} (${ref})`
-      );
+        const movJournal = buildTreasuryMovementJournalPayload({
+          id,
+          txDate: today,
+          cashbox: movForm.cashbox.trim(),
+          currency: movForm.currency,
+          direction: movForm.direction,
+          amount: amt,
+          description: desc,
+          reference: ref,
+          createdBy: userProfile?.fullName || userProfile?.username || 'المدير'
+        });
+        await ErpDataService.persistJournalPayload(movJournal).catch(() => {});
 
+        await ErpDataService.logAudit(
+          userProfile?.username || 'admin',
+          'ADD_TREASURY_MOVEMENT',
+          `${movForm.direction} بقيمة ${amt.toLocaleString()} ${movForm.currency} في ${movForm.cashbox} (${ref})`
+        );
+        return { resultReference: movDocId };
+      }
+    });
+
+    if (res.ok) {
       setMovForm((prev) => ({
         ...prev,
         amount: '',
         reference: `REC-${Date.now().toString().slice(-6)}`,
         description: ''
       }));
-      notify('success', `تم تسجيل حركة ${movForm.direction} بنجاح وتحديث الرصيد السحابي`);
-    } catch (err: any) {
-      notify('error', err?.message || 'فشل حفظ الحركة المالية');
-    } finally {
-      setIsSubmitting(false);
+      notify('success', res.replayed ? res.message : `تم تسجيل حركة ${movForm.direction} بنجاح وتحديث الرصيد السحابي`);
+    } else {
+      notify('error', res.message);
     }
   };
 
   const handleDeleteMovement = async (mov: TreasuryMovement) => {
-    if (!canDeleteOrZero) return;
+    if (!canDeleteOrZero || actionGuard.isSubmitting) return;
     if (!window.confirm(`حذف الحركة المالية رقم ${mov.reference} بقيمة ${mov.amount.toLocaleString()} ${mov.currency}؟`)) {
       return;
     }
-    try {
-      const docId = (mov as any)._docId || `MOV-${mov.id}`;
-      await ErpDataService.deleteDocument('movements', docId);
-      await ErpDataService.logAudit(
-        userProfile?.username || 'admin',
-        'DELETE_TREASURY_MOVEMENT',
-        `حذف حركة ${mov.reference} (${mov.amount} ${mov.currency}) من ${mov.cashbox}`
-      );
+    const docId = (mov as any)._docId || `MOV-${mov.id}`;
+    const res = await actionGuard.runGuarded({
+      guardKey: `treasury_del_mov_${docId}`,
+      operationType: 'DELETE',
+      userId: userProfile?.username || 'admin',
+      documentReference: docId,
+      targetCollection: 'movements',
+      payloadSummary: `حذف حركة ${mov.reference}`,
+      execute: async () => {
+        await ErpDataService.deleteDocument('movements', docId);
+        await ErpDataService.logAudit(
+          userProfile?.username || 'admin',
+          'DELETE_TREASURY_MOVEMENT',
+          `حذف حركة ${mov.reference} (${mov.amount} ${mov.currency}) من ${mov.cashbox}`
+        );
+        return { resultReference: docId };
+      }
+    });
+    if (res.ok) {
       notify('success', `تم حذف الحركة ${mov.reference} بنجاح`);
-    } catch (err: any) {
-      notify('error', err?.message || 'تعذر حذف الحركة');
+    } else {
+      notify('error', res.message);
     }
   };
 
@@ -350,7 +388,7 @@ export const TreasuryModuleView: React.FC = () => {
 
   const handleAddTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate) return;
+    if (!canCreate || trfGuard.isSubmitting) return;
     const srcAmt = Number(trfForm.sourceAmount);
     const rate = Number(trfForm.rate) || 1;
     if (!srcAmt || srcAmt <= 0 || rate <= 0) {
@@ -358,94 +396,104 @@ export const TreasuryModuleView: React.FC = () => {
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      const now = Date.now();
-      const today = new Date().toISOString().split('T')[0];
-      const ref = trfForm.reference.trim() || `TRF-${now.toString().slice(-6)}`;
-      const destAmt = calculatedTransferDestAmount;
-      const actor = userProfile?.fullName || userProfile?.username || 'المدير';
+    const refPreview = trfForm.reference.trim() || `TRF-${Date.now().toString().slice(-6)}`;
+    const destAmt = calculatedTransferDestAmount;
+    const actor = userProfile?.fullName || userProfile?.username || 'المدير';
 
-      const newTrf: TreasuryTransfer = {
-        id: now,
-        txDate: today,
-        sourceCashbox: trfForm.sourceCashbox,
-        destinationCashbox: trfForm.destinationCashbox,
-        sourceCurrency: trfForm.sourceCurrency,
-        destinationCurrency: trfForm.destinationCurrency,
-        sourceAmount: srcAmt,
-        rate,
-        destinationAmount: destAmt,
-        description: trfForm.description.trim() || `تحويل من ${trfForm.sourceCashbox} إلى ${trfForm.destinationCashbox}`,
-        reference: ref,
-        halfaInvoiceId: trfForm.halfaInvoiceId ? Number(trfForm.halfaInvoiceId) : null,
-        createdBy: actor,
-        createdAt: now
-      };
+    const res = await trfGuard.runGuarded({
+      guardKey: 'treasury_transfer',
+      operationType: 'STOCK_TRANSFER',
+      userId: userProfile?.username || actor,
+      documentReference: refPreview,
+      targetCollection: 'transfers',
+      payloadSummary: `تحويل ${srcAmt} ${trfForm.sourceCurrency} من ${trfForm.sourceCashbox} إلى ${trfForm.destinationCashbox}`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const today = new Date().toISOString().split('T')[0];
+        const trfDocId = `TRF-${idempotencyKey}`;
 
-      const outMov: TreasuryMovement = {
-        id: now + 1,
-        txDate: today,
-        cashbox: trfForm.sourceCashbox,
-        currency: trfForm.sourceCurrency,
-        direction: 'منصرف',
-        amount: srcAmt,
-        description: `تحويل صادر إلى ${trfForm.destinationCashbox} (${trfForm.description || ref})`,
-        reference: `${ref}-OUT`,
-        createdBy: actor,
-        createdAt: now + 1
-      };
+        const newTrf: TreasuryTransfer = {
+          id: now,
+          txDate: today,
+          sourceCashbox: trfForm.sourceCashbox,
+          destinationCashbox: trfForm.destinationCashbox,
+          sourceCurrency: trfForm.sourceCurrency,
+          destinationCurrency: trfForm.destinationCurrency,
+          sourceAmount: srcAmt,
+          rate,
+          destinationAmount: destAmt,
+          description: trfForm.description.trim() || `تحويل من ${trfForm.sourceCashbox} إلى ${trfForm.destinationCashbox}`,
+          reference: refPreview,
+          halfaInvoiceId: trfForm.halfaInvoiceId ? Number(trfForm.halfaInvoiceId) : null,
+          createdBy: actor,
+          createdAt: now
+        };
 
-      const inMov: TreasuryMovement = {
-        id: now + 2,
-        txDate: today,
-        cashbox: trfForm.destinationCashbox,
-        currency: trfForm.destinationCurrency,
-        direction: 'وارد',
-        amount: destAmt,
-        description: `تحويل وارد من ${trfForm.sourceCashbox} بسعر صرف ${rate} (${trfForm.description || ref})`,
-        reference: `${ref}-IN`,
-        createdBy: actor,
-        createdAt: now + 2
-      };
+        const outMov: TreasuryMovement = {
+          id: now + 1,
+          txDate: today,
+          cashbox: trfForm.sourceCashbox,
+          currency: trfForm.sourceCurrency,
+          direction: 'منصرف',
+          amount: srcAmt,
+          description: `تحويل صادر إلى ${trfForm.destinationCashbox} (${trfForm.description || refPreview})`,
+          reference: `${refPreview}-OUT`,
+          createdBy: actor,
+          createdAt: now + 1
+        };
 
-      await Promise.all([
-        ErpDataService.saveDocument('transfers', `TRF-${now}`, newTrf),
-        ErpDataService.saveDocument('movements', `MOV-${now + 1}`, outMov),
-        ErpDataService.saveDocument('movements', `MOV-${now + 2}`, inMov)
-      ]);
+        const inMov: TreasuryMovement = {
+          id: now + 2,
+          txDate: today,
+          cashbox: trfForm.destinationCashbox,
+          currency: trfForm.destinationCurrency,
+          direction: 'وارد',
+          amount: destAmt,
+          description: `تحويل وارد من ${trfForm.sourceCashbox} بسعر صرف ${rate} (${trfForm.description || refPreview})`,
+          reference: `${refPreview}-IN`,
+          createdBy: actor,
+          createdAt: now + 2
+        };
 
-      const trfJournals = buildTreasuryTransferJournalPayloads({
-        id: now,
-        txDate: today,
-        reference: ref,
-        sourceCashbox: trfForm.sourceCashbox,
-        destinationCashbox: trfForm.destinationCashbox,
-        sourceCurrency: trfForm.sourceCurrency,
-        destinationCurrency: trfForm.destinationCurrency,
-        sourceAmount: srcAmt,
-        destinationAmount: destAmt,
-        createdBy: actor
-      });
-      await ErpDataService.persistJournalPayloads(trfJournals).catch(() => {});
+        await Promise.all([
+          ErpDataService.saveDocument('transfers', trfDocId, newTrf),
+          ErpDataService.saveDocument('movements', `MOV-${idempotencyKey}-OUT`, outMov),
+          ErpDataService.saveDocument('movements', `MOV-${idempotencyKey}-IN`, inMov)
+        ]);
 
-      await ErpDataService.logAudit(
-        userProfile?.username || 'admin',
-        'TREASURY_TRANSFER',
-        `تحويل ${ref}: ${srcAmt} ${trfForm.sourceCurrency} (${trfForm.sourceCashbox}) -> ${destAmt} ${trfForm.destinationCurrency} (${trfForm.destinationCashbox})`
-      );
+        const trfJournals = buildTreasuryTransferJournalPayloads({
+          id: now,
+          txDate: today,
+          reference: refPreview,
+          sourceCashbox: trfForm.sourceCashbox,
+          destinationCashbox: trfForm.destinationCashbox,
+          sourceCurrency: trfForm.sourceCurrency,
+          destinationCurrency: trfForm.destinationCurrency,
+          sourceAmount: srcAmt,
+          destinationAmount: destAmt,
+          createdBy: actor
+        });
+        await ErpDataService.persistJournalPayloads(trfJournals).catch(() => {});
 
+        await ErpDataService.logAudit(
+          userProfile?.username || 'admin',
+          'TREASURY_TRANSFER',
+          `تحويل ${refPreview}: ${srcAmt} ${trfForm.sourceCurrency} (${trfForm.sourceCashbox}) -> ${destAmt} ${trfForm.destinationCurrency} (${trfForm.destinationCashbox})`
+        );
+        return { resultReference: trfDocId };
+      }
+    });
+
+    if (res.ok) {
       setTrfForm((prev) => ({
         ...prev,
         sourceAmount: '',
         reference: `TRF-${Date.now().toString().slice(-6)}`,
         description: ''
       }));
-      notify('success', `تم تنفيذ التحويل المالي ${ref} وتسجيل حركتي الصادر والوارد`);
-    } catch (err: any) {
-      notify('error', err?.message || 'فشل تنفيذ التحويل');
-    } finally {
-      setIsSubmitting(false);
+      notify('success', res.replayed ? res.message : `تم تنفيذ التحويل المالي ${refPreview} وتسجيل حركتي الصادر والوارد`);
+    } else {
+      notify('error', res.message);
     }
   };
 
@@ -457,47 +505,56 @@ export const TreasuryModuleView: React.FC = () => {
 
   const handlePerformClosing = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate) return;
+    if (!canCreate || closeGuard.isSubmitting) return;
     const counted = Number(closeForm.countedBalance);
     if (Number.isNaN(counted) || closeForm.countedBalance.trim() === '') {
       notify('error', 'الرجاء إدخال الرصيد الفعلي بعد العد');
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      const now = Date.now();
-      const today = new Date().toISOString().split('T')[0];
-      const diff = Math.round((counted - closeExpectedBookBalance) * 100) / 100;
+    const res = await closeGuard.runGuarded({
+      guardKey: `treasury_daily_closing_${closeForm.cashbox}_${closeForm.currency}`,
+      operationType: 'SAVE',
+      userId: userProfile?.username || 'admin',
+      documentReference: `CLS-${closeForm.cashbox}-${closeForm.currency}`,
+      targetCollection: 'daily_closings',
+      payloadSummary: `إقفال يومية ${closeForm.cashbox} (${closeForm.currency})`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const today = new Date().toISOString().split('T')[0];
+        const diff = Math.round((counted - closeExpectedBookBalance) * 100) / 100;
+        const clsDocId = `CLS-${idempotencyKey}`;
 
-      const closingEntry: DailyClosing = {
-        id: now,
-        closeDate: today,
-        cashbox: closeForm.cashbox,
-        currency: closeForm.currency,
-        bookBalance: closeExpectedBookBalance,
-        countedBalance: counted,
-        difference: diff,
-        notes: closeForm.notes.trim() || 'إقفال ومطابقة الجرد اليومي',
-        preparedBy: userProfile?.fullName || userProfile?.username || 'المدير',
-        status: 'closed',
-        closedAt: now,
-        createdAt: now
-      };
+        const closingEntry: DailyClosing = {
+          id: now,
+          closeDate: today,
+          cashbox: closeForm.cashbox,
+          currency: closeForm.currency,
+          bookBalance: closeExpectedBookBalance,
+          countedBalance: counted,
+          difference: diff,
+          notes: closeForm.notes.trim() || 'إقفال ومطابقة الجرد اليومي',
+          preparedBy: userProfile?.fullName || userProfile?.username || 'المدير',
+          status: 'closed',
+          closedAt: now,
+          createdAt: now
+        };
 
-      await ErpDataService.saveDocument('daily_closings', `CLS-${now}`, closingEntry);
-      await ErpDataService.logAudit(
-        userProfile?.username || 'admin',
-        'DAILY_CLOSING',
-        `إقفال يومية ${closeForm.cashbox} (${closeForm.currency}): دفتري ${closeExpectedBookBalance} | فعلي ${counted} | الفارق ${diff}`
-      );
+        await ErpDataService.saveDocument('daily_closings', clsDocId, closingEntry);
+        await ErpDataService.logAudit(
+          userProfile?.username || 'admin',
+          'DAILY_CLOSING',
+          `إقفال يومية ${closeForm.cashbox} (${closeForm.currency}): دفتري ${closeExpectedBookBalance} | فعلي ${counted} | الفارق ${diff}`
+        );
+        return { resultReference: clsDocId };
+      }
+    });
 
+    if (res.ok) {
       setCloseForm((prev) => ({ ...prev, countedBalance: '', notes: '' }));
       notify('success', `تم حفظ إقفال اليومية لخزنة ${closeForm.cashbox} بنجاح`);
-    } catch (err: any) {
-      notify('error', err?.message || 'فشل تسجيل إقفال اليومية');
-    } finally {
-      setIsSubmitting(false);
+    } else {
+      notify('error', res.message);
     }
   };
 
@@ -563,47 +620,57 @@ export const TreasuryModuleView: React.FC = () => {
   // Tab 5: Manage Cashboxes (Add, Edit, Zero Out, Delete)
   const handleSaveCashbox = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!boxNameInput.trim()) return;
-    setIsSubmitting(true);
-    try {
-      const cleanName = boxNameInput.trim();
-      const existingByName = distinctCashboxes.find(
-        (b) => normalizeEntityKey(b.name) === normalizeEntityKey(cleanName)
-      );
-      const id = editingBox ? editingBox.id : existingByName ? existingByName.id : Date.now();
-      const docId = cashboxDocId(cleanName, id);
-      const payload: Cashbox = {
-        id,
-        name: cleanName,
-        currency: boxCurrencyInput,
-        balance: editingBox
-          ? editingBox.primaryBalance
-          : existingByName
-          ? existingByName.primaryBalance
-          : 0,
-        branch: boxBranchInput,
-        active: true,
-        updatedAt: Date.now()
-      };
-      await ErpDataService.saveDocument('cashboxes', docId, payload);
-      await ErpDataService.logAudit(
-        userProfile?.username || 'admin',
-        editingBox ? 'EDIT_CASHBOX' : 'ADD_CASHBOX',
-        `${editingBox ? 'تعديل' : 'إضافة'} خزنة: ${cleanName} (${boxCurrencyInput})`
-      );
+    if (!boxNameInput.trim() || boxGuard.isSubmitting) return;
+    const cleanName = boxNameInput.trim();
+    const existingByName = distinctCashboxes.find(
+      (b) => normalizeEntityKey(b.name) === normalizeEntityKey(cleanName)
+    );
+    const id = editingBox ? editingBox.id : existingByName ? existingByName.id : Date.now();
+    const docId = cashboxDocId(cleanName, id);
+
+    const res = await boxGuard.runGuarded({
+      guardKey: `treasury_save_cashbox_${docId}`,
+      operationType: editingBox ? 'UPDATE' : 'SAVE',
+      userId: userProfile?.username || 'admin',
+      documentReference: docId,
+      targetCollection: 'cashboxes',
+      payloadSummary: `${editingBox ? 'تعديل' : 'إضافة'} خزنة ${cleanName}`,
+      execute: async () => {
+        const payload: Cashbox = {
+          id,
+          name: cleanName,
+          currency: boxCurrencyInput,
+          balance: editingBox
+            ? editingBox.primaryBalance
+            : existingByName
+            ? existingByName.primaryBalance
+            : 0,
+          branch: boxBranchInput,
+          active: true,
+          updatedAt: Date.now()
+        };
+        await ErpDataService.saveDocument('cashboxes', docId, payload);
+        await ErpDataService.logAudit(
+          userProfile?.username || 'admin',
+          editingBox ? 'EDIT_CASHBOX' : 'ADD_CASHBOX',
+          `${editingBox ? 'تعديل' : 'إضافة'} خزنة: ${cleanName} (${boxCurrencyInput})`
+        );
+        return { resultReference: docId };
+      }
+    });
+
+    if (res.ok) {
       setBoxModalOpen(false);
       setEditingBox(null);
       setBoxNameInput('');
       notify('success', `تم حفظ الخزنة "${cleanName}" بنجاح`);
-    } catch (err: any) {
-      notify('error', err?.message || 'فشل حفظ الخزنة');
-    } finally {
-      setIsSubmitting(false);
+    } else {
+      notify('error', res.message);
     }
   };
 
   const handleZeroOutCashbox = async (box: DistinctCashboxSummary, currencyToZero: CurrencyCode) => {
-    if (!canDeleteOrZero) return;
+    if (!canDeleteOrZero || actionGuard.isSubmitting) return;
     const currentBal = box.balances[currencyToZero] || 0;
     if (currentBal === 0) {
       notify('error', `رصيد الخزنة (${box.name} - ${currencyToZero}) صفر بالفعل`);
@@ -612,67 +679,91 @@ export const TreasuryModuleView: React.FC = () => {
     if (!window.confirm(`تأكيد تصفير رصيد "${box.name}" (${currentBal.toLocaleString()} ${currencyToZero})؟`)) {
       return;
     }
-    try {
-      const now = Date.now();
-      const today = new Date().toISOString().split('T')[0];
-      const offsetMov: TreasuryMovement = {
-        id: now,
-        txDate: today,
-        cashbox: box.name,
-        currency: currencyToZero,
-        direction: currentBal > 0 ? 'منصرف' : 'وارد',
-        amount: Math.abs(currentBal),
-        description: `قيد تصفير رصيد الخزنة بواسطة ${userProfile?.fullName || 'المدير'}`,
-        reference: `ZERO-${now.toString().slice(-6)}`,
-        createdBy: userProfile?.fullName || userProfile?.username || 'المدير',
-        createdAt: now
-      };
-      await ErpDataService.saveDocument('movements', `MOV-${now}`, offsetMov);
-      await ErpDataService.saveDocument('cashboxes', cashboxDocId(box.name, box.id), {
-        id: box.id,
-        name: box.name,
-        currency: box.primaryCurrency,
-        balance: 0,
-        branch: box.branch,
-        active: box.active,
-        updatedAt: now
-      });
-      await ErpDataService.logAudit(
-        userProfile?.username || 'admin',
-        'ZERO_CASHBOX',
-        `تصفير رصيد خزنة ${box.name} (${currencyToZero}) من ${currentBal}`
-      );
-      notify('success', `تم تصفير رصيد خزنة ${box.name} (${currencyToZero}) بنجاح`);
-    } catch (err: any) {
-      notify('error', err?.message || 'فشل تصفير الخزنة');
+    const boxDocId = cashboxDocId(box.name, box.id);
+    const res = await actionGuard.runGuarded({
+      guardKey: `treasury_zero_cashbox_${boxDocId}_${currencyToZero}`,
+      operationType: 'UPDATE',
+      userId: userProfile?.username || 'admin',
+      documentReference: `${boxDocId}-${currencyToZero}`,
+      targetCollection: 'movements',
+      payloadSummary: `تصفير خزنة ${box.name} (${currencyToZero})`,
+      execute: async ({ idempotencyKey }) => {
+        const now = Date.now();
+        const today = new Date().toISOString().split('T')[0];
+        const movDocId = `MOV-ZERO-${idempotencyKey}`;
+        const offsetMov: TreasuryMovement = {
+          id: now,
+          txDate: today,
+          cashbox: box.name,
+          currency: currencyToZero,
+          direction: currentBal > 0 ? 'منصرف' : 'وارد',
+          amount: Math.abs(currentBal),
+          description: `قيد تصفير رصيد الخزنة بواسطة ${userProfile?.fullName || 'المدير'}`,
+          reference: `ZERO-${now.toString().slice(-6)}`,
+          createdBy: userProfile?.fullName || userProfile?.username || 'المدير',
+          createdAt: now
+        };
+        await ErpDataService.saveDocument('movements', movDocId, offsetMov);
+        await ErpDataService.saveDocument('cashboxes', boxDocId, {
+          id: box.id,
+          name: box.name,
+          currency: box.primaryCurrency,
+          balance: 0,
+          branch: box.branch,
+          active: box.active,
+          updatedAt: now
+        });
+        await ErpDataService.logAudit(
+          userProfile?.username || 'admin',
+          'ZERO_CASHBOX',
+          `تصفير رصيد خزنة ${box.name} (${currencyToZero}) من ${currentBal}`
+        );
+        return { resultReference: movDocId };
+      }
+    });
+    if (res.ok) {
+      notify('success', res.replayed ? res.message : `تم تصفير رصيد خزنة ${box.name} (${currencyToZero}) بنجاح`);
+    } else {
+      notify('error', res.message || 'فشل تصفير الخزنة');
     }
   };
 
   const handleDeleteCashbox = async (box: DistinctCashboxSummary) => {
-    if (!canDeleteOrZero) return;
+    if (!canDeleteOrZero || actionGuard.isSubmitting) return;
     if (!window.confirm(`حذف الخزنة "${box.name}" نهائياً؟`)) return;
-    try {
-      // Delete all matching cashbox docs in Firestore that share the same normalized name
-      const matchingRawDocs = cashboxes.filter(
-        (raw) => normalizeEntityKey(raw.name) === normalizeEntityKey(box.name)
-      );
-      await Promise.all(
-        matchingRawDocs.map((raw) => {
-          const docId = (raw as any)._docId || cashboxDocId(raw.name, raw.id);
-          return ErpDataService.deleteDocument('cashboxes', docId);
-        })
-      );
-      if (matchingRawDocs.length === 0) {
-        await ErpDataService.deleteDocument('cashboxes', cashboxDocId(box.name, box.id));
+    const primaryDocId = cashboxDocId(box.name, box.id);
+    const res = await actionGuard.runGuarded({
+      guardKey: `treasury_delete_cashbox_${primaryDocId}`,
+      operationType: 'DELETE',
+      userId: userProfile?.username || 'admin',
+      documentReference: primaryDocId,
+      targetCollection: 'cashboxes',
+      payloadSummary: `حذف خزنة ${box.name}`,
+      execute: async () => {
+        const matchingRawDocs = cashboxes.filter(
+          (raw) => normalizeEntityKey(raw.name) === normalizeEntityKey(box.name)
+        );
+        await Promise.all(
+          matchingRawDocs.map((raw) => {
+            const docId = (raw as any)._docId || cashboxDocId(raw.name, raw.id);
+            return ErpDataService.deleteDocument('cashboxes', docId);
+          })
+        );
+        if (matchingRawDocs.length === 0) {
+          await ErpDataService.deleteDocument('cashboxes', primaryDocId);
+        }
+        await ErpDataService.logAudit(
+          userProfile?.username || 'admin',
+          'DELETE_CASHBOX',
+          `حذف الخزنة ${box.name}`
+        );
+        return { resultReference: primaryDocId };
       }
-      await ErpDataService.logAudit(
-        userProfile?.username || 'admin',
-        'DELETE_CASHBOX',
-        `حذف الخزنة ${box.name}`
-      );
+    });
+    if (res.ok) {
       notify('success', `تم حذف الخزنة ${box.name}`);
-    } catch (err: any) {
-      notify('error', err?.message || 'تعذر حذف الخزنة');
+    } else {
+      notify('error', res.message || 'تعذر حذف الخزنة');
     }
   };
 
@@ -951,8 +1042,27 @@ export const TreasuryModuleView: React.FC = () => {
                   />
                 </div>
 
-                <GlassButton type="submit" variant="primary" disabled={isSubmitting} className="w-full justify-center">
-                  {isSubmitting ? 'جاري الحفظ...' : 'إضافة معاملة'}
+                {movGuard.pendingRecord && (
+                  <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2">
+                    <span>{movGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+                    <GlassButton size="sm" variant="secondary" onClick={() => movGuard.verifyPending()}>
+                      التحقق من حالة العملية
+                    </GlassButton>
+                  </div>
+                )}
+
+                <GlassButton
+                  type="submit"
+                  variant="primary"
+                  isLoading={movGuard.isSubmitting}
+                  loadingText={
+                    movForm.direction === 'وارد'
+                      ? OPERATION_LOADING_LABELS.RECEIPT_VOUCHER
+                      : OPERATION_LOADING_LABELS.PAYMENT_VOUCHER
+                  }
+                  className="w-full justify-center"
+                >
+                  إضافة معاملة
                 </GlassButton>
               </form>
             </GlassCard>
@@ -1053,8 +1163,9 @@ export const TreasuryModuleView: React.FC = () => {
                       {canDeleteOrZero && (
                         <button
                           type="button"
+                          disabled={actionGuard.isSubmitting}
                           onClick={() => handleDeleteMovement(m)}
-                          className="p-1.5 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20"
+                          className="p-1.5 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 disabled:opacity-50"
                           title="حذف الحركة"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -1211,7 +1322,22 @@ export const TreasuryModuleView: React.FC = () => {
                 </div>
               )}
 
-              <GlassButton type="submit" variant="primary" disabled={isSubmitting} className="w-full justify-center">
+              {trfGuard.pendingRecord && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2">
+                  <span>{trfGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+                  <GlassButton size="sm" variant="secondary" onClick={() => trfGuard.verifyPending()}>
+                    التحقق من حالة العملية
+                  </GlassButton>
+                </div>
+              )}
+
+              <GlassButton
+                type="submit"
+                variant="primary"
+                isLoading={trfGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.STOCK_TRANSFER}
+                className="w-full justify-center"
+              >
                 تنفيذ التحويل
               </GlassButton>
             </form>
@@ -1324,7 +1450,22 @@ export const TreasuryModuleView: React.FC = () => {
                 />
               </div>
 
-              <GlassButton type="submit" variant="primary" disabled={isSubmitting} className="w-full justify-center">
+              {closeGuard.pendingRecord && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center justify-between gap-2">
+                  <span>{closeGuard.statusMessage || 'لم يتم التأكد من نتيجة العملية بعد، لا تعِد إدخالها.'}</span>
+                  <GlassButton size="sm" variant="secondary" onClick={() => closeGuard.verifyPending()}>
+                    التحقق من حالة العملية
+                  </GlassButton>
+                </div>
+              )}
+
+              <GlassButton
+                type="submit"
+                variant="primary"
+                isLoading={closeGuard.isSubmitting}
+                loadingText={OPERATION_LOADING_LABELS.SAVE}
+                className="w-full justify-center"
+              >
                 إقفال اليومية
               </GlassButton>
             </form>
@@ -1511,14 +1652,16 @@ export const TreasuryModuleView: React.FC = () => {
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
+                      disabled={actionGuard.isSubmitting}
                       onClick={() => handleZeroOutCashbox(b, b.primaryCurrency)}
-                      className="p-2 rounded-lg bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
+                      className="p-2 rounded-lg bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 disabled:opacity-50"
                       title="تصفير رصيد الخزنة"
                     >
                       <RotateCcw className="w-4 h-4" />
                     </button>
                     <button
                       type="button"
+                      disabled={actionGuard.isSubmitting}
                       onClick={() => {
                         setEditingBox(b);
                         setBoxNameInput(b.name);
@@ -1526,15 +1669,16 @@ export const TreasuryModuleView: React.FC = () => {
                         setBoxBranchInput(b.branch || 'SD-001');
                         setBoxModalOpen(true);
                       }}
-                      className="p-2 rounded-lg bg-pmp-cyan/10 text-pmp-cyan hover:bg-pmp-cyan/20"
+                      className="p-2 rounded-lg bg-pmp-cyan/10 text-pmp-cyan hover:bg-pmp-cyan/20 disabled:opacity-50"
                       title="تعديل الخزنة"
                     >
                       <Edit3 className="w-4 h-4" />
                     </button>
                     <button
                       type="button"
+                      disabled={actionGuard.isSubmitting}
                       onClick={() => handleDeleteCashbox(b)}
-                      className="p-2 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20"
+                      className="p-2 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 disabled:opacity-50"
                       title="حذف الخزنة"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -1587,10 +1731,15 @@ export const TreasuryModuleView: React.FC = () => {
             </div>
           </div>
           <div className="flex justify-end gap-2 pt-3 border-t border-theme">
-            <GlassButton type="button" variant="secondary" onClick={() => setBoxModalOpen(false)}>
+            <GlassButton type="button" variant="secondary" disabled={boxGuard.isSubmitting} onClick={() => setBoxModalOpen(false)}>
               إلغاء
             </GlassButton>
-            <GlassButton type="submit" variant="primary" disabled={isSubmitting}>
+            <GlassButton
+              type="submit"
+              variant="primary"
+              isLoading={boxGuard.isSubmitting}
+              loadingText={editingBox ? OPERATION_LOADING_LABELS.UPDATE : OPERATION_LOADING_LABELS.SAVE}
+            >
               حفظ الخزنة
             </GlassButton>
           </div>

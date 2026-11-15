@@ -391,6 +391,24 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             <Smartphone className="w-4 h-4 text-emerald-400 shrink-0" />
           </a>
 
+          <a
+            href={APP_VERSION_CONTRACT.GITHUB_LATEST_WINDOWS_URL}
+            download={APP_VERSION_CONTRACT.WINDOWS_INSTALLER_FILENAME}
+            className="w-full flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-xl bg-sky-600/15 hover:bg-sky-600/25 border border-sky-500/40 transition-all"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Download className="w-4 h-4 text-sky-400 shrink-0" />
+              <div className="text-start min-w-0">
+                <span className="text-xs font-extrabold text-theme-primary block truncate">
+                  {language === 'ar' ? 'تنزيل برنامج الكمبيوتر (Windows x64)' : 'Download Windows Desktop (.exe)'}
+                </span>
+                <span className="text-[10px] text-sky-400 font-semibold block truncate">
+                  {`v${APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME} • Windows Setup .exe`}
+                </span>
+              </div>
+            </div>
+          </a>
+
           {onNavigateRoute && (
             <button
               type="button"
@@ -400,7 +418,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               }}
               className="w-full text-[11px] font-bold text-pmp-cyan hover:underline text-center py-1"
             >
-              {language === 'ar' ? 'الانتقال لصفحة التحميل المباشر لتطبيق الأندرويد' : 'Open Official Android Download Page'}
+              {language === 'ar' ? 'الانتقال لصفحة التحميل المباشر (الأندرويد والكمبيوتر)' : 'Open Official App Download Page'}
             </button>
           )}
         </div>
