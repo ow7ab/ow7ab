@@ -577,8 +577,11 @@ jobs:
                                   continue
                               if rel.get("draft") or rel.get("prerelease"):
                                   continue
+                              rel_tag = str(rel.get("tag_name", "")).strip()
+                              if rel_tag.startswith("desktop-"):
+                                  continue
                               title_and_body = f"{rel.get('name', '')} {rel.get('body', '')}"
-                              for m in re.finditer(r"(?:Build|versionCode|b|#)\s*[:=`]*\s*(\d+)", title_and_body, re.IGNORECASE):
+                              for m in re.finditer(r"(?:Build|versionCode)\s*[:=`#]*\s*(\d+)", title_and_body, re.IGNORECASE):
                                   code_val = int(m.group(1))
                                   if 1 <= code_val < 100000 and code_val > highest_github_release_code:
                                       highest_github_release_code = code_val
@@ -936,9 +939,10 @@ jobs:
                   if os.path.isfile(src):
                       shutil.copy2(src, dst)
 
-          hist_src = os.path.join("public", "releases-history.json")
-          if os.path.isfile(hist_src):
-              shutil.copy2(hist_src, os.path.join("web", "public", "releases-history.json"))
+          for json_name in ("version.json", "releases-history.json"):
+              src = os.path.join("public", json_name)
+              if os.path.isfile(src):
+                  shutil.copy2(src, os.path.join("web", "public", json_name))
           PYEOF
 
           npm ci --prefix web

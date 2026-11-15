@@ -1405,7 +1405,8 @@ class ExampleUnitTest {
     )
     assertTrue(BuildConfig.VERSION_CODE >= 21)
     assertEquals(BuildConfig.VERSION_CODE, com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_CODE)
-    assertEquals("21.0", BuildConfig.VERSION_NAME)
+    assertEquals(BuildConfig.VERSION_NAME, com.example.core.architecture.PmpAppVersionContract.CURRENT_VERSION_NAME)
+    assertTrue("Parsed major version must be >= 21", parsedCurrent.major >= 21)
     assertTrue(com.example.util.UpdateManager.DEFAULT_PERIODIC_CHECK_INTERVAL_MS >= 60_000L)
     assertTrue(com.example.util.UpdateManager.DEFAULT_NOTIFICATION_SNOOZE_MS >= 60_000L)
     assertEquals(

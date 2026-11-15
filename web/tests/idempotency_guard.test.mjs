@@ -510,8 +510,8 @@ test('Version v21.0 sync & Windows Desktop GitHub release parser work accurately
   const rootVersion = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'version.json'), 'utf8'));
   const pubVersion = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'public/version.json'), 'utf8'));
   const desktopPkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'desktop/package.json'), 'utf8'));
-  assert.equal(rootVersion.versionCode, 21);
-  assert.equal(pubVersion.versionCode, 21);
+  assert.ok(rootVersion.versionCode >= 21);
+  assert.equal(pubVersion.versionCode, rootVersion.versionCode);
   assert.equal(desktopPkg.version, '21.0.0');
 
   const parsedDesktop = parseGitHubDesktopRelease({

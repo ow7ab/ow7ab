@@ -2,21 +2,33 @@ name: PMP Paints - Windows Desktop Installer & Auto-Update Release
 
 on:
   push:
+    branches:
+      - "main"
+    paths:
+      - "desktop/**"
+      - "web/**"
+      - "public/**"
+      - "package.json"
+      - ".github/workflows/build-desktop.yml"
     tags:
       - "desktop-v*"
   workflow_dispatch:
     inputs:
       desktop_version:
-        description: "Desktop Release Version (e.g. 18.0.0)"
+        description: "Desktop Release Version (e.g. 21.0.0)"
         required: false
         default: ""
       publish_release:
         description: "Publish Windows installer & portable .exe to GitHub Releases"
         required: false
-        default: "false"
+        default: "true"
 
 permissions:
   contents: write
+
+concurrency:
+  group: pmp-desktop-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-windows-desktop:
@@ -168,7 +180,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish Separate Desktop Release on GitHub Releases
-        if: startsWith(github.ref, 'refs/tags/desktop-v') || github.event.inputs.publish_release == 'true'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/desktop-v') || github.event.inputs.publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag_name }}
