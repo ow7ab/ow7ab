@@ -181,6 +181,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (user.email) {
             const matched = await AccountService.findAccountForLogin(user.email);
             if (matched && matched.active && matched.syncStatus !== 'PENDING_MANAGER_APPROVAL') {
+              await AccountService.ensureOwnClusterMemberRegistration(matched, user.uid, user.email).catch(() => {});
               persistSession(matched);
               setIsLoading(false);
               return;
@@ -365,14 +366,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       LoginRateLimiter.recordSuccess(cleanUser);
 
-      // Transparent upgrade from legacy SHA-256 / plaintext PIN to PBKDF2-HMAC-SHA256
+      // Transparent upgrade from legacy SHA-256 / plaintext PIN to PBKDF2-HMAC-SHA256 using 8-key self-update whitelist
       if (needsUpgradeToPbkdf2(storedSecret)) {
-        AccountService.updateEmployee(
-          matched,
-          matched,
-          'ترقية تشفير كلمة المرور تلقائياً إلى PBKDF2-HMAC-SHA256',
-          cleanPin
-        ).catch(() => {});
+        AccountService.updateOwnProfile(matched, { rawNewPassword: cleanPin }).catch(() => {});
       }
 
       await ErpDataService.logAudit(
@@ -440,12 +436,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             throw new Error(`البريد الإلكتروني أو كلمة المرور غير صحيحة (متبقي ${rl.attemptsRemaining} محاولات).`);
           }
           if (needsUpgradeToPbkdf2(storedSecret)) {
-            AccountService.updateEmployee(matched, matched, 'ترقية تشفير كلمة المرور إلى PBKDF2', cleanPass).catch(
-              () => {}
-            );
+            AccountService.updateOwnProfile(matched, { rawNewPassword: cleanPass }).catch(() => {});
           }
         }
 
+        if (fbCredUser) {
+          await AccountService.ensureOwnClusterMemberRegistration(matched, fbCredUser.uid, fbCredUser.email || cleanEmail).catch(() => {});
+        }
         LoginRateLimiter.recordSuccess(cleanEmail);
         await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${cleanEmail}`);
         persistSession(matched);
@@ -503,6 +500,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const matched = await AccountService.findAccountForLogin(email);
       if (matched) {
         validateAccountAccessState(matched);
+        if (fbUser?.uid) {
+          await AccountService.ensureOwnClusterMemberRegistration(matched, fbUser.uid, email).catch(() => {});
+        }
         LoginRateLimiter.recordSuccess(email);
         await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_GOOGLE', `تسجيل دخول عبر Google (${email})`);
         persistSession(matched);
@@ -533,7 +533,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const updateCurrentUserProfile = async (data: Partial<UserAccount>) => {
     if (!linkedAccount) return;
-    // SECURITY: Strict whitelist blocks self-privilege escalation (cannot overwrite role, roleType, permissions, active, userCode, username, syncStatus)
+    // SECURITY: Strict 8-key self-update whitelist matching firestore.rules (blocks role/permissions escalation)
     const updated: UserAccount = {
       ...linkedAccount,
       fullName: typeof data.fullName === 'string' && data.fullName.trim() ? data.fullName.trim().slice(0, 120) : linkedAccount.fullName,
@@ -542,7 +542,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
     updated.roleType = resolveUserRoleType(updated);
     persistSession(updated);
-    await AccountService.updateEmployee(updated, updated, 'تحديث بيانات الحساب الشخصي');
+    await AccountService.updateOwnProfile(updated, {
+      fullName: updated.fullName,
+      phoneOrEmail: updated.phoneOrEmail,
+      lastLoginAt: typeof updated.lastLoginAt === 'number' ? updated.lastLoginAt : undefined
+    });
   };
 
   return (

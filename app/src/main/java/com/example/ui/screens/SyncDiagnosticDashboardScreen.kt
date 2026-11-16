@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.FactCheck
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -29,6 +30,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.data.remote.CloudErrorLogEntry
+import com.example.data.remote.ServiceProbeId
+import com.example.data.remote.ServiceProbeResult
 import com.example.data.remote.SyncDiagnosticRecord
 import com.example.ui.components.*
 import com.example.ui.theme.*
@@ -93,6 +97,10 @@ fun SyncDiagnosticDashboardView(
     val syncDiagnostics by viewModel.syncDiagnostics.collectAsState()
     val lastSyncTime by viewModel.lastSuccessfulSyncTime.collectAsState()
     val pendingErrors by viewModel.pendingSyncErrors.collectAsState()
+    val structuredErrors by viewModel.structuredCloudErrors.collectAsState()
+    val preflightResult by viewModel.lastPreflightResult.collectAsState()
+    val serviceProbes by viewModel.serviceProbes.collectAsState()
+    val comprehensiveReport by viewModel.comprehensiveDiagnosticReport.collectAsState()
     val operationTrackingRecords by viewModel.operationTrackingRecords.collectAsState()
     val pendingOperationsCount by viewModel.pendingOperationsCount.collectAsState()
     val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
@@ -106,14 +114,16 @@ fun SyncDiagnosticDashboardView(
     var opStatusFilter by remember { mutableStateOf("ALL") }
     var opSearchQuery by remember { mutableStateOf("") }
     var showWipeConfirmDialog by remember { mutableStateOf(false) }
+    val totalErrorsBadge = maxOf(pendingErrors.size, structuredErrors.size)
     val tabs = listOf(
         "نظرة عامة والوحدات",
         "متابعة العمليات (${pendingOperationsCount})",
-        "الأخطاء المعلقة (${pendingErrors.size})",
+        "الأخطاء المعلقة ($totalErrorsBadge)",
         "سجل المزامنة (${syncDiagnostics.size})"
     )
 
-    val isOnline = serverHealthReport?.isOnline != false
+    val isHealthMeasured = serverHealthReport != null
+    val isOnline = serverHealthReport?.isOnline == true
     val numberFormat = remember { NumberFormat.getNumberInstance(Locale.US) }
 
     // Pulsing animation for live sync indicator
@@ -138,7 +148,8 @@ fun SyncDiagnosticDashboardView(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = 16.dp)
+                .testTag("sync_dashboard_list"),
             contentPadding = PaddingValues(top = 16.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -212,21 +223,30 @@ fun SyncDiagnosticDashboardView(
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // Live Status Banner
+                        // Live Status Banner (Real measured state only - no assumed success)
+                        val hasErrors = pendingErrors.isNotEmpty() || structuredErrors.isNotEmpty()
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(14.dp))
                                 .background(
-                                    if (isSyncing) Color(0xFFEFF6FF)
-                                    else if (pendingErrors.isNotEmpty()) Color(0xFFFEF2F2)
-                                    else Color(0xFFF0FDF4)
+                                    when {
+                                        isSyncing -> Color(0xFFEFF6FF)
+                                        hasErrors -> Color(0xFFFEF2F2)
+                                        !isHealthMeasured -> Color(0xFFFFFBEB)
+                                        isOnline -> Color(0xFFF0FDF4)
+                                        else -> Color(0xFFFEF2F2)
+                                    }
                                 )
                                 .border(
                                     1.dp,
-                                    if (isSyncing) PmpCyan.copy(alpha = 0.5f)
-                                    else if (pendingErrors.isNotEmpty()) PmpRed.copy(alpha = 0.5f)
-                                    else PmpGreen.copy(alpha = 0.5f),
+                                    when {
+                                        isSyncing -> PmpCyan.copy(alpha = 0.5f)
+                                        hasErrors -> PmpRed.copy(alpha = 0.5f)
+                                        !isHealthMeasured -> PmpGold.copy(alpha = 0.5f)
+                                        isOnline -> PmpGreen.copy(alpha = 0.5f)
+                                        else -> PmpRed.copy(alpha = 0.5f)
+                                    },
                                     RoundedCornerShape(14.dp)
                                 )
                                 .padding(horizontal = 14.dp, vertical = 10.dp)
@@ -247,15 +267,23 @@ fun SyncDiagnosticDashboardView(
                                             .scale(pulseScale)
                                             .clip(CircleShape)
                                             .background(
-                                                if (isSyncing) PmpCyan
-                                                else if (pendingErrors.isNotEmpty()) PmpRed
-                                                else PmpGreen
+                                                when {
+                                                    isSyncing -> PmpCyan
+                                                    hasErrors -> PmpRed
+                                                    !isHealthMeasured -> PmpGold
+                                                    isOnline -> PmpGreen
+                                                    else -> PmpRed
+                                                }
                                             )
                                     )
                                     Text(
-                                        text = if (isSyncing) "جارٍ المزامنة السحابية لحظياً مع السيرفر..."
-                                        else if (pendingErrors.isNotEmpty()) "يوجد ${pendingErrors.size} أخطاء معلقة تتطلب المراجعة"
-                                        else "السيرفر متصل ومزامن بالكامل مع قاعدة البيانات",
+                                        text = when {
+                                            isSyncing -> "جارٍ المزامنة السحابية لحظياً مع السيرفر..."
+                                            hasErrors -> "يوجد $totalErrorsBadge أخطاء معلقة تتطلب المراجعة"
+                                            !isHealthMeasured -> "بانتظار فحص السيرفر المباشر (لم يُقَس بعد)"
+                                            isOnline -> "السيرفر متصل ومزامن بالكامل مع قاعدة البيانات"
+                                            else -> serverHealthReport?.message ?: "السيرفر غير متاح حالياً"
+                                        },
                                         color = PmpBrandNavy,
                                         fontSize = 12.5.sp,
                                         fontWeight = FontWeight.SemiBold,
@@ -265,8 +293,18 @@ fun SyncDiagnosticDashboardView(
                                 }
 
                                 GlassBadge(
-                                    text = if (isSyncing) "مزامنة جارية" else if (isOnline) "سيرفر مستقر" else "غير متاح",
-                                    color = if (isSyncing) PmpCyan else if (isOnline) PmpGreen else PmpRed
+                                    text = when {
+                                        isSyncing -> "مزامنة جارية"
+                                        !isHealthMeasured -> "غير مقاس"
+                                        isOnline -> "سيرفر مستقر"
+                                        else -> "غير متاح"
+                                    },
+                                    color = when {
+                                        isSyncing -> PmpCyan
+                                        !isHealthMeasured -> PmpGold
+                                        isOnline -> PmpGreen
+                                        else -> PmpRed
+                                    }
                                 )
                             }
                         }
@@ -293,11 +331,26 @@ fun SyncDiagnosticDashboardView(
                         // KPI 1: Status
                         GlassStatCard(
                             title = "حالة اتصال السيرفر",
-                            value = if (isSyncing) "جارٍ الحفظ" else if (isOnline) "متصل ومزامن" else "تنبيه شبكة",
+                            value = when {
+                                isSyncing -> "جارٍ الحفظ"
+                                !isHealthMeasured -> "غير مقاس"
+                                isOnline -> "متصل ومزامن"
+                                else -> "غير متاح"
+                            },
                             unit = "Google Cloud",
-                            subtitle = "كود الكلاستر: ${clusterCode.take(14)}",
-                            accentColor = if (isSyncing) PmpCyan else if (isOnline) PmpGreen else PmpRed,
-                            icon = if (isSyncing) Icons.Default.Sync else Icons.Default.CloudDone,
+                            subtitle = "كود الكلاستر: ${clusterCode.take(18)}",
+                            accentColor = when {
+                                isSyncing -> PmpCyan
+                                !isHealthMeasured -> PmpGold
+                                isOnline -> PmpGreen
+                                else -> PmpRed
+                            },
+                            icon = when {
+                                isSyncing -> Icons.Default.Sync
+                                !isHealthMeasured -> Icons.Default.HourglassEmpty
+                                isOnline -> Icons.Default.CloudDone
+                                else -> Icons.Default.CloudOff
+                            },
                             modifier = Modifier.weight(1f)
                         )
 
@@ -320,21 +373,22 @@ fun SyncDiagnosticDashboardView(
                         // KPI 3: Pending Errors
                         GlassStatCard(
                             title = "الأخطاء المعلقة",
-                            value = "${pendingErrors.size} خطأ",
-                            unit = if (pendingErrors.isEmpty()) "نظام مستقر" else "بحاجة لمراجعة",
-                            subtitle = if (pendingErrors.isEmpty()) "لا توجد أخطاء معلقة إطلاقاً" else "انقر لتبويب الأخطاء للمعالجة",
-                            accentColor = if (pendingErrors.isEmpty()) PmpGreen else PmpRed,
-                            icon = if (pendingErrors.isEmpty()) Icons.Default.VerifiedUser else Icons.Default.ReportProblem,
+                            value = "$totalErrorsBadge خطأ",
+                            unit = if (totalErrorsBadge == 0) "نظام مستقر" else "بحاجة لمراجعة",
+                            subtitle = if (totalErrorsBadge == 0) "لا توجد أخطاء معلقة إطلاقاً" else "انقر لتبويب الأخطاء للمعالجة",
+                            accentColor = if (totalErrorsBadge == 0) PmpGreen else PmpRed,
+                            icon = if (totalErrorsBadge == 0) Icons.Default.VerifiedUser else Icons.Default.ReportProblem,
                             modifier = Modifier.weight(1f)
                         )
 
-                        // KPI 4: Ping / Response Time
+                        // KPI 4: Ping / Response Time (Never fake 38ms when unmeasured)
+                        val pingText = serverHealthReport?.responseTimeMs?.let { "$it ms" } ?: "غير مقاس"
                         GlassStatCard(
                             title = "زمن الاستجابة (Ping)",
-                            value = "${serverHealthReport?.responseTimeMs ?: 38} ms",
-                            unit = "مللي ثانية",
-                            subtitle = "خوادم Firestore الإقليمية",
-                            accentColor = PmpBlueLight,
+                            value = pingText,
+                            unit = if (isHealthMeasured) "مللي ثانية" else "بانتظار الفحص",
+                            subtitle = "خوادم Firestore الإقليمية (Source.SERVER)",
+                            accentColor = if (isOnline) PmpBlueLight else PmpGold,
                             icon = Icons.Default.Speed,
                             modifier = Modifier.weight(1f)
                         )
@@ -366,10 +420,21 @@ fun SyncDiagnosticDashboardView(
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 15.sp
                                     )
-                                    GlassBadge(text = "Active & Synced", color = PmpGreen)
+                                    val healthBadgeText = when {
+                                        !isHealthMeasured -> "بانتظار الفحص"
+                                        isOnline && totalErrorsBadge == 0 -> "متصل ومقاس"
+                                        isOnline -> "متصل • تنبيه أخطاء"
+                                        else -> "غير متاح"
+                                    }
+                                    val healthBadgeColor = when {
+                                        !isHealthMeasured -> PmpGold
+                                        isOnline && totalErrorsBadge == 0 -> PmpGreen
+                                        else -> PmpRed
+                                    }
+                                    GlassBadge(text = healthBadgeText, color = healthBadgeColor)
                                 }
                                 Text(
-                                    text = "مقارنة دقيقة وفورية بين السجلات المحفوظة في ذاكرة الهاتف المحلية (Room DB) وسجلات سيرفر Google Cloud المركزية:",
+                                    text = "مقارنة فعلية بين السجلات المحفوظة محلياً (Room DB) وسجلات السيرفر المقاسة مباشرة عبر Source.SERVER:",
                                     color = TextMuted,
                                     fontSize = 11.5.sp,
                                     lineHeight = 17.sp
@@ -379,7 +444,7 @@ fun SyncDiagnosticDashboardView(
                                 ModuleSyncItemCard(
                                     title = "فواتير المبيعات والعملاء",
                                     localCount = invoices.size,
-                                    cloudCount = serverHealthReport?.cloudInvoicesCount ?: invoices.size,
+                                    cloudCount = serverHealthReport?.cloudInvoicesCount,
                                     unitLabel = "فاتورة",
                                     icon = Icons.Default.ReceiptLong,
                                     accentColor = PmpCyan
@@ -389,7 +454,7 @@ fun SyncDiagnosticDashboardView(
                                 ModuleSyncItemCard(
                                     title = "حركات الخزن والنقدية",
                                     localCount = movements.size,
-                                    cloudCount = serverHealthReport?.cloudMovementsCount ?: movements.size,
+                                    cloudCount = serverHealthReport?.cloudMovementsCount,
                                     unitLabel = "حركة خزنة",
                                     icon = Icons.Default.AccountBalanceWallet,
                                     accentColor = PmpGreen
@@ -399,7 +464,7 @@ fun SyncDiagnosticDashboardView(
                                 ModuleSyncItemCard(
                                     title = "المخازن والمنتجات والمصنع",
                                     localCount = products.size,
-                                    cloudCount = products.size,
+                                    cloudCount = serverHealthReport?.cloudProductsCount,
                                     unitLabel = "صنف مسجل",
                                     icon = Icons.Default.Inventory2,
                                     accentColor = PmpGold
@@ -409,11 +474,173 @@ fun SyncDiagnosticDashboardView(
                                 ModuleSyncItemCard(
                                     title = "حسابات المستخدمين والصلاحيات",
                                     localCount = userAccounts.size,
-                                    cloudCount = serverHealthReport?.cloudUsersCount ?: userAccounts.size,
+                                    cloudCount = serverHealthReport?.cloudUsersCount,
                                     unitLabel = "حساب موظف",
                                     icon = Icons.Default.ManageAccounts,
                                     accentColor = PmpBlueLight
                                 )
+                            }
+                        }
+                    }
+
+                    // Comprehensive Diagnostics & 5 Read-Only Service Probes Card
+                    item {
+                        GlassCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("service_probes_card"),
+                            backgroundColor = Color.White
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(18.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "اختبارات خدمات السيرفر (للقراءة فقط)",
+                                        color = PmpBrandNavy,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.5.sp
+                                    )
+                                    GlassBadge(
+                                        text = comprehensiveReport?.let {
+                                            if (it.overallOk) "جاهز بالكامل" else "بحاجة للمراجعة"
+                                        } ?: "Read-Only Probes",
+                                        color = comprehensiveReport?.let {
+                                            if (it.overallOk) PmpGreen else PmpRed
+                                        } ?: PmpCyan
+                                    )
+                                }
+
+                                GlassButton(
+                                    text = "فحص تشخيصي شامل (بدون كتابة)",
+                                    icon = Icons.Default.VerifiedUser,
+                                    gradient = GlassAccentBlueGradient,
+                                    isLoading = isSyncing,
+                                    loadingText = "جارٍ فحص الخدمات الخمس...",
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 48.dp)
+                                        .testTag("comprehensive_diagnostic_btn"),
+                                    onClick = { viewModel.runComprehensiveServerDiagnostics() }
+                                )
+
+                                // Preflight Check Status Banner
+                                val pf = preflightResult
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(
+                                            when {
+                                                pf == null -> Color(0xFFF8FAFC)
+                                                pf.passed -> Color(0xFFF0FDF4)
+                                                else -> Color(0xFFFEF2F2)
+                                            }
+                                        )
+                                        .border(
+                                            1.dp,
+                                            when {
+                                                pf == null -> Color(0xFFE2E8F0)
+                                                pf.passed -> PmpGreen.copy(alpha = 0.4f)
+                                                else -> PmpRed.copy(alpha = 0.4f)
+                                            },
+                                            RoundedCornerShape(12.dp)
+                                        )
+                                        .padding(12.dp)
+                                        .testTag("preflight_status_card")
+                                ) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(
+                                            text = if (pf == null) {
+                                                "فحص الجاهزية المسبق (Preflight): لم يتم تشغيله بعد"
+                                            } else {
+                                                "فحص الجاهزية المسبق: ${pf.message}"
+                                            },
+                                            color = PmpBrandNavy,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                        if (pf != null) {
+                                            Text(
+                                                text = "الدور المعتمد: ${pf.roleSummary} • Auth: ${if (pf.firebaseAuthPresent) "نشط" else "غير مسجل"} • الشبكة: ${if (pf.networkOnline) "متصلة" else "منقطعة"}",
+                                                color = TextMuted,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
+
+                                val probeButtonTags = mapOf(
+                                    ServiceProbeId.NETWORK to "probe_network_btn",
+                                    ServiceProbeId.FIREBASE_AUTH to "probe_auth_btn",
+                                    ServiceProbeId.FIRESTORE to "probe_firestore_btn",
+                                    ServiceProbeId.RBAC_POLICY to "probe_rbac_btn",
+                                    ServiceProbeId.APP_UPDATES to "probe_updates_btn"
+                                )
+                                val probeById = serviceProbes.associateBy { it.probeId }
+
+                                ServiceProbeId.entries.forEach { probeId ->
+                                    val probeRes: ServiceProbeResult? = probeById[probeId]
+                                    val statusColor = when {
+                                        probeRes == null -> PmpGold
+                                        probeRes.ok -> PmpGreen
+                                        else -> PmpRed
+                                    }
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(Color(0xFFF8FAFC))
+                                            .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(12.dp))
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = probeId.arabicLabel,
+                                                color = PmpBrandNavy,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.5.sp
+                                            )
+                                            Text(
+                                                text = probeRes?.detail ?: "بانتظار التشغيل (للقراءة فقط)",
+                                                color = if (probeRes?.ok == false) PmpRed else TextMuted,
+                                                fontSize = 11.sp,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            GlassBadge(
+                                                text = when {
+                                                    probeRes == null -> "غير مفحوص"
+                                                    probeRes.ok -> "سليم"
+                                                    else -> "فشل"
+                                                },
+                                                color = statusColor
+                                            )
+                                            OutlinedButton(
+                                                onClick = { viewModel.runSingleServiceProbe(probeId) },
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                                modifier = Modifier
+                                                    .heightIn(min = 48.dp)
+                                                    .testTag(probeButtonTags[probeId] ?: "probe_${probeId.name}")
+                                            ) {
+                                                Text("فحص", fontSize = 11.sp, color = PmpBrandNavy)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -469,7 +696,14 @@ fun SyncDiagnosticDashboardView(
                                             fontSize = 14.5.sp
                                         )
                                     }
-                                    GlassBadge(text = "100% متطابق ومزامن", color = PmpGreen)
+                                    GlassBadge(
+                                        text = when {
+                                            !isHealthMeasured -> "بانتظار القياس"
+                                            isOnline -> "الشبكة متصلة"
+                                            else -> "الشبكة غير متاحة"
+                                        },
+                                        color = if (!isHealthMeasured) PmpGold else if (isOnline) PmpGreen else PmpRed
+                                    )
                                 }
 
                                 Text(
@@ -483,7 +717,10 @@ fun SyncDiagnosticDashboardView(
                                 MetadataRow(label = "عقدة التصنيع والإنتاج:", value = "مصنع البوهيات المركزي بالسودان")
                                 MetadataRow(label = "عقدة الشحن والترحيل:", value = "مخزن ومكتب وادي حلفا الحدودي")
                                 MetadataRow(label = "عملة تقييم البضاعة والخامات:", value = "الجنيه المصري (EGP) معتمد بالكامل")
-                                MetadataRow(label = "حالة دقة الربط بين الشبكات:", value = "Exact Cross-Network Multi-Device Active")
+                                MetadataRow(
+                                    label = "حالة دقة الربط بين الشبكات:",
+                                    value = if (!isHealthMeasured) "بانتظار فحص السيرفر المباشر" else if (isOnline) "Exact Cross-Network Multi-Device Active" else "غير متصل بالسيرفر"
+                                )
                             }
                         }
                     }
@@ -583,7 +820,7 @@ fun SyncDiagnosticDashboardView(
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Icon(Icons.Default.FactCheck, contentDescription = null, tint = PmpGreen, modifier = Modifier.size(36.dp))
+                                    Icon(Icons.AutoMirrored.Filled.FactCheck, contentDescription = null, tint = PmpGreen, modifier = Modifier.size(36.dp))
                                     Text(
                                         text = "لا توجد عمليات مطابقة في سجل المتابعة حالياً.",
                                         color = PmpBrandNavy,
@@ -697,8 +934,8 @@ fun SyncDiagnosticDashboardView(
                 }
 
                 2 -> {
-                    // Tab 2: Pending Errors & Resolution Queue
-                    if (pendingErrors.isEmpty()) {
+                    // Tab 2: Pending Errors & Structured Root-Cause Classification Queue
+                    if (pendingErrors.isEmpty() && structuredErrors.isEmpty()) {
                         item {
                             GlassCard(
                                 modifier = Modifier.fillMaxWidth(),
@@ -771,6 +1008,86 @@ fun SyncDiagnosticDashboardView(
                             }
                         }
 
+                        items(structuredErrors, key = { "struct_${it.id}" }) { sErr: CloudErrorLogEntry ->
+                            GlassCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .border(1.dp, PmpRed.copy(alpha = 0.55f), RoundedCornerShape(18.dp))
+                                    .testTag("structured_error_card_${sErr.category.name}"),
+                                backgroundColor = Color.White
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = sErr.category.arabicTitle,
+                                                color = PmpRed,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 13.sp
+                                            )
+                                            Text(
+                                                text = "العملية: ${sErr.operation} • المسار: ${sErr.collectionPath}",
+                                                color = PmpBrandNavy,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                        GlassBadge(
+                                            text = if (sErr.retryable) "قابل للإعادة" else "صلاحية/إعداد",
+                                            color = if (sErr.retryable) PmpGold else PmpRed
+                                        )
+                                    }
+
+                                    Text(
+                                        text = sErr.sanitizedMessage,
+                                        color = PmpBrandNavy,
+                                        fontSize = 12.sp,
+                                        lineHeight = 17.sp
+                                    )
+
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(Color(0xFFFFFBEB))
+                                            .padding(10.dp)
+                                    ) {
+                                        Text(
+                                            text = "الإجراء المقترح: ${sErr.remediationHint}",
+                                            color = PmpBrandNavy,
+                                            fontSize = 11.sp,
+                                            lineHeight = 16.sp
+                                        )
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "${sErr.formattedTime} • الكود: ${sErr.code} • الجهاز: ${sErr.deviceId.take(14)}",
+                                            color = TextMuted,
+                                            fontSize = 10.5.sp
+                                        )
+                                        TextButton(
+                                            onClick = { viewModel.clearPendingSyncError(sErr.id) },
+                                            modifier = Modifier.heightIn(min = 48.dp)
+                                        ) {
+                                            Text("تجاهل", color = TextMuted, fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         items(pendingErrors, key = { it.id }) { err ->
                             GlassCard(
                                 modifier = Modifier
@@ -816,7 +1133,7 @@ fun SyncDiagnosticDashboardView(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            text = "التوقيت: ${err.formattedTime} • الجهاز: ${err.deviceId.take(10)}...",
+                                            text = "التوقيت: ${err.formattedTime} • الجهاز: ${err.deviceId.take(14)}",
                                             color = TextMuted,
                                             fontSize = 10.5.sp
                                         )
@@ -825,7 +1142,7 @@ fun SyncDiagnosticDashboardView(
                                             TextButton(
                                                 onClick = { viewModel.clearPendingSyncError(err.id) },
                                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                                modifier = Modifier.height(28.dp)
+                                                modifier = Modifier.heightIn(min = 48.dp)
                                             ) {
                                                 Text("تجاهل", color = TextMuted, fontSize = 11.sp)
                                             }
@@ -837,7 +1154,7 @@ fun SyncDiagnosticDashboardView(
                                                 },
                                                 colors = ButtonDefaults.buttonColors(containerColor = PmpCyan),
                                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                                modifier = Modifier.height(28.dp)
+                                                modifier = Modifier.heightIn(min = 48.dp)
                                             ) {
                                                 Icon(Icons.Default.Replay, contentDescription = null, tint = Color.Black, modifier = Modifier.size(12.dp))
                                                 Spacer(modifier = Modifier.width(4.dp))
@@ -1071,12 +1388,24 @@ fun SyncDiagnosticDashboardDialog(
 private fun ModuleSyncItemCard(
     title: String,
     localCount: Int,
-    cloudCount: Int,
+    cloudCount: Int?,
     unitLabel: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     accentColor: Color
 ) {
-    val isMatched = localCount == cloudCount || (localCount > 0 && cloudCount > 0)
+    val isMeasured = cloudCount != null
+    val isMatched = cloudCount != null && localCount == cloudCount
+    val cloudLabel = cloudCount?.let { "$it $unitLabel" } ?: "غير مقاس"
+    val badgeText = when {
+        !isMeasured -> "غير مقاس"
+        isMatched -> "متطابق 100%"
+        else -> "قيد التحديث"
+    }
+    val badgeColor = when {
+        !isMeasured -> PmpGold
+        isMatched -> PmpGreen
+        else -> PmpCyan
+    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -1092,7 +1421,8 @@ private fun ModuleSyncItemCard(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.weight(1f)
             ) {
                 Box(
                     modifier = Modifier
@@ -1106,7 +1436,7 @@ private fun ModuleSyncItemCard(
                 Column {
                     Text(text = title, color = PmpBrandNavy, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     Text(
-                        text = "محلياً: $localCount $unitLabel • السحابة: $cloudCount $unitLabel",
+                        text = "محلياً: $localCount $unitLabel • السحابة: $cloudLabel",
                         color = TextMuted,
                         fontSize = 11.sp
                     )
@@ -1114,8 +1444,8 @@ private fun ModuleSyncItemCard(
             }
 
             GlassBadge(
-                text = if (isMatched) "متطابق 100%" else "قيد التحديث",
-                color = if (isMatched) PmpGreen else PmpGold
+                text = badgeText,
+                color = badgeColor
             )
         }
     }

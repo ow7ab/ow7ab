@@ -26,9 +26,12 @@ import {
   GRANULAR_ACTIONS,
   ERP_MODULES,
   SCOPED_ADMIN_MARKER,
+  canAssignRole,
   canConfigureEmployeePermissions,
+  canModifyEmployeeTarget,
   isSuperAdminAccount,
-  isScopedAdministrator
+  isScopedAdministrator,
+  validatePermissionChange
 } from '../../services/SecurityService';
 import { evaluatePasswordStrength } from '../../services/PasswordSecurity';
 import { AccountService } from '../../services/AccountService';
@@ -170,10 +173,10 @@ export const EmployeeManagementCenter: React.FC = () => {
     return matchesSearch && matchesBranch && matchesRole && matchesStatus;
   });
 
+  const assignableRoles = JOB_ROLES.filter((r) => canAssignRole(userProfile, r));
+
   const canModifyTarget = (target: UserAccount): boolean => {
-    if (!canManageUsers || !userProfile) return false;
-    if (isSuperAdminAccount(target) && !isSuperAdminAccount(userProfile)) return false;
-    return true;
+    return canModifyEmployeeTarget(userProfile, target);
   };
 
   const handleToggleStatus = async (emp: UserAccount) => {
@@ -254,6 +257,16 @@ export const EmployeeManagementCenter: React.FC = () => {
     if (!selectedEmp || !userProfile || editGuard.isSubmitting) return;
     if (resetPasswordInput.trim().length > 0 && resetPasswordInput.trim().length < 4) {
       showMessage('error', 'كلمة المرور الجديدة يجب أن تكون 4 خانات على الأقل');
+      return;
+    }
+    const rbacCheck = validatePermissionChange(
+      userProfile,
+      selectedEmp,
+      selectedEmp.role,
+      selectedEmp.permissions
+    );
+    if (!rbacCheck.allowed) {
+      showMessage('error', rbacCheck.reasonAr);
       return;
     }
 
@@ -352,9 +365,16 @@ export const EmployeeManagementCenter: React.FC = () => {
       return;
     }
 
-    const perms = newEmpData.isScopedAdmin
-      ? Array.from(new Set([SCOPED_ADMIN_MARKER, ...newEmpData.permissions]))
-      : newEmpData.permissions;
+    const perms =
+      newEmpData.isScopedAdmin && isSuperAdminAccount(userProfile)
+        ? Array.from(new Set([SCOPED_ADMIN_MARKER, ...newEmpData.permissions]))
+        : newEmpData.permissions;
+
+    const rbacCheck = validatePermissionChange(userProfile, null, newEmpData.role, perms.join(','));
+    if (!rbacCheck.allowed) {
+      showMessage('error', rbacCheck.reasonAr);
+      return;
+    }
 
     const res = await createGuard.runGuarded({
       guardKey: `emp_create_${cleanUser}`,
@@ -838,7 +858,7 @@ export const EmployeeManagementCenter: React.FC = () => {
                   onChange={(e) => setNewEmpData({ ...newEmpData, role: e.target.value })}
                   className="w-full px-3 py-2.5 rounded-xl bg-theme-base border border-theme text-theme-primary focus:outline-none focus:border-pmp-primary"
                 >
-                  {JOB_ROLES.map((r) => (
+                  {assignableRoles.map((r) => (
                     <option key={r} value={r}>
                       {r}
                     </option>
@@ -862,14 +882,16 @@ export const EmployeeManagementCenter: React.FC = () => {
               </div>
             </div>
 
-            <label className="flex items-center gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-theme-primary cursor-pointer">
-              <input
-                type="checkbox"
-                checked={newEmpData.isScopedAdmin}
-                onChange={(e) => setNewEmpData({ ...newEmpData, isScopedAdmin: e.target.checked })}
-              />
-              <span className="font-bold">تعيين كمسؤول نظام مقيد النطاق (SCOPED_ADMIN — يمنع توريث صلاحيات المدير العام تلقائياً)</span>
-            </label>
+            {isSuperAdminAccount(userProfile) && (
+              <label className="flex items-center gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-theme-primary cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={newEmpData.isScopedAdmin}
+                  onChange={(e) => setNewEmpData({ ...newEmpData, isScopedAdmin: e.target.checked })}
+                />
+                <span className="font-bold">تعيين كمسؤول نظام مقيد النطاق (SCOPED_ADMIN — يمنع توريث صلاحيات المدير العام تلقائياً)</span>
+              </label>
+            )}
 
             <div>
               <h4 className="text-xs font-bold text-theme-primary mb-2">الوحدات والعمليات المصرح بها:</h4>
@@ -990,12 +1012,12 @@ export const EmployeeManagementCenter: React.FC = () => {
                   disabled={isSuperAdminAccount(selectedEmp)}
                   className="w-full px-3 py-2 rounded-lg bg-theme-surface border border-theme text-theme-primary disabled:opacity-60"
                 >
-                  {JOB_ROLES.map((r) => (
+                  {assignableRoles.map((r) => (
                     <option key={r} value={r}>
                       {r}
                     </option>
                   ))}
-                  {!JOB_ROLES.includes(selectedEmp.role) && <option value={selectedEmp.role}>{selectedEmp.role}</option>}
+                  {!assignableRoles.includes(selectedEmp.role) && <option value={selectedEmp.role}>{selectedEmp.role}</option>}
                 </select>
               </div>
               <div>
@@ -1031,7 +1053,7 @@ export const EmployeeManagementCenter: React.FC = () => {
               </div>
             </div>
 
-            {!isSuperAdminAccount(selectedEmp) && (
+            {isSuperAdminAccount(userProfile) && !isSuperAdminAccount(selectedEmp) && (
               <label className="flex items-center gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 cursor-pointer">
                 <input
                   type="checkbox"
@@ -1140,7 +1162,7 @@ export const EmployeeManagementCenter: React.FC = () => {
                 onChange={(e) => setApproveRole(e.target.value)}
                 className="w-full px-3 py-2 rounded-lg bg-theme-surface border border-theme text-theme-primary"
               >
-                {JOB_ROLES.map((r) => (
+                {assignableRoles.map((r) => (
                   <option key={r} value={r}>
                     {r}
                   </option>

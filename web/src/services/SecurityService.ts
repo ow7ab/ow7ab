@@ -325,3 +325,154 @@ export function canConfigureEmployeePermissions(
     tokens.has('DENY:المستخدمين:USER_MANAGEMENT');
   return hasExplicit && !isDenied;
 }
+
+export type CanonicalRbacTier = 'ADMIN' | 'MANAGER' | 'ACCOUNTANT' | 'DEPUTY_ACCOUNTANT' | 'EMPLOYEE';
+
+/**
+ * Checks whether a role label represents a privileged Admin or Manager role.
+ */
+export function isPrivilegedRole(roleName: string | null | undefined): boolean {
+  const clean = (roleName || '').trim().toLowerCase();
+  if (!clean) return false;
+  return (
+    clean.includes('مدير النظام') ||
+    clean.includes('المدير العام') ||
+    clean === 'المدير' ||
+    clean.includes('مدير فرع') ||
+    clean.includes('مسؤول نظام') ||
+    clean.includes('مسؤول صلاحيات') ||
+    clean === 'admin' ||
+    clean === 'super_admin' ||
+    clean.includes('manager') ||
+    clean.includes('مشرف')
+  );
+}
+
+/**
+ * Resolves whether actor and target refer to the same user account.
+ */
+export function isSameAccount(
+  actor: Partial<UserAccount> | null | undefined,
+  target: Partial<UserAccount> | null | undefined
+): boolean {
+  if (!actor || !target) return false;
+  const aCode = (actor.userCode || '').trim().toLowerCase();
+  const tCode = (target.userCode || '').trim().toLowerCase();
+  if (aCode && tCode && aCode === tCode) return true;
+
+  const aUser = (actor.username || '').trim().toLowerCase();
+  const tUser = (target.username || '').trim().toLowerCase();
+  if (aUser && tUser && aUser === tUser) return true;
+
+  const aEmail = (actor.phoneOrEmail || '').trim().toLowerCase();
+  const tEmail = (target.phoneOrEmail || '').trim().toLowerCase();
+  return Boolean(aEmail && tEmail && aEmail === tEmail);
+}
+
+/**
+ * Resolves canonical 5-tier Firestore RBAC roleKey matching `firestore.rules`.
+ */
+export function resolveCanonicalRbacTier(account: Partial<UserAccount> | null | undefined): CanonicalRbacTier {
+  if (!account) return 'EMPLOYEE';
+  if (isSuperAdminAccount(account) || isSystemManager(account)) return 'ADMIN';
+
+  const roleStr = (account.role || '').trim().toLowerCase();
+  if (
+    !isScopedAdministrator(account) &&
+    (roleStr.includes('المدير') || roleStr.includes('مدير فرع') || roleStr.includes('manager') || roleStr.includes('مشرف'))
+  ) {
+    return 'MANAGER';
+  }
+  if (isScopedAdministrator(account) && (roleStr.includes('مدير فرع') || roleStr.includes('مسؤول نظام'))) {
+    return 'MANAGER';
+  }
+  if (roleStr.includes('نائب محاسب') || roleStr.includes('مساعد محاسب') || roleStr.includes('deputy')) {
+    return 'DEPUTY_ACCOUNTANT';
+  }
+  if (roleStr.includes('محاسب') || roleStr.includes('accountant')) {
+    return 'ACCOUNTANT';
+  }
+  return 'EMPLOYEE';
+}
+
+/**
+ * Strict target modification guard matching `EnterpriseRbacManager.kt` and `firestore.rules`.
+ * - Non-SuperAdmins cannot modify primary `admin`, cannot modify themselves, and cannot modify Managers/Admins.
+ */
+export function canModifyEmployeeTarget(
+  actor: UserAccount | null | undefined,
+  target: Partial<UserAccount> | null | undefined,
+  nowMillis: number = Date.now()
+): boolean {
+  if (!actor || !target) return false;
+  if (!canConfigureEmployeePermissions(actor, nowMillis)) return false;
+
+  if (isSuperAdminAccount(actor)) {
+    return !isSuperAdminAccount(target);
+  }
+
+  if (isSameAccount(actor, target)) return false;
+  if (isSuperAdminAccount(target) || isSystemManager(target)) return false;
+
+  const targetTier = resolveCanonicalRbacTier(target);
+  if (targetTier === 'ADMIN' || targetTier === 'MANAGER') return false;
+  if (isPrivilegedRole(target.role)) return false;
+
+  return true;
+}
+
+/**
+ * Validates whether `actor` may assign `targetRole` when creating or editing an employee.
+ */
+export function canAssignRole(
+  actor: UserAccount | null | undefined,
+  targetRole: string | null | undefined
+): boolean {
+  if (!actor || !actor.active) return false;
+  if (isSuperAdminAccount(actor)) return true;
+  return !isPrivilegedRole(targetRole);
+}
+
+/**
+ * Centralized RBAC permission change validator blocking self-escalation and Manager->Admin/Manager elevation.
+ */
+export function validatePermissionChange(
+  actor: UserAccount | null | undefined,
+  target: Partial<UserAccount> | null | undefined,
+  newRole: string,
+  newPermissions: string,
+  nowMillis: number = Date.now()
+): { allowed: boolean; reasonAr: string } {
+  if (!canConfigureEmployeePermissions(actor, nowMillis)) {
+    return { allowed: false, reasonAr: 'لا تملك صلاحية إدارة المستخدمين أو تعديل الأدوار.' };
+  }
+  if (!isSuperAdminAccount(actor)) {
+    if (target && isSameAccount(actor, target)) {
+      return { allowed: false, reasonAr: 'يُحظر على المستخدم تعديل دوره أو صلاحياته بنفسه.' };
+    }
+    if (target && !canModifyEmployeeTarget(actor, target, nowMillis)) {
+      return { allowed: false, reasonAr: 'لا يمكن لغير مدير النظام الرئيسي تعديل حساب مدير أو مشرف.' };
+    }
+    if (!canAssignRole(actor, newRole)) {
+      return { allowed: false, reasonAr: 'غير مصرح بترقية أي مستخدم إلى دور مدير أو مسؤول نظام.' };
+    }
+    const tokenSet = new Set(
+      (newPermissions || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    );
+    if (
+      tokenSet.has(GRANULAR_ACTIONS.ADMIN_SETTINGS) ||
+      tokenSet.has(GRANULAR_ACTIONS.USER_MANAGEMENT) ||
+      tokenSet.has(SCOPED_ADMIN_MARKER)
+    ) {
+      return {
+        allowed: false,
+        reasonAr: 'منح صلاحيات الإعدادات الإدارية أو إدارة المستخدمين أو SCOPED_ADMIN مقصور على مدير النظام الرئيسي.'
+      };
+    }
+  }
+  return { allowed: true, reasonAr: 'صالح' };
+}
+

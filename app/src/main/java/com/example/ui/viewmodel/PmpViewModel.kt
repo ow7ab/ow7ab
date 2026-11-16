@@ -640,6 +640,16 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     val syncDiagnostics = cloudErpSyncRepo.diagnostics
     val lastSuccessfulSyncTime = cloudErpSyncRepo.lastSuccessfulSyncTime
     val pendingSyncErrors = cloudErpSyncRepo.pendingErrors
+    val structuredCloudErrors: StateFlow<List<com.example.data.remote.CloudErrorLogEntry>> =
+        cloudErpSyncRepo.structuredErrors
+    val lastSyncStepSummaries: StateFlow<List<com.example.data.remote.SyncStepSummary>> =
+        cloudErpSyncRepo.syncStepSummaries
+    val lastPreflightResult: StateFlow<com.example.data.remote.PreflightCheckResult?> =
+        cloudErpSyncRepo.lastPreflightResult
+    val serviceProbes: StateFlow<List<com.example.data.remote.ServiceProbeResult>> =
+        cloudErpSyncRepo.serviceProbes
+    val comprehensiveDiagnosticReport: StateFlow<com.example.data.remote.ComprehensiveDiagnosticReport?> =
+        cloudErpSyncRepo.comprehensiveReport
     val transactionTraces = com.example.util.RoomTransactionLogger.traces
     val pendingApprovalUserCode = MutableStateFlow<String?>(null)
 
@@ -952,8 +962,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             // Defer network sync slightly so initial screen displays instantly without any freeze
             kotlinx.coroutines.delay(1500)
             try {
-                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
-                cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao())
+                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(application)
+                val activeId = activeSessionUserId.value
+                val isMgr = currentUser.value.isSystemManager()
+                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeId, devId)
+                cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao(), isMgr, activeId, devId)
                 DatabaseBackupManager.saveLocalSnapshot(application, repository.getDao())
                 checkServerHealth()
             } catch (e: Exception) {
@@ -985,9 +998,15 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         _dataLoadError.value = null
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+                val activeId = activeSessionUserId.value
+                val isMgr = currentUser.value.isSystemManager()
                 DatabaseBackupManager.restoreIfEmpty(getApplication(), repository.getDao())
-                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
-                cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao())
+                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeId, devId)
+                val res = cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao(), isMgr, activeId, devId)
+                res.onFailure { err ->
+                    Log.w("PmpViewModel", "retryDataLoadAndSync sync failure: ${err.message}")
+                }
                 _isInitialDataLoading.value = false
             } catch (e: Exception) {
                 _isInitialDataLoading.value = false
@@ -1643,9 +1662,16 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             val res = repository.deleteCashbox(id, cleanName, user)
             res.map { hadFinancialHistory ->
                 viewModelScope.launch(Dispatchers.IO) {
+                    val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
                     cloudErpSyncRepo.deleteCashboxFromCloud(serverClusterCode.value, id, cleanName)
                     DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
-                    cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao())
+                    cloudErpSyncRepo.syncAllLocalToCloud(
+                        serverClusterCode.value,
+                        repository.getDao(),
+                        currentUser.value.isSystemManager(),
+                        activeSessionUserId.value,
+                        devId
+                    )
                 }
                 val msg = if (hadFinancialHistory) {
                     "تم إلغاء تفعيل وأرشفة الخزنة ($cleanName) عبر جميع الأجهزة مع الاحتفاظ الكامل بكافة الحركات والسجلات المالية التاريخية المرتبطة بها"
@@ -3140,11 +3166,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             val targetCluster = clusterCode.trim().ifBlank { CloudErpSyncRepository.DEFAULT_CLUSTER }
+            val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+            val activeId = activeSessionUserId.value
+            val isMgr = currentUser.value.isSystemManager()
             _isSyncing.value = true
             _cloudSyncState.value = "جاري المزامنة الفورية مع سيرفر Google Cloud..."
 
             // 1. Pull and merge any remote accounts first so no user created on another device is lost
-            cloudErpSyncRepo.pullAndMergeCloudUsers(targetCluster, repository.getDao())
+            cloudErpSyncRepo.pullAndMergeCloudUsers(targetCluster, repository.getDao(), activeId, devId)
 
             // 2. Push all local accounts and ERP entities to Google Cloud cluster
             val accounts = repository.getDao().getUserAccountsDirect()
@@ -3156,7 +3185,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     cloudSyncRepo.syncLocalAccountToCloud(acc, clusterCode = targetCluster)
                 }
             }
-            cloudErpSyncRepo.syncAllLocalToCloud(targetCluster, repository.getDao())
+            val syncRes = cloudErpSyncRepo.syncAllLocalToCloud(targetCluster, repository.getDao(), isMgr, activeId, devId)
             DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
 
             if (Firebase.auth.currentUser != null) {
@@ -3165,10 +3194,19 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             _isSyncing.value = false
-            _cloudSyncState.value = "متصل بسيرفر Google Cloud • تم ربط ومزامنة $syncedCount حساب"
-            checkServerHealth()
-            if (!silent) {
-                postMessage("تم ربط ومزامنة $syncedCount حساب وصلاحياتهم وكافة البيانات مع سيرفر Google Cloud بنجاح")
+            syncRes.onSuccess {
+                _cloudSyncState.value = "متصل بسيرفر Google Cloud • تم ربط ومزامنة $syncedCount حساب"
+                checkServerHealth()
+                if (!silent) {
+                    postMessage("تم ربط ومزامنة $syncedCount حساب وصلاحياتهم وكافة البيانات مع سيرفر Google Cloud بنجاح")
+                }
+            }.onFailure { err ->
+                val safeMsg = com.example.data.remote.CloudSyncErrorTracker.sanitizeCloudMessage(err.message)
+                _cloudSyncState.value = "تعذر الحفظ على السيرفر: $safeMsg"
+                checkServerHealth()
+                if (!silent) {
+                    postMessage("تعذر الحفظ على السيرفر: $safeMsg", isError = true)
+                }
             }
         }
     }
@@ -3188,7 +3226,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             _cloudSyncState.value = "جاري جلب بيانات الحساب ($cleanCode) من سيرفر Google Cloud..."
 
             // 1. Pull latest accounts from Google Cloud cluster
-            cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+            val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+            cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeSessionUserId.value, devId)
             val allLocal = repository.getDao().getUserAccountsDirect()
             val matchedInCluster = allLocal.firstOrNull {
                 it.userCode.equals(cleanCode, ignoreCase = true) ||
@@ -3350,8 +3389,50 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             if (report.isOnline) {
                 _cloudSyncState.value = "سيرفر Google Cloud متصل ونشط • استجابة ${report.responseTimeMs}ms"
             } else {
-                _cloudSyncState.value = "جاري الاتصال بسيرفر Google Cloud..."
+                _cloudSyncState.value = report.message
             }
+        }
+    }
+
+    fun refreshPreflightCheck() {
+        viewModelScope.launch(Dispatchers.IO) {
+            cloudErpSyncRepo.runSyncPreflightCheck(
+                clusterCode = serverClusterCode.value,
+                dao = repository.getDao(),
+                activeUserId = activeSessionUserId.value,
+                isManagerHint = currentUser.value.isSystemManager()
+            )
+        }
+    }
+
+    fun runSingleServiceProbe(probeId: com.example.data.remote.ServiceProbeId) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val cluster = serverClusterCode.value
+            val result = when (probeId) {
+                com.example.data.remote.ServiceProbeId.NETWORK -> cloudErpSyncRepo.probeNetworkConnectivity()
+                com.example.data.remote.ServiceProbeId.FIREBASE_AUTH -> cloudErpSyncRepo.probeFirebaseAuth()
+                com.example.data.remote.ServiceProbeId.FIRESTORE -> cloudErpSyncRepo.probeFirestoreAccess(cluster)
+                com.example.data.remote.ServiceProbeId.RBAC_POLICY -> cloudErpSyncRepo.probeRbacPolicy(cluster, currentUser.value)
+                com.example.data.remote.ServiceProbeId.APP_UPDATES -> cloudErpSyncRepo.probeUpdatesMetadata()
+            }
+            postMessage("${probeId.arabicLabel}: ${result.detail}", isError = !result.ok)
+        }
+    }
+
+    fun runComprehensiveServerDiagnostics() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _isSyncing.value = true
+            val report = cloudErpSyncRepo.runComprehensiveDiagnostics(
+                clusterCode = serverClusterCode.value,
+                dao = repository.getDao(),
+                activeUserId = activeSessionUserId.value,
+                isManagerHint = currentUser.value.isSystemManager()
+            )
+            val health = cloudErpSyncRepo.checkServerHealth(serverClusterCode.value)
+            _serverHealthReport.value = health
+            _isSyncing.value = false
+            _cloudSyncState.value = report.summaryMessage
+            postMessage(report.summaryMessage, isError = !report.overallOk)
         }
     }
 
@@ -3475,7 +3556,19 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
-                cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao())
+                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+                val syncRes = cloudErpSyncRepo.syncAllLocalToCloud(
+                    serverClusterCode.value,
+                    repository.getDao(),
+                    currentUser.value.isSystemManager(),
+                    activeSessionUserId.value,
+                    devId
+                )
+                syncRes.onFailure { err ->
+                    val safeMsg = com.example.data.remote.CloudSyncErrorTracker.sanitizeCloudMessage(err.message)
+                    _cloudSyncState.value = "تعذر الحفظ على السيرفر: $safeMsg"
+                    Log.w("PmpViewModel", "persistAndSyncToServer failure: $safeMsg")
+                }
                 checkServerHealth()
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Background cloud sync deferred: ${e.message}")
@@ -3636,7 +3729,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         // Background cloud user sync (non-blocking, won't freeze login)
                         viewModelScope.launch(Dispatchers.IO) {
                             try {
-                                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), authenticated.id)
+                                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+                                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), authenticated.id, devId)
                                 if (com.example.util.PasswordSecurityUtil.isPbkdf2Hash(authenticated.pinOrPassword)) {
                                     cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, authenticated)
                                 }
@@ -3832,7 +3926,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
             try {
                 withTimeoutOrNull(2000L) {
-                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                    val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeSessionUserId.value, devId)
                 }
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Cloud check warning: ${e.message}")
@@ -3929,7 +4024,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val app = getApplication<Application>()
             try {
-                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeSessionUserId.value, devId)
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Reset pull warning: ${e.message}")
             }
@@ -4096,7 +4192,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
             try {
                 withTimeoutOrNull(3000L) {
-                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                    val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeSessionUserId.value, devId)
                 }
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Pull cloud error: ${e.message}")
@@ -4181,7 +4278,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 withTimeoutOrNull(3000L) {
-                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao())
+                    val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeSessionUserId.value, devId)
                 }
             } catch (e: Exception) {
                 Log.w("PmpViewModel", "Could not pre-fetch cloud users before Google bind: ${e.message}")
@@ -4281,7 +4379,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         cloudErpSyncRepo.pullAndMergeCloudUsers(
                             serverClusterCode.value,
                             repository.getDao(),
-                            initialValidation.user.id
+                            initialValidation.user.id,
+                            deviceId
                         )
                     }
                 } catch (e: Exception) {

@@ -10,7 +10,8 @@ import {
   Moon,
   Sun,
   Globe,
-  Smartphone
+  Smartphone,
+  Activity
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
@@ -22,6 +23,14 @@ import {
   ErpDataService,
   ClusterHealthReport
 } from '../../services/ErpDataService';
+import {
+  CloudErrorLogger,
+  CloudErrorLogEntry,
+  ServiceProbeId,
+  ServiceProbeResult,
+  ComprehensiveDiagnosticReport
+} from '../../services/CloudErrorLogger';
+import { APP_VERSION_CONTRACT } from '../../config/appVersionContract';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { fetchReleaseFeed } from '../../services/ReleaseService';
 import { AuditLog } from '../../types/erp';
@@ -50,6 +59,10 @@ export const SettingsModuleView: React.FC = () => {
   const canManageSystemSettings = isSuperAdmin || canPerformAction(GRANULAR_ACTIONS.ADMIN_SETTINGS);
 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [cloudErrors, setCloudErrors] = useState<CloudErrorLogEntry[]>([]);
+  const [serviceProbes, setServiceProbes] = useState<Partial<Record<ServiceProbeId, ServiceProbeResult>>>({});
+  const [diagReport, setDiagReport] = useState<ComprehensiveDiagnosticReport | null>(null);
+  const [runningDiagnostics, setRunningDiagnostics] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'IDLE' | 'SYNCING' | 'SUCCESS' | 'ERROR'>('IDLE');
   const [healthReport, setHealthReport] = useState<ClusterHealthReport | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -65,6 +78,7 @@ export const SettingsModuleView: React.FC = () => {
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateState | null>(null);
 
   useEffect(() => {
+    const unsubErr = CloudErrorLogger.subscribe(setCloudErrors);
     const unsubAudit = ErpDataService.subscribeToCollection<AuditLog>('audit_logs', (logs) => {
       setAuditLogs([...logs].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)));
     });
@@ -90,6 +104,7 @@ export const SettingsModuleView: React.FC = () => {
     }
 
     return () => {
+      unsubErr();
       unsubAudit();
       if (unsubDesktopUpd) unsubDesktopUpd();
     };
@@ -115,6 +130,31 @@ export const SettingsModuleView: React.FC = () => {
     setTimeout(() => setFeedback(null), 5000);
   };
 
+  const handleRunSingleProbe = async (probeId: ServiceProbeId) => {
+    setRunningDiagnostics(true);
+    try {
+      const res = await ErpDataService.probeSingleService(probeId, userProfile);
+      setServiceProbes((prev) => ({ ...prev, [probeId]: res }));
+    } finally {
+      setRunningDiagnostics(false);
+    }
+  };
+
+  const handleRunComprehensiveDiagnostics = async () => {
+    setRunningDiagnostics(true);
+    try {
+      const report = await ErpDataService.runComprehensiveDiagnostics(userProfile);
+      setDiagReport(report);
+      const mapped: Partial<Record<ServiceProbeId, ServiceProbeResult>> = {};
+      report.probes.forEach((p) => {
+        mapped[p.id] = p;
+      });
+      setServiceProbes((prev) => ({ ...prev, ...mapped }));
+    } finally {
+      setRunningDiagnostics(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -129,8 +169,18 @@ export const SettingsModuleView: React.FC = () => {
                 <h2 className="text-xl font-black text-theme-primary">
                   {language === 'ar' ? 'إعدادات النظام والمزامنة السحابية' : 'System Settings & Cloud Sync'}
                 </h2>
-                <GlassBadge variant="green">
-                  {language === 'ar' ? 'متصل ومحدث لحظياً' : 'Connected'}
+                <GlassBadge variant={!healthReport ? 'gold' : healthReport.ok ? 'green' : 'red'}>
+                  {!healthReport
+                    ? language === 'ar'
+                      ? 'بانتظار الفحص الحي'
+                      : 'Awaiting Live Probe'
+                    : healthReport.ok
+                    ? language === 'ar'
+                      ? 'متصل ومقاس'
+                      : 'Measured & Connected'
+                    : language === 'ar'
+                    ? 'تعذر الاتصال'
+                    : 'Connection Error'}
                 </GlassBadge>
               </div>
               <p className="text-xs text-theme-secondary mt-1">
@@ -204,7 +254,9 @@ export const SettingsModuleView: React.FC = () => {
                 <span>إصدار تطبيق الأندرويد</span>
               </div>
               <div className="text-theme-muted mt-0.5 font-mono">
-                {apkVersionInfo?.versionName ? `${apkVersionInfo.versionName}` : 'الإصدار 20.0 المعتمد'}
+                {apkVersionInfo?.versionName
+                  ? `${apkVersionInfo.versionName}`
+                  : `الإصدار ${APP_VERSION_CONTRACT.CURRENT_VERSION_NAME} المعتمد`}
               </div>
             </div>
             <GlassBadge variant="cyan">محدث</GlassBadge>
@@ -223,7 +275,7 @@ export const SettingsModuleView: React.FC = () => {
                     : 'Windows Desktop Edition & Auto-Updates'}
                 </h3>
                 <GlassBadge variant="green">
-                  v{desktopInfo?.version || desktopUpdate?.currentVersion || '20.0.0'}
+                  v{desktopInfo?.version || desktopUpdate?.currentVersion || APP_VERSION_CONTRACT.WINDOWS_VERSION_NAME}
                 </GlassBadge>
               </div>
               <p className="text-xs text-theme-secondary mt-1">
@@ -347,8 +399,22 @@ export const SettingsModuleView: React.FC = () => {
 
             <div className="space-y-3 text-xs">
               <div className="p-3 rounded-xl bg-theme-base border border-theme flex justify-between items-center gap-2">
-                <span className="text-theme-secondary">حالة الربط مع تطبيق الأندرويد:</span>
-                <span className="font-bold text-emerald-400">متصل ومزامن لحظياً</span>
+                <span className="text-theme-secondary">حالة القياس الحي مع السيرفر:</span>
+                <span
+                  className={`font-bold ${
+                    !healthReport
+                      ? 'text-amber-400'
+                      : healthReport.ok
+                      ? 'text-emerald-400'
+                      : 'text-red-400'
+                  }`}
+                >
+                  {!healthReport
+                    ? 'غير مقاس بعد — اضغط فحص'
+                    : healthReport.ok
+                    ? `متصل (${healthReport.latencyMs} ms)`
+                    : 'مرفوض أو غير متصل'}
+                </span>
               </div>
               <div className="p-3 rounded-xl bg-theme-base border border-theme flex justify-between items-center gap-2">
                 <span className="text-theme-secondary">الفرع النشط للمستخدم:</span>
@@ -368,6 +434,9 @@ export const SettingsModuleView: React.FC = () => {
                     {healthReport.ok ? 'متصل بنجاح' : 'تعذر الاتصال'}
                   </span>
                 </div>
+                {healthReport.error && (
+                  <p className="text-[11px] text-red-400 font-semibold">{healthReport.error}</p>
+                )}
                 {healthReport.ok && (
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1">
                     {Object.entries(healthReport.counts).map(([col, count]) => (
@@ -382,6 +451,105 @@ export const SettingsModuleView: React.FC = () => {
             )}
           </GlassCard>
 
+          {/* 5 Read-Only Service Diagnostic Probes */}
+          <GlassCard className="p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+              <h3 className="text-sm font-bold text-theme-primary flex items-center gap-2">
+                <Activity className="w-4 h-4 text-pmp-primary" />
+                <span>فحص خدمات السيرفر (للقراءة فقط — بدون أي كتابة)</span>
+              </h3>
+              <GlassButton
+                variant="primary"
+                onClick={handleRunComprehensiveDiagnostics}
+                disabled={runningDiagnostics}
+                className="text-xs min-h-[40px]"
+              >
+                {runningDiagnostics ? 'جاري الفحص...' : 'فحص تشخيصي شامل (بدون كتابة)'}
+              </GlassButton>
+            </div>
+
+            {diagReport && (
+              <div className="p-2.5 rounded-lg bg-theme-base border border-theme text-[11px] flex justify-between items-center">
+                <span className={diagReport.overallOk ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                  {diagReport.overallOk ? 'جميع الخدمات تعمل بصورة سليمة' : 'تم رصد ملاحظات تتطلب مراجعة'}
+                </span>
+                <span className="font-mono text-theme-muted">{diagReport.totalLatencyMs} ms</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+              {(
+                [
+                  { id: 'NETWORK', label: 'فحص الشبكة' },
+                  { id: 'FIREBASE_AUTH', label: 'فحص Firebase Auth' },
+                  { id: 'FIRESTORE', label: 'فحص Firestore' },
+                  { id: 'RBAC_POLICY', label: 'فحص RBAC والعضوية' },
+                  { id: 'APP_UPDATES', label: 'فحص قناة التحديثات' }
+                ] as Array<{ id: ServiceProbeId; label: string }>
+              ).map(({ id, label }) => {
+                const probe = serviceProbes[id];
+                return (
+                  <div key={id} className="p-3 rounded-xl bg-theme-base border border-theme space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-theme-primary">{label}</span>
+                      <GlassButton
+                        variant="secondary"
+                        onClick={() => void handleRunSingleProbe(id)}
+                        disabled={runningDiagnostics}
+                        className="text-[11px] min-h-[36px] px-2.5"
+                      >
+                        اختبار
+                      </GlassButton>
+                    </div>
+                    {probe ? (
+                      <div className="text-[11px] space-y-0.5">
+                        <div className={probe.ok ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>
+                          {probe.ok ? 'سليم' : 'فشل الفحص'} ({probe.latencyMs} ms)
+                        </div>
+                        <div className="text-theme-secondary">{probe.summaryAr}</div>
+                        {!probe.ok && <div className="text-amber-400">{probe.remediationHintAr}</div>}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-theme-muted">غير مقاس بعد</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </GlassCard>
+
+          {/* Sanitized Cloud Errors Log */}
+          {cloudErrors.length > 0 && (
+            <GlassCard className="p-6 space-y-3 border-red-500/30">
+              <div className="flex justify-between items-center">
+                <h3 className="text-sm font-bold text-red-400 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>سجل أخطاء السيرفر المصنفة ({cloudErrors.length})</span>
+                </h3>
+                <GlassButton variant="secondary" onClick={() => CloudErrorLogger.clear()} className="text-[11px]">
+                  مسح السجل
+                </GlassButton>
+              </div>
+              <div className="space-y-2 max-h-60 overflow-y-auto text-xs">
+                {cloudErrors.slice(0, 10).map((err) => (
+                  <div key={err.id} className="p-3 rounded-xl bg-red-500/5 border border-red-500/20 space-y-1">
+                    <div className="flex justify-between items-center gap-2">
+                      <span className="font-bold text-red-400">{err.categoryTitleAr}</span>
+                      <span className="font-mono text-[10px] text-theme-muted">
+                        {new Date(err.timestamp).toLocaleTimeString('ar-EG')}
+                      </span>
+                    </div>
+                    <div className="font-mono text-[10px] text-theme-muted">
+                      {err.operation} • {err.path}
+                    </div>
+                    <div className="text-[11px] text-theme-secondary">{err.sanitizedMessage}</div>
+                    <div className="text-[11px] text-amber-400">{err.remediationHintAr}</div>
+                  </div>
+                ))}
+              </div>
+            </GlassCard>
+          )}
+
           {canManageSystemSettings && (
             <GlassCard className="p-6">
               <h3 className="text-sm font-bold text-theme-primary mb-3 flex items-center gap-2">
@@ -394,7 +562,7 @@ export const SettingsModuleView: React.FC = () => {
                   <CheckCircle className="w-4 h-4 text-emerald-400" />
                 </div>
                 <span className="text-[11px] text-theme-secondary block mt-1">
-                  جميع فروع الخرطوم والقاهرة وحلفا والمخازن متصلة وموحدة لحظياً على قاعدة بيانات واحدة معتمدة.
+                  جميع فروع الخرطوم والقاهرة وحلفا والمخازن متصلة وموحدة على الكلاستر الرئيسي PMP-ERP-MAIN-CLUSTER.
                 </span>
               </div>
             </GlassCard>

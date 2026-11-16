@@ -45,6 +45,7 @@ data class ServerHealthReport(
     val cloudMovementsCount: Int,
     val cloudCustomersCount: Int,
     val cloudUsersCount: Int,
+    val cloudProductsCount: Int = 0,
     val message: String
 )
 
@@ -55,6 +56,7 @@ class CloudErpSyncRepository(
     companion object {
         private const val TAG = "CloudErpSyncRepo"
         const val DEFAULT_CLUSTER = "PMP-ERP-MAIN-CLUSTER"
+        const val DEPRECATED_V16_CLUSTER = "PMP-ERP-V16-CLUSTER"
 
         fun create(context: Context): CloudErpSyncRepository {
             runCatching {
@@ -71,11 +73,26 @@ class CloudErpSyncRepository(
     private val _diagnostics = kotlinx.coroutines.flow.MutableStateFlow<List<SyncDiagnosticRecord>>(emptyList())
     val diagnostics: kotlinx.coroutines.flow.StateFlow<List<SyncDiagnosticRecord>> = _diagnostics
 
-    private val _lastSuccessfulSyncTime = kotlinx.coroutines.flow.MutableStateFlow<Long?>(System.currentTimeMillis() - 120_000L)
+    private val _lastSuccessfulSyncTime = kotlinx.coroutines.flow.MutableStateFlow<Long?>(null)
     val lastSuccessfulSyncTime: kotlinx.coroutines.flow.StateFlow<Long?> = _lastSuccessfulSyncTime
 
     private val _pendingErrors = kotlinx.coroutines.flow.MutableStateFlow<List<SyncDiagnosticRecord>>(emptyList())
     val pendingErrors: kotlinx.coroutines.flow.StateFlow<List<SyncDiagnosticRecord>> = _pendingErrors
+
+    private val _structuredErrors = kotlinx.coroutines.flow.MutableStateFlow<List<CloudErrorLogEntry>>(emptyList())
+    val structuredErrors: kotlinx.coroutines.flow.StateFlow<List<CloudErrorLogEntry>> = _structuredErrors
+
+    private val _syncStepSummaries = kotlinx.coroutines.flow.MutableStateFlow<List<SyncStepSummary>>(emptyList())
+    val syncStepSummaries: kotlinx.coroutines.flow.StateFlow<List<SyncStepSummary>> = _syncStepSummaries
+
+    private val _lastPreflightResult = kotlinx.coroutines.flow.MutableStateFlow<PreflightCheckResult?>(null)
+    val lastPreflightResult: kotlinx.coroutines.flow.StateFlow<PreflightCheckResult?> = _lastPreflightResult
+
+    private val _serviceProbes = kotlinx.coroutines.flow.MutableStateFlow<List<ServiceProbeResult>>(emptyList())
+    val serviceProbes: kotlinx.coroutines.flow.StateFlow<List<ServiceProbeResult>> = _serviceProbes
+
+    private val _comprehensiveReport = kotlinx.coroutines.flow.MutableStateFlow<ComprehensiveDiagnosticReport?>(null)
+    val comprehensiveReport: kotlinx.coroutines.flow.StateFlow<ComprehensiveDiagnosticReport?> = _comprehensiveReport
 
     // Global mutex guaranteeing non-overlapping synchronization passes (prevents sync concurrency collisions)
     private val syncMutex = Mutex()
@@ -126,10 +143,30 @@ class CloudErpSyncRepository(
 
     fun clearPendingError(errorId: String) {
         _pendingErrors.value = _pendingErrors.value.filter { it.id != errorId }
+        _structuredErrors.value = _structuredErrors.value.filter { it.id != errorId }
     }
 
     fun clearAllPendingErrors() {
         _pendingErrors.value = emptyList()
+        _structuredErrors.value = emptyList()
+    }
+
+    fun recordStructuredError(
+        operation: String,
+        collectionPath: String,
+        throwable: Throwable?,
+        deviceId: String = "ANDROID-CLIENT"
+    ): CloudErrorLogEntry {
+        val entry = CloudSyncErrorTracker.buildLogEntry(
+            operation = operation,
+            collectionPath = collectionPath,
+            throwable = throwable,
+            deviceId = deviceId
+        )
+        val currentStruct = _structuredErrors.value.toMutableList()
+        currentStruct.add(0, entry)
+        _structuredErrors.value = if (currentStruct.size > 50) currentStruct.take(50) else currentStruct
+        return entry
     }
 
     fun recordDiagnostic(
@@ -137,18 +174,19 @@ class CloudErpSyncRepository(
         status: String,
         count: Int,
         message: String,
-        deviceId: String = "DEV-NODE"
+        deviceId: String = "ANDROID-CLIENT"
     ) {
+        val safeMessage = CloudSyncErrorTracker.sanitizeCloudMessage(message)
         val now = System.currentTimeMillis()
         val timeStr = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date(now))
         val record = SyncDiagnosticRecord(
             timestamp = now,
             formattedTime = timeStr,
-            deviceId = deviceId,
+            deviceId = deviceId.ifBlank { "ANDROID-CLIENT" },
             action = action,
             status = status,
             entitiesCount = count,
-            message = message
+            message = safeMessage
         )
         val current = _diagnostics.value.toMutableList()
         current.add(0, record)
@@ -371,7 +409,7 @@ class CloudErpSyncRepository(
         clusterCode: String,
         dao: PmpDao,
         currentActiveUserId: Long? = null,
-        deviceId: String = "DEV-NODE"
+        deviceId: String = "ANDROID-CLIENT"
     ): Result<Int> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
             internalPullAndMergeCloudUsers(clusterCode, dao, currentActiveUserId, deviceId)
@@ -382,7 +420,7 @@ class CloudErpSyncRepository(
         clusterCode: String,
         dao: PmpDao,
         currentActiveUserId: Long? = null,
-        deviceId: String = "DEV-NODE"
+        deviceId: String = "ANDROID-CLIENT"
     ): Result<Int> {
         return runCatching {
             // Clean local duplicate user accounts first
@@ -712,11 +750,16 @@ class CloudErpSyncRepository(
         dao: PmpDao,
         isManager: Boolean = true,
         activeUserId: Long? = null,
-        deviceId: String = "DEV-NODE",
+        deviceId: String = "ANDROID-CLIENT",
         invDao: ErpInventoryDao? = null
     ): Result<Int> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
             runCatching {
+                val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+                if (cleanCluster.equals(DEPRECATED_V16_CLUSTER, ignoreCase = true)) {
+                    throw SecurityException("تم حظر الكتابة إلى الكلاستر المهجور $DEPRECATED_V16_CLUSTER لحماية الصلاحيات.")
+                }
+
                 // Deduplicate local cashboxes, movements, and user accounts before pushing
                 runCatching {
                     dao.removeDuplicateCashboxes()
@@ -726,7 +769,7 @@ class CloudErpSyncRepository(
 
                 val actor = currentActorId
                 var syncedCount = 0
-                val cRef = clusterRef(clusterCode)
+                val cRef = clusterRef(cleanCluster)
 
             // 0. User Accounts & Employee Permissions
             // Concurrency protection: non-manager employees only sync their own user profile,
@@ -832,29 +875,47 @@ class CloudErpSyncRepository(
                 val batch = firestore.batch()
                 chunk.forEach { u ->
                     val docId = safeId(u.userCode, "USR-${u.id}")
-                    val data = mapOf(
-                        "id" to u.id,
-                        "userCode" to docId,
-                        "fullName" to u.fullName,
-                        "username" to u.username,
-                        "phoneOrEmail" to u.phoneOrEmail,
-                        "pinOrPassword" to u.pinOrPassword,
-                        "role" to u.role,
-                        "branch" to u.branch,
-                        "permissions" to u.permissions,
-                        "serverSyncToken" to u.serverSyncToken,
-                        "remoteServerId" to u.remoteServerId,
-                        "syncStatus" to u.syncStatus,
-                        "serverEndpoint" to u.serverEndpoint,
-                        "active" to u.active,
-                        "createdAt" to u.createdAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    )
-                    batch.set(cRef.collection("user_accounts").document(docId), data, SetOptions.merge())
+                    if (isManager) {
+                        val data = mapOf(
+                            "id" to u.id,
+                            "userCode" to docId,
+                            "fullName" to u.fullName,
+                            "username" to u.username,
+                            "phoneOrEmail" to u.phoneOrEmail,
+                            "pinOrPassword" to u.pinOrPassword,
+                            "role" to u.role,
+                            "branch" to u.branch,
+                            "permissions" to u.permissions,
+                            "serverSyncToken" to u.serverSyncToken,
+                            "remoteServerId" to u.remoteServerId,
+                            "syncStatus" to u.syncStatus,
+                            "serverEndpoint" to u.serverEndpoint,
+                            "active" to u.active,
+                            "createdAt" to u.createdAt,
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        )
+                        batch.set(cRef.collection("user_accounts").document(docId), data, SetOptions.merge())
+                    } else {
+                        // Strict 8-key self-update whitelist matching firestore.rules functionUpdateUserAccount
+                        val selfData = mapOf(
+                            "fullName" to u.fullName,
+                            "phoneOrEmail" to u.phoneOrEmail,
+                            "pinOrPassword" to u.pinOrPassword,
+                            "serverSyncToken" to u.serverSyncToken,
+                            "deviceId" to deviceId,
+                            "updatedAt" to System.currentTimeMillis(),
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        )
+                        batch.set(cRef.collection("user_accounts").document(docId), selfData, SetOptions.merge())
+                    }
                     syncedCount++
                 }
-                batch.commit().await()
+                if (isManager) {
+                    batch.commit().await()
+                } else {
+                    runCatching { batch.commit().await() }
+                }
             }
 
             // 1. Invoices & Items & Payments (Batched - excluding deleted)
@@ -1439,6 +1500,17 @@ class CloudErpSyncRepository(
                 ).await()
             }
 
+            val summary = listOf(
+                SyncStepSummary(
+                    stepName = "مزامنة الكلاستر السحابي الكاملة",
+                    collectionPath = "erp_clusters/${safeId(clusterCode, DEFAULT_CLUSTER)}",
+                    syncedCount = syncedCount,
+                    success = true,
+                    message = "تم حفظ $syncedCount سجل بنجاح"
+                )
+            )
+            _syncStepSummaries.value = summary
+
             recordDiagnostic(
                 action = "SYNC_ALL_TO_CLOUD",
                 status = "SUCCESS",
@@ -1449,11 +1521,27 @@ class CloudErpSyncRepository(
             Log.i(TAG, "Successfully synced $syncedCount total ERP entities to cloud cluster $clusterCode")
             syncedCount
         }.onFailure { err ->
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val entry = recordStructuredError(
+                operation = "SYNC_ALL_TO_CLOUD",
+                collectionPath = "erp_clusters/$cleanCluster",
+                throwable = err,
+                deviceId = deviceId
+            )
+            _syncStepSummaries.value = listOf(
+                SyncStepSummary(
+                    stepName = "مزامنة الكلاستر السحابي الكاملة",
+                    collectionPath = "erp_clusters/$cleanCluster",
+                    syncedCount = 0,
+                    success = false,
+                    message = "${entry.category.arabicTitle}: ${entry.sanitizedMessage}"
+                )
+            )
             recordDiagnostic(
                 action = "SYNC_ALL_TO_CLOUD",
                 status = "FAILED",
                 count = 0,
-                message = "تعذر الحفظ على السيرفر: ${err.message}",
+                message = "تعذر الحفظ على السيرفر (${entry.code}): ${entry.sanitizedMessage}",
                 deviceId = deviceId
             )
         }
@@ -1468,7 +1556,7 @@ class CloudErpSyncRepository(
         clusterCode: String,
         dao: PmpDao,
         currentActiveUserId: Long? = null,
-        deviceId: String = "DEV-NODE",
+        deviceId: String = "ANDROID-CLIENT",
         invDao: ErpInventoryDao? = null
     ): Result<Int> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
@@ -3006,7 +3094,8 @@ class CloudErpSyncRepository(
     }
 
     /**
-     * Performs a server diagnostics health check to verify connection stability and response latency.
+     * Performs a server diagnostics health check using Source.SERVER (no stale local cache)
+     * to verify connection stability and response latency.
      */
     suspend fun checkServerHealth(clusterCode: String): ServerHealthReport = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
@@ -3016,13 +3105,16 @@ class CloudErpSyncRepository(
 
         try {
             val cRef = clusterRef(cleanCluster)
-            val invCountTask = cRef.collection("invoices").get()
-            val movCountTask = cRef.collection("movements").get()
-            val custCountTask = cRef.collection("customers").get()
-            val userCountTask = cRef.collection("user_accounts").get()
+            val src = com.google.firebase.firestore.Source.SERVER
+            val invCountTask = cRef.collection("invoices").get(src)
+            val movCountTask = cRef.collection("movements").get(src)
+            val prodCountTask = cRef.collection("products").get(src)
+            val custCountTask = cRef.collection("customers").get(src)
+            val userCountTask = cRef.collection("user_accounts").get(src)
 
             val invCount = invCountTask.await().size()
             val movCount = movCountTask.await().size()
+            val prodCount = prodCountTask.await().size()
             val custCount = custCountTask.await().size()
             val userCount = userCountTask.await().size()
             val latency = System.currentTimeMillis() - start
@@ -3038,11 +3130,13 @@ class CloudErpSyncRepository(
                 cloudMovementsCount = movCount,
                 cloudCustomersCount = custCount,
                 cloudUsersCount = userCount,
-                message = "سيرفر Google Cloud متصل ونشط • جاهز للمزامنة الفورية مع جميع المستخدمين ($latency ms)"
+                cloudProductsCount = prodCount,
+                message = "سيرفر Google Cloud متصل ومقاس مباشرة عبر Source.SERVER ($latency ms)"
             )
         } catch (e: Exception) {
             val latency = System.currentTimeMillis() - start
-            Log.e(TAG, "Server health check failed", e)
+            val entry = recordStructuredError("SERVER_HEALTH_CHECK", "erp_clusters/$cleanCluster", e)
+            Log.e(TAG, "Server health check failed: ${entry.sanitizedMessage}", e)
             ServerHealthReport(
                 isOnline = false,
                 endpoint = endpointUrl,
@@ -3054,9 +3148,293 @@ class CloudErpSyncRepository(
                 cloudMovementsCount = 0,
                 cloudCustomersCount = 0,
                 cloudUsersCount = 0,
-                message = "جاري إعادة الاتصال بسيرفر Google Cloud (${e.localizedMessage ?: "تحقق من الشبكة"})"
+                cloudProductsCount = 0,
+                message = "${entry.category.arabicTitle}: ${entry.sanitizedMessage}"
             )
         }
+    }
+
+    private fun upsertServiceProbe(result: ServiceProbeResult): ServiceProbeResult {
+        val updated = _serviceProbes.value.filterNot { it.probeId == result.probeId } + result
+        _serviceProbes.value = updated.sortedBy { it.probeId.ordinal }
+        return result
+    }
+
+    suspend fun runSyncPreflightCheck(
+        clusterCode: String,
+        dao: PmpDao,
+        activeUserId: Long?,
+        isManagerHint: Boolean
+    ): PreflightCheckResult = withContext(Dispatchers.IO) {
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+        val authPresent = fbUser != null
+        val netProbe = probeNetworkConnectivity()
+        val accounts = runCatching { dao.getUserAccountsDirect() }.getOrDefault(emptyList())
+        val activeUser = accounts.firstOrNull { it.id == activeUserId } ?: accounts.firstOrNull { it.isCurrentSession }
+        val roleSummary = when {
+            activeUser != null -> "${activeUser.username} (${activeUser.role})"
+            isManagerHint -> "مدير نظام"
+            else -> "بدون جلسة محلية"
+        }
+
+        val passed = authPresent && netProbe.ok && !cleanCluster.equals(DEPRECATED_V16_CLUSTER, ignoreCase = true)
+        val message = when {
+            cleanCluster.equals(DEPRECATED_V16_CLUSTER, ignoreCase = true) ->
+                "الكلاستر المهجور $DEPRECATED_V16_CLUSTER محظور أمنياً"
+            !netProbe.ok ->
+                "الشبكة غير متصلة حالياً — تعذر الوصول لخدمات Google Cloud"
+            !authPresent ->
+                "جلسة Firebase Auth غير مسجلة — مطلوب تسجيل الدخول السحابي قبل المزامنة"
+            else ->
+                "جميع شروط المزامنة جاهزة ($cleanCluster • Auth: نشط)"
+        }
+
+        val res = PreflightCheckResult(
+            passed = passed,
+            clusterCode = cleanCluster,
+            firebaseAuthPresent = authPresent,
+            networkOnline = netProbe.ok,
+            roleSummary = roleSummary,
+            message = message
+        )
+        _lastPreflightResult.value = res
+        res
+    }
+
+    suspend fun probeNetworkConnectivity(): ServiceProbeResult = withContext(Dispatchers.IO) {
+        val start = System.currentTimeMillis()
+        val result = runCatching {
+            val ctx = firestore.app.applicationContext
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            val network = cm?.activeNetwork
+            val caps = if (network != null) cm.getNetworkCapabilities(network) else null
+            val hasInternet = caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            val latency = System.currentTimeMillis() - start
+            ServiceProbeResult(
+                probeId = ServiceProbeId.NETWORK,
+                ok = hasInternet,
+                measured = true,
+                latencyMs = latency,
+                detail = if (hasInternet) "الشبكة متصلة وجاهزة (${latency}ms)" else "لا يوجد اتصال إنترنت نشط",
+                remediationHint = if (hasInternet) "" else "تأكد من تفعيل Wi-Fi أو بيانات الهاتف"
+            )
+        }.getOrElse { e ->
+            val latency = System.currentTimeMillis() - start
+            ServiceProbeResult(
+                probeId = ServiceProbeId.NETWORK,
+                ok = false,
+                measured = true,
+                latencyMs = latency,
+                detail = "تعذر فحص حالة الشبكة: ${CloudSyncErrorTracker.sanitizeCloudMessage(e.message)}",
+                remediationHint = CloudErrorCategory.NETWORK_ERROR.remediationHint
+            )
+        }
+        upsertServiceProbe(result)
+    }
+
+    suspend fun probeFirebaseAuth(): ServiceProbeResult = withContext(Dispatchers.IO) {
+        val start = System.currentTimeMillis()
+        val result = runCatching {
+            val user = Firebase.auth.currentUser
+            val latency = System.currentTimeMillis() - start
+            if (user == null) {
+                ServiceProbeResult(
+                    probeId = ServiceProbeId.FIREBASE_AUTH,
+                    ok = false,
+                    measured = true,
+                    latencyMs = latency,
+                    detail = "لا توجد جلسة Firebase Auth نشطة حالياً",
+                    remediationHint = CloudErrorCategory.UNAUTHENTICATED.remediationHint
+                )
+            } else {
+                val label = user.email?.takeIf { it.isNotBlank() } ?: user.uid.take(12)
+                ServiceProbeResult(
+                    probeId = ServiceProbeId.FIREBASE_AUTH,
+                    ok = true,
+                    measured = true,
+                    latencyMs = latency,
+                    detail = "جلسة مصادقة نشطة ($label)"
+                )
+            }
+        }.getOrElse { e ->
+            ServiceProbeResult(
+                probeId = ServiceProbeId.FIREBASE_AUTH,
+                ok = false,
+                measured = true,
+                latencyMs = System.currentTimeMillis() - start,
+                detail = CloudSyncErrorTracker.sanitizeCloudMessage(e.message),
+                remediationHint = CloudErrorCategory.UNAUTHENTICATED.remediationHint
+            )
+        }
+        upsertServiceProbe(result)
+    }
+
+    suspend fun probeFirestoreAccess(clusterCode: String): ServiceProbeResult = withContext(Dispatchers.IO) {
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+        val start = System.currentTimeMillis()
+        val result = try {
+            val snap = clusterRef(cleanCluster)
+                .collection("user_accounts")
+                .limit(1)
+                .get(com.google.firebase.firestore.Source.SERVER)
+                .await()
+            val latency = System.currentTimeMillis() - start
+            ServiceProbeResult(
+                probeId = ServiceProbeId.FIRESTORE,
+                ok = true,
+                measured = true,
+                latencyMs = latency,
+                detail = "قراءة Source.SERVER ناجحة (${latency}ms • مستندات: ${snap.size()})"
+            )
+        } catch (e: Exception) {
+            val latency = System.currentTimeMillis() - start
+            val entry = recordStructuredError("PROBE_FIRESTORE", "erp_clusters/$cleanCluster/user_accounts", e)
+            ServiceProbeResult(
+                probeId = ServiceProbeId.FIRESTORE,
+                ok = false,
+                measured = true,
+                latencyMs = latency,
+                detail = "${entry.code}: ${entry.sanitizedMessage}",
+                remediationHint = entry.remediationHint
+            )
+        }
+        upsertServiceProbe(result)
+    }
+
+    suspend fun probeRbacPolicy(
+        clusterCode: String,
+        actor: UserAccountEntity?
+    ): ServiceProbeResult = withContext(Dispatchers.IO) {
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+        val start = System.currentTimeMillis()
+        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+        val result = try {
+            if (fbUser == null) {
+                ServiceProbeResult(
+                    probeId = ServiceProbeId.RBAC_POLICY,
+                    ok = false,
+                    measured = true,
+                    latencyMs = System.currentTimeMillis() - start,
+                    detail = "يتطلب فحص عضوية RBAC السحابية تسجيل الدخول بـ Firebase Auth",
+                    remediationHint = CloudErrorCategory.UNAUTHENTICATED.remediationHint
+                )
+            } else {
+                val memberSnap = clusterRef(cleanCluster)
+                    .collection("cluster_members")
+                    .document(fbUser.uid)
+                    .get(com.google.firebase.firestore.Source.SERVER)
+                    .await()
+                val latency = System.currentTimeMillis() - start
+                if (memberSnap.exists()) {
+                    val cloudRole = memberSnap.safeString("roleKey") ?: actor?.role ?: "MEMBER"
+                    ServiceProbeResult(
+                        probeId = ServiceProbeId.RBAC_POLICY,
+                        ok = true,
+                        measured = true,
+                        latencyMs = latency,
+                        detail = "عضوية RBAC مفعلة على الخادم ($cloudRole)"
+                    )
+                } else {
+                    ServiceProbeResult(
+                        probeId = ServiceProbeId.RBAC_POLICY,
+                        ok = false,
+                        measured = true,
+                        latencyMs = latency,
+                        detail = "المستند cluster_members/${fbUser.uid.take(8)} غير مسجل في الكلاستر $cleanCluster",
+                        remediationHint = CloudErrorCategory.PERMISSION_DENIED.remediationHint
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            val latency = System.currentTimeMillis() - start
+            val entry = recordStructuredError("PROBE_RBAC", "erp_clusters/$cleanCluster/cluster_members", e)
+            ServiceProbeResult(
+                probeId = ServiceProbeId.RBAC_POLICY,
+                ok = false,
+                measured = true,
+                latencyMs = latency,
+                detail = "${entry.code}: ${entry.sanitizedMessage}",
+                remediationHint = entry.remediationHint
+            )
+        }
+        upsertServiceProbe(result)
+    }
+
+    suspend fun probeUpdatesMetadata(): ServiceProbeResult = withContext(Dispatchers.IO) {
+        val start = System.currentTimeMillis()
+        val result = try {
+            val src = com.google.firebase.firestore.Source.SERVER
+            val snap = runCatching {
+                firestore.collection("app_updates").document("latest").get(src).await()
+            }.getOrNull() ?: firestore.collection("system_config").document("app_version").get(src).await()
+            val latency = System.currentTimeMillis() - start
+            val vName = snap.safeString("versionName") ?: snap.safeString("latestVersion") ?: "غير محدد"
+            ServiceProbeResult(
+                probeId = ServiceProbeId.APP_UPDATES,
+                ok = snap.exists(),
+                measured = true,
+                latencyMs = latency,
+                detail = if (snap.exists()) {
+                    "مستند التحديثات متاح ($vName • ${latency}ms)"
+                } else {
+                    "مستند التحديثات غير موجود على Firestore"
+                }
+            )
+        } catch (e: Exception) {
+            val latency = System.currentTimeMillis() - start
+            val entry = recordStructuredError("PROBE_UPDATES", "app_updates/latest", e)
+            ServiceProbeResult(
+                probeId = ServiceProbeId.APP_UPDATES,
+                ok = false,
+                measured = true,
+                latencyMs = latency,
+                detail = "${entry.code}: ${entry.sanitizedMessage}",
+                remediationHint = entry.remediationHint
+            )
+        }
+        upsertServiceProbe(result)
+    }
+
+    suspend fun runComprehensiveDiagnostics(
+        clusterCode: String,
+        dao: PmpDao,
+        activeUserId: Long?,
+        isManagerHint: Boolean
+    ): ComprehensiveDiagnosticReport = withContext(Dispatchers.IO) {
+        val start = System.currentTimeMillis()
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+        val accounts = runCatching { dao.getUserAccountsDirect() }.getOrDefault(emptyList())
+        val activeUser = accounts.firstOrNull { it.id == activeUserId } ?: accounts.firstOrNull { it.isCurrentSession }
+
+        val preflight = runSyncPreflightCheck(cleanCluster, dao, activeUserId, isManagerHint)
+        val p1 = probeNetworkConnectivity()
+        val p2 = probeFirebaseAuth()
+        val p3 = probeFirestoreAccess(cleanCluster)
+        val p4 = probeRbacPolicy(cleanCluster, activeUser)
+        val p5 = probeUpdatesMetadata()
+
+        val allProbes = listOf(p1, p2, p3, p4, p5)
+        val passedCount = allProbes.count { it.ok }
+        val overallOk = allProbes.all { it.ok }
+        val totalLatency = System.currentTimeMillis() - start
+        val summary = if (overallOk) {
+            "اكتمل الفحص الشامل (5/5 خدمات سليمة • بدون أي تعديل للبيانات • ${totalLatency}ms)"
+        } else {
+            "نتائج الفحص الشامل: $passedCount/5 خدمات سليمة — راجع التفاصيل المقاسة أدناه"
+        }
+
+        val report = ComprehensiveDiagnosticReport(
+            clusterCode = cleanCluster,
+            overallOk = overallOk,
+            summaryMessage = summary,
+            probes = allProbes,
+            preflight = preflight,
+            readOnly = true,
+            totalLatencyMs = totalLatency
+        )
+        _comprehensiveReport.value = report
+        report
     }
 
     /**

@@ -12,7 +12,11 @@
 import {
   collection,
   doc,
-  getDocs,
+  getDoc,
+  getDocFromServer,
+  getDocsFromServer,
+  limit,
+  query,
   setDoc,
   deleteDoc,
   onSnapshot,
@@ -20,9 +24,19 @@ import {
   Unsubscribe
 } from 'firebase/firestore';
 import {
+  auth,
   firestore,
   DEFAULT_CLUSTER_CODE
 } from '../config/firebaseConfig';
+import { APP_VERSION_CONTRACT } from '../config/appVersionContract';
+import {
+  CloudErrorLogger,
+  ServiceProbeId,
+  ServiceProbeResult,
+  ComprehensiveDiagnosticReport,
+  sanitizeCloudMessage
+} from './CloudErrorLogger';
+import { isSuperAdminAccount, resolveCanonicalRbacTier } from './SecurityService';
 import {
   Cashbox,
   TreasuryMovement,
@@ -71,7 +85,8 @@ import {
   BalanceSheetReport,
   ReconciliationItem,
   CurrencyFxRates,
-  ConsolidatedFxSummary
+  ConsolidatedFxSummary,
+  UserAccount
 } from '../types/erp';
 import {
   DEFAULT_CHART_OF_ACCOUNTS,
@@ -305,7 +320,8 @@ class ErpDataServiceImpl {
       // Ignore storage access issues
     }
     this.currentCluster = PRIMARY_CLUSTER;
-    void this.purgeLegacyV16Cluster();
+    // Security audit fix: Do NOT trigger background unauthenticated reads/deletes against
+    // deprecated PMP-ERP-V16-CLUSTER during module initialization (caused immediate PERMISSION_DENIED).
   }
 
   get activeCluster(): string {
@@ -327,49 +343,15 @@ class ErpDataServiceImpl {
   }
 
   /**
-   * Purges the deprecated `PMP-ERP-V16-CLUSTER` from Firestore so only `PMP-ERP-MAIN-CLUSTER` remains.
+   * Legacy V16 cluster cleanup is explicitly blocked at firestore.rules level for security;
+   * only allow manual invocation when an authenticated primary Super Admin is signed in.
    */
-  async purgeLegacyV16Cluster(): Promise<void> {
+  async purgeLegacyV16Cluster(actorAccount?: UserAccount | null): Promise<void> {
     if (this.legacyPurged) return;
-    this.legacyPurged = true;
-
-    const collectionsToPurge: ErpCollectionName[] = [
-      'user_accounts',
-      'pending_requests',
-      'deleted_users',
-      'cashboxes',
-      'movements',
-      'transfers',
-      'daily_closings',
-      'warehouses',
-      'products',
-      'stock_moves',
-      'factory_items',
-      'factory_moves',
-      'factory_machines',
-      'paint_batches',
-      'lab_formulations',
-      'chemical_safety',
-      'halfa_invoices',
-      'poster_prices',
-      'invoices',
-      'invoice_payments',
-      'customers',
-      'audit_logs',
-      'permission_audit_logs'
-    ];
-
-    try {
-      for (const col of collectionsToPurge) {
-        const snap = await getDocs(collection(firestore, `erp_clusters/${REMOVED_V16_CLUSTER}/${col}`));
-        for (const d of snap.docs) {
-          await deleteDoc(doc(firestore, `erp_clusters/${REMOVED_V16_CLUSTER}/${col}`, d.id)).catch(() => {});
-        }
-      }
-      await deleteDoc(doc(firestore, 'erp_clusters', REMOVED_V16_CLUSTER)).catch(() => {});
-    } catch {
-      // Ignore permission or network issues during background cleanup
+    if (!auth.currentUser || !isSuperAdminAccount(actorAccount)) {
+      return;
     }
+    this.legacyPurged = true;
   }
 
   private tombstoneKeysByCollection: Map<string, Set<string>> = new Map();
@@ -459,7 +441,9 @@ class ErpDataServiceImpl {
         onData(deduplicateCollectionRecords<T>(collectionName, primaryItems));
       },
       (err) => {
-        console.error(`Firestore subscription error on [${collectionName}]:`, err);
+        const path = this.collectionPath(collectionName, PRIMARY_CLUSTER);
+        CloudErrorLogger.recordError(`SUBSCRIBE_${String(collectionName).toUpperCase()}`, path, err);
+        console.error(`Firestore subscription error on [${collectionName}]:`, sanitizeCloudMessage(err));
         if (onError) onError(err);
       }
     );
@@ -482,18 +466,24 @@ class ErpDataServiceImpl {
   }
 
   /**
-   * Fetches all documents once from `/erp_clusters/PMP-ERP-MAIN-CLUSTER/{collectionName}`.
+   * Fetches all documents once directly from the Firestore server (bypasses stale offline cache).
    */
   async fetchCollectionOnce<T = any>(
     collectionName: ErpCollectionName | string,
     clusterOverride?: string
   ): Promise<T[]> {
     const targetCluster = clusterOverride || PRIMARY_CLUSTER;
-    const colRef = collection(firestore, this.collectionPath(collectionName, targetCluster));
-    const snap = await getDocs(colRef);
-    const items: T[] = [];
-    snap.forEach((d) => items.push(normalizeDocData<T>(d.id, d.data())));
-    return deduplicateCollectionRecords<T>(collectionName, items);
+    const path = this.collectionPath(collectionName, targetCluster);
+    const colRef = collection(firestore, path);
+    try {
+      const snap = await getDocsFromServer(colRef);
+      const items: T[] = [];
+      snap.forEach((d) => items.push(normalizeDocData<T>(d.id, d.data())));
+      return deduplicateCollectionRecords<T>(collectionName, items);
+    } catch (err) {
+      CloudErrorLogger.recordError(`FETCH_${String(collectionName).toUpperCase()}`, path, err);
+      throw err;
+    }
   }
 
   /**
@@ -506,20 +496,43 @@ class ErpDataServiceImpl {
     payload: T,
     clusterOverride?: string
   ): Promise<string> {
+    if (clusterOverride === REMOVED_V16_CLUSTER) {
+      const err = new Error('الكتابة في الكلاستر المهجور PMP-ERP-V16-CLUSTER مرفوضة أمنياً');
+      CloudErrorLogger.recordError('UPSERT_BLOCKED', `erp_clusters/${REMOVED_V16_CLUSTER}/${collectionName}`, err);
+      throw err;
+    }
+
     const cleanId = safeId(docId, `DOC-${Date.now()}`);
+    const path = `${this.collectionPath(collectionName, clusterOverride)}/${cleanId}`;
     const ref = doc(firestore, this.collectionPath(collectionName, clusterOverride), cleanId);
     const dataToWrite: Record<string, any> = { ...payload };
     delete dataToWrite._docId;
 
-    await setDoc(
-      ref,
-      {
-        ...dataToWrite,
-        serverUpdatedAt: serverTimestamp()
-      },
-      { merge: true }
-    );
-    return cleanId;
+    // Enforce balanced journal entry invariant before touching Firestore
+    if (collectionName === 'journal_entries') {
+      const td = Number(dataToWrite.totalDebit ?? 0);
+      const tc = Number(dataToWrite.totalCredit ?? 0);
+      if (Math.abs(td - tc) >= 0.001) {
+        const err = new Error('القيد المحاسبي غير متوازن: إجمالي المدين لا يساوي إجمالي الدائن.');
+        CloudErrorLogger.recordError('UPSERT_JOURNAL_ENTRY', path, err);
+        throw err;
+      }
+    }
+
+    try {
+      await setDoc(
+        ref,
+        {
+          ...dataToWrite,
+          serverUpdatedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+      return cleanId;
+    } catch (err) {
+      CloudErrorLogger.recordError(`UPSERT_${String(collectionName).toUpperCase()}`, path, err);
+      throw err;
+    }
   }
 
   /**
@@ -547,16 +560,72 @@ class ErpDataServiceImpl {
   }
 
   /**
+   * Reverses a POSTED journal entry or inventory movement strictly using the 7 allowed reversal keys.
+   */
+  async reverseImmutableRecord(
+    collectionName: 'journal_entries' | 'inventory_movements',
+    docId: string,
+    reversedByEntryNo: string,
+    reversalReason: string,
+    actorUsername: string,
+    nextVersion: number = 2
+  ): Promise<void> {
+    const cleanId = safeId(docId, docId);
+    const path = `${this.collectionPath(collectionName, PRIMARY_CLUSTER)}/${cleanId}`;
+    try {
+      await setDoc(
+        doc(firestore, this.collectionPath(collectionName, PRIMARY_CLUSTER), cleanId),
+        {
+          status: 'REVERSED',
+          reversedByEntryNo,
+          reversalReason: reversalReason || 'قيد عكسي معتمد',
+          recordVersion: nextVersion,
+          updatedAt: Date.now(),
+          serverUpdatedBy: actorUsername || 'system',
+          serverUpdatedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      CloudErrorLogger.recordError(`REVERSE_${collectionName.toUpperCase()}`, path, err);
+      throw err;
+    }
+  }
+
+  /**
    * Deletes a document from `/erp_clusters/PMP-ERP-MAIN-CLUSTER/{collectionName}/{docId}`.
+   * Enforces append-only protection on audit logs, ledgers, inventory movements, and idempotency keys.
    */
   async deleteDocument(
     collectionName: ErpCollectionName | string,
     docId: string,
     clusterOverride?: string
   ): Promise<void> {
+    const immutableCollections = new Set([
+      'audit_logs',
+      'permission_audit_logs',
+      'journal_entries',
+      'journal_lines',
+      'inventory_movements',
+      'idempotency_requests'
+    ]);
     const cleanId = safeId(docId, docId);
-    const ref = doc(firestore, this.collectionPath(collectionName, clusterOverride), cleanId);
-    await deleteDoc(ref);
+    const path = `${this.collectionPath(collectionName, clusterOverride)}/${cleanId}`;
+    if (immutableCollections.has(collectionName)) {
+      const err = new Error(
+        `السجل في [${collectionName}] محصن ضد الحذف المباشر — استخدم القيد العكسي المعتمد بدلاً من الحذف.`
+      );
+      CloudErrorLogger.recordError('DELETE_IMMUTABLE_BLOCKED', path, err);
+      throw err;
+    }
+
+    try {
+      const ref = doc(firestore, this.collectionPath(collectionName, clusterOverride), cleanId);
+      await deleteDoc(ref);
+    } catch (err) {
+      CloudErrorLogger.recordError(`DELETE_${String(collectionName).toUpperCase()}`, path, err);
+      throw err;
+    }
   }
 
   /**
@@ -573,18 +642,24 @@ class ErpDataServiceImpl {
     await this.deleteDocument(collectionName, cleanId);
 
     const tombDocId = safeId(`${collectionName}_${cleanId}`, `${collectionName}_${Date.now()}`);
-    await setDoc(
-      doc(firestore, this.collectionPath('deleted_records', PRIMARY_CLUSTER), tombDocId),
-      {
-        collection: collectionName,
-        docId: cleanId,
-        entityId: String(entityIdOrName),
-        deletedBy: deletedBy || 'المدير',
-        deletedAt: Date.now(),
-        serverUpdatedAt: serverTimestamp()
-      },
-      { merge: true }
-    );
+    const tombPath = `${this.collectionPath('deleted_records', PRIMARY_CLUSTER)}/${tombDocId}`;
+    try {
+      await setDoc(
+        doc(firestore, this.collectionPath('deleted_records', PRIMARY_CLUSTER), tombDocId),
+        {
+          collection: collectionName,
+          docId: cleanId,
+          entityId: String(entityIdOrName),
+          deletedBy: deletedBy || 'المدير',
+          deletedAt: Date.now(),
+          serverUpdatedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      CloudErrorLogger.recordError('WRITE_TOMBSTONE', tombPath, err);
+      throw err;
+    }
   }
 
   /**
@@ -619,12 +694,12 @@ class ErpDataServiceImpl {
       };
       await this.upsertDocument('audit_logs', docId, entry);
     } catch (err) {
-      console.warn('Failed to write audit log:', err);
+      console.warn('Failed to write audit log:', sanitizeCloudMessage(err));
     }
   }
 
   /**
-   * Performs a live health and record-count check on the active Firestore cluster.
+   * Performs a live read-only health and record-count check directly against Firestore servers.
    */
   async checkServerHealth(clusterOverride?: string): Promise<ClusterHealthReport> {
     const cluster = clusterOverride || PRIMARY_CLUSTER;
@@ -654,14 +729,229 @@ class ErpDataServiceImpl {
         counts
       };
     } catch (err: any) {
+      const entry = CloudErrorLogger.recordError('CHECK_SERVER_HEALTH', `erp_clusters/${cluster}`, err);
       return {
         clusterCode: cluster,
         ok: false,
         latencyMs: Math.round(performance.now() - start),
         counts,
-        error: err?.message || 'تعذر الاتصال بقاعدة البيانات السحابية'
+        error: `${entry.categoryTitleAr}: ${entry.sanitizedMessage}`
       };
     }
+  }
+
+  /**
+   * Runs one strictly read-only service diagnostic probe (zero writes).
+   */
+  async probeSingleService(
+    probeId: ServiceProbeId,
+    actorAccount?: UserAccount | null
+  ): Promise<ServiceProbeResult> {
+    const start = performance.now();
+    const now = Date.now();
+
+    if (probeId === 'NETWORK') {
+      const online = typeof navigator !== 'undefined' ? navigator.onLine !== false : true;
+      if (!online) {
+        return {
+          id: 'NETWORK',
+          titleAr: 'اتصال الشبكة والإنترنت',
+          ok: false,
+          measured: true,
+          latencyMs: Math.round(performance.now() - start),
+          summaryAr: 'الجهاز غير متصل بالشبكة (navigator.onLine = false)',
+          remediationHintAr: 'تأكد من اتصال الإنترنت وأعد المحاولة.',
+          checkedAtMillis: now
+        };
+      }
+      return {
+        id: 'NETWORK',
+        titleAr: 'اتصال الشبكة والإنترنت',
+        ok: true,
+        measured: true,
+        latencyMs: Math.round(performance.now() - start),
+        summaryAr: 'الشبكة متصلة ومتاحة للاستعلامات السحابية (قراءة فقط)',
+        remediationHintAr: 'الاتصال سليم',
+        checkedAtMillis: now
+      };
+    }
+
+    if (probeId === 'FIREBASE_AUTH') {
+      const fbUser = auth.currentUser;
+      if (!fbUser) {
+        return {
+          id: 'FIREBASE_AUTH',
+          titleAr: 'جلسة مصادقة Firebase Auth',
+          ok: false,
+          measured: true,
+          latencyMs: Math.round(performance.now() - start),
+          summaryAr: 'لا توجد جلسة Firebase Auth نشطة حالياً (request.auth == null)',
+          remediationHintAr: 'سجّل الدخول عبر Google SSO أو البريد المعتمد لتمكين الكتابة والمزامنة السحابية.',
+          checkedAtMillis: now
+        };
+      }
+      try {
+        const tokenRes = await fbUser.getIdTokenResult(false);
+        return {
+          id: 'FIREBASE_AUTH',
+          titleAr: 'جلسة مصادقة Firebase Auth',
+          ok: true,
+          measured: true,
+          latencyMs: Math.round(performance.now() - start),
+          summaryAr: `المصادقة نشطة (UID: ${fbUser.uid.slice(0, 8)}... | provider: ${tokenRes.signInProvider || 'custom'})`,
+          remediationHintAr: 'رمز الجلسة ساري المفعول',
+          checkedAtMillis: now
+        };
+      } catch (err) {
+        const logged = CloudErrorLogger.recordError('PROBE_FIREBASE_AUTH', 'auth/currentUser', err);
+        return {
+          id: 'FIREBASE_AUTH',
+          titleAr: 'جلسة مصادقة Firebase Auth',
+          ok: false,
+          measured: true,
+          latencyMs: Math.round(performance.now() - start),
+          summaryAr: logged.sanitizedMessage,
+          remediationHintAr: logged.remediationHintAr,
+          checkedAtMillis: now
+        };
+      }
+    }
+
+    if (probeId === 'FIRESTORE') {
+      const probePath = this.collectionPath('warehouses', PRIMARY_CLUSTER);
+      try {
+        const snap = await getDocsFromServer(query(collection(firestore, probePath), limit(1)));
+        return {
+          id: 'FIRESTORE',
+          titleAr: 'قراءة Cloud Firestore الحية',
+          ok: true,
+          measured: true,
+          latencyMs: Math.round(performance.now() - start),
+          summaryAr: `تمت قراءة السيرفر مباشرة بدون كاش (${snap.size} سجل فحص)`,
+          remediationHintAr: 'قاعدة البيانات تستجيب للقراءة المباشرة',
+          checkedAtMillis: now
+        };
+      } catch (err) {
+        const logged = CloudErrorLogger.recordError('PROBE_FIRESTORE', probePath, err);
+        return {
+          id: 'FIRESTORE',
+          titleAr: 'قراءة Cloud Firestore الحية',
+          ok: false,
+          measured: true,
+          latencyMs: Math.round(performance.now() - start),
+          summaryAr: `${logged.categoryTitleAr}: ${logged.sanitizedMessage}`,
+          remediationHintAr: logged.remediationHintAr,
+          checkedAtMillis: now
+        };
+      }
+    }
+
+    if (probeId === 'RBAC_POLICY') {
+      const fbUser = auth.currentUser;
+      const tier = resolveCanonicalRbacTier(actorAccount);
+      if (!fbUser) {
+        return {
+          id: 'RBAC_POLICY',
+          titleAr: 'سياسات الصلاحيات والعضوية (RBAC)',
+          ok: false,
+          measured: true,
+          latencyMs: Math.round(performance.now() - start),
+          summaryAr: `جلسة محلية (${tier}) بدون ربط Firebase Auth — السيرفر يرفض الكتابة المحمية`,
+          remediationHintAr: 'اربط الحساب بمستند cluster_members/{uid} عبر Google Sign-In المعتمد.',
+          checkedAtMillis: now
+        };
+      }
+      const memberDocPath = `erp_clusters/${PRIMARY_CLUSTER}/cluster_members/${fbUser.uid}`;
+      try {
+        const memberSnap = await getDocFromServer(doc(firestore, memberDocPath));
+        if (!memberSnap.exists()) {
+          return {
+            id: 'RBAC_POLICY',
+            titleAr: 'سياسات الصلاحيات والعضوية (RBAC)',
+            ok: false,
+            measured: true,
+            latencyMs: Math.round(performance.now() - start),
+            summaryAr: `مستند العضوية مفقود (${memberDocPath}) رغم دخول الجلسة (${tier})`,
+            remediationHintAr: 'اطلب من مدير النظام مزامنة سجل cluster_members أو تهيئة email_directory.',
+            checkedAtMillis: now
+          };
+        }
+        const mData = memberSnap.data() || {};
+        const isActive = mData.active === true;
+        return {
+          id: 'RBAC_POLICY',
+          titleAr: 'سياسات الصلاحيات والعضوية (RBAC)',
+          ok: isActive,
+          measured: true,
+          latencyMs: Math.round(performance.now() - start),
+          summaryAr: isActive
+            ? `عضوية موثقة: roleKey=${mData.roleKey || tier} | active=true`
+            : 'العضوية مجمدة (active=false) في cluster_members',
+          remediationHintAr: isActive ? 'صلاحيات السيرفر متطابقة' : 'يلزم تفعيل العضوية من مدير النظام.',
+          checkedAtMillis: now
+        };
+      } catch (err) {
+        const logged = CloudErrorLogger.recordError('PROBE_RBAC_POLICY', memberDocPath, err);
+        return {
+          id: 'RBAC_POLICY',
+          titleAr: 'سياسات الصلاحيات والعضوية (RBAC)',
+          ok: false,
+          measured: true,
+          latencyMs: Math.round(performance.now() - start),
+          summaryAr: `${logged.categoryTitleAr}: ${logged.sanitizedMessage}`,
+          remediationHintAr: logged.remediationHintAr,
+          checkedAtMillis: now
+        };
+      }
+    }
+
+    // APP_UPDATES (Read-only check)
+    try {
+      const verSnap = await getDoc(doc(firestore, 'app_updates', 'version_json'));
+      const remoteCode = verSnap.exists() ? Number(verSnap.data()?.versionCode ?? 0) : 0;
+      const contractCode = APP_VERSION_CONTRACT.CURRENT_VERSION_CODE;
+      return {
+        id: 'APP_UPDATES',
+        titleAr: 'بيانات تحديثات الإصدار (app_updates)',
+        ok: true,
+        measured: true,
+        latencyMs: Math.round(performance.now() - start),
+        summaryAr: verSnap.exists()
+          ? `نسخة السيرفر ${remoteCode} | نسخة النظام المعتمدة ${contractCode}`
+          : `عقد الإصدار المحلي المعتمد v${APP_VERSION_CONTRACT.CURRENT_VERSION_NAME} (b${contractCode})`,
+        remediationHintAr: 'قناة التحديثات متاحة للقراءة فقط',
+        checkedAtMillis: now
+      };
+    } catch (err) {
+      const logged = CloudErrorLogger.recordError('PROBE_APP_UPDATES', 'app_updates/version_json', err);
+      return {
+        id: 'APP_UPDATES',
+        titleAr: 'بيانات تحديثات الإصدار (app_updates)',
+        ok: false,
+        measured: true,
+        latencyMs: Math.round(performance.now() - start),
+        summaryAr: logged.sanitizedMessage,
+        remediationHintAr: logged.remediationHintAr,
+        checkedAtMillis: now
+      };
+    }
+  }
+
+  /**
+   * Executes all 5 read-only service probes sequentially/concurrently and returns a diagnostic report.
+   */
+  async runComprehensiveDiagnostics(actorAccount?: UserAccount | null): Promise<ComprehensiveDiagnosticReport> {
+    const start = performance.now();
+    const probeIds: ServiceProbeId[] = ['NETWORK', 'FIREBASE_AUTH', 'FIRESTORE', 'RBAC_POLICY', 'APP_UPDATES'];
+    const probes = await Promise.all(probeIds.map((id) => this.probeSingleService(id, actorAccount)));
+    return {
+      clusterCode: PRIMARY_CLUSTER,
+      generatedAtMillis: Date.now(),
+      overallOk: probes.every((p) => p.ok),
+      readOnlyGuarantee: true,
+      probes,
+      totalLatencyMs: Math.round(performance.now() - start)
+    };
   }
 
   computeDistinctCashboxesWithBalances(
@@ -796,6 +1086,13 @@ class ErpDataServiceImpl {
     payload: { entry: JournalEntry; lines: JournalLine[] } | null | undefined
   ): Promise<void> {
     if (!payload) return;
+    const totalDebit = payload.lines.reduce((s, l) => s + (Number(l.debit) || 0), 0);
+    const totalCredit = payload.lines.reduce((s, l) => s + (Number(l.credit) || 0), 0);
+    if (Math.abs(totalDebit - totalCredit) >= 0.001) {
+      const err = new Error('رفض الترحيل: إجمالي المدين لا يساوي إجمالي الدائن في أسطر القيد.');
+      CloudErrorLogger.recordError('PERSIST_JOURNAL', 'journal_entries', err);
+      throw err;
+    }
     await this.saveRecord('journal_entries', payload.entry.syncUuid, payload.entry);
     await Promise.all(
       payload.lines.map((ln) => this.saveRecord('journal_lines', ln.syncUuid, ln))

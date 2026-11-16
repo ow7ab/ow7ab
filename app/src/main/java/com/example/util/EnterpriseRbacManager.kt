@@ -320,6 +320,37 @@ object EnterpriseRbacManager {
     private val temporaryGrantsMemory = CopyOnWriteArrayList<TemporaryPermissionGrant>()
     private val rejectedRequestsMemory = CopyOnWriteArrayList<BackendAccessDecision>()
 
+    fun isPrivilegedRole(roleName: String?): Boolean {
+        val clean = roleName?.trim()?.lowercase().orEmpty()
+        if (clean.isEmpty()) return false
+        return clean.contains("مدير النظام") ||
+            clean.contains("المدير العام") ||
+            clean == "المدير" ||
+            clean.contains("مدير فرع") ||
+            clean.contains("مسؤول نظام") ||
+            clean.contains("مسؤول صلاحيات") ||
+            clean == "admin" ||
+            clean == "super admin" ||
+            clean == "super_admin" ||
+            clean.contains("manager") ||
+            clean.contains("supervisor") ||
+            clean.contains("مشرف")
+    }
+
+    fun isSameAccount(actor: UserAccountEntity?, target: UserAccountEntity?): Boolean {
+        if (actor == null || target == null) return false
+        if (actor.id > 0L && target.id > 0L && actor.id == target.id) return true
+        val aCode = actor.userCode.trim()
+        val tCode = target.userCode.trim()
+        if (aCode.isNotEmpty() && tCode.isNotEmpty() && aCode.equals(tCode, ignoreCase = true)) return true
+        val aUser = actor.username.trim()
+        val tUser = target.username.trim()
+        if (aUser.isNotEmpty() && tUser.isNotEmpty() && aUser.equals(tUser, ignoreCase = true)) return true
+        val aEmail = actor.phoneOrEmail.trim()
+        val tEmail = target.phoneOrEmail.trim()
+        return aEmail.isNotEmpty() && tEmail.isNotEmpty() && aEmail.equals(tEmail, ignoreCase = true)
+    }
+
     /**
      * التحقق مما إذا كان الحساب هو مسؤول مخصص النطاق (Scoped Administrator)
      * لا يحصل المسؤول المخصص على صلاحيات شاملة تلقائياً بل يقتصر على ما مُنح له صراحةً.
@@ -895,8 +926,53 @@ object EnterpriseRbacManager {
             return Result.failure(SecurityException(denied.message))
         }
 
-        // منع تصعيد الصلاحيات: المسؤول المفوض (غير SuperAdmin) لا يمكنه منح صلاحية الإعدادات الإدارية إذا لم يكن يملكها
+        // حظر التعديل الذاتي وحظر تعديل المدراء أو الترقية إلى أدوار إدارية من غير SuperAdmin
         if (!actor.isSuperAdminAccount()) {
+            if (isSameAccount(actor, targetUser)) {
+                val denied = BackendAccessDecision(
+                    allowed = false,
+                    statusCode = 403,
+                    errorCode = "ERR_RBAC_SELF_MODIFICATION",
+                    message = "تم رفض الطلب: لا يمكن للمستخدم تعديل دوره أو صلاحياته بنفسه.",
+                    actorUsername = actor?.username ?: "unknown",
+                    module = "المستخدمين",
+                    action = ErpActionPermission.USER_MANAGEMENT,
+                    timestampMillis = nowMillis
+                )
+                recordRejectedRequest(denied, context)
+                return Result.failure(SecurityException(denied.message))
+            }
+
+            if (targetUser.isSystemManager() || isPrivilegedRole(targetUser.role)) {
+                val denied = BackendAccessDecision(
+                    allowed = false,
+                    statusCode = 403,
+                    errorCode = "ERR_RBAC_PEER_MANAGER_PROTECTED",
+                    message = "تم رفض الطلب: لا يمكن للمدير تعديل حساب مدير أو مسؤول آخر.",
+                    actorUsername = actor?.username ?: "unknown",
+                    module = "المستخدمين",
+                    action = ErpActionPermission.USER_MANAGEMENT,
+                    timestampMillis = nowMillis
+                )
+                recordRejectedRequest(denied, context)
+                return Result.failure(SecurityException(denied.message))
+            }
+
+            if (isPrivilegedRole(newRole)) {
+                val denied = BackendAccessDecision(
+                    allowed = false,
+                    statusCode = 403,
+                    errorCode = "ERR_RBAC_PRIVILEGED_ROLE_ESCALATION",
+                    message = "تم رفض الطلب: ترقية الحساب إلى دور إداري أو قيادي مقتصرة على مدير النظام الأساسي (Admin).",
+                    actorUsername = actor?.username ?: "unknown",
+                    module = "المستخدمين",
+                    action = ErpActionPermission.USER_MANAGEMENT,
+                    timestampMillis = nowMillis
+                )
+                recordRejectedRequest(denied, context)
+                return Result.failure(SecurityException(denied.message))
+            }
+
             val actorTokens = extractActiveRawTokens(actor, nowMillis)
             val targetTokens = newPermissions.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
             if (PermissionTokens.ACTION_ADMIN_SETTINGS in targetTokens &&
