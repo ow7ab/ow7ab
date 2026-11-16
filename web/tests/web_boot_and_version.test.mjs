@@ -228,6 +228,31 @@ test('Web Server: serves root, SPA routes, version.json, and compiled JS/CSS/ima
     const emblemRes = await httpGet('/assets/ic_pmp_emblem.png');
     assert.equal(emblemRes.status, 200);
     assert.equal(emblemRes.headers['content-type'], 'image/png');
+    assert.equal(emblemRes.headers['x-frame-options'], 'SAMEORIGIN');
+    assert.equal(emblemRes.headers['x-content-type-options'], 'nosniff');
+
+    const headVersion = await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/version.json', method: 'HEAD' }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, bodyLen: Buffer.concat(chunks).length }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(headVersion.status, 200);
+    assert.equal(headVersion.bodyLen, 0, 'HEAD response must not send a body');
+    assert.ok(Number(headVersion.headers['content-length']) > 10);
+
+    const postRes = await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/', method: 'POST' }, (res) => {
+        res.resume();
+        res.on('end', () => resolve({ status: res.statusCode }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(postRes.status, 405);
   } finally {
     child.kill('SIGTERM');
   }

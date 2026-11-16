@@ -100,6 +100,9 @@ test('Desktop Assets & Hardening: verifies official icons and secure BrowserWind
   assert.ok(mainSource.includes('nodeIntegration: false'));
   assert.ok(mainSource.includes('sandbox: true'));
   assert.ok(mainSource.includes('requestSingleInstanceLock'));
+  assert.ok(mainSource.includes("session.on('will-download'"));
+  assert.ok(mainSource.includes('AbortController'));
+  assert.ok(mainSource.includes("on('did-fail-load'"));
 
   const preloadSource = fs.readFileSync(path.join(DESKTOP_ROOT, 'src', 'preload.cjs'), 'utf8');
   assert.ok(preloadSource.includes("contextBridge.exposeInMainWorld('pmpDesktop'"));

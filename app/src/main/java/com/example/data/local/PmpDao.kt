@@ -28,21 +28,45 @@ interface PmpDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMovement(movement: MovementEntity): Long
 
-    @Query("DELETE FROM movements WHERE cashbox = :cashbox")
-    suspend fun clearMovementsByCashbox(cashbox: String)
+    @Query("SELECT * FROM movements WHERE id = :id LIMIT 1")
+    suspend fun getMovementByIdDirect(id: Long): MovementEntity?
+
+    @Query("SELECT * FROM movements WHERE TRIM(LOWER(cashbox)) = TRIM(LOWER(:cashbox)) ORDER BY txDate DESC, createdAt DESC, id DESC")
+    suspend fun getMovementsByCashboxNormalized(cashbox: String): List<MovementEntity>
+
+    @Query("DELETE FROM movements WHERE TRIM(LOWER(cashbox)) = TRIM(LOWER(:cashbox))")
+    suspend fun clearMovementsByCashbox(cashbox: String): Int
 
     @Query("DELETE FROM movements WHERE id = :id")
     suspend fun deleteMovementById(id: Long)
 
+    @Query("DELETE FROM movements WHERE TRIM(reference) != '' AND TRIM(LOWER(reference)) = TRIM(LOWER(:ref))")
+    suspend fun deleteMovementByReference(ref: String): Int
+
+    @Query("DELETE FROM movements WHERE TRIM(cloudDocId) != '' AND TRIM(LOWER(cloudDocId)) = TRIM(LOWER(:cloudDocId))")
+    suspend fun deleteMovementByCloudDocId(cloudDocId: String): Int
+
+    @Query("DELETE FROM movements WHERE TRIM(syncUuid) != '' AND TRIM(LOWER(syncUuid)) = TRIM(LOWER(:syncUuid))")
+    suspend fun deleteMovementBySyncUuid(syncUuid: String): Int
+
+    @Query("DELETE FROM movements WHERE createdAt >= 1600000000000 AND createdAt < :epochTimestamp")
+    suspend fun deletePreEpochMovements(epochTimestamp: Long): Int
+
     // --- Transfers ---
     @Query("SELECT * FROM transfers ORDER BY txDate DESC, createdAt DESC, id DESC")
     fun getAllTransfers(): Flow<List<TransferEntity>>
+
+    @Query("SELECT * FROM transfers WHERE id = :id LIMIT 1")
+    suspend fun getTransferByIdDirect(id: Long): TransferEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTransfer(transfer: TransferEntity): Long
 
     @Query("DELETE FROM transfers WHERE id = :id")
     suspend fun deleteTransferById(id: Long)
+
+    @Query("DELETE FROM transfers WHERE TRIM(reference) != '' AND TRIM(LOWER(reference)) = TRIM(LOWER(:ref))")
+    suspend fun deleteTransferByReference(ref: String): Int
 
     // --- Daily Closings ---
     @Query("SELECT * FROM daily_closings ORDER BY closeDate DESC, closedAt DESC, id DESC")
@@ -95,6 +119,9 @@ interface PmpDao {
     @Update
     suspend fun updateInvoice(invoice: InvoiceEntity)
 
+    @Query("DELETE FROM invoices WHERE TRIM(invoiceNo) != '' AND TRIM(LOWER(invoiceNo)) = TRIM(LOWER(:invoiceNo))")
+    suspend fun deleteInvoiceByNo(invoiceNo: String): Int
+
     @Query("DELETE FROM invoices WHERE id = :id")
     suspend fun deleteInvoiceById(id: Long)
 
@@ -136,6 +163,9 @@ interface PmpDao {
     @Query("SELECT * FROM warehouses ORDER BY name ASC")
     fun getAllWarehouses(): Flow<List<WarehouseEntity>>
 
+    @Query("SELECT * FROM warehouses WHERE id = :id LIMIT 1")
+    suspend fun getWarehouseByIdDirect(id: Long): WarehouseEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertWarehouse(warehouse: WarehouseEntity): Long
 
@@ -147,6 +177,9 @@ interface PmpDao {
 
     @Query("SELECT * FROM products ORDER BY name ASC")
     fun getAllProducts(): Flow<List<ProductEntity>>
+
+    @Query("SELECT * FROM products WHERE id = :id LIMIT 1")
+    suspend fun getProductByIdDirect(id: Long): ProductEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertProduct(product: ProductEntity): Long
@@ -206,11 +239,17 @@ interface PmpDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFactoryMove(move: FactoryMoveEntity): Long
 
+    @Query("DELETE FROM factory_moves WHERE id = :id")
+    suspend fun deleteFactoryMoveById(id: Long)
+
     @Query("SELECT * FROM halfa_invoices ORDER BY id DESC")
     fun getAllHalfaInvoices(): Flow<List<HalfaInvoiceEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertHalfaInvoice(invoice: HalfaInvoiceEntity): Long
+
+    @Query("DELETE FROM halfa_invoices WHERE id = :id")
+    suspend fun deleteHalfaInvoiceById(id: Long)
 
     // --- Poster Prices ---
     @Query("SELECT * FROM poster_prices")
@@ -459,6 +498,22 @@ interface PmpDao {
 
     @Query("DELETE FROM audit_log")
     suspend fun clearAllAuditLogs()
+
+    // --- SQLite Record Tombstones (Persistent Non-Resurrection Shield) ---
+    @Query("SELECT * FROM record_tombstones ORDER BY deletedAt DESC")
+    suspend fun getAllTombstonesDirect(): List<RecordTombstoneEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertTombstone(tombstone: RecordTombstoneEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertTombstones(tombstones: List<RecordTombstoneEntity>)
+
+    @Query("DELETE FROM record_tombstones WHERE TRIM(LOWER(collectionName)) = TRIM(LOWER(:collectionName)) AND normalizedKey = :normalizedKey")
+    suspend fun deleteTombstoneByKey(collectionName: String, normalizedKey: String)
+
+    @Query("DELETE FROM record_tombstones")
+    suspend fun clearAllTombstones()
 
     // --- High-Performance SQL Aggregations (SUM / GROUP BY) ---
     @Query(

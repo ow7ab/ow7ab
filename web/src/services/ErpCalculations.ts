@@ -85,6 +85,144 @@ export function isStockInMoveKind(rawKind: unknown): boolean {
   );
 }
 
+export function extractBareEntityId(rawId: unknown): string | null {
+  const trimmed = String(rawId ?? '').trim();
+  if (!trimmed) return null;
+  const upper = trimmed.toUpperCase();
+  const prefixes = ['MOV-', 'CUST-', 'INV-', 'TRF-', 'PROD-', 'PRD-', 'BOX-', 'WH-', 'SM-', 'FI-', 'FM-'];
+  for (const prefix of prefixes) {
+    if (upper.startsWith(prefix)) {
+      const bare = trimmed.slice(prefix.length).trim();
+      return bare.length > 0 ? bare : null;
+    }
+  }
+  return null;
+}
+
+export function isPreEpochRecord(createdAtValue: unknown, clusterEpochTimestamp: number): boolean {
+  if (!clusterEpochTimestamp || clusterEpochTimestamp <= 0) return false;
+  const num = Number(createdAtValue ?? 0);
+  if (!Number.isFinite(num) || num < 1_600_000_000_000) return false;
+  return num < clusterEpochTimestamp;
+}
+
+const EPOCH_PROTECTED_COLLECTIONS = new Set<string>([
+  'movements',
+  'transfers',
+  'daily_closings',
+  'invoices',
+  'invoice_items',
+  'invoice_payments',
+  'stock_moves',
+  'factory_moves',
+  'halfa_invoices',
+  'lab_formulations',
+  'paint_batches',
+  'audit_logs'
+]);
+
+export function buildTombstoneKeySet(docs: Array<Record<string, any>>): Map<string, Set<string>> {
+  const nextMap = new Map<string, Set<string>>();
+  for (const data of docs) {
+    if (!data || typeof data !== 'object') continue;
+    const col = String(data.collection || '').trim().toLowerCase();
+    if (!col) continue;
+    let set = nextMap.get(col);
+    if (!set) {
+      set = new Set<string>();
+      nextMap.set(col, set);
+    }
+    const rawValues: unknown[] = [
+      data.docId,
+      data._docId,
+      data.entityId,
+      data.numericId,
+      data.reference,
+      data.invoiceNo,
+      data.syncUuid,
+      ...(Array.isArray(data.aliases) ? data.aliases : [])
+    ];
+    for (const val of rawValues) {
+      if (val === undefined || val === null) continue;
+      const str = String(val).trim();
+      if (!str) continue;
+      set.add(str.toLowerCase());
+      const norm = normalizeEntityKey(str);
+      if (norm) set.add(norm);
+      const bare = extractBareEntityId(str);
+      if (bare) {
+        set.add(bare.toLowerCase());
+        const bareNorm = normalizeEntityKey(bare);
+        if (bareNorm) set.add(bareNorm);
+      }
+    }
+  }
+  return nextMap;
+}
+
+export function isRecordTombstoned(
+  collectionName: string,
+  raw: Record<string, any> | null | undefined,
+  tombstoneKeysByCollection: Map<string, Set<string>>,
+  clusterEpochTimestamp: number = 0
+): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const col = String(collectionName || '').trim().toLowerCase();
+  if (!col) return false;
+
+  if (EPOCH_PROTECTED_COLLECTIONS.has(col)) {
+    const ts = raw.createdAt ?? raw.timestamp;
+    if (isPreEpochRecord(ts, clusterEpochTimestamp)) {
+      return true;
+    }
+  }
+
+  const keys = tombstoneKeysByCollection.get(col);
+  if (!keys || keys.size === 0) return false;
+
+  const hasId = raw.id !== undefined && raw.id !== null && String(raw.id).trim() !== '';
+  const idStr = hasId ? String(raw.id).trim() : '';
+
+  const candidates: unknown[] = [
+    raw._docId,
+    raw.docId,
+    raw.cloudDocId,
+    raw.id,
+    raw.syncUuid,
+    raw.name,
+    raw.userCode,
+    raw.invoiceNo,
+    raw.invoiceNumber,
+    raw.reference,
+    col === 'movements' && hasId ? `MOV-${idStr}` : '',
+    col === 'transfers' && hasId ? `TRF-${idStr}` : '',
+    col === 'invoices' && hasId ? `INV-${idStr}` : '',
+    col === 'customers' && hasId ? `CUST-${idStr}` : '',
+    col === 'warehouses' && hasId ? `WH-${idStr}` : '',
+    col === 'stock_moves' && hasId ? `SM-${idStr}` : '',
+    col === 'factory_items' && hasId ? `FI-${idStr}` : '',
+    col === 'factory_moves' && hasId ? `FM-${idStr}` : '',
+    col === 'products' && hasId ? `PRD-${idStr}` : '',
+    col === 'products' && hasId ? `PROD-${idStr}` : '',
+    col === 'cashboxes' && hasId ? `BOX-${idStr}` : '',
+    col === 'cashboxes' && raw.name ? cashboxDocId(String(raw.name), Number(raw.id || 0)) : ''
+  ];
+
+  for (const c of candidates) {
+    if (c === undefined || c === null) continue;
+    const str = String(c).trim();
+    if (!str) continue;
+    if (keys.has(str.toLowerCase()) || keys.has(normalizeEntityKey(str))) {
+      return true;
+    }
+    const bare = extractBareEntityId(str);
+    if (bare && (keys.has(bare.toLowerCase()) || keys.has(normalizeEntityKey(bare)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Deduplicates Firestore collection documents so repeated seeding or legacy sync IDs
  * never produce duplicate rows in UI tables or double-counted KPIs.
@@ -190,9 +328,21 @@ export function deduplicateCollectionRecords<T = any>(collectionName: string, it
         break;
       }
       case 'movements': {
-        const idPart = raw.id !== undefined && raw.id !== null ? String(raw.id) : '';
-        const composite = `${normalizeEntityKey(raw.cashbox)}__${String(raw.direction || raw.type || '').toUpperCase()}__${Number(raw.amount || 0)}__${normalizeEntityKey(raw.description || raw.note)}__${raw.createdAt || raw.timestamp || 0}`;
-        key = idPart ? `id:${idPart}` : composite;
+        const uuid = String(raw.syncUuid ?? '').trim();
+        const ref = normalizeEntityKey(raw.reference);
+        const dir = String(raw.direction || raw.type || '').trim().toUpperCase();
+        const boxKey = normalizeEntityKey(raw.cashbox || raw.cashboxName);
+        const curr = resolveCanonicalCurrency(raw.currency, raw.cashbox || raw.cashboxName);
+        const idPart = raw.id !== undefined && raw.id !== null ? String(raw.id).trim() : '';
+        if (uuid) {
+          key = `uuid:${uuid}`;
+        } else if (ref && !ref.startsWith('mov')) {
+          key = `ref:${ref}__${boxKey}__${dir}__${curr}__${Number(raw.amount || 0)}`;
+        } else if (idPart) {
+          key = `id:${idPart}`;
+        } else {
+          key = `${boxKey}__${dir}__${Number(raw.amount || 0)}__${normalizeEntityKey(raw.description || raw.note)}__${raw.createdAt || raw.timestamp || 0}`;
+        }
         break;
       }
       case 'inventory_movements': {

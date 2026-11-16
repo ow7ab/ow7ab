@@ -1,6 +1,7 @@
 package com.example.data.local
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "cashboxes")
@@ -9,7 +10,14 @@ data class CashboxEntity(
     val name: String
 )
 
-@Entity(tableName = "movements")
+@Entity(
+    tableName = "movements",
+    indices = [
+        Index(value = ["cashbox"], name = "idx_mov_cashbox"),
+        Index(value = ["txDate"], name = "idx_mov_tx_date"),
+        Index(value = ["reference"], name = "idx_mov_ref")
+    ]
+)
 data class MovementEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val txDate: String,
@@ -20,7 +28,10 @@ data class MovementEntity(
     val description: String,
     val reference: String,
     val createdBy: String = "المدير",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val cloudDocId: String = "",
+    val syncUuid: String = "",
+    val updatedAt: Long = 0L
 )
 
 @Entity(tableName = "transfers")
@@ -409,4 +420,19 @@ data class ProductionBatchEntity(
     val createdAt: Long = System.currentTimeMillis()
 )
 
-
+@Entity(
+    tableName = "record_tombstones",
+    indices = [
+        Index(value = ["collectionName", "normalizedKey"], unique = true, name = "idx_tomb_col_key"),
+        Index(value = ["collectionName"], name = "idx_tomb_col")
+    ]
+)
+data class RecordTombstoneEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val collectionName: String,
+    val normalizedKey: String,
+    val entityId: String,
+    val docId: String,
+    val deletedAt: Long = System.currentTimeMillis(),
+    val deletedBy: String = "مدير النظام"
+)

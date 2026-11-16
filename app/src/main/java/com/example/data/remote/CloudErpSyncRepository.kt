@@ -19,6 +19,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import com.example.isSuperAdminAccount
+import com.example.isSystemManager
+import com.example.util.EnterpriseRbacManager
+import com.google.firebase.firestore.Source
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -67,6 +71,22 @@ class CloudErpSyncRepository(
             val dbId = context.getString(R.string.firestore_database_id)
             val db = FirebaseFirestore.getInstance(dbId)
             return CloudErpSyncRepository(db, dbId)
+        }
+
+        fun buildEmailDirectoryKey(email: String): String {
+            val clean = email.trim().lowercase()
+            val normalized = clean.replace(Regex("[^a-zA-Z0-9]+"), "_").trim('_')
+            val raw = "EMAIL_$normalized".trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-").trim('-')
+            return (if (raw.isNotBlank()) raw.take(100) else "EMAIL_USER")
+        }
+
+        fun resolveCanonicalRbacTier(account: UserAccountEntity): String {
+            if (account.isSuperAdminAccount()) return "ADMIN"
+            if (account.isSystemManager() || EnterpriseRbacManager.isPrivilegedRole(account.role)) return "MANAGER"
+            val r = account.role.trim().lowercase()
+            if (r.contains("نائب محاسب") || r.contains("deputy")) return "DEPUTY_ACCOUNTANT"
+            if (r.contains("محاسب") || r.contains("accountant")) return "ACCOUNTANT"
+            return "EMPLOYEE"
         }
     }
 
@@ -212,6 +232,165 @@ class CloudErpSyncRepository(
     private fun clusterRef(clusterCode: String) =
         firestore.collection("erp_clusters").document(safeId(clusterCode, DEFAULT_CLUSTER))
 
+    fun buildEmailDirectoryKey(email: String): String =
+        Companion.buildEmailDirectoryKey(email)
+
+    fun resolveCanonicalRbacTier(account: UserAccountEntity): String =
+        Companion.resolveCanonicalRbacTier(account)
+
+    /**
+     * يزامن دليل البريد الإلكتروني `email_directory` وعضوية `cluster_members/{uid}` على Firestore
+     * لضمان تطابق صلاحيات Firebase Auth مع قواعد الأمان (firestore.rules) بدون أي أخطاء PERMISSION_DENIED.
+     */
+    suspend fun syncRbacDirectoryForAccount(
+        clusterCode: String,
+        account: UserAccountEntity,
+        linkedUid: String? = null
+    ) = withContext(Dispatchers.IO) {
+        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull() ?: return@withContext
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+        if (cleanCluster.equals(DEPRECATED_V16_CLUSTER, ignoreCase = true)) return@withContext
+        val cRef = clusterRef(cleanCluster)
+        val roleKey = resolveCanonicalRbacTier(account)
+        val docUserCode = safeId(account.userCode, "USR-${account.id}")
+        val email = account.phoneOrEmail.trim().lowercase()
+        val emailKey = if (email.contains("@")) buildEmailDirectoryKey(email) else ""
+
+        if (emailKey.isNotEmpty()) {
+            runCatching {
+                cRef.collection("email_directory").document(emailKey).set(
+                    mapOf(
+                        "email" to email,
+                        "userCode" to docUserCode,
+                        "username" to account.username,
+                        "roleKey" to roleKey,
+                        "branch" to account.branch.ifBlank { "الخرطوم" },
+                        "permissions" to account.permissions.ifBlank { "صلاحية العرض" },
+                        "active" to account.active,
+                        "updatedAt" to System.currentTimeMillis(),
+                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                ).await()
+            }.onFailure { e ->
+                recordStructuredError("SYNC_EMAIL_DIRECTORY", "erp_clusters/$cleanCluster/email_directory/$emailKey", e)
+            }
+        }
+
+        val uid = linkedUid?.trim().orEmpty()
+        if (uid.isNotEmpty()) {
+            val cleanUid = safeId(uid, uid)
+            runCatching {
+                cRef.collection("cluster_members").document(cleanUid).set(
+                    buildMap<String, Any> {
+                        put("uid", cleanUid)
+                        put("userCode", docUserCode)
+                        put("username", account.username)
+                        put("fullName", account.fullName)
+                        put("roleKey", roleKey)
+                        put("branch", account.branch.ifBlank { "الخرطوم" })
+                        put("permissions", account.permissions.ifBlank { "صلاحية العرض" })
+                        put("active", account.active)
+                        if (emailKey.isNotEmpty()) put("emailKey", emailKey)
+                        put("updatedAt", System.currentTimeMillis())
+                        put("serverUpdatedAt", FieldValue.serverTimestamp())
+                    },
+                    SetOptions.merge()
+                ).await()
+            }.onFailure { e ->
+                recordStructuredError("SYNC_CLUSTER_MEMBER", "erp_clusters/$cleanCluster/cluster_members/$cleanUid", e)
+            }
+        } else if (fbUser.uid.isNotBlank() && account.isSuperAdminAccount()) {
+            ensureOwnClusterMemberRegistration(cleanCluster, account, fbUser.uid, fbUser.email)
+        }
+    }
+
+    /**
+     * يضمن وجود مستند عضوية `cluster_members/{uid}` للمستخدم المسجل عبر Firebase Auth
+     * سواء عبر قفل المالك الأول `system_metadata/cluster_owner` أو دليل البريد المعتمد `email_directory`.
+     */
+    suspend fun ensureOwnClusterMemberRegistration(
+        clusterCode: String,
+        account: UserAccountEntity?,
+        fbUid: String?,
+        fbEmail: String? = null
+    ) = withContext(Dispatchers.IO) {
+        val currentUser = runCatching { Firebase.auth.currentUser }.getOrNull() ?: return@withContext
+        val uid = fbUid?.takeIf { it.isNotBlank() } ?: currentUser.uid
+        if (uid.isBlank()) return@withContext
+
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+        if (cleanCluster.equals(DEPRECATED_V16_CLUSTER, ignoreCase = true)) return@withContext
+        val cleanUid = safeId(uid, uid)
+        val cRef = clusterRef(cleanCluster)
+        val memberRef = cRef.collection("cluster_members").document(cleanUid)
+
+        try {
+            val existing = runCatching { memberRef.get(Source.SERVER).await() }.getOrNull()
+            if (existing != null && existing.exists()) {
+                return@withContext
+            }
+
+            val resolvedEmail = (fbEmail?.takeIf { it.isNotBlank() }
+                ?: currentUser.email?.takeIf { it.isNotBlank() }
+                ?: account?.phoneOrEmail.orEmpty()).trim().lowercase()
+
+            if (resolvedEmail.contains("@")) {
+                val emailKey = buildEmailDirectoryKey(resolvedEmail)
+                val dirSnap = runCatching {
+                    cRef.collection("email_directory").document(emailKey).get(Source.SERVER).await()
+                }.getOrNull()
+                if (dirSnap != null && dirSnap.exists()) {
+                    val isDirActive = dirSnap.getBoolean("active") != false
+                    if (isDirActive) {
+                        val fallbackCode = account?.let { safeId(it.userCode, "USR-${it.id}") } ?: "EMP-${cleanUid.take(6)}"
+                        val fallbackRoleKey = account?.let { resolveCanonicalRbacTier(it) } ?: "EMPLOYEE"
+                        val payload = mapOf(
+                            "uid" to cleanUid,
+                            "emailKey" to emailKey,
+                            "userCode" to (dirSnap.safeString("userCode") ?: fallbackCode),
+                            "roleKey" to (dirSnap.safeString("roleKey") ?: fallbackRoleKey),
+                            "branch" to (dirSnap.safeString("branch") ?: account?.branch?.ifBlank { "الخرطوم" } ?: "الخرطوم"),
+                            "permissions" to (dirSnap.safeString("permissions") ?: account?.permissions ?: "صلاحية العرض"),
+                            "active" to true,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                        memberRef.set(payload).await()
+                        return@withContext
+                    }
+                }
+            }
+
+            if (account?.isSuperAdminAccount() == true) {
+                val ownerRef = cRef.collection("system_metadata").document("cluster_owner")
+                val ownerSnap = runCatching { ownerRef.get(Source.SERVER).await() }.getOrNull()
+                if (ownerSnap == null || !ownerSnap.exists()) {
+                    val adminCode = safeId(account.userCode, "USR-ADMIN")
+                    ownerRef.set(
+                        mapOf(
+                            "ownerUid" to cleanUid,
+                            "userCode" to adminCode,
+                            "createdAt" to System.currentTimeMillis()
+                        )
+                    ).await()
+                    memberRef.set(
+                        mapOf(
+                            "uid" to cleanUid,
+                            "userCode" to adminCode,
+                            "roleKey" to "ADMIN",
+                            "branch" to "ALL",
+                            "permissions" to account.permissions,
+                            "active" to true,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                    ).await()
+                }
+            }
+        } catch (e: Exception) {
+            recordStructuredError("ENSURE_CLUSTER_MEMBER", "erp_clusters/$cleanCluster/cluster_members/$cleanUid", e)
+        }
+    }
+
     /**
      * Immediately pushes a single UserAccountEntity to Google Cloud Firestore so that
      * account creation, Google Sign-In pending requests, and Manager permission updates
@@ -248,6 +427,7 @@ class CloudErpSyncRepository(
                 cRef.collection("pending_requests").document(docId).set(data, SetOptions.merge()).await()
             } else {
                 runCatching { cRef.collection("pending_requests").document(docId).delete().await() }
+                syncRbacDirectoryForAccount(clusterCode, user)
             }
             docId
         }
@@ -772,9 +952,16 @@ class CloudErpSyncRepository(
                 val cRef = clusterRef(cleanCluster)
 
             // 0. User Accounts & Employee Permissions
+            // Ensure active Firebase session has an authoritative cluster_members/{uid} registration before collection writes
+            val users = dao.getUserAccountsDirect()
+            val activeLocalAccount = users.firstOrNull { it.id == activeUserId } ?: users.firstOrNull { it.isCurrentSession }
+            val fbCurrentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+            if (fbCurrentUser != null) {
+                ensureOwnClusterMemberRegistration(cleanCluster, activeLocalAccount, fbCurrentUser.uid, fbCurrentUser.email)
+            }
+
             // Concurrency protection: non-manager employees only sync their own user profile,
             // strictly preventing employees from overwriting manager accounts or other colleagues' credentials
-            val users = dao.getUserAccountsDirect()
             val usersToSync = (if (isManager) {
                 users
             } else {
@@ -812,63 +999,8 @@ class CloudErpSyncRepository(
                     }
                     tBatch.commit().await()
                 }
-
-                // تطهير السجلات المحلية التي تم حذفها سابقاً أو التي تسبق تاريخ التصفير الشامل
-                dao.getMovementsDirect().forEach { m ->
-                    if (DeletedRecordsRegistry.isDeleted("movements", m.id) ||
-                        DeletedRecordsRegistry.isDeleted("movements", "MOV-${m.id}") ||
-                        DeletedRecordsRegistry.isPreEpoch(m.createdAt)
-                    ) {
-                        dao.deleteMovementById(m.id)
-                    }
-                }
-                dao.getCustomersDirect().forEach { c ->
-                    if (DeletedRecordsRegistry.isDeleted("customers", c.id) ||
-                        DeletedRecordsRegistry.isDeleted("customers", "CUST-${c.id}")
-                    ) {
-                        dao.deleteCustomer(c.id)
-                    }
-                }
-                dao.getInvoicesDirect().forEach { inv ->
-                    if (DeletedRecordsRegistry.isDeleted("invoices", inv.id) ||
-                        DeletedRecordsRegistry.isDeleted("invoices", inv.invoiceNo) ||
-                        DeletedRecordsRegistry.isDeleted("invoices", "INV-${inv.id}")
-                    ) {
-                        dao.deleteInvoiceById(inv.id)
-                    }
-                }
-                dao.getTransfersDirect().forEach { t ->
-                    if (DeletedRecordsRegistry.isDeleted("transfers", t.id) ||
-                        DeletedRecordsRegistry.isDeleted("transfers", "TRF-${t.id}")
-                    ) {
-                        dao.deleteTransferById(t.id)
-                    }
-                }
-                dao.getFactoryItemsDirect().forEach { fi ->
-                    if (DeletedRecordsRegistry.isDeleted("factory_items", fi.id) ||
-                        DeletedRecordsRegistry.isDeleted("factory_items", "FI-${fi.id}") ||
-                        DeletedRecordsRegistry.isDeleted("factory_items", fi.name)
-                    ) {
-                        dao.deleteFactoryItemById(fi.id)
-                    }
-                }
-                dao.getProductsDirect().forEach { p ->
-                    if (DeletedRecordsRegistry.isDeleted("products", p.id) ||
-                        DeletedRecordsRegistry.isDeleted("products", "PROD-${p.id}")
-                    ) {
-                        dao.deleteProduct(p.id)
-                    }
-                }
-                dao.getCashboxesDirect().forEach { cb ->
-                    val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
-                    if (DeletedRecordsRegistry.isDeleted("cashboxes", cb.id) ||
-                        DeletedRecordsRegistry.isDeleted("cashboxes", "BOX-${cb.id}") ||
-                        DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) ||
-                        DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId)
-                    ) {
-                        dao.deleteCashbox(cb.id)
-                    }
-                }
+                DeletedRecordsRegistry.syncWithDao(dao)
+                PmpDatabase.purgeTombstonedRecordsLocally(dao)
             }
 
             usersToSync.chunked(300).forEach { chunk ->
@@ -920,7 +1052,8 @@ class CloudErpSyncRepository(
 
             // 1. Invoices & Items & Payments (Batched - excluding deleted)
             val invoices = dao.getInvoicesDirect().filterNot {
-                DeletedRecordsRegistry.isDeleted("invoices", it.id) ||
+                DeletedRecordsRegistry.isPreEpoch(it.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("invoices", it.id) ||
                     DeletedRecordsRegistry.isDeleted("invoices", it.invoiceNo) ||
                     DeletedRecordsRegistry.isDeleted("invoices", "INV-${it.id}")
             }
@@ -967,12 +1100,11 @@ class CloudErpSyncRepository(
                         "status" to inv.status,
                         "cancelReason" to (inv.cancelReason ?: ""),
                         "createdBy" to inv.createdBy,
-                        "items" to invItems,
-                        "payments" to invPayments,
+                        "createdAt" to inv.createdAt,
                         "serverUpdatedBy" to actor,
                         "serverUpdatedAt" to FieldValue.serverTimestamp()
                     )
-                    batch.set(cRef.collection("invoices").document(docId), data, SetOptions.merge())
+                    batch.set(cRef.collection("invoices").document(docId), data + mapOf("items" to invItems, "payments" to invPayments), SetOptions.merge())
                     syncedCount++
                 }
                 batch.commit().await()
@@ -980,9 +1112,7 @@ class CloudErpSyncRepository(
 
             // 2. Financial Movements (Batched for high speed and unique document ID - excluding deleted)
             val movements = dao.getMovementsDirect().filterNot {
-                DeletedRecordsRegistry.isDeleted("movements", it.id) ||
-                    DeletedRecordsRegistry.isDeleted("movements", "MOV-${it.id}") ||
-                    DeletedRecordsRegistry.isPreEpoch(it.createdAt)
+                DeletedRecordsRegistry.isMovementDeleted(it)
             }
             RoomTransactionLogger.log(
                 operation = "SYNC_MOVEMENTS_DISPATCH",
@@ -995,8 +1125,8 @@ class CloudErpSyncRepository(
                 movements.chunked(300).forEach { chunk ->
                     val batch = firestore.batch()
                     chunk.forEach { m ->
-                        val docId = "MOV-${m.id}"
-                        val data = mapOf(
+                        val docId = m.cloudDocId.trim().ifBlank { "MOV-${m.id}" }
+                        val data = mutableMapOf<String, Any>(
                             "id" to m.id,
                             "txDate" to m.txDate,
                             "cashbox" to m.cashbox,
@@ -1007,9 +1137,12 @@ class CloudErpSyncRepository(
                             "reference" to m.reference,
                             "createdBy" to m.createdBy,
                             "createdAt" to m.createdAt,
+                            "cloudDocId" to docId,
                             "serverUpdatedBy" to actor,
                             "serverUpdatedAt" to FieldValue.serverTimestamp()
                         )
+                        if (m.syncUuid.isNotBlank()) data["syncUuid"] = m.syncUuid
+                        if (m.updatedAt > 0L) data["updatedAt"] = m.updatedAt
                         batch.set(cRef.collection("movements").document(docId), data, SetOptions.merge())
                         syncedCount++
                     }
@@ -1035,8 +1168,10 @@ class CloudErpSyncRepository(
 
             // 3. Transfers (Batched - excluding deleted)
             val transfers = dao.getTransfersDirect().filterNot {
-                DeletedRecordsRegistry.isDeleted("transfers", it.id) ||
-                    DeletedRecordsRegistry.isDeleted("transfers", "TRF-${it.id}")
+                DeletedRecordsRegistry.isPreEpoch(it.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("transfers", it.id) ||
+                    DeletedRecordsRegistry.isDeleted("transfers", "TRF-${it.id}") ||
+                    (it.reference.isNotBlank() && DeletedRecordsRegistry.isDeleted("transfers", it.reference))
             }
             transfers.chunked(300).forEach { chunk ->
                 val batch = firestore.batch()
@@ -1265,8 +1400,12 @@ class CloudErpSyncRepository(
                 batch.commit().await()
             }
 
-            // 8. Factory Movements (Batched)
-            val factoryMoves = dao.getFactoryMovesDirect()
+            // 8. Factory Movements (Batched - excluding deleted & pre-epoch)
+            val factoryMoves = dao.getFactoryMovesDirect().filterNot { fm ->
+                DeletedRecordsRegistry.isPreEpoch(fm.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("factory_moves", fm.id) ||
+                    DeletedRecordsRegistry.isDeleted("factory_moves", "FM-${fm.id}")
+            }
             factoryMoves.chunked(300).forEach { chunk ->
                 val batch = firestore.batch()
                 chunk.forEach { fm ->
@@ -1299,8 +1438,13 @@ class CloudErpSyncRepository(
                 batch.commit().await()
             }
 
-            // 8b. Chemical Formulations & Paint Batch Formulas (Batched)
-            val formulations = dao.getFormulationsDirect()
+            // 8b. Chemical Formulations & Paint Batch Formulas (Batched - excluding deleted)
+            val formulations = dao.getFormulationsDirect().filterNot { form ->
+                DeletedRecordsRegistry.isPreEpoch(form.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("lab_formulations", form.id) ||
+                    DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-${form.id}") ||
+                    (form.formulaNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", form.formulaNo))
+            }
             formulations.chunked(300).forEach { chunk ->
                 val batch = firestore.batch()
                 chunk.forEach { form ->
@@ -1340,8 +1484,13 @@ class CloudErpSyncRepository(
                 batch.commit().await()
             }
 
-            // 8c. Daily Production Batches (Batched)
-            val batches = dao.getProductionBatchesDirect()
+            // 8c. Daily Production Batches (Batched - excluding deleted)
+            val batches = dao.getProductionBatchesDirect().filterNot { b ->
+                DeletedRecordsRegistry.isPreEpoch(b.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("paint_batches", b.id) ||
+                    DeletedRecordsRegistry.isDeleted("paint_batches", "BATCH-${b.id}") ||
+                    (b.batchNumber.isNotBlank() && DeletedRecordsRegistry.isDeleted("paint_batches", b.batchNumber))
+            }
             batches.chunked(300).forEach { chunk ->
                 val batch = firestore.batch()
                 chunk.forEach { b ->
@@ -1389,7 +1538,8 @@ class CloudErpSyncRepository(
             val validProductIds = products.map { it.id }.toSet()
             val validWarehouseIds = warehouses.map { it.id }.toSet()
             val stockMoves = dao.getStockMovesDirect().filterNot { sm ->
-                DeletedRecordsRegistry.isDeleted("stock_moves", sm.id) ||
+                DeletedRecordsRegistry.isPreEpoch(sm.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("stock_moves", sm.id) ||
                     DeletedRecordsRegistry.isDeleted("stock_moves", "SM-${sm.id}") ||
                     (validProductIds.isNotEmpty() && sm.productId !in validProductIds) ||
                     (validWarehouseIds.isNotEmpty() && sm.warehouseId !in validWarehouseIds)
@@ -1420,8 +1570,13 @@ class CloudErpSyncRepository(
                 batch.commit().await()
             }
 
-            // 10. Halfa & Egypt Invoices (Handled in EGP - Batched)
-            val halfaInvoices = dao.getHalfaInvoicesDirect()
+            // 10. Halfa & Egypt Invoices (Handled in EGP - Batched - excluding deleted)
+            val halfaInvoices = dao.getHalfaInvoicesDirect().filterNot { hi ->
+                DeletedRecordsRegistry.isPreEpoch(hi.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("halfa_invoices", hi.id) ||
+                    DeletedRecordsRegistry.isDeleted("halfa_invoices", "HINV-${hi.id}") ||
+                    (hi.invoiceNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("halfa_invoices", hi.invoiceNo))
+            }
             halfaInvoices.chunked(300).forEach { chunk ->
                 val batch = firestore.batch()
                 chunk.forEach { hi ->
@@ -1575,6 +1730,8 @@ class CloudErpSyncRepository(
                     val tombSnap = cRef.collection("deleted_records").get().await()
                     val remTombstones = tombSnap.documents.mapNotNull { it.data }
                     DeletedRecordsRegistry.mergeRemoteTombstones(remTombstones, epochTime)
+                    DeletedRecordsRegistry.syncWithDao(dao)
+                    PmpDatabase.purgeTombstonedRecordsLocally(dao)
                 }
 
             // 1. Fetch Invoices from Server with deduplication & tombstone shield
@@ -1661,22 +1818,34 @@ class CloudErpSyncRepository(
                 dao.upsertInvoicePayments(restoredPayments)
             }
 
-            // 2. Fetch Movements from Server with deduplication & tombstone shield
+            // 2. Fetch Movements from Server with deduplication & strict alias tombstone shield
             val localMovements = dao.getMovementsDirect()
             val movSnapshot = cRef.collection("movements").get().await()
             val restoredMovements = movSnapshot.documents.mapNotNull { doc ->
-                val ref = doc.getString("reference") ?: doc.id
-                val existingMov = localMovements.firstOrNull { it.reference.isNotBlank() && it.reference == ref }
+                val ref = doc.getString("reference")?.trim() ?: doc.id
+                val syncUuid = doc.getString("syncUuid")?.trim().orEmpty()
+                val existingMov = localMovements.firstOrNull {
+                    (syncUuid.isNotBlank() && it.syncUuid == syncUuid) ||
+                        (ref.isNotBlank() && it.reference == ref) ||
+                        it.cloudDocId == doc.id
+                }
                 val movId = existingMov?.id ?: (doc.getLong("id") ?: 0L)
 
                 val docCreatedAt = doc.getLong("createdAt") ?: 0L
-                val isMovDeleted = DeletedRecordsRegistry.isDeleted("movements", movId) ||
-                    DeletedRecordsRegistry.isDeleted("movements", "MOV-$movId") ||
+                val isMovDeleted = (movId > 0L && (
+                    DeletedRecordsRegistry.isDeleted("movements", movId) ||
+                        DeletedRecordsRegistry.isDeleted("movements", "MOV-$movId")
+                    )) ||
                     DeletedRecordsRegistry.isDeleted("movements", doc.id) ||
+                    (ref.isNotBlank() && DeletedRecordsRegistry.isDeleted("movements", ref)) ||
+                    (syncUuid.isNotBlank() && DeletedRecordsRegistry.isDeleted("movements", syncUuid)) ||
                     DeletedRecordsRegistry.isPreEpoch(docCreatedAt)
                 if (isMovDeleted) {
                     runCatching { doc.reference.delete() }
-                    dao.deleteMovementById(movId)
+                    if (movId > 0L) dao.deleteMovementById(movId)
+                    if (ref.isNotBlank()) dao.deleteMovementByReference(ref)
+                    dao.deleteMovementByCloudDocId(doc.id)
+                    if (syncUuid.isNotBlank()) dao.deleteMovementBySyncUuid(syncUuid)
                     return@mapNotNull null
                 }
 
@@ -1690,11 +1859,19 @@ class CloudErpSyncRepository(
                     description = doc.getString("description") ?: "",
                     reference = ref,
                     createdBy = doc.getString("createdBy") ?: "المدير",
-                    createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis()
+                    createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                    cloudDocId = doc.id,
+                    syncUuid = syncUuid,
+                    updatedAt = doc.getLong("updatedAt") ?: 0L
                 )
             }
             val distinctMovements = restoredMovements.distinctBy {
-                if (it.reference.isNotBlank()) it.reference.trim() else "ID-${it.id}"
+                when {
+                    it.syncUuid.isNotBlank() -> "UUID-${it.syncUuid.trim()}"
+                    it.reference.isNotBlank() -> "REF-${it.reference.trim()}"
+                    it.cloudDocId.isNotBlank() -> "DOC-${it.cloudDocId.trim()}"
+                    else -> "ID-${it.id}"
+                }
             }
             if (distinctMovements.isNotEmpty()) {
                 dao.upsertMovements(distinctMovements)
@@ -1705,14 +1882,17 @@ class CloudErpSyncRepository(
             val trfSnapshot = cRef.collection("transfers").get().await()
             val restoredTransfers = trfSnapshot.documents.mapNotNull { doc ->
                 val trfId = doc.getLong("id") ?: 0L
+                val trfRef = doc.getString("reference")?.trim().orEmpty()
                 val docCreatedAt = doc.getLong("createdAt") ?: 0L
                 val isTrfDeleted = DeletedRecordsRegistry.isDeleted("transfers", trfId) ||
                     DeletedRecordsRegistry.isDeleted("transfers", "TRF-$trfId") ||
                     DeletedRecordsRegistry.isDeleted("transfers", doc.id) ||
+                    (trfRef.isNotBlank() && DeletedRecordsRegistry.isDeleted("transfers", trfRef)) ||
                     DeletedRecordsRegistry.isPreEpoch(docCreatedAt)
                 if (isTrfDeleted) {
                     runCatching { doc.reference.delete() }
                     dao.deleteTransferById(trfId)
+                    if (trfRef.isNotBlank()) dao.deleteTransferByReference(trfRef)
                     return@mapNotNull null
                 }
                 TransferEntity(
@@ -1972,10 +2152,20 @@ class CloudErpSyncRepository(
                 restoredCount += restoredFactoryItems.size
             }
 
-            // 8. Fetch Factory Moves
+            // 8. Fetch Factory Moves (with tombstone & epoch shield)
             val fmSnapshot = cRef.collection("factory_moves").get().await()
             val restoredFactoryMoves = fmSnapshot.documents.mapNotNull { doc ->
                 val id = doc.getLong("id") ?: return@mapNotNull null
+                val createdAt = doc.getLong("createdAt") ?: 0L
+                if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("factory_moves", id) ||
+                    DeletedRecordsRegistry.isDeleted("factory_moves", "FM-$id") ||
+                    DeletedRecordsRegistry.isDeleted("factory_moves", doc.id)
+                ) {
+                    runCatching { doc.reference.delete() }
+                    dao.deleteFactoryMoveById(id)
+                    return@mapNotNull null
+                }
                 FactoryMoveEntity(
                     id = id,
                     moveDate = doc.getString("moveDate") ?: "2026-10-26",
@@ -1990,7 +2180,7 @@ class CloudErpSyncRepository(
                     actor = doc.getString("actor") ?: "مسؤول المواد الخام",
                     counterparty = doc.getString("counterparty") ?: "مورد مصر",
                     linked = doc.getBoolean("linked") ?: false,
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                    createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             }
             if (restoredFactoryMoves.isNotEmpty()) {
@@ -1998,11 +2188,22 @@ class CloudErpSyncRepository(
                 restoredCount += restoredFactoryMoves.size
             }
 
-            // 8b. Fetch Chemical Formulations from Cloud
+            // 8b. Fetch Chemical Formulations from Cloud (with tombstone & epoch shield)
             val formSnapshot = cRef.collection("lab_formulations").get().await()
             val restoredFormulations = formSnapshot.documents.mapNotNull { doc ->
                 val id = doc.getLong("id") ?: return@mapNotNull null
                 val fNo = doc.getString("formulaNo") ?: doc.id
+                val createdAt = doc.getLong("createdAt") ?: 0L
+                if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("lab_formulations", id) ||
+                    DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-$id") ||
+                    DeletedRecordsRegistry.isDeleted("lab_formulations", doc.id) ||
+                    (fNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", fNo))
+                ) {
+                    runCatching { doc.reference.delete() }
+                    dao.deleteFormulation(id)
+                    return@mapNotNull null
+                }
                 FormulationEntity(
                     id = id,
                     formulaNo = fNo,
@@ -2024,7 +2225,7 @@ class CloudErpSyncRepository(
                     notes = doc.getString("notes") ?: "",
                     approvedForProduction = doc.getBoolean("approvedForProduction") ?: false,
                     createdBy = doc.getString("createdBy") ?: "مهندس المختبر الكيميائي",
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                    createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             }
             if (restoredFormulations.isNotEmpty()) {
@@ -2032,11 +2233,22 @@ class CloudErpSyncRepository(
                 restoredCount += restoredFormulations.size
             }
 
-            // 8c. Fetch Daily Production Batches from Cloud
+            // 8c. Fetch Daily Production Batches from Cloud (with tombstone & epoch shield)
             val batchSnapshot = cRef.collection("paint_batches").get().await()
             val restoredBatches = batchSnapshot.documents.mapNotNull { doc ->
                 val id = doc.getLong("id") ?: return@mapNotNull null
                 val bNo = doc.getString("batchNumber") ?: doc.id
+                val createdAt = doc.getLong("createdAt") ?: 0L
+                if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("paint_batches", id) ||
+                    DeletedRecordsRegistry.isDeleted("paint_batches", "BATCH-$id") ||
+                    DeletedRecordsRegistry.isDeleted("paint_batches", doc.id) ||
+                    (bNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("paint_batches", bNo))
+                ) {
+                    runCatching { doc.reference.delete() }
+                    dao.deleteProductionBatch(id)
+                    return@mapNotNull null
+                }
                 ProductionBatchEntity(
                     id = id,
                     batchNumber = bNo,
@@ -2062,7 +2274,7 @@ class CloudErpSyncRepository(
                     shift = doc.getString("shift") ?: "الوردية الصباحية",
                     notes = doc.getString("notes") ?: "",
                     syncStatus = "SYNCED",
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                    createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             }
             if (restoredBatches.isNotEmpty()) {
@@ -2107,13 +2319,25 @@ class CloudErpSyncRepository(
                 restoredCount += restoredStockMoves.size
             }
 
-            // 10. Fetch Halfa & Egypt Invoices
+            // 10. Fetch Halfa & Egypt Invoices (with tombstone & epoch shield)
             val hiSnapshot = cRef.collection("halfa_invoices").get().await()
             val restoredHalfaInvoices = hiSnapshot.documents.mapNotNull { doc ->
                 val id = doc.getLong("id") ?: return@mapNotNull null
+                val invNo = doc.getString("invoiceNo") ?: "HINV-$id"
+                val createdAt = doc.getLong("createdAt") ?: 0L
+                if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("halfa_invoices", id) ||
+                    DeletedRecordsRegistry.isDeleted("halfa_invoices", "HINV-$id") ||
+                    DeletedRecordsRegistry.isDeleted("halfa_invoices", doc.id) ||
+                    DeletedRecordsRegistry.isDeleted("halfa_invoices", invNo)
+                ) {
+                    runCatching { doc.reference.delete() }
+                    dao.deleteHalfaInvoiceById(id)
+                    return@mapNotNull null
+                }
                 HalfaInvoiceEntity(
                     id = id,
-                    invoiceNo = doc.getString("invoiceNo") ?: "HINV-$id",
+                    invoiceNo = invNo,
                     invoiceDate = doc.getString("invoiceDate") ?: "2026-10-26",
                     cashbox = doc.getString("cashbox") ?: "خزنة مصر",
                     currency = doc.getString("currency") ?: "EGP",
@@ -2127,7 +2351,7 @@ class CloudErpSyncRepository(
                     note = doc.getString("note") ?: "",
                     status = doc.getString("status") ?: "active",
                     createdBy = doc.getString("createdBy") ?: "مسؤول التحميل",
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                    createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             }
             if (restoredHalfaInvoices.isNotEmpty()) {
@@ -3542,7 +3766,24 @@ class CloudErpSyncRepository(
     ): Flow<Int> = callbackFlow {
         val cRef = clusterRef(clusterCode)
 
-        // 0. الاستماع لشواهد الحذف في السحابة وتطهير أي سجل محذوف فوراً
+        // 0. الاستماع لشواهد الحذف وعصر النظام (cluster_epoch) في السحابة وتطهير أي سجل محذوف فورياً
+        val epochListener = cRef.collection("system_metadata").document("cluster_epoch")
+            .addSnapshotListener { docSnap, error ->
+                if (error == null && docSnap != null && docSnap.exists()) {
+                    val wipeTs = docSnap.getLong("wipeTimestamp") ?: 0L
+                    if (wipeTs > 0L) {
+                        scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                            runCatching {
+                                DeletedRecordsRegistry.setClusterEpoch(wipeTs, docSnap.safeString("wipedBy") ?: "SYSTEM_WIPE")
+                                PmpDatabase.purgeTombstonedRecordsLocally(dao)
+                                DatabaseBackupManager.saveLocalSnapshot(firestore.app.applicationContext, dao)
+                                trySend(1)
+                            }
+                        }
+                    }
+                }
+            }
+
         val tombListener = cRef.collection("deleted_records")
             .addSnapshotListener { snapshot, error ->
                 if (error == null && snapshot != null && !snapshot.isEmpty) {
@@ -3550,57 +3791,10 @@ class CloudErpSyncRepository(
                         try {
                             val tombstones = snapshot.documents.mapNotNull { it.data }
                             DeletedRecordsRegistry.mergeRemoteTombstones(tombstones)
-                            for (doc in snapshot.documents) {
-                                val col = doc.safeString("collection") ?: ""
-                                val docId = doc.safeString("docId") ?: doc.id
-                                val numId = (doc.get("entityId") as? Number)?.toLong() ?: docId.filter { it.isDigit() }.toLongOrNull()
-                                when (col) {
-                                    "movements" -> if (numId != null) dao.deleteMovementById(numId)
-                                    "customers" -> if (numId != null) dao.deleteCustomer(numId)
-                                    "invoices" -> if (numId != null) dao.deleteInvoiceById(numId)
-                                    "transfers" -> if (numId != null) dao.deleteTransferById(numId)
-                                    "factory_items" -> if (numId != null) dao.deleteFactoryItemById(numId)
-                                    "products" -> if (numId != null) {
-                                        dao.clearStockMovesByProduct(numId)
-                                        dao.deleteProduct(numId)
-                                    }
-                                    "stock_moves" -> if (numId != null) dao.deleteStockMoveById(numId)
-                                    "warehouses" -> {
-                                        val entityIdStr = doc.safeString("entityId")?.trim().orEmpty()
-                                        if (numId != null && numId > 0L) {
-                                            dao.clearStockMovesByWarehouse(numId)
-                                            dao.deleteWarehouse(numId)
-                                        }
-                                        val currentWarehouses = dao.getWarehousesDirect()
-                                        currentWarehouses.forEach { wh ->
-                                            if ((entityIdStr.isNotBlank() && wh.name.trim().equals(entityIdStr, ignoreCase = true)) ||
-                                                "WH-${wh.id}".equals(docId, ignoreCase = true) ||
-                                                DeletedRecordsRegistry.isDeleted("warehouses", wh.name) ||
-                                                DeletedRecordsRegistry.isDeleted("warehouses", wh.id)
-                                            ) {
-                                                dao.clearStockMovesByWarehouse(wh.id)
-                                                dao.deleteWarehouse(wh.id)
-                                            }
-                                        }
-                                    }
-                                    "cashboxes" -> {
-                                        val entityIdStr = doc.safeString("entityId")?.trim().orEmpty()
-                                        if (numId != null && numId > 0L) {
-                                            dao.deleteCashbox(numId)
-                                        }
-                                        val currentBoxes = dao.getCashboxesDirect()
-                                        currentBoxes.forEach { cb ->
-                                            val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
-                                            if ((entityIdStr.isNotBlank() && cb.name.trim().equals(entityIdStr, ignoreCase = true)) ||
-                                                cbDocId.equals(docId, ignoreCase = true) ||
-                                                DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) ||
-                                                DeletedRecordsRegistry.isDeleted("cashboxes", cb.id)
-                                            ) {
-                                                dao.deleteCashbox(cb.id)
-                                            }
-                                        }
-                                    }
-                                }
+                            DeletedRecordsRegistry.syncWithDao(dao)
+                            val purged = PmpDatabase.purgeTombstonedRecordsLocally(dao)
+                            if (purged > 0) {
+                                DatabaseBackupManager.saveLocalSnapshot(firestore.app.applicationContext, dao)
                             }
                             trySend(snapshot.size())
                         } catch (e: Throwable) {
@@ -3723,30 +3917,60 @@ class CloudErpSyncRepository(
                             for (dc in snapshot.documentChanges) {
                                 if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
                                     val movId = dc.document.safeLong("id")
-                                    if (movId != null) {
+                                    val removedRef = dc.document.safeString("reference")?.trim().orEmpty()
+                                    val removedSyncUuid = dc.document.safeString("syncUuid")?.trim().orEmpty()
+                                    if (movId != null && movId > 0L) {
                                         dao.deleteMovementById(movId)
                                     }
+                                    dao.deleteMovementByCloudDocId(dc.document.id)
+                                    if (removedRef.isNotBlank()) dao.deleteMovementByReference(removedRef)
+                                    if (removedSyncUuid.isNotBlank()) dao.deleteMovementBySyncUuid(removedSyncUuid)
                                 }
                             }
                             if (!snapshot.isEmpty) {
+                                val localMovs = dao.getMovementsDirect()
                                 for (doc in snapshot.documents) {
-                                    val movId = doc.safeLong("id") ?: continue
+                                    val ref = doc.safeString("reference")?.trim() ?: doc.id
+                                    val syncUuid = doc.safeString("syncUuid")?.trim().orEmpty()
+                                    val movId = doc.safeLong("id")
+                                        ?: localMovs.firstOrNull {
+                                            (syncUuid.isNotBlank() && it.syncUuid == syncUuid) ||
+                                                (ref.isNotBlank() && it.reference == ref) ||
+                                                it.cloudDocId == doc.id
+                                        }?.id
+                                        ?: 0L
                                     val docCreatedAt = doc.safeLong("createdAt") ?: 0L
-                                    val isDel = DeletedRecordsRegistry.isDeleted("movements", movId) ||
-                                        DeletedRecordsRegistry.isDeleted("movements", "MOV-$movId") ||
+                                    val isDel = (movId > 0L && (
+                                        DeletedRecordsRegistry.isDeleted("movements", movId) ||
+                                            DeletedRecordsRegistry.isDeleted("movements", "MOV-$movId")
+                                        )) ||
                                         DeletedRecordsRegistry.isDeleted("movements", doc.id) ||
+                                        (ref.isNotBlank() && DeletedRecordsRegistry.isDeleted("movements", ref)) ||
+                                        (syncUuid.isNotBlank() && DeletedRecordsRegistry.isDeleted("movements", syncUuid)) ||
                                         DeletedRecordsRegistry.isPreEpoch(docCreatedAt)
                                     if (isDel) {
                                         runCatching { doc.reference.delete() }
-                                        dao.deleteMovementById(movId)
+                                        if (movId > 0L) dao.deleteMovementById(movId)
+                                        dao.deleteMovementByCloudDocId(doc.id)
+                                        if (ref.isNotBlank()) dao.deleteMovementByReference(ref)
+                                        if (syncUuid.isNotBlank()) dao.deleteMovementBySyncUuid(syncUuid)
                                     }
                                 }
                                 val list = snapshot.documents.mapNotNull { doc ->
-                                    val id = doc.safeLong("id") ?: return@mapNotNull null
+                                    val ref = doc.safeString("reference")?.trim() ?: doc.id
+                                    val syncUuid = doc.safeString("syncUuid")?.trim().orEmpty()
+                                    val existing = localMovs.firstOrNull {
+                                        (syncUuid.isNotBlank() && it.syncUuid == syncUuid) ||
+                                            (ref.isNotBlank() && it.reference == ref) ||
+                                            it.cloudDocId == doc.id
+                                    }
+                                    val id = existing?.id ?: doc.safeLong("id") ?: return@mapNotNull null
                                     val docCreatedAt = doc.safeLong("createdAt") ?: 0L
                                     if (DeletedRecordsRegistry.isDeleted("movements", id) ||
                                         DeletedRecordsRegistry.isDeleted("movements", "MOV-$id") ||
                                         DeletedRecordsRegistry.isDeleted("movements", doc.id) ||
+                                        (ref.isNotBlank() && DeletedRecordsRegistry.isDeleted("movements", ref)) ||
+                                        (syncUuid.isNotBlank() && DeletedRecordsRegistry.isDeleted("movements", syncUuid)) ||
                                         DeletedRecordsRegistry.isPreEpoch(docCreatedAt)
                                     ) return@mapNotNull null
                                     MovementEntity(
@@ -3757,9 +3981,12 @@ class CloudErpSyncRepository(
                                         direction = doc.safeString("direction") ?: "وارد",
                                         amount = doc.safeDouble("amount") ?: 0.0,
                                         description = doc.safeString("description") ?: "",
-                                        reference = doc.safeString("reference") ?: doc.id,
+                                        reference = ref,
                                         createdBy = doc.safeString("createdBy") ?: "المدير",
-                                        createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis()
+                                        createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                                        cloudDocId = doc.id,
+                                        syncUuid = syncUuid,
+                                        updatedAt = doc.safeLong("updatedAt") ?: 0L
                                     )
                                 }
                                 if (list.isNotEmpty()) dao.upsertMovements(list)
@@ -4064,6 +4291,7 @@ class CloudErpSyncRepository(
             }
 
         awaitClose {
+            epochListener.remove()
             tombListener.remove()
             invListener.remove()
             movListener.remove()
@@ -4258,7 +4486,7 @@ class CloudErpSyncRepository(
             // 1. تسجيل الشاهد محلياً في DeletedRecordsRegistry
             DeletedRecordsRegistry.registerDeleted(collectionName, cleanDocId, cleanDocId, actor)
 
-            // 2. كتابة شاهد الحذف الدائم (Tombstone) على السحابة لمنع إعادة رفعه عند مزامنة النسخ القديمة
+            // 2. كتابة شاهد الحذف الدائم (Tombstone) على السحابة وتأكيد حفظه قبل حذف المستند
             val tombstoneDocId = safeId("${collectionName}_${cleanDocId}", cleanDocId)
             val tombstoneData = mapOf(
                 "collection" to collectionName,
@@ -4269,16 +4497,18 @@ class CloudErpSyncRepository(
                 "clusterCode" to cleanCluster
             )
             runCatching {
-                cRef.collection("deleted_records").document(tombstoneDocId).set(tombstoneData, SetOptions.merge())
-                firestore.collection("deleted_records").document(tombstoneDocId).set(tombstoneData, SetOptions.merge())
+                cRef.collection("deleted_records").document(tombstoneDocId).set(tombstoneData, SetOptions.merge()).await()
+            }
+            runCatching {
+                firestore.collection("deleted_records").document(tombstoneDocId).set(tombstoneData, SetOptions.merge()).await()
             }
 
             // 3. حذف المستند الفعلي من السيرفر السحابي
-            cRef.collection(collectionName).document(cleanDocId).delete().await()
+            runCatching { cRef.collection(collectionName).document(cleanDocId).delete().await() }
             if (cleanCluster != DEFAULT_CLUSTER) {
                 runCatching {
+                    clusterRef(DEFAULT_CLUSTER).collection("deleted_records").document(tombstoneDocId).set(tombstoneData, SetOptions.merge()).await()
                     clusterRef(DEFAULT_CLUSTER).collection(collectionName).document(cleanDocId).delete().await()
-                    clusterRef(DEFAULT_CLUSTER).collection("deleted_records").document(tombstoneDocId).set(tombstoneData, SetOptions.merge())
                 }
             }
             if (collectionName in listOf("lab_formulations", "paint_batches")) {
@@ -4291,6 +4521,119 @@ class CloudErpSyncRepository(
                 status = "SUCCESS",
                 count = 1,
                 message = "تم تسجيل شاهد الحذف ($cleanDocId) وحذف المستند من ($collectionName) على السيرفر لمنع استرجاعه"
+            )
+            Unit
+        }
+    }
+
+    /**
+     * حذف حركة مالية من السحابة مع كافة مستنداتها البديلة (MOV-id، MOV-idempotencyKey، reference، syncUuid)
+     * وتسجيل شاهد حذف شامل يمنع عودتها من أي منصة أو نسخة مخزنة محلياً.
+     */
+    suspend fun deleteMovementFromCloud(
+        clusterCode: String,
+        movementId: Long,
+        reference: String = "",
+        cloudDocId: String = "",
+        syncUuid: String = "",
+        actor: String = currentActorId
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            val cleanRef = reference.trim()
+            val cleanCloudDoc = cloudDocId.trim()
+            val cleanUuid = syncUuid.trim()
+
+            val aliases = linkedSetOf<String>()
+            if (movementId > 0L) {
+                aliases.add(movementId.toString())
+                aliases.add("MOV-$movementId")
+            }
+            if (cleanCloudDoc.isNotBlank()) aliases.add(cleanCloudDoc)
+            if (cleanRef.isNotBlank()) aliases.add(cleanRef)
+            if (cleanUuid.isNotBlank()) aliases.add(cleanUuid)
+
+            val primaryDoc = cleanCloudDoc.ifBlank { if (movementId > 0L) "MOV-$movementId" else cleanRef }
+            if (primaryDoc.isBlank()) return@runCatching Unit
+
+            DeletedRecordsRegistry.registerDeletedWithAliases(
+                collection = "movements",
+                aliases = aliases,
+                primaryEntityId = if (movementId > 0L) movementId.toString() else primaryDoc,
+                primaryDocId = primaryDoc,
+                actor = actor
+            )
+
+            suspend fun writeTombstoneAndDeleteDoc(docIdCandidate: String) {
+                val cleanDoc = safeId(docIdCandidate, docIdCandidate)
+                if (cleanDoc.isBlank()) return
+                val tombDocId = safeId("movements_$cleanDoc", "movements_${movementId}_${cleanDoc.take(24)}")
+                val tombData = mutableMapOf<String, Any>(
+                    "collection" to "movements",
+                    "entityId" to (if (movementId > 0L) movementId.toString() else cleanDoc),
+                    "docId" to cleanDoc,
+                    "aliases" to aliases.toList(),
+                    "deletedAt" to FieldValue.serverTimestamp(),
+                    "deletedBy" to actor,
+                    "clusterCode" to cleanCluster
+                )
+                if (movementId > 0L) tombData["numericId"] = movementId
+                if (cleanRef.isNotBlank()) tombData["reference"] = cleanRef
+                if (cleanUuid.isNotBlank()) tombData["syncUuid"] = cleanUuid
+
+                runCatching {
+                    cRef.collection("deleted_records").document(tombDocId).set(tombData, SetOptions.merge()).await()
+                }
+                runCatching {
+                    cRef.collection("movements").document(cleanDoc).delete().await()
+                }
+            }
+
+            if (movementId > 0L) writeTombstoneAndDeleteDoc("MOV-$movementId")
+            if (cleanCloudDoc.isNotBlank() && cleanCloudDoc != "MOV-$movementId") {
+                writeTombstoneAndDeleteDoc(cleanCloudDoc)
+            }
+
+            if (movementId > 0L) {
+                runCatching {
+                    val byIdSnap = cRef.collection("movements").whereEqualTo("id", movementId).get().await()
+                    for (doc in byIdSnap.documents) {
+                        DeletedRecordsRegistry.registerDeleted("movements", doc.id, doc.id, actor)
+                        writeTombstoneAndDeleteDoc(doc.id)
+                        runCatching { doc.reference.delete().await() }
+                    }
+                }
+            }
+            if (cleanRef.isNotBlank()) {
+                runCatching {
+                    val byRefSnap = cRef.collection("movements").whereEqualTo("reference", cleanRef).get().await()
+                    for (doc in byRefSnap.documents) {
+                        val docNumId = doc.getLong("id")
+                        if (docNumId != null && docNumId > 0L) {
+                            DeletedRecordsRegistry.registerDeleted("movements", docNumId, doc.id, actor)
+                        }
+                        DeletedRecordsRegistry.registerDeleted("movements", doc.id, doc.id, actor)
+                        writeTombstoneAndDeleteDoc(doc.id)
+                        runCatching { doc.reference.delete().await() }
+                    }
+                }
+            }
+            if (cleanUuid.isNotBlank()) {
+                runCatching {
+                    val byUuidSnap = cRef.collection("movements").whereEqualTo("syncUuid", cleanUuid).get().await()
+                    for (doc in byUuidSnap.documents) {
+                        writeTombstoneAndDeleteDoc(doc.id)
+                        runCatching { doc.reference.delete().await() }
+                    }
+                }
+            }
+
+            recordDiagnostic(
+                action = "DELETE_MOVEMENT_CLOUD",
+                status = "SUCCESS",
+                count = 1,
+                message = "تم حذف الحركة المالية ($primaryDoc) مع كافة معرفاتها البديلة وتسجيل شاهد الحذف في السحابة"
             )
             Unit
         }
@@ -4350,22 +4693,106 @@ class CloudErpSyncRepository(
 
     /**
      * Clears all movements associated with a specific cashbox from Cloud Firestore,
-     * ensuring zeroed cashbox records do not bounce back upon sync.
+     * registering persistent deleted_records tombstones for every deleted movement BEFORE deletion
+     * so offline devices can NEVER re-upload them upon reconnect/sync.
      */
-    suspend fun clearCashboxMovementsFromCloud(clusterCode: String, cashboxName: String): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun clearCashboxMovementsFromCloud(
+        clusterCode: String,
+        cashboxName: String,
+        knownClearedMovements: List<MovementEntity> = emptyList(),
+        actor: String = currentActorId
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            val cRef = clusterRef(clusterCode)
-            val snaps = cRef.collection("movements")
-                .whereEqualTo("cashbox", cashboxName)
-                .get()
-                .await()
-            if (!snaps.isEmpty) {
-                snaps.documents.chunked(300).forEach { chunk ->
-                    val batch = firestore.batch()
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            val cleanBox = cashboxName.trim()
+
+            // Register tombstones for any locally cleared movements first (covers offline/cached cases)
+            knownClearedMovements.forEach { m ->
+                val aliases = listOfNotNull(
+                    m.id.takeIf { it > 0L }?.toString(),
+                    m.id.takeIf { it > 0L }?.let { "MOV-$it" },
+                    m.cloudDocId.takeIf { it.isNotBlank() },
+                    m.reference.takeIf { it.isNotBlank() },
+                    m.syncUuid.takeIf { it.isNotBlank() }
+                )
+                val primaryDoc = m.cloudDocId.ifBlank { "MOV-${m.id}" }
+                DeletedRecordsRegistry.registerDeletedWithAliases(
+                    collection = "movements",
+                    aliases = aliases,
+                    primaryEntityId = m.id.toString(),
+                    primaryDocId = primaryDoc,
+                    actor = actor
+                )
+                val tombDocId = safeId("movements_$primaryDoc", "movements_${m.id}")
+                val tombData = mutableMapOf<String, Any>(
+                    "collection" to "movements",
+                    "entityId" to m.id.toString(),
+                    "numericId" to m.id,
+                    "docId" to primaryDoc,
+                    "aliases" to aliases,
+                    "deletedAt" to FieldValue.serverTimestamp(),
+                    "deletedBy" to actor,
+                    "clusterCode" to cleanCluster
+                )
+                if (m.reference.isNotBlank()) tombData["reference"] = m.reference
+                if (m.syncUuid.isNotBlank()) tombData["syncUuid"] = m.syncUuid
+                runCatching {
+                    cRef.collection("deleted_records").document(tombDocId).set(tombData, SetOptions.merge()).await()
+                }
+            }
+
+            // Fetch all cloud movements matching cashbox (normalized case/whitespace insensitive fallback)
+            val allCloudMovements = cRef.collection("movements").get().await()
+            val matchedDocs = allCloudMovements.documents.filter { doc ->
+                val docBox = doc.safeString("cashbox")?.trim().orEmpty()
+                docBox.equals(cleanBox, ignoreCase = true)
+            }
+
+            if (matchedDocs.isNotEmpty()) {
+                matchedDocs.chunked(200).forEach { chunk ->
+                    val tombBatch = firestore.batch()
                     chunk.forEach { doc ->
-                        batch.delete(doc.reference)
+                        val docId = doc.id
+                        val numId = doc.safeLong("id") ?: 0L
+                        val ref = doc.safeString("reference")?.trim().orEmpty()
+                        val syncUuid = doc.safeString("syncUuid")?.trim().orEmpty()
+                        val aliases = listOfNotNull(
+                            numId.takeIf { it > 0L }?.toString(),
+                            numId.takeIf { it > 0L }?.let { "MOV-$it" },
+                            docId,
+                            ref.takeIf { it.isNotBlank() },
+                            syncUuid.takeIf { it.isNotBlank() }
+                        ).distinct()
+                        DeletedRecordsRegistry.registerDeletedWithAliases(
+                            collection = "movements",
+                            aliases = aliases,
+                            primaryEntityId = if (numId > 0L) numId.toString() else docId,
+                            primaryDocId = docId,
+                            actor = actor
+                        )
+                        val tombDocId = safeId("movements_$docId", docId)
+                        val tombData = mutableMapOf<String, Any>(
+                            "collection" to "movements",
+                            "entityId" to (if (numId > 0L) numId.toString() else docId),
+                            "docId" to docId,
+                            "aliases" to aliases,
+                            "deletedAt" to FieldValue.serverTimestamp(),
+                            "deletedBy" to actor,
+                            "clusterCode" to cleanCluster
+                        )
+                        if (numId > 0L) tombData["numericId"] = numId
+                        if (ref.isNotBlank()) tombData["reference"] = ref
+                        if (syncUuid.isNotBlank()) tombData["syncUuid"] = syncUuid
+                        tombBatch.set(cRef.collection("deleted_records").document(tombDocId), tombData, SetOptions.merge())
                     }
-                    batch.commit().await()
+                    tombBatch.commit().await()
+
+                    val delBatch = firestore.batch()
+                    chunk.forEach { doc ->
+                        delBatch.delete(doc.reference)
+                    }
+                    delBatch.commit().await()
                 }
             }
             Unit
@@ -4538,19 +4965,26 @@ class CloudErpSyncRepository(
             for (doc in snap.documents) {
                 val moveId = doc.getLong("id") ?: 0L
                 val docId = doc.id
-                DeletedRecordsRegistry.registerDeleted("stock_moves", moveId.takeIf { it > 0L }?.toString() ?: docId, docId, actor)
+                val aliases = listOfNotNull(moveId.takeIf { it > 0L }?.toString(), docId)
+                DeletedRecordsRegistry.registerDeletedWithAliases(
+                    collection = "stock_moves",
+                    aliases = aliases,
+                    primaryEntityId = moveId.takeIf { it > 0L }?.toString() ?: docId,
+                    primaryDocId = docId,
+                    actor = actor
+                )
                 val tombDocId = safeId("stock_moves_$docId", docId)
+                val tombData = mutableMapOf<String, Any>(
+                    "collection" to "stock_moves",
+                    "entityId" to (moveId.takeIf { it > 0L }?.toString() ?: docId),
+                    "docId" to docId,
+                    "aliases" to aliases,
+                    "deletedAt" to FieldValue.serverTimestamp(),
+                    "deletedBy" to actor
+                )
+                if (moveId > 0L) tombData["numericId"] = moveId
                 runCatching {
-                    cRef.collection("deleted_records").document(tombDocId).set(
-                        mapOf(
-                            "collection" to "stock_moves",
-                            "entityId" to docId,
-                            "docId" to docId,
-                            "deletedAt" to FieldValue.serverTimestamp(),
-                            "deletedBy" to actor
-                        ),
-                        SetOptions.merge()
-                    )
+                    cRef.collection("deleted_records").document(tombDocId).set(tombData, SetOptions.merge()).await()
                 }
                 runCatching { doc.reference.delete().await() }
             }
@@ -4569,19 +5003,26 @@ class CloudErpSyncRepository(
             for (doc in snap.documents) {
                 val moveId = doc.getLong("id") ?: 0L
                 val docId = doc.id
-                DeletedRecordsRegistry.registerDeleted("stock_moves", moveId.takeIf { it > 0L }?.toString() ?: docId, docId, actor)
+                val aliases = listOfNotNull(moveId.takeIf { it > 0L }?.toString(), docId)
+                DeletedRecordsRegistry.registerDeletedWithAliases(
+                    collection = "stock_moves",
+                    aliases = aliases,
+                    primaryEntityId = moveId.takeIf { it > 0L }?.toString() ?: docId,
+                    primaryDocId = docId,
+                    actor = actor
+                )
                 val tombDocId = safeId("stock_moves_$docId", docId)
+                val tombData = mutableMapOf<String, Any>(
+                    "collection" to "stock_moves",
+                    "entityId" to (moveId.takeIf { it > 0L }?.toString() ?: docId),
+                    "docId" to docId,
+                    "aliases" to aliases,
+                    "deletedAt" to FieldValue.serverTimestamp(),
+                    "deletedBy" to actor
+                )
+                if (moveId > 0L) tombData["numericId"] = moveId
                 runCatching {
-                    cRef.collection("deleted_records").document(tombDocId).set(
-                        mapOf(
-                            "collection" to "stock_moves",
-                            "entityId" to docId,
-                            "docId" to docId,
-                            "deletedAt" to FieldValue.serverTimestamp(),
-                            "deletedBy" to actor
-                        ),
-                        SetOptions.merge()
-                    )
+                    cRef.collection("deleted_records").document(tombDocId).set(tombData, SetOptions.merge()).await()
                 }
                 runCatching { doc.reference.delete().await() }
             }
@@ -4671,9 +5112,12 @@ class CloudErpSyncRepository(
         actor: String = currentActorId
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
+            if (DeletedRecordsRegistry.isMovementDeleted(m)) {
+                return@runCatching Unit
+            }
             val cRef = clusterRef(clusterCode)
-            val docId = "MOV-${m.id}"
-            val data = mapOf(
+            val docId = m.cloudDocId.trim().ifBlank { "MOV-${m.id}" }
+            val data = mutableMapOf<String, Any>(
                 "id" to m.id,
                 "txDate" to m.txDate,
                 "cashbox" to m.cashbox,
@@ -4684,9 +5128,12 @@ class CloudErpSyncRepository(
                 "reference" to m.reference,
                 "createdBy" to m.createdBy,
                 "createdAt" to m.createdAt,
+                "cloudDocId" to docId,
                 "serverUpdatedBy" to actor,
                 "serverUpdatedAt" to FieldValue.serverTimestamp()
             )
+            if (m.syncUuid.isNotBlank()) data["syncUuid"] = m.syncUuid
+            if (m.updatedAt > 0L) data["updatedAt"] = m.updatedAt
             cRef.collection("movements").document(docId).set(data, SetOptions.merge()).await()
             RoomTransactionLogger.log(
                 operation = "SYNC_SINGLE_MOVEMENT",

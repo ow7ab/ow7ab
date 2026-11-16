@@ -49,7 +49,8 @@ class PmpDatabaseMigration11To12Test {
                 PmpDatabase.MIGRATION_11_12,
                 PmpDatabase.MIGRATION_12_13,
                 PmpDatabase.MIGRATION_13_14,
-                PmpDatabase.MIGRATION_14_15
+                PmpDatabase.MIGRATION_14_15,
+                PmpDatabase.MIGRATION_15_16
             )
             .allowMainThreadQueries()
             .build()

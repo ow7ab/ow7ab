@@ -353,17 +353,28 @@ export const TreasuryModuleView: React.FC = () => {
       return;
     }
     const docId = (mov as any)._docId || `MOV-${mov.id}`;
+    const actor = userProfile?.username || 'admin';
     const res = await actionGuard.runGuarded({
       guardKey: `treasury_del_mov_${docId}`,
       operationType: 'DELETE',
-      userId: userProfile?.username || 'admin',
+      userId: actor,
       documentReference: docId,
       targetCollection: 'movements',
       payloadSummary: `حذف حركة ${mov.reference}`,
       execute: async () => {
-        await ErpDataService.deleteDocument('movements', docId);
+        await ErpDataService.deleteDocumentWithTombstone(
+          'movements',
+          docId,
+          mov.id || docId,
+          actor,
+          [
+            mov.reference,
+            mov.id ? `MOV-${mov.id}` : '',
+            (mov as any).syncUuid
+          ]
+        );
         await ErpDataService.logAudit(
-          userProfile?.username || 'admin',
+          actor,
           'DELETE_TREASURY_MOVEMENT',
           `حذف حركة ${mov.reference} (${mov.amount} ${mov.currency}) من ${mov.cashbox}`
         );
@@ -371,7 +382,7 @@ export const TreasuryModuleView: React.FC = () => {
       }
     });
     if (res.ok) {
-      notify('success', `تم حذف الحركة ${mov.reference} بنجاح`);
+      notify('success', `تم حذف الحركة ${mov.reference} نهائياً ومنع عودتها`);
     } else {
       notify('error', res.message);
     }
@@ -732,10 +743,11 @@ export const TreasuryModuleView: React.FC = () => {
     if (!canDeleteOrZero || actionGuard.isSubmitting) return;
     if (!window.confirm(`حذف الخزنة "${box.name}" نهائياً؟`)) return;
     const primaryDocId = cashboxDocId(box.name, box.id);
+    const actor = userProfile?.username || 'admin';
     const res = await actionGuard.runGuarded({
       guardKey: `treasury_delete_cashbox_${primaryDocId}`,
       operationType: 'DELETE',
-      userId: userProfile?.username || 'admin',
+      userId: actor,
       documentReference: primaryDocId,
       targetCollection: 'cashboxes',
       payloadSummary: `حذف خزنة ${box.name}`,
@@ -746,14 +758,26 @@ export const TreasuryModuleView: React.FC = () => {
         await Promise.all(
           matchingRawDocs.map((raw) => {
             const docId = (raw as any)._docId || cashboxDocId(raw.name, raw.id);
-            return ErpDataService.deleteDocument('cashboxes', docId);
+            return ErpDataService.deleteDocumentWithTombstone(
+              'cashboxes',
+              docId,
+              box.name,
+              actor,
+              [box.id, `BOX-${box.id}`, raw.id]
+            );
           })
         );
         if (matchingRawDocs.length === 0) {
-          await ErpDataService.deleteDocument('cashboxes', primaryDocId);
+          await ErpDataService.deleteDocumentWithTombstone(
+            'cashboxes',
+            primaryDocId,
+            box.name,
+            actor,
+            [box.id, `BOX-${box.id}`]
+          );
         }
         await ErpDataService.logAudit(
-          userProfile?.username || 'admin',
+          actor,
           'DELETE_CASHBOX',
           `حذف الخزنة ${box.name}`
         );
@@ -761,7 +785,7 @@ export const TreasuryModuleView: React.FC = () => {
       }
     });
     if (res.ok) {
-      notify('success', `تم حذف الخزنة ${box.name}`);
+      notify('success', `تم حذف الخزنة ${box.name} وتسجيل شاهد الحذف`);
     } else {
       notify('error', res.message || 'تعذر حذف الخزنة');
     }

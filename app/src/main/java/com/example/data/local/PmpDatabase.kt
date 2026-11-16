@@ -50,9 +50,10 @@ import kotlinx.coroutines.sync.withLock
         ChartAccountEntity::class,
         JournalEntryEntity::class,
         JournalLineEntity::class,
-        IdempotencyRequestEntity::class
+        IdempotencyRequestEntity::class,
+        RecordTombstoneEntity::class
     ],
-    version = 15,
+    version = 16,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
@@ -282,13 +283,16 @@ abstract class PmpDatabase : RoomDatabase() {
                 """.trimIndent()
             )
 
-            // Drop any indices not declared in @Entity annotations so Room schema validation never throws IllegalStateException
+            // Drop any legacy indices not declared in @Entity annotations so Room schema validation never throws IllegalStateException
             db.execSQL("DROP INDEX IF EXISTS `index_user_accounts_username`")
             db.execSQL("DROP INDEX IF EXISTS `index_user_accounts_userCode`")
             db.execSQL("DROP INDEX IF EXISTS `index_invoices_invoiceNo`")
             db.execSQL("DROP INDEX IF EXISTS `index_invoice_items_invoiceId`")
             db.execSQL("DROP INDEX IF EXISTS `index_movements_reference`")
             db.execSQL("DROP INDEX IF EXISTS `index_customers_name`")
+
+            // Ensure V16 movements columns & indices and record_tombstones table match Room schema
+            upgradeSchemaToV16TombstonesAndHardening(db)
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -1109,12 +1113,190 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private fun upgradeSchemaToV16TombstonesAndHardening(db: SupportSQLiteDatabase) {
+            val movCols = getTableColumns(db, "movements").toMutableSet()
+            if (movCols.isNotEmpty()) {
+                addColumnIfMissing(db, "movements", "cloudDocId", "TEXT NOT NULL DEFAULT ''", movCols)
+                addColumnIfMissing(db, "movements", "syncUuid", "TEXT NOT NULL DEFAULT ''", movCols)
+                addColumnIfMissing(db, "movements", "updatedAt", "INTEGER NOT NULL DEFAULT 0", movCols)
+                db.execSQL("UPDATE `movements` SET `cloudDocId` = 'MOV-' || `id` WHERE TRIM(`cloudDocId`) = ''")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `idx_mov_cashbox` ON `movements` (`cashbox`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `idx_mov_tx_date` ON `movements` (`txDate`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `idx_mov_ref` ON `movements` (`reference`)")
+            }
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `record_tombstones` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `collectionName` TEXT NOT NULL,
+                    `normalizedKey` TEXT NOT NULL,
+                    `entityId` TEXT NOT NULL,
+                    `docId` TEXT NOT NULL,
+                    `deletedAt` INTEGER NOT NULL,
+                    `deletedBy` TEXT NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_tomb_col_key` ON `record_tombstones` (`collectionName`, `normalizedKey`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_tomb_col` ON `record_tombstones` (`collectionName`)")
+        }
+
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+                upgradeSchemaToV12AndBackfill(db)
+                upgradeSchemaToV13Phase3(db)
+                upgradeSchemaToV14Accounting(db)
+                upgradeSchemaToV15Idempotency(db)
+                upgradeSchemaToV16TombstonesAndHardening(db)
+            }
+        }
+
         private val dbCallbackMutex = Mutex()
         private val dbCallbackScope = CoroutineScope(
             SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
                 Log.e("PmpDatabase", "Caught exception in DatabaseCallback", throwable)
             }
         )
+
+        suspend fun purgeTombstonedRecordsLocally(dao: PmpDao): Int {
+            var purged = 0
+            val epoch = DeletedRecordsRegistry.getClusterEpoch()
+            if (epoch > 0L) {
+                purged += dao.deletePreEpochMovements(epoch)
+            }
+            dao.getMovementsDirect().forEach { m ->
+                if (DeletedRecordsRegistry.isMovementDeleted(m)) {
+                    dao.deleteMovementById(m.id)
+                    if (m.reference.isNotBlank()) dao.deleteMovementByReference(m.reference)
+                    if (m.cloudDocId.isNotBlank()) dao.deleteMovementByCloudDocId(m.cloudDocId)
+                    if (m.syncUuid.isNotBlank()) dao.deleteMovementBySyncUuid(m.syncUuid)
+                    purged++
+                }
+            }
+            dao.getTransfersDirect().forEach { t ->
+                if (DeletedRecordsRegistry.isPreEpoch(t.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("transfers", t.id) ||
+                    DeletedRecordsRegistry.isDeleted("transfers", "TRF-${t.id}") ||
+                    (t.reference.isNotBlank() && DeletedRecordsRegistry.isDeleted("transfers", t.reference))
+                ) {
+                    dao.deleteTransferById(t.id)
+                    purged++
+                }
+            }
+            dao.getInvoicesDirect().forEach { inv ->
+                if (DeletedRecordsRegistry.isPreEpoch(inv.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("invoices", inv.id) ||
+                    DeletedRecordsRegistry.isDeleted("invoices", "INV-${inv.id}") ||
+                    (inv.invoiceNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("invoices", inv.invoiceNo))
+                ) {
+                    dao.deleteInvoicePaymentsByInvoiceId(inv.id)
+                    dao.deleteInvoiceItemsByInvoiceId(inv.id)
+                    dao.deleteInvoiceById(inv.id)
+                    purged++
+                }
+            }
+            dao.getCustomersDirect().forEach { c ->
+                if (DeletedRecordsRegistry.isPreEpoch(c.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("customers", c.id) ||
+                    DeletedRecordsRegistry.isDeleted("customers", "CUST-${c.id}") ||
+                    DeletedRecordsRegistry.isDeleted("customers", c.name)
+                ) {
+                    dao.deleteCustomer(c.id)
+                    purged++
+                }
+            }
+            dao.getCashboxesDirect().forEach { cb ->
+                val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
+                if (DeletedRecordsRegistry.isDeleted("cashboxes", cb.id) ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", "BOX-${cb.id}") ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId)
+                ) {
+                    dao.deleteCashbox(cb.id)
+                    purged++
+                }
+            }
+            dao.getWarehousesDirect().forEach { wh ->
+                if (DeletedRecordsRegistry.isDeleted("warehouses", wh.id) ||
+                    DeletedRecordsRegistry.isDeleted("warehouses", "WH-${wh.id}") ||
+                    DeletedRecordsRegistry.isDeleted("warehouses", wh.name)
+                ) {
+                    dao.clearStockMovesByWarehouse(wh.id)
+                    dao.deleteWarehouse(wh.id)
+                    purged++
+                }
+            }
+            dao.getProductsDirect().forEach { p ->
+                if (DeletedRecordsRegistry.isDeleted("products", p.id) ||
+                    DeletedRecordsRegistry.isDeleted("products", "PROD-${p.id}") ||
+                    DeletedRecordsRegistry.isDeleted("products", "PRD-${p.id}")
+                ) {
+                    dao.clearStockMovesByProduct(p.id)
+                    dao.deleteProduct(p.id)
+                    purged++
+                }
+            }
+            dao.getStockMovesDirect().forEach { sm ->
+                if (DeletedRecordsRegistry.isPreEpoch(sm.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("stock_moves", sm.id) ||
+                    DeletedRecordsRegistry.isDeleted("stock_moves", "SM-${sm.id}")
+                ) {
+                    dao.deleteStockMoveById(sm.id)
+                    purged++
+                }
+            }
+            dao.getFactoryItemsDirect().forEach { fi ->
+                if (DeletedRecordsRegistry.isDeleted("factory_items", fi.id) ||
+                    DeletedRecordsRegistry.isDeleted("factory_items", "FI-${fi.id}") ||
+                    DeletedRecordsRegistry.isDeleted("factory_items", fi.name)
+                ) {
+                    dao.deleteFactoryItemById(fi.id)
+                    purged++
+                }
+            }
+            dao.getFactoryMovesDirect().forEach { fm ->
+                if (DeletedRecordsRegistry.isPreEpoch(fm.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("factory_moves", fm.id) ||
+                    DeletedRecordsRegistry.isDeleted("factory_moves", "FM-${fm.id}")
+                ) {
+                    dao.deleteFactoryMoveById(fm.id)
+                    purged++
+                }
+            }
+            dao.getHalfaInvoicesDirect().forEach { hi ->
+                if (DeletedRecordsRegistry.isPreEpoch(hi.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("halfa_invoices", hi.id) ||
+                    DeletedRecordsRegistry.isDeleted("halfa_invoices", "HINV-${hi.id}") ||
+                    (hi.invoiceNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("halfa_invoices", hi.invoiceNo))
+                ) {
+                    dao.deleteHalfaInvoiceById(hi.id)
+                    purged++
+                }
+            }
+            dao.getFormulationsDirect().forEach { f ->
+                if (DeletedRecordsRegistry.isPreEpoch(f.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("lab_formulations", f.id) ||
+                    DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-${f.id}") ||
+                    (f.formulaNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", f.formulaNo))
+                ) {
+                    dao.deleteFormulation(f.id)
+                    purged++
+                }
+            }
+            dao.getProductionBatchesDirect().forEach { b ->
+                if (DeletedRecordsRegistry.isPreEpoch(b.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("paint_batches", b.id) ||
+                    DeletedRecordsRegistry.isDeleted("paint_batches", "BATCH-${b.id}") ||
+                    (b.batchNumber.isNotBlank() && DeletedRecordsRegistry.isDeleted("paint_batches", b.batchNumber))
+                ) {
+                    dao.deleteProductionBatch(b.id)
+                    purged++
+                }
+            }
+            return purged
+        }
 
         fun getDatabase(context: Context): PmpDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -1142,7 +1324,8 @@ abstract class PmpDatabase : RoomDatabase() {
                         MIGRATION_11_12,
                         MIGRATION_12_13,
                         MIGRATION_13_14,
-                        MIGRATION_14_15
+                        MIGRATION_14_15,
+                        MIGRATION_15_16
                     )
                     .addCallback(DatabaseCallback(appContext))
                     .build()
@@ -1162,12 +1345,14 @@ abstract class PmpDatabase : RoomDatabase() {
                         DeletedRecordsRegistry.init(appContext)
                         INSTANCE?.let { database ->
                             val dao = database.pmpDao()
+                            DeletedRecordsRegistry.syncWithDao(dao)
                             val restored = DatabaseBackupManager.restoreIfEmpty(appContext, dao)
                             if (!restored) {
                                 seedInitialData(dao, database.erpInventoryDao())
                             } else {
                                 seedDefaultPackagingRulesIfEmpty(database.erpInventoryDao())
                             }
+                            purgeTombstonedRecordsLocally(dao)
                             seedDefaultChartOfAccountsIfEmpty(database.erpAccountingDao())
                             DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
                         }
@@ -1190,7 +1375,9 @@ abstract class PmpDatabase : RoomDatabase() {
                         DeletedRecordsRegistry.init(appContext)
                         INSTANCE?.let { database ->
                             val dao = database.pmpDao()
+                            DeletedRecordsRegistry.syncWithDao(dao)
                             DatabaseBackupManager.restoreIfEmpty(appContext, dao)
+                            purgeTombstonedRecordsLocally(dao)
                             seedDefaultUsersIfEmpty(dao)
                             seedDefaultPackagingRulesIfEmpty(database.erpInventoryDao())
                             seedDefaultChartOfAccountsIfEmpty(database.erpAccountingDao())

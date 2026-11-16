@@ -235,4 +235,39 @@ class CloudSyncAuditTest {
     assertTrue(viewModel.serverClusterCode.value.isNotBlank())
     viewModel.refreshPreflightCheck()
   }
+
+  @Test
+  fun `cloudErpSyncRepository builds deterministic email directory keys and canonical RBAC tiers`() {
+    assertEquals(
+      "EMAIL_oaw7ab_gmail_com",
+      com.example.data.remote.CloudErpSyncRepository.buildEmailDirectoryKey("  OAW7AB@gmail.com ")
+    )
+
+    val admin = UserAccountEntity(
+      id = 1L, userCode = "USR-ADMIN", fullName = "Admin", username = "admin",
+      role = "مدير النظام", branch = "الخرطوم", permissions = "", serverSyncToken = "T", active = true
+    )
+    val manager = UserAccountEntity(
+      id = 2L, userCode = "MGR-1", fullName = "Mgr", username = "mgr",
+      role = "المدير", branch = "الخرطوم", permissions = "", serverSyncToken = "T", active = true
+    )
+    val accountant = UserAccountEntity(
+      id = 3L, userCode = "ACC-1", fullName = "Acc", username = "acc",
+      role = "المحاسب", branch = "الخرطوم", permissions = "", serverSyncToken = "T", active = true
+    )
+    val deputy = UserAccountEntity(
+      id = 4L, userCode = "DEP-1", fullName = "Dep", username = "dep",
+      role = "نائب محاسب", branch = "الخرطوم", permissions = "", serverSyncToken = "T", active = true
+    )
+    val employee = UserAccountEntity(
+      id = 5L, userCode = "EMP-1", fullName = "Emp", username = "emp",
+      role = "مسؤول مبيعات وفواتير", branch = "الخرطوم", permissions = "", serverSyncToken = "T", active = true
+    )
+
+    assertEquals("ADMIN", com.example.data.remote.CloudErpSyncRepository.resolveCanonicalRbacTier(admin))
+    assertEquals("MANAGER", com.example.data.remote.CloudErpSyncRepository.resolveCanonicalRbacTier(manager))
+    assertEquals("ACCOUNTANT", com.example.data.remote.CloudErpSyncRepository.resolveCanonicalRbacTier(accountant))
+    assertEquals("DEPUTY_ACCOUNTANT", com.example.data.remote.CloudErpSyncRepository.resolveCanonicalRbacTier(deputy))
+    assertEquals("EMPLOYEE", com.example.data.remote.CloudErpSyncRepository.resolveCanonicalRbacTier(employee))
+  }
 }

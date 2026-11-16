@@ -145,6 +145,9 @@ import {
   computeCustomerStatement,
   normalizeArabicText,
   normalizeEntityKey,
+  extractBareEntityId,
+  buildTombstoneKeySet,
+  isRecordTombstoned as checkRecordTombstoned,
   resolveCanonicalCurrency,
   isStockInMoveKind,
   resolveWarehouseFilterIds,
@@ -355,70 +358,103 @@ class ErpDataServiceImpl {
   }
 
   private tombstoneKeysByCollection: Map<string, Set<string>> = new Map();
+  private clusterEpochTimestamp: number = 0;
   private tombstoneUnsub: Unsubscribe | null = null;
+  private epochUnsub: Unsubscribe | null = null;
+  private activeCollectionRefreshers: Set<() => void> = new Set();
+
+  private notifyCollectionRefreshers(): void {
+    this.activeCollectionRefreshers.forEach((refresh) => {
+      try {
+        refresh();
+      } catch {
+        // Ignore stale listener cleanup races
+      }
+    });
+  }
+
+  private registerLocalTombstoneKeys(collectionName: string, rawKeys: Array<unknown>): void {
+    const col = String(collectionName || '').trim().toLowerCase();
+    if (!col) return;
+    const nextMap = new Map(this.tombstoneKeysByCollection);
+    const set = new Set(nextMap.get(col) || []);
+    for (const rawKey of rawKeys) {
+      if (rawKey === undefined || rawKey === null) continue;
+      const str = String(rawKey).trim();
+      if (!str) continue;
+      set.add(str.toLowerCase());
+      const norm = normalizeEntityKey(str);
+      if (norm) set.add(norm);
+      const bare = extractBareEntityId(str);
+      if (bare) {
+        set.add(bare.toLowerCase());
+        const bareNorm = normalizeEntityKey(bare);
+        if (bareNorm) set.add(bareNorm);
+      }
+    }
+    nextMap.set(col, set);
+    this.tombstoneKeysByCollection = nextMap;
+    this.notifyCollectionRefreshers();
+  }
 
   private ensureTombstoneSubscription(): void {
-    if (this.tombstoneUnsub) return;
-    try {
-      const colRef = collection(firestore, this.collectionPath('deleted_records', PRIMARY_CLUSTER));
-      this.tombstoneUnsub = onSnapshot(
-        colRef,
-        (snap) => {
-          const nextMap = new Map<string, Set<string>>();
-          snap.forEach((d) => {
-            const data = d.data() || {};
-            const col = String(data.collection || '').trim();
-            if (!col) return;
-            let set = nextMap.get(col);
-            if (!set) {
-              set = new Set<string>();
-              nextMap.set(col, set);
+    if (!this.tombstoneUnsub) {
+      try {
+        const colRef = collection(firestore, this.collectionPath('deleted_records', PRIMARY_CLUSTER));
+        this.tombstoneUnsub = onSnapshot(
+          colRef,
+          (snap) => {
+            const docs: Array<Record<string, any>> = [];
+            snap.forEach((d) => docs.push({ _docId: d.id, ...d.data() }));
+            this.tombstoneKeysByCollection = buildTombstoneKeySet(docs);
+            this.notifyCollectionRefreshers();
+          },
+          () => {
+            // Reset so post-auth callers re-attach automatically
+            this.tombstoneUnsub = null;
+          }
+        );
+      } catch {
+        this.tombstoneUnsub = null;
+      }
+    }
+
+    if (!this.epochUnsub) {
+      try {
+        const epochRef = doc(firestore, this.collectionPath('system_metadata', PRIMARY_CLUSTER), 'cluster_epoch');
+        this.epochUnsub = onSnapshot(
+          epochRef,
+          (snap) => {
+            if (!snap.exists()) return;
+            const d = snap.data() || {};
+            const rawEpoch = d.wipeTimestamp;
+            const parsed =
+              rawEpoch && typeof rawEpoch === 'object' && typeof rawEpoch.seconds === 'number'
+                ? rawEpoch.seconds * 1000
+                : Number(rawEpoch || 0);
+            if (Number.isFinite(parsed) && parsed > this.clusterEpochTimestamp) {
+              this.clusterEpochTimestamp = parsed;
+              this.notifyCollectionRefreshers();
             }
-            const docId = String(data.docId || d.id || '').trim();
-            const entityId = String(data.entityId ?? '').trim();
-            if (docId) set.add(docId.toLowerCase());
-            if (entityId) {
-              set.add(entityId.toLowerCase());
-              set.add(normalizeEntityKey(entityId));
-            }
-          });
-          this.tombstoneKeysByCollection = nextMap;
-        },
-        () => {}
-      );
-    } catch {
-      // Ignore subscription setup issues in unit test environment
+          },
+          () => {
+            this.epochUnsub = null;
+          }
+        );
+      } catch {
+        this.epochUnsub = null;
+      }
     }
   }
 
   private isRecordTombstoned(collectionName: string, raw: Record<string, any>): boolean {
-    const keys = this.tombstoneKeysByCollection.get(collectionName);
-    if (!keys || keys.size === 0) return false;
-    const candidates = [
-      raw._docId,
-      raw.id,
-      raw.name,
-      raw.invoiceNo,
-      raw.reference,
-      collectionName === 'warehouses' && raw.id ? `WH-${raw.id}` : '',
-      collectionName === 'stock_moves' && raw.id ? `SM-${raw.id}` : '',
-      collectionName === 'products' && raw.id ? `PRD-${raw.id}` : '',
-      collectionName === 'products' && raw.id ? `PROD-${raw.id}` : ''
-    ];
-    for (const c of candidates) {
-      if (c === undefined || c === null) continue;
-      const str = String(c).trim();
-      if (!str) continue;
-      if (keys.has(str.toLowerCase()) || keys.has(normalizeEntityKey(str))) {
-        return true;
-      }
-    }
-    return false;
+    return checkRecordTombstoned(collectionName, raw, this.tombstoneKeysByCollection, this.clusterEpochTimestamp);
   }
 
   /**
    * Subscribes in real-time to `/erp_clusters/PMP-ERP-MAIN-CLUSTER/{collectionName}`.
-   * Automatically filters out records present in `deleted_records` tombstones and deduplicates records on read.
+   * Automatically filters out records present in `deleted_records` tombstones or pre-epoch wiped data,
+   * re-emits when tombstones update, and deduplicates records on read.
    */
   subscribeToCollection<T = any>(
     collectionName: ErpCollectionName | string,
@@ -428,17 +464,29 @@ class ErpDataServiceImpl {
     this.ensureTombstoneSubscription();
     const primaryColRef = collection(firestore, this.collectionPath(collectionName, PRIMARY_CLUSTER));
 
+    let latestRawItems: T[] = [];
+    let hasReceivedSnapshot = false;
+
+    const refilterAndEmit = () => {
+      if (!hasReceivedSnapshot) return;
+      const filtered = latestRawItems.filter(
+        (item) => !this.isRecordTombstoned(String(collectionName), item as Record<string, any>)
+      );
+      onData(deduplicateCollectionRecords<T>(String(collectionName), filtered));
+    };
+
+    this.activeCollectionRefreshers.add(refilterAndEmit);
+
     const unsubPrimary = onSnapshot(
       primaryColRef,
       (snap) => {
-        const primaryItems: T[] = [];
+        const rawList: T[] = [];
         snap.forEach((docSnap) => {
-          const normalized = normalizeDocData<T>(docSnap.id, docSnap.data());
-          if (!this.isRecordTombstoned(collectionName, normalized as Record<string, any>)) {
-            primaryItems.push(normalized);
-          }
+          rawList.push(normalizeDocData<T>(docSnap.id, docSnap.data()));
         });
-        onData(deduplicateCollectionRecords<T>(collectionName, primaryItems));
+        latestRawItems = rawList;
+        hasReceivedSnapshot = true;
+        refilterAndEmit();
       },
       (err) => {
         const path = this.collectionPath(collectionName, PRIMARY_CLUSTER);
@@ -449,6 +497,7 @@ class ErpDataServiceImpl {
     );
 
     return () => {
+      this.activeCollectionRefreshers.delete(refilterAndEmit);
       unsubPrimary();
     };
   }
@@ -457,28 +506,38 @@ class ErpDataServiceImpl {
    * Subscribes to tombstones and cluster epoch changes in `/erp_clusters/PMP-ERP-MAIN-CLUSTER`.
    */
   subscribeTombstonesAndEpoch(): Unsubscribe {
-    const unsub = onSnapshot(
-      collection(firestore, this.collectionPath('deleted_users', PRIMARY_CLUSTER)),
-      () => {},
-      () => {}
-    );
-    return () => unsub();
+    this.ensureTombstoneSubscription();
+    return () => {
+      if (this.activeCollectionRefreshers.size === 0) {
+        this.tombstoneUnsub?.();
+        this.tombstoneUnsub = null;
+        this.epochUnsub?.();
+        this.epochUnsub = null;
+      }
+    };
   }
 
   /**
-   * Fetches all documents once directly from the Firestore server (bypasses stale offline cache).
+   * Fetches all documents once directly from the Firestore server (bypasses stale offline cache)
+   * and strictly filters out tombstoned & pre-epoch records.
    */
   async fetchCollectionOnce<T = any>(
     collectionName: ErpCollectionName | string,
     clusterOverride?: string
   ): Promise<T[]> {
+    this.ensureTombstoneSubscription();
     const targetCluster = clusterOverride || PRIMARY_CLUSTER;
     const path = this.collectionPath(collectionName, targetCluster);
     const colRef = collection(firestore, path);
     try {
       const snap = await getDocsFromServer(colRef);
       const items: T[] = [];
-      snap.forEach((d) => items.push(normalizeDocData<T>(d.id, d.data())));
+      snap.forEach((d) => {
+        const normalized = normalizeDocData<T>(d.id, d.data());
+        if (!this.isRecordTombstoned(String(collectionName), normalized as Record<string, any>)) {
+          items.push(normalized);
+        }
+      });
       return deduplicateCollectionRecords<T>(collectionName, items);
     } catch (err) {
       CloudErrorLogger.recordError(`FETCH_${String(collectionName).toUpperCase()}`, path, err);
@@ -507,6 +566,27 @@ class ErpDataServiceImpl {
     const ref = doc(firestore, this.collectionPath(collectionName, clusterOverride), cleanId);
     const dataToWrite: Record<string, any> = { ...payload };
     delete dataToWrite._docId;
+
+    // Guard transactional collections against re-uploading already-tombstoned records from stale retry queues
+    const guardTombstoneCollections = new Set([
+      'movements',
+      'transfers',
+      'invoices',
+      'invoice_items',
+      'invoice_payments',
+      'stock_moves',
+      'factory_moves',
+      'halfa_invoices',
+      'lab_formulations',
+      'paint_batches'
+    ]);
+    if (
+      guardTombstoneCollections.has(String(collectionName)) &&
+      this.isRecordTombstoned(String(collectionName), { ...dataToWrite, _docId: cleanId })
+    ) {
+      console.warn(`Blocked upsert of tombstoned record [${collectionName}/${cleanId}] to prevent resurrection.`);
+      return cleanId;
+    }
 
     // Enforce balanced journal entry invariant before touching Firestore
     if (collectionName === 'journal_entries') {
@@ -629,36 +709,61 @@ class ErpDataServiceImpl {
   }
 
   /**
-   * Deletes a document AND records an Android-compatible tombstone in `deleted_records`
-   * so offline/mobile devices remove it locally and never re-upload it.
+   * Registers an authoritative tombstone in `deleted_records` BEFORE deleting the target document(s)
+   * (plus any cross-platform aliases) so offline/mobile devices remove it locally and never re-upload it.
    */
   async deleteDocumentWithTombstone(
     collectionName: ErpCollectionName | string,
     docId: string,
     entityIdOrName: number | string,
-    deletedBy: string = 'المدير'
+    deletedBy: string = 'المدير',
+    aliasKeys: Array<string | number | null | undefined> = []
   ): Promise<void> {
     const cleanId = safeId(docId, docId);
-    await this.deleteDocument(collectionName, cleanId);
+    const cleanAliases = Array.from(
+      new Set(
+        [cleanId, String(entityIdOrName), ...aliasKeys]
+          .map((v) => (v === undefined || v === null ? '' : String(v).trim()))
+          .filter(Boolean)
+      )
+    );
+
+    this.registerLocalTombstoneKeys(String(collectionName), cleanAliases);
 
     const tombDocId = safeId(`${collectionName}_${cleanId}`, `${collectionName}_${Date.now()}`);
     const tombPath = `${this.collectionPath('deleted_records', PRIMARY_CLUSTER)}/${tombDocId}`;
     try {
+      const numericEntityId = Number(entityIdOrName);
+      const tombPayload: Record<string, any> = {
+        collection: collectionName,
+        docId: cleanId,
+        entityId: String(entityIdOrName),
+        aliases: cleanAliases,
+        deletedBy: deletedBy || 'المدير',
+        deletedAt: Date.now(),
+        serverUpdatedAt: serverTimestamp()
+      };
+      if (Number.isFinite(numericEntityId) && numericEntityId > 0) {
+        tombPayload.numericId = numericEntityId;
+      }
       await setDoc(
         doc(firestore, this.collectionPath('deleted_records', PRIMARY_CLUSTER), tombDocId),
-        {
-          collection: collectionName,
-          docId: cleanId,
-          entityId: String(entityIdOrName),
-          deletedBy: deletedBy || 'المدير',
-          deletedAt: Date.now(),
-          serverUpdatedAt: serverTimestamp()
-        },
+        tombPayload,
         { merge: true }
       );
     } catch (err) {
       CloudErrorLogger.recordError('WRITE_TOMBSTONE', tombPath, err);
       throw err;
+    }
+
+    await this.deleteDocument(collectionName, cleanId);
+
+    // Best-effort cleanup of secondary alias Firestore docs (e.g. MOV-123 alongside MOV-IDEM-...)
+    const extraDocCandidates = aliasKeys
+      .map((a) => (a === undefined || a === null ? '' : safeId(String(a), '')))
+      .filter((d) => d && d !== cleanId && /^(MOV|INV|TRF|CUST|WH|SM|FI|FM|PRD|PROD|BOX|CB)-/i.test(d));
+    for (const extraDoc of extraDocCandidates) {
+      await this.deleteDocument(collectionName, extraDoc).catch(() => {});
     }
   }
 

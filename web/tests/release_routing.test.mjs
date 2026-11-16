@@ -145,3 +145,20 @@ test('Routing: normalizes root and /ow7ab subpath routes cleanly without 404', (
   assert.equal(Routing.normalizeAppRoute('/employee'), '/employee');
   assert.equal(Routing.normalizeAppRoute('/unknown-random-route'), '/');
 });
+
+test('ReleaseService: getDownloadMirrors provides deduplicated GitHub CDN and ERP stream mirrors', () => {
+  const defaultMirrors = ReleaseService.getDownloadMirrors(ReleaseService.DEFAULT_STABLE_RELEASE);
+  assert.equal(defaultMirrors.length, 2);
+  assert.ok(defaultMirrors.every((m) => !m.url.includes('raw.githubusercontent.com')));
+  assert.ok(defaultMirrors.some((m) => m.id === 'github-latest'));
+  assert.ok(defaultMirrors.some((m) => m.id === 'server-stream'));
+
+  const versionedMirrors = ReleaseService.getDownloadMirrors({
+    ...ReleaseService.DEFAULT_STABLE_RELEASE,
+    downloadUrl: 'https://github.com/ow7ab/ow7ab/releases/download/v21.0/pmp-paints-latest.apk'
+  });
+  assert.equal(versionedMirrors.length, 3);
+  assert.ok(versionedMirrors.some((m) => m.id === 'github-versioned'));
+  assert.ok(versionedMirrors.some((m) => m.id === 'github-latest'));
+  assert.ok(versionedMirrors.some((m) => m.id === 'server-stream'));
+});

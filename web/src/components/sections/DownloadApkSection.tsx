@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useLanguage } from '../../context/LanguageContext';
 import { APP_VERSION_CONTRACT, resolveAssetUrl } from '../../config/appVersionContract';
 import { useLatestRelease } from '../../hooks/useLatestRelease';
-import { formatReleaseDate } from '../../services/ReleaseService';
+import { formatReleaseDate, getDownloadMirrors } from '../../services/ReleaseService';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
 import {
@@ -13,7 +13,12 @@ import {
   Calendar,
   HardDrive,
   RefreshCw,
-  Monitor
+  Monitor,
+  Copy,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Link2
 } from 'lucide-react';
 
 export const DownloadApkSection: React.FC = () => {
@@ -24,6 +29,21 @@ export const DownloadApkSection: React.FC = () => {
     isLoading,
     refreshReleases
   } = useLatestRelease();
+  const [showVerificationPanel, setShowVerificationPanel] = useState(false);
+  const [copiedField, setCopiedField] = useState<'apk' | 'cert' | null>(null);
+
+  const handleCopyHash = async (value: string, field: 'apk' | 'cert') => {
+    if (!value) return;
+    try {
+      await navigator.clipboard?.writeText(value);
+      setCopiedField(field);
+      setTimeout(() => setCopiedField((prev) => (prev === field ? null : prev)), 2000);
+    } catch {
+      // Ignore clipboard API unavailability
+    }
+  };
+
+  const downloadMirrors = getDownloadMirrors(latestRelease);
 
   const directDownloadUrl =
     latestRelease?.downloadUrl || APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL;
@@ -339,7 +359,160 @@ export const DownloadApkSection: React.FC = () => {
                 <RefreshCw size={13} className={isLoading ? 'animate-spin' : ''} />
                 <span>{language === 'ar' ? 'تحديث الحالة' : 'Refresh'}</span>
               </button>
+              <button
+                type="button"
+                onClick={() => setShowVerificationPanel((prev) => !prev)}
+                data-testid="toggle-verification-panel-btn"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--text-primary)',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px'
+                }}
+              >
+                <Link2 size={13} color="var(--pmp-gold)" />
+                <span>{language === 'ar' ? 'التحقق الأمني والروابط البديلة' : 'Checksum & Mirrors'}</span>
+                {showVerificationPanel ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              </button>
             </div>
+
+            {showVerificationPanel && (
+              <div
+                data-testid="apk-verification-panel"
+                style={{
+                  marginTop: '6px',
+                  padding: '14px 16px',
+                  borderRadius: '14px',
+                  background: 'var(--surface-primary)',
+                  border: '1px solid var(--border-subtle)',
+                  textAlign: 'start',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px'
+                }}
+              >
+                {latestRelease?.apkSha256 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                      <span style={{ fontSize: '11.5px', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                        {language === 'ar' ? 'بصمة التحقق الأمنية للحزمة (SHA-256):' : 'APK SHA-256 Checksum:'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyHash(latestRelease.apkSha256, 'apk')}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: 'var(--pmp-cyan-light)',
+                          fontSize: '11.5px',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px'
+                        }}
+                      >
+                        {copiedField === 'apk' ? <Check size={12} color="var(--pmp-green)" /> : <Copy size={12} />}
+                        <span>{copiedField === 'apk' ? (language === 'ar' ? 'تم النسخ' : 'Copied') : (language === 'ar' ? 'نسخ' : 'Copy')}</span>
+                      </button>
+                    </div>
+                    <code
+                      dir="ltr"
+                      style={{
+                        fontSize: '11px',
+                        fontFamily: 'monospace',
+                        color: 'var(--text-primary)',
+                        wordBreak: 'break-all',
+                        background: 'var(--bg-base)',
+                        padding: '6px 8px',
+                        borderRadius: '8px',
+                        border: '1px solid var(--border-subtle)'
+                      }}
+                    >
+                      {latestRelease.apkSha256}
+                    </code>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                    <span style={{ fontSize: '11.5px', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                      {language === 'ar' ? 'شهادة التوقيع الرقمي المعتمدة:' : 'Signing Certificate SHA-256:'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopyHash(
+                          latestRelease?.signingCertSha256 || APP_VERSION_CONTRACT.SIGNING_CERT_SHA256,
+                          'cert'
+                        )
+                      }
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--pmp-cyan-light)',
+                        fontSize: '11.5px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px'
+                      }}
+                    >
+                      {copiedField === 'cert' ? <Check size={12} color="var(--pmp-green)" /> : <Copy size={12} />}
+                      <span>{copiedField === 'cert' ? (language === 'ar' ? 'تم النسخ' : 'Copied') : (language === 'ar' ? 'نسخ' : 'Copy')}</span>
+                    </button>
+                  </div>
+                  <code
+                    dir="ltr"
+                    style={{
+                      fontSize: '11px',
+                      fontFamily: 'monospace',
+                      color: 'var(--text-primary)',
+                      wordBreak: 'break-all',
+                      background: 'var(--bg-base)',
+                      padding: '6px 8px',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border-subtle)'
+                    }}
+                  >
+                    {latestRelease?.signingCertSha256 || APP_VERSION_CONTRACT.SIGNING_CERT_SHA256}
+                  </code>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '4px' }}>
+                  <span style={{ fontSize: '11.5px', fontWeight: 800, color: 'var(--text-secondary)' }}>
+                    {language === 'ar' ? 'مسارات التحميل المباشر البديلة:' : 'Alternative Direct Mirrors:'}
+                  </span>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                    {downloadMirrors.map((mirror) => (
+                      <a
+                        key={mirror.id}
+                        href={mirror.url}
+                        download={APP_VERSION_CONTRACT.DOWNLOAD_APK_FILENAME}
+                        style={{
+                          padding: '6px 12px',
+                          borderRadius: '10px',
+                          border: '1px solid var(--border-subtle)',
+                          background: 'var(--bg-base)',
+                          color: 'var(--pmp-cyan-light)',
+                          fontSize: '11.5px',
+                          fontWeight: 700,
+                          textDecoration: 'none'
+                        }}
+                      >
+                        {language === 'ar' ? mirror.labelAr : mirror.labelEn}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Clean Release Summary */}

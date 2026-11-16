@@ -1,9 +1,11 @@
 import React from 'react';
 import { safeStorageRemove } from '../../utils/safeStorage';
+import { isChunkLoadError } from '../../utils/lazyWithRetry';
 
 interface ErrorBoundaryState {
   hasError: boolean;
   errorMessage: string;
+  isChunkFailure: boolean;
 }
 
 export class ErrorBoundary extends React.Component<
@@ -14,14 +16,16 @@ export class ErrorBoundary extends React.Component<
     super(props);
     this.state = {
       hasError: false,
-      errorMessage: ''
+      errorMessage: '',
+      isChunkFailure: false
     };
   }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return {
       hasError: true,
-      errorMessage: error?.message || 'Unexpected rendering error'
+      errorMessage: error?.message || 'Unexpected rendering error',
+      isChunkFailure: isChunkLoadError(error)
     };
   }
 
@@ -30,8 +34,13 @@ export class ErrorBoundary extends React.Component<
   }
 
   private handleReload = () => {
-    this.setState({ hasError: false, errorMessage: '' });
+    this.setState({ hasError: false, errorMessage: '', isChunkFailure: false });
     if (typeof window !== 'undefined') {
+      try {
+        window.sessionStorage?.removeItem('pmp_chunk_reload_guard_v1');
+      } catch {
+        // Ignore sessionStorage restrictions
+      }
       window.location.reload();
     }
   };
@@ -91,10 +100,14 @@ export class ErrorBoundary extends React.Component<
           </div>
 
           <h1 style={{ fontSize: '20px', fontWeight: 900, marginBottom: '10px', color: '#FFFFFF' }}>
-            حدث تعثر مؤقت أثناء عرض الواجهة
+            {this.state.isChunkFailure
+              ? 'يتوفر تحديث جديد للمنصة'
+              : 'حدث تعثر مؤقت أثناء عرض الواجهة'}
           </h1>
           <p style={{ fontSize: '13.5px', color: '#94A3B8', lineHeight: 1.7, marginBottom: '16px' }}>
-            تم تفعيل الحماية التلقائية لمنع توقف الشاشة. يمكنك إعادة تحميل المنصة أو تصفير بيانات الجلسة المحلية بأمان دون التأثير على البيانات السحابية.
+            {this.state.isChunkFailure
+              ? 'تم تحديث ملفات التشغيل على الخادم. اضغط زر التحديث لتحميل النسخة الأحدث بسلاسة دون التأثير على بياناتك.'
+              : 'تم تفعيل الحماية التلقائية لمنع توقف الشاشة. يمكنك إعادة تحميل المنصة أو تصفير بيانات الجلسة المحلية بأمان دون التأثير على البيانات السحابية.'}
           </p>
 
           {this.state.errorMessage && (
@@ -131,7 +144,7 @@ export class ErrorBoundary extends React.Component<
                 cursor: 'pointer'
               }}
             >
-              إعادة تحميل الصفحة
+              {this.state.isChunkFailure ? 'تحديث وتحميل النسخة الجديدة' : 'إعادة تحميل الصفحة'}
             </button>
             <button
               type="button"

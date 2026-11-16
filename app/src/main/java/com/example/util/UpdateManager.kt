@@ -2134,140 +2134,166 @@ class UpdateManager(private val context: Context) {
                 continue
             }
 
-            if (cancelDownloadRequested) {
-                _downloadState.value = DownloadState.Cancelled
-                return@withContext Result.failure(CancellationException("تم إلغاء تنزيل التحديث."))
-            }
-
-            var connection: HttpURLConnection? = null
-            try {
-                val existingBytes = if (tempFile.exists()) tempFile.length() else 0L
-                val probePct = (4 + (urlIndex * 2)).coerceIn(4, 16)
-                onProgress(probePct, existingBytes.toDouble() / (1024.0 * 1024.0), estimatedTotalMb)
-                _downloadState.value = DownloadState.Downloading(
-                    progressPercent = probePct,
-                    downloadedMb = existingBytes.toDouble() / (1024.0 * 1024.0),
-                    totalMb = estimatedTotalMb,
-                    attempt = 1
-                )
-
-                val downloadUrlWithCacheBuster = buildCacheBustedUrl(candidateUrl)
-                val url = URL(downloadUrlWithCacheBuster)
-                connection = (url.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 15_000
-                    readTimeout = 30_000
-                    useCaches = false
-                    defaultUseCaches = false
-                    instanceFollowRedirects = true
-                    setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
-                    setRequestProperty("Pragma", "no-cache")
-                    setRequestProperty("Accept", "application/vnd.android.package-archive, application/octet-stream, */*")
-                    setRequestProperty("User-Agent", "PMP-Paints-Updater/${BuildConfig.VERSION_NAME}")
-                    if (existingBytes > 0L) {
-                        setRequestProperty("Range", "bytes=$existingBytes-")
-                    }
+            val maxAttemptsForUrl = 2
+            for (attempt in 1..maxAttemptsForUrl) {
+                if (cancelDownloadRequested) {
+                    _downloadState.value = DownloadState.Cancelled
+                    return@withContext Result.failure(CancellationException("تم إلغاء تنزيل التحديث."))
                 }
-                connection.connect()
 
-                val code = connection.responseCode
-                if (code == 416) {
-                    tempFile.delete()
-                    continue
-                }
-                if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
-                    DeveloperUpdateLogger.warn(
-                        "DownloadApk",
-                        "Candidate URL #$urlIndex returned HTTP $code: $candidateUrl"
+                var connection: HttpURLConnection? = null
+                try {
+                    val existingBytes = if (tempFile.exists()) tempFile.length() else 0L
+                    val probePct = (4 + (urlIndex * 2)).coerceIn(4, 16)
+                    onProgress(probePct, existingBytes.toDouble() / (1024.0 * 1024.0), estimatedTotalMb)
+                    _downloadState.value = DownloadState.Downloading(
+                        progressPercent = probePct,
+                        downloadedMb = existingBytes.toDouble() / (1024.0 * 1024.0),
+                        totalMb = estimatedTotalMb,
+                        attempt = attempt
                     )
-                    continue
-                }
 
-                val contentType = (connection.contentType ?: "").lowercase()
-                if (contentType.contains("text/html") || contentType.contains("application/json")) {
-                    DeveloperUpdateLogger.warn(
-                        "DownloadApk",
-                        "Candidate URL #$urlIndex returned non-binary Content-Type ($contentType): $candidateUrl"
-                    )
-                    continue
-                }
-
-                val isResumed = (code == HttpURLConnection.HTTP_PARTIAL && existingBytes > 0L)
-                val contentLength = connection.contentLengthLong
-                val totalBytes = when {
-                    isResumed && contentLength > 0L -> existingBytes + contentLength
-                    contentLength > 0L -> contentLength
-                    updateInfo.fileSize > 0L -> updateInfo.fileSize
-                    else -> (estimatedTotalMb * 1024 * 1024).toLong()
-                }
-                val totalMb = (totalBytes.toDouble() / (1024.0 * 1024.0)).coerceAtLeast(1.0)
-
-                var downloadedBytes = if (isResumed) existingBytes else 0L
-                connection.inputStream.use { input ->
-                    FileOutputStream(tempFile, isResumed).use { output ->
-                        val buffer = ByteArray(32 * 1024)
-                        var bytesRead: Int
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
-                            if (cancelDownloadRequested) {
-                                output.flush()
-                                _downloadState.value = DownloadState.Cancelled
-                                return@withContext Result.failure(CancellationException("تم إيقاف تنزيل التحديث."))
-                            }
-                            output.write(buffer, 0, bytesRead)
-                            downloadedBytes += bytesRead
-                            val downloadedMb = downloadedBytes.toDouble() / (1024.0 * 1024.0)
-                            val percent = if (totalBytes > 0L) {
-                                ((downloadedBytes * 100L) / totalBytes).toInt().coerceIn(5, 99)
-                            } else {
-                                50
-                            }
-                            onProgress(percent, downloadedMb, totalMb)
-                            _downloadState.value = DownloadState.Downloading(
-                                progressPercent = percent,
-                                downloadedMb = downloadedMb,
-                                totalMb = totalMb,
-                                attempt = 1
-                            )
+                    val downloadUrlWithCacheBuster = buildCacheBustedUrl(candidateUrl)
+                    val url = URL(downloadUrlWithCacheBuster)
+                    connection = (url.openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 15_000
+                        readTimeout = 35_000
+                        useCaches = false
+                        defaultUseCaches = false
+                        instanceFollowRedirects = true
+                        setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
+                        setRequestProperty("Pragma", "no-cache")
+                        setRequestProperty("Accept", "application/vnd.android.package-archive, application/octet-stream, */*")
+                        setRequestProperty("User-Agent", "PMP-Paints-Updater/${BuildConfig.VERSION_NAME}")
+                        if (existingBytes > 0L) {
+                            setRequestProperty("Range", "bytes=$existingBytes-")
                         }
-                        output.flush()
                     }
-                }
+                    connection.connect()
 
-                if (!isValidZipApkHeader(tempFile)) {
-                    tempFile.delete()
+                    val code = connection.responseCode
+                    if (code == 416) {
+                        tempFile.delete()
+                        if (attempt < maxAttemptsForUrl) {
+                            delay(450L)
+                            continue
+                        }
+                        break
+                    }
+                    if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
+                        DeveloperUpdateLogger.warn(
+                            "DownloadApk",
+                            "Candidate URL #$urlIndex (attempt $attempt) returned HTTP $code: $candidateUrl"
+                        )
+                        if (code in listOf(408, 429, 500, 502, 503, 504) && attempt < maxAttemptsForUrl) {
+                            delay(650L * attempt)
+                            continue
+                        }
+                        break
+                    }
+
+                    val contentType = (connection.contentType ?: "").lowercase()
+                    if (contentType.contains("text/html") || contentType.contains("application/json") || contentType.contains("text/plain")) {
+                        DeveloperUpdateLogger.warn(
+                            "DownloadApk",
+                            "Candidate URL #$urlIndex returned non-binary Content-Type ($contentType): $candidateUrl"
+                        )
+                        break
+                    }
+
+                    val isResumed = (code == HttpURLConnection.HTTP_PARTIAL && existingBytes > 0L)
+                    if (!isResumed && existingBytes > 0L) {
+                        // Server ignored Range header and sent HTTP 200; reset partial temp archive cleanly
+                        tempFile.delete()
+                    }
+                    val contentLength = connection.contentLengthLong
+                    if (!isResumed && contentLength in 1 until MIN_VALID_APK_SIZE_BYTES) {
+                        DeveloperUpdateLogger.warn(
+                            "DownloadApk",
+                            "Rejected undersized binary payload ($contentLength bytes) from $candidateUrl"
+                        )
+                        break
+                    }
+
+                    val totalBytes = when {
+                        isResumed && contentLength > 0L -> existingBytes + contentLength
+                        contentLength > 0L -> contentLength
+                        updateInfo.fileSize > 0L -> updateInfo.fileSize
+                        else -> (estimatedTotalMb * 1024 * 1024).toLong()
+                    }
+                    val totalMb = (totalBytes.toDouble() / (1024.0 * 1024.0)).coerceAtLeast(1.0)
+
+                    var downloadedBytes = if (isResumed) existingBytes else 0L
+                    connection.inputStream.use { input ->
+                        FileOutputStream(tempFile, isResumed).use { output ->
+                            val buffer = ByteArray(32 * 1024)
+                            var bytesRead: Int
+                            while (input.read(buffer).also { bytesRead = it } != -1) {
+                                if (cancelDownloadRequested) {
+                                    output.flush()
+                                    _downloadState.value = DownloadState.Cancelled
+                                    return@withContext Result.failure(CancellationException("تم إيقاف تنزيل التحديث."))
+                                }
+                                output.write(buffer, 0, bytesRead)
+                                downloadedBytes += bytesRead
+                                val downloadedMb = downloadedBytes.toDouble() / (1024.0 * 1024.0)
+                                val percent = if (totalBytes > 0L) {
+                                    ((downloadedBytes * 100L) / totalBytes).toInt().coerceIn(5, 99)
+                                } else {
+                                    50
+                                }
+                                onProgress(percent, downloadedMb, totalMb)
+                                _downloadState.value = DownloadState.Downloading(
+                                    progressPercent = percent,
+                                    downloadedMb = downloadedMb,
+                                    totalMb = totalMb,
+                                    attempt = attempt
+                                )
+                            }
+                            output.flush()
+                        }
+                    }
+
+                    if (!isValidZipApkHeader(tempFile)) {
+                        tempFile.delete()
+                        DeveloperUpdateLogger.warn(
+                            "DownloadApk",
+                            "Downloaded file from $candidateUrl does not have valid ZIP/APK header."
+                        )
+                        break
+                    }
+
+                    val candidateValidation = validateApkArchive(tempFile, updateInfo)
+                    if (!candidateValidation.isValid) {
+                        tempFile.delete()
+                        DeveloperUpdateLogger.warn(
+                            "DownloadApk",
+                            "Rejected stale or mismatched APK from $candidateUrl: ${candidateValidation.developerReason}"
+                        )
+                        break
+                    }
+
+                    downloadedSuccessfully = true
+                    DeveloperUpdateLogger.info(
+                        "DownloadApk",
+                        "Successfully downloaded and verified APK (${tempFile.length()} bytes) from $candidateUrl on attempt $attempt"
+                    )
+                    break@urlLoop
+                } catch (e: CancellationException) {
+                    _downloadState.value = DownloadState.Cancelled
+                    return@withContext Result.failure(e)
+                } catch (e: Exception) {
                     DeveloperUpdateLogger.warn(
                         "DownloadApk",
-                        "Downloaded file from $candidateUrl does not have valid ZIP/APK header."
+                        "Download probe for URL #$urlIndex ($candidateUrl) attempt $attempt failed: ${e.message}"
                     )
-                    continue
+                    if (attempt < maxAttemptsForUrl) {
+                        delay(700L * attempt)
+                    }
+                } finally {
+                    connection?.disconnect()
                 }
-
-                val candidateValidation = validateApkArchive(tempFile, updateInfo)
-                if (!candidateValidation.isValid) {
-                    tempFile.delete()
-                    DeveloperUpdateLogger.warn(
-                        "DownloadApk",
-                        "Rejected stale or mismatched APK from $candidateUrl: ${candidateValidation.developerReason}"
-                    )
-                    continue
-                }
-
-                downloadedSuccessfully = true
-                DeveloperUpdateLogger.info(
-                    "DownloadApk",
-                    "Successfully downloaded and verified APK (${tempFile.length()} bytes) from $candidateUrl"
-                )
-                break@urlLoop
-            } catch (e: CancellationException) {
-                _downloadState.value = DownloadState.Cancelled
-                return@withContext Result.failure(e)
-            } catch (e: Exception) {
-                DeveloperUpdateLogger.warn(
-                    "DownloadApk",
-                    "Download probe for URL #$urlIndex ($candidateUrl) failed: ${e.message}"
-                )
-            } finally {
-                connection?.disconnect()
             }
         }
 

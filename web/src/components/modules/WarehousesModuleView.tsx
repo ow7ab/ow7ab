@@ -515,7 +515,7 @@ export const WarehousesModuleView: React.FC = () => {
           const docIds: string[] = Array.isArray((w as any)._aliasDocIds) ? (w as any)._aliasDocIds : [];
           const extras = docIds.filter((d) => d && d !== canonicalDocId);
           for (const extraDocId of extras) {
-            await ErpDataService.deleteDocument('warehouses', extraDocId);
+            await ErpDataService.deleteDocumentWithTombstone('warehouses', extraDocId, extraDocId, actor);
             removedDocs++;
           }
         }

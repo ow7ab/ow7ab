@@ -104,7 +104,7 @@ object FormulationPdfExporter {
         canvas.drawText("كود التركيبة:", 280f, y + 25f, labelPaint)
         canvas.drawText(formulation.formulaNo, 215f, y + 25f, valuePaint)
 
-        val dateStr = SimpleDateFormat("yyyy/MM/dd", Locale("ar")).format(Date(formulation.createdAt))
+        val dateStr = SimpleDateFormat("yyyy/MM/dd", Locale.forLanguageTag("ar")).format(Date(formulation.createdAt))
         canvas.drawText("تاريخ الاعتماد:", 555f, y + 55f, labelPaint)
         canvas.drawText(dateStr, 475f, y + 55f, valuePaint)
 

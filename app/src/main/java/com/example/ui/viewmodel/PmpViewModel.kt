@@ -187,6 +187,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val movements = repository.getMovements()
+        .map { list -> list.filter { !DeletedRecordsRegistry.isMovementDeleted(it) } }
+        .flowOn(Dispatchers.Default)
         .onEach { _isInitialDataLoading.value = false }
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in movements flow", e)
@@ -197,6 +199,15 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val transfers = repository.getTransfers()
+        .map { list ->
+            list.filter { trf ->
+                !DeletedRecordsRegistry.isPreEpoch(trf.createdAt) &&
+                    !DeletedRecordsRegistry.isDeleted("transfers", trf.id) &&
+                    !DeletedRecordsRegistry.isDeleted("transfers", "TRF-${trf.id}") &&
+                    (trf.reference.isBlank() || !DeletedRecordsRegistry.isDeleted("transfers", trf.reference))
+            }
+        }
+        .flowOn(Dispatchers.Default)
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in transfers flow", e)
             emit(emptyList())
@@ -213,6 +224,15 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val customers = repository.getCustomers()
+        .map { list ->
+            list.filter { c ->
+                !DeletedRecordsRegistry.isPreEpoch(c.createdAt) &&
+                    !DeletedRecordsRegistry.isDeleted("customers", c.id) &&
+                    !DeletedRecordsRegistry.isDeleted("customers", "CUST-${c.id}") &&
+                    (c.name.isBlank() || !DeletedRecordsRegistry.isDeleted("customers", c.name))
+            }
+        }
+        .flowOn(Dispatchers.Default)
         .onEach { _isInitialDataLoading.value = false }
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in customers flow", e)
@@ -223,6 +243,15 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val invoices = repository.getInvoices()
+        .map { list ->
+            list.filter { inv ->
+                !DeletedRecordsRegistry.isPreEpoch(inv.createdAt) &&
+                    !DeletedRecordsRegistry.isDeleted("invoices", inv.id) &&
+                    !DeletedRecordsRegistry.isDeleted("invoices", "INV-${inv.id}") &&
+                    (inv.invoiceNo.isBlank() || !DeletedRecordsRegistry.isDeleted("invoices", inv.invoiceNo))
+            }
+        }
+        .flowOn(Dispatchers.Default)
         .onEach { _isInitialDataLoading.value = false }
         .catch { e ->
             android.util.Log.e("PmpViewModel", "Error in invoices flow", e)
@@ -879,7 +908,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             // الاستماع لإشارات إشعارات FCM الواردة عند نشر إصدار جديد
             viewModelScope.launch {
                 com.example.util.UpdateNotificationHelper.fcmUpdateSignal.collect { signal ->
-                    if (signal != null) {
+                    if (signal > 0) {
                         checkForAppUpdates(manual = false)
                     }
                 }
@@ -1252,13 +1281,18 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     IllegalStateException("عفواً، حذف الحركات المالية متاح لمدير النظام أو الحسابات المصرح لها فقط")
                 )
             }
-            val res = repository.deleteMovement(id, resolveUserActor("المدير"))
-            res.map {
-                DeletedRecordsRegistry.registerDeleted("movements", id, "MOV-$id", resolveUserActor("المدير"))
-                viewModelScope.launch(Dispatchers.IO) {
-                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "movements", "MOV-$id")
-                }
-                postMessage("تم حذف الحركة المالية بنجاح")
+            val actor = resolveUserActor("المدير")
+            val res = repository.deleteMovement(id, actor)
+            res.map { deletedMov ->
+                cloudErpSyncRepo.deleteMovementFromCloud(
+                    clusterCode = serverClusterCode.value,
+                    movementId = id,
+                    reference = deletedMov?.reference.orEmpty(),
+                    cloudDocId = deletedMov?.cloudDocId.orEmpty(),
+                    syncUuid = deletedMov?.syncUuid.orEmpty(),
+                    actor = actor
+                )
+                postMessage("تم حذف الحركة المالية نهائياً ومزامنة الحذف مع السيرفر بنجاح")
                 persistAndSyncToServer()
                 "MOV-$id" to Unit
             }
@@ -1320,12 +1354,16 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     IllegalStateException("عفواً، تصفير الخزن متاح لمدير النظام أو الحسابات المصرح لها فقط")
                 )
             }
-            val res = repository.resetCashboxBalance(cashboxName, resolveUserActor("المدير"))
-            res.map {
-                viewModelScope.launch(Dispatchers.IO) {
-                    cloudErpSyncRepo.clearCashboxMovementsFromCloud(serverClusterCode.value, cashboxName)
-                }
-                postMessage("تم تصفير رصيد وحركات خزنة ($cashboxName) بنجاح")
+            val actor = resolveUserActor("المدير")
+            val res = repository.resetCashboxBalance(cashboxName, actor)
+            res.map { clearedMovements ->
+                cloudErpSyncRepo.clearCashboxMovementsFromCloud(
+                    clusterCode = serverClusterCode.value,
+                    cashboxName = cashboxName,
+                    knownClearedMovements = clearedMovements,
+                    actor = actor
+                )
+                postMessage("تم تصفير رصيد وحركات خزنة ($cashboxName) ومنع عودتها بنجاح")
                 persistAndSyncToServer()
                 "RESET-BOX-$cashboxName" to Unit
             }
@@ -1406,13 +1444,22 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     IllegalStateException("عفواً، حذف العملاء متاح لحساب مدير النظام فقط")
                 )
             }
-            val res = repository.deleteCustomer(customerId, customerName, resolveUserActor("المدير"))
+            val actor = resolveUserActor("المدير")
+            val res = repository.deleteCustomer(customerId, customerName, actor)
             res.map {
-                DeletedRecordsRegistry.registerDeleted("customers", customerId, "CUST-$customerId", resolveUserActor("المدير"))
-                viewModelScope.launch(Dispatchers.IO) {
-                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "customers", "CUST-$customerId")
-                }
-                postMessage("تم حذف العميل ($customerName) وسجلاته بنجاح")
+                DeletedRecordsRegistry.registerDeletedWithAliases(
+                    collection = "customers",
+                    aliases = listOfNotNull(
+                        customerId.toString(),
+                        "CUST-$customerId",
+                        customerName.trim().takeIf { it.isNotBlank() }
+                    ),
+                    primaryEntityId = customerId.toString(),
+                    primaryDocId = "CUST-$customerId",
+                    actor = actor
+                )
+                cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "customers", "CUST-$customerId")
+                postMessage("تم حذف العميل ($customerName) وسجلاته نهائياً بنجاح")
                 persistAndSyncToServer()
                 "CUST-$customerId" to Unit
             }
@@ -1566,6 +1613,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     invoiceNo = deletedInv.invoiceNo,
                     actor = user
                 )
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
+                }
                 postMessage("تم الحذف النهائي للفاتورة ${deletedInv.invoiceNo} (${deletedInv.customerName}) من السيرفر")
                 persistAndSyncToServer()
                 deletedInv.invoiceNo to deletedInv
@@ -1661,18 +1711,18 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             val res = repository.deleteCashbox(id, cleanName, user)
             res.map { hadFinancialHistory ->
-                viewModelScope.launch(Dispatchers.IO) {
-                    val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
-                    cloudErpSyncRepo.deleteCashboxFromCloud(serverClusterCode.value, id, cleanName)
+                cloudErpSyncRepo.deleteCashboxFromCloud(serverClusterCode.value, id, cleanName)
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
                     DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
-                    cloudErpSyncRepo.syncAllLocalToCloud(
-                        serverClusterCode.value,
-                        repository.getDao(),
-                        currentUser.value.isSystemManager(),
-                        activeSessionUserId.value,
-                        devId
-                    )
                 }
+                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+                cloudErpSyncRepo.syncAllLocalToCloud(
+                    serverClusterCode.value,
+                    repository.getDao(),
+                    currentUser.value.isSystemManager(),
+                    activeSessionUserId.value,
+                    devId
+                )
                 val msg = if (hadFinancialHistory) {
                     "تم إلغاء تفعيل وأرشفة الخزنة ($cleanName) عبر جميع الأجهزة مع الاحتفاظ الكامل بكافة الحركات والسجلات المالية التاريخية المرتبطة بها"
                 } else {
@@ -1759,14 +1809,15 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         ) { _ ->
             val res = repository.deleteWarehouse(id, user)
             res.map {
-                DeletedRecordsRegistry.registerDeleted("warehouses", id, "WH-$id", user)
-                if (name.isNotBlank()) {
-                    DeletedRecordsRegistry.registerDeleted("warehouses", name.trim(), "WH-$id", user)
-                }
-                viewModelScope.launch(Dispatchers.IO) {
-                    cloudErpSyncRepo.deleteWarehouseFromCloud(serverClusterCode.value, id, name)
-                }
-                postMessage("تم حذف المخزن $name بنجاح من النظام والسحابة")
+                DeletedRecordsRegistry.registerDeletedWithAliases(
+                    collection = "warehouses",
+                    aliases = listOfNotNull(id.toString(), "WH-$id", name.trim().takeIf { it.isNotBlank() }),
+                    primaryEntityId = name.trim().ifBlank { id.toString() },
+                    primaryDocId = "WH-$id",
+                    actor = user
+                )
+                cloudErpSyncRepo.deleteWarehouseFromCloud(serverClusterCode.value, id, name)
+                postMessage("تم حذف المخزن $name نهائياً بنجاح من النظام والسحابة")
                 persistAndSyncToServer()
                 "WH-$id" to Unit
             }
@@ -2104,11 +2155,15 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             val actor = resolveUserActor("المدير")
             val res = repository.deleteProduct(productId, productName, actor)
             res.map {
-                DeletedRecordsRegistry.registerDeleted("products", productId, "PROD-$productId", actor)
-                viewModelScope.launch(Dispatchers.IO) {
-                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "products", "PROD-$productId")
-                    cloudErpSyncRepo.deleteStockMovesByProductFromCloud(serverClusterCode.value, productId)
-                }
+                DeletedRecordsRegistry.registerDeletedWithAliases(
+                    collection = "products",
+                    aliases = listOfNotNull(productId.toString(), "PROD-$productId", "PRD-$productId"),
+                    primaryEntityId = productId.toString(),
+                    primaryDocId = "PROD-$productId",
+                    actor = actor
+                )
+                cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "products", "PROD-$productId")
+                cloudErpSyncRepo.deleteStockMovesByProductFromCloud(serverClusterCode.value, productId)
                 postMessage("تم حذف الصنف ($productName) وحركاته بنجاح من النظام والسحابة")
                 persistAndSyncToServer()
                 "PROD-$productId" to Unit
@@ -2136,11 +2191,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     IllegalStateException("عفواً، تصفير رصيد المخزن متاح لمدير النظام أو المصرح لهم فقط")
                 )
             }
-            val res = repository.resetWarehouseStock(warehouseId, warehouseName, resolveUserActor("المدير"))
+            val actor = resolveUserActor("المدير")
+            val res = repository.resetWarehouseStock(warehouseId, warehouseName, actor)
             res.map {
-                viewModelScope.launch(Dispatchers.IO) {
-                    cloudErpSyncRepo.deleteStockMovesByWarehouseFromCloud(serverClusterCode.value, warehouseId)
-                }
+                cloudErpSyncRepo.deleteStockMovesByWarehouseFromCloud(serverClusterCode.value, warehouseId)
                 postMessage("تم تصفير كامل رصيد مخزن ($warehouseName) وحذف حركاته من السحابة")
                 persistAndSyncToServer()
                 "RESET-WH-$warehouseId" to Unit
@@ -3529,6 +3583,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             )
             _isSyncing.value = false
             result.onSuccess { count ->
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
+                }
                 _cloudSyncState.value = "تم حذف جميع السجلات من السيرفر وبدء البيانات من جديد بنجاح"
                 postMessage("تم حذف $count سجلاً من السيرفر وتصفير الحركات والبدء من جديد بنجاح!")
                 checkServerHealth()
@@ -4296,7 +4353,20 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         return@launch
                     }
                     try {
+                        cloudErpSyncRepo.ensureOwnClusterMemberRegistration(
+                            clusterCode = serverClusterCode.value,
+                            account = res.account,
+                            fbUid = uid,
+                            fbEmail = email
+                        )
                         cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, res.account)
+                        if (res.account.isSystemManager() || res.account.isSuperAdminAccount()) {
+                            cloudErpSyncRepo.syncRbacDirectoryForAccount(
+                                clusterCode = serverClusterCode.value,
+                                account = res.account,
+                                linkedUid = uid
+                            )
+                        }
                     } catch (e: Exception) {
                         Log.w("PmpViewModel", "Cloud ERP sync error: ${e.message}")
                     }
@@ -4717,21 +4787,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             val actor = resolveUserActor("إدارة المصنع")
             val res = repository.deleteFactoryItem(item.id, item.name, actor)
             res.map {
-                com.example.data.local.DeletedRecordsRegistry.registerDeleted(
-                    "factory_items",
-                    "FI-${item.id}",
-                    item.name,
-                    actor
+                com.example.data.local.DeletedRecordsRegistry.registerDeletedWithAliases(
+                    collection = "factory_items",
+                    aliases = listOfNotNull(item.id.toString(), "FI-${item.id}", item.name.trim().takeIf { it.isNotBlank() }),
+                    primaryEntityId = item.id.toString(),
+                    primaryDocId = "FI-${item.id}",
+                    actor = actor
                 )
-                com.example.data.local.DeletedRecordsRegistry.registerDeleted(
-                    "factory_items",
-                    item.id.toString(),
-                    item.name,
-                    actor
-                )
-                viewModelScope.launch(Dispatchers.IO) {
-                    cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "factory_items", "FI-${item.id}")
-                }
+                cloudErpSyncRepo.deleteEntityFromCloud(serverClusterCode.value, "factory_items", "FI-${item.id}")
                 postMessage("تم حذف المادة الخام (${item.name}) من النظام والسحابة بنجاح")
                 persistAndSyncToServer()
                 "FI-DEL-${item.id}" to Unit

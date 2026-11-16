@@ -1,11 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { Suspense, useState, useEffect, useCallback } from 'react';
 import { ThemeProvider } from './context/ThemeContext';
 import { LanguageProvider } from './context/LanguageContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { HomePage } from './pages/HomePage';
-import { PortalPage } from './pages/PortalPage';
-import { LoginPage } from './pages/LoginPage';
-import { DownloadPage } from './pages/DownloadPage';
 import {
   AppRoute,
   buildBrowserPath,
@@ -16,6 +12,39 @@ import { DesktopWindowChrome } from './components/layout/DesktopWindowChrome';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { isDesktopApp } from './utils/desktopBridge';
 import { safeHistoryPush } from './utils/safeStorage';
+import { lazyWithRetry } from './utils/lazyWithRetry';
+
+const HomePage = lazyWithRetry(
+  () => import('./pages/HomePage').then((m) => ({ default: m.HomePage })),
+  'HomePage'
+);
+const PortalPage = lazyWithRetry(
+  () => import('./pages/PortalPage').then((m) => ({ default: m.PortalPage })),
+  'PortalPage'
+);
+const LoginPage = lazyWithRetry(
+  () => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })),
+  'LoginPage'
+);
+const DownloadPage = lazyWithRetry(
+  () => import('./pages/DownloadPage').then((m) => ({ default: m.DownloadPage })),
+  'DownloadPage'
+);
+
+const RouteLoadingFallback: React.FC = () => (
+  <div
+    dir="rtl"
+    className="min-h-screen bg-theme-base text-theme-primary flex items-center justify-center p-6"
+    role="status"
+    aria-live="polite"
+  >
+    <div className="flex flex-col items-center gap-3 text-center">
+      <div className="w-11 h-11 rounded-2xl border-2 border-red-600/30 border-t-red-500 animate-spin" />
+      <div className="text-sm font-black tracking-wide">PMP PAINTS ERP</div>
+      <div className="text-xs text-theme-secondary font-semibold">جاري تجهيز الواجهة...</div>
+    </div>
+  </div>
+);
 
 const AppContent: React.FC = () => {
   const { userProfile } = useAuth();
@@ -69,55 +98,63 @@ const AppContent: React.FC = () => {
     }
   }, [userProfile, navigateRoute]);
 
-  // 1. Dedicated Official APK Download Route (/download) — public, zero private ERP data
-  if (currentRoute === '/download') {
-    return (
-      <DownloadPage
-        onNavigateRoute={navigateRoute}
-        onEnterPortal={handleEnterPortal}
-      />
-    );
-  }
+  const renderActiveRoute = () => {
+    // 1. Dedicated Official APK Download Route (/download) — public, zero private ERP data
+    if (currentRoute === '/download') {
+      return (
+        <DownloadPage
+          onNavigateRoute={navigateRoute}
+          onEnterPortal={handleEnterPortal}
+        />
+      );
+    }
 
-  // 2. Protected Routes (/dashboard, /admin, /employee)
-  if (currentRoute === '/dashboard' || currentRoute === '/admin' || currentRoute === '/employee') {
-    if (!userProfile) {
+    // 2. Protected Routes (/dashboard, /admin, /employee)
+    if (currentRoute === '/dashboard' || currentRoute === '/admin' || currentRoute === '/employee') {
+      if (!userProfile) {
+        return (
+          <LoginPage
+            onLoginSuccess={() => navigateRoute(currentRoute)}
+            onGoToPublicWebsite={() => navigateRoute('/')}
+            onNavigateRoute={navigateRoute}
+          />
+        );
+      }
+
+      return (
+        <PortalPage
+          portalRoute={currentRoute}
+          onNavigateRoute={navigateRoute}
+          onBackToWebsite={() => navigateRoute('/')}
+          onLogoutToLogin={() => navigateRoute('/login')}
+        />
+      );
+    }
+
+    // 3. Employee & Admin Login Route (/login)
+    if (currentRoute === '/login') {
       return (
         <LoginPage
-          onLoginSuccess={() => navigateRoute(currentRoute)}
+          onLoginSuccess={() => navigateRoute('/dashboard')}
           onGoToPublicWebsite={() => navigateRoute('/')}
           onNavigateRoute={navigateRoute}
         />
       );
     }
 
+    // 4. Default Main Route (/) — Unified PMP PAINTS ERP Website + Official App Showcase
     return (
-      <PortalPage
-        portalRoute={currentRoute}
-        onNavigateRoute={navigateRoute}
-        onBackToWebsite={() => navigateRoute('/')}
-        onLogoutToLogin={() => navigateRoute('/login')}
-      />
-    );
-  }
-
-  // 3. Employee & Admin Login Route (/login)
-  if (currentRoute === '/login') {
-    return (
-      <LoginPage
-        onLoginSuccess={() => navigateRoute('/dashboard')}
-        onGoToPublicWebsite={() => navigateRoute('/')}
+      <HomePage
+        onEnterPortal={handleEnterPortal}
         onNavigateRoute={navigateRoute}
       />
     );
-  }
+  };
 
-  // 4. Default Main Route (/) — Unified PMP PAINTS ERP Website + Official App Showcase
   return (
-    <HomePage
-      onEnterPortal={handleEnterPortal}
-      onNavigateRoute={navigateRoute}
-    />
+    <Suspense fallback={<RouteLoadingFallback />}>
+      {renderActiveRoute()}
+    </Suspense>
   );
 };
 

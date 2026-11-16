@@ -2,8 +2,11 @@ package com.example.data.local
 
 import android.content.Context
 import android.util.Log
+import com.google.firebase.Timestamp
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -12,12 +15,15 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * سجل شواهد الحذف الشامل (Distributed ERP Tombstone Registry)
  * يمنع عودة السجلات المحذوفة (حركات مالية، عملاء، فواتير، تحويلات، أصناف)
- * نهائياً عند قيام أي هاتف آخر أو نسخة قديمة بالضغط على "مزامنة".
+ * نهائياً عند قيام أي هاتف آخر أو نسخة قديمة بالضغط على "مزامنة"،
+ * مع مزامنة ثنائية مع جدول record_tombstones داخل SQLite/Room.
  */
 object DeletedRecordsRegistry {
 
     private const val TAG = "DeletedRecordsRegistry"
     private const val FILE_NAME = "pmp_deleted_erp_records.json"
+    private val persistLock = Any()
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private fun logInfo(msg: String) {
         runCatching { Log.i(TAG, msg) }
@@ -32,7 +38,8 @@ object DeletedRecordsRegistry {
         val entityId: String,
         val docId: String,
         val deletedAt: Long = System.currentTimeMillis(),
-        val deletedBy: String = "مدير النظام"
+        val deletedBy: String = "مدير النظام",
+        val aliases: List<String> = emptyList()
     )
 
     // Fast in-memory sets for O(1) checks
@@ -47,19 +54,114 @@ object DeletedRecordsRegistry {
     private var isInitialized = false
     private var appContext: Context? = null
 
+    @Volatile
+    private var boundDao: PmpDao? = null
+
     fun init(context: Context) {
-        if (isInitialized && appContext != null) return
-        appContext = context.applicationContext
-        loadPersisted(context.applicationContext)
+        val app = context.applicationContext
+        if (isInitialized && appContext === app) return
+        appContext = app
+        loadPersisted(app)
         isInitialized = true
+    }
+
+    /**
+     * يفرغ الذاكرة المؤقتة بين اختبارات الوحدات المعزولة مع الحفاظ على التوافق الكامل في التشغيل الفعلي.
+     */
+    fun resetForTesting() {
+        deletedKeys.clear()
+        allTombstones.clear()
+        clusterEpochTimestamp = 0L
+        boundDao = null
+        appContext = null
+        isInitialized = false
+    }
+
+    /**
+     * يربط السجل بـ Room PmpDao ويقوم بتبادل/مزامنة الشواهد بين SQLite والذاكرة والملف المحلي.
+     */
+    suspend fun syncWithDao(dao: PmpDao) {
+        boundDao = dao
+        runCatching {
+            val dbTombstones = dao.getAllTombstonesDirect()
+            var loadedFromDb = 0
+            for (row in dbTombstones) {
+                val col = row.collectionName.trim()
+                if (col.isBlank()) continue
+                val kNorm = row.normalizedKey.ifBlank { makeKey(col, row.entityId.ifBlank { row.docId }) }
+                if (deletedKeys.add(kNorm)) {
+                    allTombstones[kNorm] = RecordTombstone(
+                        collection = col,
+                        entityId = row.entityId,
+                        docId = row.docId,
+                        deletedAt = row.deletedAt,
+                        deletedBy = row.deletedBy
+                    )
+                    loadedFromDb++
+                }
+                if (row.entityId.isNotBlank()) deletedKeys.add(makeKey(col, row.entityId))
+                if (row.docId.isNotBlank()) deletedKeys.add(makeKey(col, row.docId))
+            }
+            // Push any in-memory tombstones into SQLite table
+            persistTombstonesToDao(dao)
+            if (loadedFromDb > 0) {
+                appContext?.let { persist(it) }
+                logInfo("Synchronized $loadedFromDb tombstones from SQLite record_tombstones")
+            }
+        }.onFailure {
+            logWarn("Failed syncing tombstones with Room DAO: ${it.message}")
+        }
+    }
+
+    private suspend fun persistTombstonesToDao(dao: PmpDao) {
+        val entities = buildSqlEntitiesSnapshot()
+        if (entities.isNotEmpty()) {
+            dao.upsertTombstones(entities)
+        }
+    }
+
+    private fun buildSqlEntitiesSnapshot(): List<RecordTombstoneEntity> {
+        val rows = LinkedHashMap<String, RecordTombstoneEntity>()
+        allTombstones.forEach { (k, t) ->
+            val cleanCol = t.collection.trim().lowercase()
+            if (cleanCol.isNotBlank() && k.isNotBlank()) {
+                rows[k] = RecordTombstoneEntity(
+                    collectionName = cleanCol,
+                    normalizedKey = k,
+                    entityId = t.entityId,
+                    docId = t.docId,
+                    deletedAt = t.deletedAt,
+                    deletedBy = t.deletedBy
+                )
+            }
+        }
+        return rows.values.toList()
     }
 
     private fun normalize(v: String?): String = v?.trim()?.lowercase() ?: ""
 
-    private fun makeKey(collection: String, idOrDoc: String): String {
+    fun makeKey(collection: String, idOrDoc: String): String {
         val cleanCol = normalize(collection)
         val cleanId = normalize(idOrDoc).replace(Regex("[^\\p{L}\\p{N}_\\-]"), "-").trim('-')
         return "${cleanCol}_$cleanId"
+    }
+
+    private fun extractBareId(idOrDoc: String): String? {
+        val trimmed = idOrDoc.trim()
+        return when {
+            trimmed.startsWith("MOV-", true) -> trimmed.substring(4)
+            trimmed.startsWith("CUST-", true) -> trimmed.substring(5)
+            trimmed.startsWith("INV-", true) -> trimmed.substring(4)
+            trimmed.startsWith("TRF-", true) -> trimmed.substring(4)
+            trimmed.startsWith("PROD-", true) -> trimmed.substring(5)
+            trimmed.startsWith("PRD-", true) -> trimmed.substring(4)
+            trimmed.startsWith("BOX-", true) -> trimmed.substring(4)
+            trimmed.startsWith("WH-", true) -> trimmed.substring(3)
+            trimmed.startsWith("SM-", true) -> trimmed.substring(3)
+            trimmed.startsWith("FI-", true) -> trimmed.substring(3)
+            trimmed.startsWith("FM-", true) -> trimmed.substring(3)
+            else -> null
+        }?.takeIf { it.isNotBlank() }
     }
 
     /**
@@ -87,43 +189,16 @@ object DeletedRecordsRegistry {
         docId: String = "",
         actor: String = "مدير النظام"
     ) {
-        if (collection.isBlank() || (entityId.isBlank() && docId.isBlank())) return
-
-        val primaryId = entityId.ifBlank { docId }
-        val key1 = makeKey(collection, primaryId)
-        deletedKeys.add(key1)
-
-        val resolvedDocId = docId.ifBlank {
-            when (normalize(collection)) {
-                "movements" -> if (primaryId.startsWith("MOV-", true)) primaryId else "MOV-$primaryId"
-                "customers" -> if (primaryId.startsWith("CUST-", true)) primaryId else "CUST-$primaryId"
-                "invoices" -> if (primaryId.startsWith("INV-", true)) primaryId else "INV-$primaryId"
-                "transfers" -> if (primaryId.startsWith("TRF-", true)) primaryId else "TRF-$primaryId"
-                "products" -> if (primaryId.startsWith("PROD-", true)) primaryId else "PROD-$primaryId"
-                "cashboxes" -> if (primaryId.startsWith("BOX-", true)) primaryId else cashboxDocId(primaryId)
-                else -> primaryId
-            }
-        }
-
-        val key2 = makeKey(collection, resolvedDocId)
-        deletedKeys.add(key2)
-
-        if (normalize(collection) == "cashboxes" && !primaryId.startsWith("BOX-", true)) {
-            deletedKeys.add(makeKey(collection, cashboxDocId(primaryId)))
-        }
-
-        val tombstone = RecordTombstone(
-            collection = collection.trim(),
-            entityId = primaryId,
-            docId = resolvedDocId,
-            deletedAt = System.currentTimeMillis(),
-            deletedBy = actor
+        registerDeletedWithAliases(
+            collection = collection,
+            aliases = listOfNotNull(
+                entityId.takeIf { it.isNotBlank() },
+                docId.takeIf { it.isNotBlank() }
+            ),
+            primaryEntityId = entityId,
+            primaryDocId = docId,
+            actor = actor
         )
-        allTombstones[key1] = tombstone
-        allTombstones[key2] = tombstone
-
-        appContext?.let { persist(it) }
-        logInfo("Registered tombstone for $collection: entityId=$primaryId, docId=$resolvedDocId by $actor")
     }
 
     fun registerDeleted(
@@ -133,6 +208,93 @@ object DeletedRecordsRegistry {
         actor: String = "مدير النظام"
     ) {
         registerDeleted(collection, numericId.toString(), docId, actor)
+    }
+
+    /**
+     * تسجيل السجل مع كافة المعرفات البديلة (id, MOV-id, cloudDocId, reference, syncUuid)
+     * لضمان مطابقة ومنع عودة السجل عبر Android و Web و Desktop.
+     */
+    fun registerDeletedWithAliases(
+        collection: String,
+        aliases: Collection<String>,
+        primaryEntityId: String = "",
+        primaryDocId: String = "",
+        actor: String = "مدير النظام"
+    ) {
+        val cleanCol = collection.trim()
+        val nonBlankAliases = aliases.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (cleanCol.isBlank() || (nonBlankAliases.isEmpty() && primaryEntityId.isBlank() && primaryDocId.isBlank())) return
+
+        val resolvedEntityId = primaryEntityId.trim().ifBlank {
+            nonBlankAliases.firstOrNull().orEmpty().ifBlank { primaryDocId.trim() }
+        }
+        val resolvedDocId = primaryDocId.trim().ifBlank {
+            when (normalize(cleanCol)) {
+                "movements" -> if (resolvedEntityId.startsWith("MOV-", true)) resolvedEntityId else "MOV-$resolvedEntityId"
+                "customers" -> if (resolvedEntityId.startsWith("CUST-", true)) resolvedEntityId else "CUST-$resolvedEntityId"
+                "invoices" -> if (resolvedEntityId.startsWith("INV-", true)) resolvedEntityId else "INV-$resolvedEntityId"
+                "transfers" -> if (resolvedEntityId.startsWith("TRF-", true)) resolvedEntityId else "TRF-$resolvedEntityId"
+                "products" -> if (resolvedEntityId.startsWith("PROD-", true)) resolvedEntityId else "PROD-$resolvedEntityId"
+                "warehouses" -> if (resolvedEntityId.startsWith("WH-", true)) resolvedEntityId else "WH-$resolvedEntityId"
+                "stock_moves" -> if (resolvedEntityId.startsWith("SM-", true)) resolvedEntityId else "SM-$resolvedEntityId"
+                "cashboxes" -> if (resolvedEntityId.startsWith("BOX-", true)) resolvedEntityId else cashboxDocId(resolvedEntityId)
+                else -> resolvedEntityId
+            }
+        }
+
+        val allKeysToRegister = linkedSetOf<String>()
+        if (resolvedEntityId.isNotBlank()) allKeysToRegister.add(resolvedEntityId)
+        if (resolvedDocId.isNotBlank()) allKeysToRegister.add(resolvedDocId)
+        allKeysToRegister.addAll(nonBlankAliases)
+        if (normalize(cleanCol) == "cashboxes") {
+            if (resolvedEntityId.isNotBlank() && !resolvedEntityId.startsWith("BOX-", true)) {
+                allKeysToRegister.add(cashboxDocId(resolvedEntityId))
+            }
+            nonBlankAliases.forEach { a ->
+                if (!a.startsWith("BOX-", true)) allKeysToRegister.add(cashboxDocId(a))
+            }
+        }
+
+        val tombstone = RecordTombstone(
+            collection = cleanCol,
+            entityId = resolvedEntityId,
+            docId = resolvedDocId,
+            deletedAt = System.currentTimeMillis(),
+            deletedBy = actor,
+            aliases = allKeysToRegister.toList()
+        )
+
+        val sqlBatch = mutableListOf<RecordTombstoneEntity>()
+        for (rawAlias in allKeysToRegister) {
+            val k = makeKey(cleanCol, rawAlias)
+            deletedKeys.add(k)
+            allTombstones[k] = tombstone
+            sqlBatch.add(
+                RecordTombstoneEntity(
+                    collectionName = cleanCol.lowercase(),
+                    normalizedKey = k,
+                    entityId = resolvedEntityId,
+                    docId = resolvedDocId,
+                    deletedAt = tombstone.deletedAt,
+                    deletedBy = actor
+                )
+            )
+            val bare = extractBareId(rawAlias)
+            if (bare != null) {
+                val bareKey = makeKey(cleanCol, bare)
+                deletedKeys.add(bareKey)
+                allTombstones[bareKey] = tombstone
+            }
+        }
+
+        appContext?.let { persist(it) }
+        val dao = boundDao
+        if (dao != null && sqlBatch.isNotEmpty()) {
+            ioScope.launch {
+                runCatching { dao.upsertTombstones(sqlBatch) }
+            }
+        }
+        logInfo("Registered tombstone for $cleanCol: entityId=$resolvedEntityId, docId=$resolvedDocId, aliases=${allKeysToRegister.size} by $actor")
     }
 
     /**
@@ -149,16 +311,7 @@ object DeletedRecordsRegistry {
             }
         }
 
-        // Also check prefixed variant if it was stored without prefix
-        val altId = when {
-            idOrDoc.startsWith("MOV-", true) -> idOrDoc.substring(4)
-            idOrDoc.startsWith("CUST-", true) -> idOrDoc.substring(5)
-            idOrDoc.startsWith("INV-", true) -> idOrDoc.substring(4)
-            idOrDoc.startsWith("TRF-", true) -> idOrDoc.substring(4)
-            idOrDoc.startsWith("PROD-", true) -> idOrDoc.substring(5)
-            idOrDoc.startsWith("BOX-", true) -> idOrDoc.substring(4)
-            else -> null
-        }
+        val altId = extractBareId(idOrDoc)
         if (altId != null && deletedKeys.contains(makeKey(collection, altId))) {
             return true
         }
@@ -172,35 +325,49 @@ object DeletedRecordsRegistry {
     }
 
     /**
+     * فحص شامل للحركة المالية بكافة معرفاتها (id, MOV-id, reference, cloudDocId, syncUuid, epoch).
+     */
+    fun isMovementDeleted(movement: MovementEntity): Boolean {
+        if (isPreEpoch(movement.createdAt)) return true
+        if (movement.id > 0L && (isDeleted("movements", movement.id) || isDeleted("movements", "MOV-${movement.id}"))) {
+            return true
+        }
+        if (movement.cloudDocId.isNotBlank() && isDeleted("movements", movement.cloudDocId)) return true
+        if (movement.reference.isNotBlank() && isDeleted("movements", movement.reference)) return true
+        if (movement.syncUuid.isNotBlank() && isDeleted("movements", movement.syncUuid)) return true
+        return false
+    }
+
+    /**
      * إلغاء الشاهد عند إضافة سجل جديد أو إعادة إنشائه لمنع حذفه بالخطأ
      */
     fun unregisterDeleted(collection: String, idOrDoc: String) {
         if (idOrDoc.isBlank()) return
-        val key1 = makeKey(collection, idOrDoc)
-        deletedKeys.remove(key1)
-        allTombstones.remove(key1)
+        val keysToRemove = mutableListOf(makeKey(collection, idOrDoc))
 
         if (normalize(collection) == "cashboxes" && !idOrDoc.startsWith("BOX-", true)) {
-            val hashDocKey = makeKey(collection, cashboxDocId(idOrDoc))
-            deletedKeys.remove(hashDocKey)
-            allTombstones.remove(hashDocKey)
+            keysToRemove.add(makeKey(collection, cashboxDocId(idOrDoc)))
         }
 
-        val altId = when {
-            idOrDoc.startsWith("MOV-", true) -> idOrDoc.substring(4)
-            idOrDoc.startsWith("CUST-", true) -> idOrDoc.substring(5)
-            idOrDoc.startsWith("INV-", true) -> idOrDoc.substring(4)
-            idOrDoc.startsWith("TRF-", true) -> idOrDoc.substring(4)
-            idOrDoc.startsWith("PROD-", true) -> idOrDoc.substring(5)
-            idOrDoc.startsWith("BOX-", true) -> idOrDoc.substring(4)
-            else -> null
-        }
+        val altId = extractBareId(idOrDoc)
         if (altId != null) {
-            val key2 = makeKey(collection, altId)
-            deletedKeys.remove(key2)
-            allTombstones.remove(key2)
+            keysToRemove.add(makeKey(collection, altId))
+        }
+
+        keysToRemove.forEach { k ->
+            deletedKeys.remove(k)
+            allTombstones.remove(k)
         }
         appContext?.let { persist(it) }
+        val dao = boundDao
+        if (dao != null) {
+            val cleanCol = collection.trim().lowercase()
+            ioScope.launch {
+                keysToRemove.forEach { k ->
+                    runCatching { dao.deleteTombstoneByKey(cleanCol, k) }
+                }
+            }
+        }
     }
 
     fun unregisterDeleted(collection: String, numericId: Long) {
@@ -231,15 +398,21 @@ object DeletedRecordsRegistry {
      * استخراج كافة شواهد الحذف لرفعها ومزامنتها على السحابة
      */
     fun getAllTombstoneRecords(): List<Map<String, Any>> {
-        return allTombstones.values.distinctBy { it.docId }.map { t ->
-            mapOf(
-                "collection" to t.collection,
-                "entityId" to t.entityId,
-                "docId" to t.docId,
-                "deletedAt" to t.deletedAt,
-                "deletedBy" to t.deletedBy
-            )
-        }
+        return allTombstones.values
+            .distinctBy { "${normalize(it.collection)}::${normalize(it.docId)}::${normalize(it.entityId)}" }
+            .map { t ->
+                val map = mutableMapOf<String, Any>(
+                    "collection" to t.collection,
+                    "entityId" to t.entityId,
+                    "docId" to t.docId,
+                    "deletedAt" to t.deletedAt,
+                    "deletedBy" to t.deletedBy
+                )
+                if (t.aliases.isNotEmpty()) {
+                    map["aliases"] = t.aliases
+                }
+                map
+            }
     }
 
     /**
@@ -247,92 +420,165 @@ object DeletedRecordsRegistry {
      */
     fun mergeRemoteTombstones(remoteList: List<Map<String, Any>>, remoteEpoch: Long = 0L) {
         var added = 0
+        val sqlBatch = mutableListOf<RecordTombstoneEntity>()
+
         for (item in remoteList) {
-            val col = (item["collection"] as? String).orEmpty()
-            val entityId = (item["entityId"] as? String).orEmpty()
-            val docId = (item["docId"] as? String).orEmpty()
-            val delAt = (item["deletedAt"] as? Number)?.toLong() ?: System.currentTimeMillis()
+            val col = (item["collection"] as? String).orEmpty().trim()
+            val entityId = (item["entityId"] as? String).orEmpty().trim()
+            val docId = (item["docId"] as? String).orEmpty().trim()
+            val numId = (item["numericId"] as? Number)?.toLong()?.takeIf { it > 0L }?.toString().orEmpty()
+            val ref = (item["reference"] as? String).orEmpty().trim()
+            val invoiceNo = (item["invoiceNo"] as? String).orEmpty().trim()
+            val syncUuid = (item["syncUuid"] as? String).orEmpty().trim()
+            @Suppress("UNCHECKED_CAST")
+            val remoteAliases = (item["aliases"] as? List<*>)?.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotBlank() } }.orEmpty()
+
+            val delAt = when (val raw = item["deletedAt"]) {
+                is Number -> raw.toLong()
+                is Timestamp -> raw.toDate().time
+                else -> System.currentTimeMillis()
+            }
             val delBy = (item["deletedBy"] as? String) ?: "سيرفر السحابة"
 
-            if (col.isNotBlank() && (entityId.isNotBlank() || docId.isNotBlank())) {
-                val primaryId = entityId.ifBlank { docId }
-                val key1 = makeKey(col, primaryId)
-                val key2 = if (docId.isNotBlank()) makeKey(col, docId) else key1
+            val candidateAliases = linkedSetOf<String>()
+            listOf(entityId, docId, numId, ref, invoiceNo, syncUuid).forEach { v ->
+                if (v.isNotBlank()) candidateAliases.add(v)
+            }
+            candidateAliases.addAll(remoteAliases)
 
-                if (deletedKeys.add(key1) or deletedKeys.add(key2)) {
-                    val tombstone = RecordTombstone(col, primaryId, docId.ifBlank { primaryId }, delAt, delBy)
-                    allTombstones[key1] = tombstone
-                    allTombstones[key2] = tombstone
-                    added++
+            if (col.isNotBlank() && candidateAliases.isNotEmpty()) {
+                val primaryId = entityId.ifBlank { docId.ifBlank { candidateAliases.first() } }
+                val resolvedDocId = docId.ifBlank { primaryId }
+                val tombstone = RecordTombstone(
+                    collection = col,
+                    entityId = primaryId,
+                    docId = resolvedDocId,
+                    deletedAt = delAt,
+                    deletedBy = delBy,
+                    aliases = candidateAliases.toList()
+                )
+                for (alias in candidateAliases) {
+                    val key = makeKey(col, alias)
+                    if (deletedKeys.add(key)) added++
+                    allTombstones[key] = tombstone
+                    sqlBatch.add(
+                        RecordTombstoneEntity(
+                            collectionName = col.lowercase(),
+                            normalizedKey = key,
+                            entityId = primaryId,
+                            docId = resolvedDocId,
+                            deletedAt = delAt,
+                            deletedBy = delBy
+                        )
+                    )
+                    val bare = extractBareId(alias)
+                    if (bare != null) {
+                        val bareKey = makeKey(col, bare)
+                        if (deletedKeys.add(bareKey)) added++
+                        allTombstones[bareKey] = tombstone
+                    }
                 }
             }
         }
 
-        if (remoteEpoch > clusterEpochTimestamp) {
+        val epochUpdated = remoteEpoch > clusterEpochTimestamp
+        if (epochUpdated) {
             clusterEpochTimestamp = remoteEpoch
         }
 
-        if (added > 0 || remoteEpoch > 0) {
+        if (added > 0 || epochUpdated) {
             appContext?.let { persist(it) }
-            logInfo("Merged $added remote tombstones. Total active tombstones: ${allTombstones.size}")
+            val dao = boundDao
+            if (dao != null && sqlBatch.isNotEmpty()) {
+                ioScope.launch {
+                    runCatching { dao.upsertTombstones(sqlBatch) }
+                }
+            }
+            logInfo("Merged $added remote tombstone keys. Total active tombstones: ${allTombstones.size}, epoch=$clusterEpochTimestamp")
         }
     }
 
     private fun persist(context: Context) {
-        runCatching {
-            val file = File(context.filesDir, FILE_NAME)
-            val root = JSONObject()
-            root.put("epoch", clusterEpochTimestamp)
-            val arr = JSONArray()
-            allTombstones.values.distinctBy { it.docId }.forEach { t ->
-                val obj = JSONObject()
-                obj.put("collection", t.collection)
-                obj.put("entityId", t.entityId)
-                obj.put("docId", t.docId)
-                obj.put("deletedAt", t.deletedAt)
-                obj.put("deletedBy", t.deletedBy)
-                arr.put(obj)
+        synchronized(persistLock) {
+            runCatching {
+                val file = File(context.filesDir, FILE_NAME)
+                val tmpFile = File(context.filesDir, "$FILE_NAME.tmp")
+                val root = JSONObject()
+                root.put("epoch", clusterEpochTimestamp)
+                val arr = JSONArray()
+                allTombstones.values
+                    .distinctBy { "${normalize(it.collection)}::${normalize(it.docId)}::${normalize(it.entityId)}" }
+                    .forEach { t ->
+                        val obj = JSONObject()
+                        obj.put("collection", t.collection)
+                        obj.put("entityId", t.entityId)
+                        obj.put("docId", t.docId)
+                        obj.put("deletedAt", t.deletedAt)
+                        obj.put("deletedBy", t.deletedBy)
+                        if (t.aliases.isNotEmpty()) {
+                            obj.put("aliases", JSONArray(t.aliases))
+                        }
+                        arr.put(obj)
+                    }
+                root.put("tombstones", arr)
+                tmpFile.writeText(root.toString())
+                if (!tmpFile.renameTo(file)) {
+                    file.writeText(root.toString())
+                    tmpFile.delete()
+                }
+            }.onFailure {
+                logWarn("Failed to persist tombstones: ${it.message}")
             }
-            root.put("tombstones", arr)
-            file.writeText(root.toString())
-        }.onFailure {
-            logWarn("Failed to persist tombstones: ${it.message}")
         }
     }
 
     private fun loadPersisted(context: Context) {
-        runCatching {
-            val file = File(context.filesDir, FILE_NAME)
-            if (!file.exists()) return
-            val content = file.readText()
-            if (content.isBlank()) return
-            val root = JSONObject(content)
-            clusterEpochTimestamp = root.optLong("epoch", 0L)
-            val arr = root.optJSONArray("tombstones") ?: JSONArray()
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val col = obj.optString("collection", "")
-                val entityId = obj.optString("entityId", "")
-                val docId = obj.optString("docId", "")
-                val delAt = obj.optLong("deletedAt", System.currentTimeMillis())
-                val delBy = obj.optString("deletedBy", "مدير النظام")
+        synchronized(persistLock) {
+            runCatching {
+                val file = File(context.filesDir, FILE_NAME)
+                if (!file.exists()) return
+                val content = file.readText()
+                if (content.isBlank()) return
+                val root = JSONObject(content)
+                clusterEpochTimestamp = maxOf(clusterEpochTimestamp, root.optLong("epoch", 0L))
+                val arr = root.optJSONArray("tombstones") ?: JSONArray()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val col = obj.optString("collection", "").trim()
+                    val entityId = obj.optString("entityId", "").trim()
+                    val docId = obj.optString("docId", "").trim()
+                    val delAt = obj.optLong("deletedAt", System.currentTimeMillis())
+                    val delBy = obj.optString("deletedBy", "مدير النظام")
+                    val aliasesArr = obj.optJSONArray("aliases")
+                    val aliasList = mutableListOf<String>()
+                    if (aliasesArr != null) {
+                        for (j in 0 until aliasesArr.length()) {
+                            val v = aliasesArr.optString(j, "").trim()
+                            if (v.isNotBlank()) aliasList.add(v)
+                        }
+                    }
 
-                if (col.isNotBlank() && (entityId.isNotBlank() || docId.isNotBlank())) {
-                    val primaryId = entityId.ifBlank { docId }
-                    val key1 = makeKey(col, primaryId)
-                    val key2 = if (docId.isNotBlank()) makeKey(col, docId) else key1
-
-                    deletedKeys.add(key1)
-                    deletedKeys.add(key2)
-
-                    val t = RecordTombstone(col, primaryId, docId.ifBlank { primaryId }, delAt, delBy)
-                    allTombstones[key1] = t
-                    allTombstones[key2] = t
+                    if (col.isNotBlank() && (entityId.isNotBlank() || docId.isNotBlank() || aliasList.isNotEmpty())) {
+                        val primaryId = entityId.ifBlank { docId.ifBlank { aliasList.first() } }
+                        val resolvedDocId = docId.ifBlank { primaryId }
+                        val combinedAliases = (listOf(primaryId, resolvedDocId) + aliasList).filter { it.isNotBlank() }.distinct()
+                        val t = RecordTombstone(col, primaryId, resolvedDocId, delAt, delBy, combinedAliases)
+                        for (alias in combinedAliases) {
+                            val k = makeKey(col, alias)
+                            deletedKeys.add(k)
+                            allTombstones[k] = t
+                            extractBareId(alias)?.let { bare ->
+                                val bk = makeKey(col, bare)
+                                deletedKeys.add(bk)
+                                allTombstones[bk] = t
+                            }
+                        }
+                    }
                 }
+                logInfo("Loaded ${allTombstones.size} tombstones from local storage. Epoch: $clusterEpochTimestamp")
+            }.onFailure {
+                logWarn("Failed to load persisted tombstones: ${it.message}")
             }
-            logInfo("Loaded ${allTombstones.size} tombstones from local storage. Epoch: $clusterEpochTimestamp")
-        }.onFailure {
-            logWarn("Failed to load persisted tombstones: ${it.message}")
         }
     }
 }

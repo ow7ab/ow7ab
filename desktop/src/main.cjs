@@ -182,11 +182,14 @@ function createSystemTray() {
 
 async function triggerDesktopUpdateCheck() {
   if (!app.isPackaged) {
-    // In unpackaged dev mode, query GitHub Desktop release feed read-only without mutating files
+    // In unpackaged dev mode, query GitHub Desktop release feed read-only with 8s timeout
     emitUpdateStatus({ status: 'checking', progressPercent: 0, message: 'جاري فحص أحدث إصدار رسمي لسطح المكتب...' });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
     try {
       const resp = await fetch('https://api.github.com/repos/ow7ab/ow7ab/releases?per_page=15', {
-        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'PMP-PAINTS-Desktop-Updater' }
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'PMP-PAINTS-Desktop-Updater' },
+        signal: controller.signal
       });
       if (!resp.ok) {
         emitUpdateStatus({ status: 'not-available', message: 'نسختك محدثة (بيئة التطوير).' });
@@ -231,6 +234,8 @@ async function triggerDesktopUpdateCheck() {
         status: 'not-available',
         message: 'تعذر الوصول لخادم التحديثات حالياً. سيستمر النظام بالعمل بشكل طبيعي.'
       });
+    } finally {
+      clearTimeout(timer);
     }
     return latestUpdateState;
   }
@@ -423,6 +428,47 @@ function createMainWindow() {
     } else if ((input.ctrlKey || input.metaKey) && input.key.toLowerCase() === 'p') {
       event.preventDefault();
       mainWindow.webContents.send('desktop:shortcut', 'PRINT_REPORT');
+    }
+  });
+
+  // Security & Reliability: Validate downloads initiated inside Electron session
+  mainWindow.webContents.session.on('will-download', (_event, item) => {
+    const itemUrl = item.getURL() || '';
+    const isSafeUrl =
+      itemUrl.startsWith('blob:') ||
+      itemUrl.startsWith('data:') ||
+      isTrustedLoopbackOrigin(itemUrl, trustedOrigin) ||
+      isAllowedExternalUrl(itemUrl);
+    if (!isSafeUrl) {
+      item.cancel();
+      return;
+    }
+    const cleanFileName = String(item.getFilename() || `pmp_download_${Date.now()}`).replace(/[<>:"/\\|?*]+/g, '_');
+    item.setSaveDialogOptions({
+      title: 'حفظ الملف — PMP PAINTS ERP',
+      defaultPath: path.join(app.getPath('downloads'), cleanFileName)
+    });
+    item.on('done', (_e, state) => {
+      if (state === 'completed' && Notification.isSupported()) {
+        new Notification({
+          title: 'اكتمل التنزيل — PMP PAINTS ERP',
+          body: `تم حفظ الملف: ${cleanFileName}`,
+          icon: fs.existsSync(ICON_PNG_PATH) ? ICON_PNG_PATH : undefined
+        }).show();
+      }
+    });
+  });
+
+  // Resilience: Automatic single retry if transient loopback load hiccup occurs
+  let hasRetriedLoad = false;
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode) => {
+    if (!hasRetriedLoad && errorCode !== -3 && mainWindow && !mainWindow.isDestroyed()) {
+      hasRetriedLoad = true;
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          void mainWindow.loadURL(`${trustedOrigin}/`);
+        }
+      }, 350);
     }
   });
 
@@ -729,7 +775,14 @@ function registerIpcHandlers() {
       emitUpdateStatus({ status: 'error', message: 'تنزيل التحديثات التلقائي متاح في النسخة المثبتة الرسمية (.exe) فقط.' });
       return latestUpdateState;
     }
-    await autoUpdater.downloadUpdate();
+    try {
+      await autoUpdater.downloadUpdate();
+    } catch (err) {
+      emitUpdateStatus({
+        status: 'error',
+        message: err?.message || 'تعذر تنزيل تحديث سطح المكتب حالياً.'
+      });
+    }
     return latestUpdateState;
   });
 

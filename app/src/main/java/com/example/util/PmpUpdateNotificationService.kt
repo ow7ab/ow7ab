@@ -291,6 +291,7 @@ object UpdateNotificationHelper {
  */
 class PmpFirebaseMessagingService : FirebaseMessagingService() {
 
+    @Suppress("OVERRIDE_DEPRECATION")
     override fun onNewToken(token: String) {
         super.onNewToken(token)
         DeveloperUpdateLogger.info("FCM", "FCM registration token refreshed")

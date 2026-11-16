@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { Suspense, useState, useEffect } from 'react';
 import {
   LayoutDashboard,
   Coins,
@@ -26,31 +26,83 @@ import {
 } from 'lucide-react';
 import { GlassCard } from '../components/ui/GlassCard';
 import { GlassButton } from '../components/ui/GlassButton';
-import { AdminDashboardOverview } from '../components/admin/AdminDashboardOverview';
-import { TreasuryModuleView } from '../components/modules/TreasuryModuleView';
-import { PurchasesModuleView } from '../components/modules/PurchasesModuleView';
-import { SalesModuleView } from '../components/modules/SalesModuleView';
-import { WarehousesModuleView } from '../components/modules/WarehousesModuleView';
-import { FactoryModuleView } from '../components/modules/FactoryModuleView';
-import { ChemistryLabModuleView } from '../components/modules/ChemistryLabModuleView';
-import { EmployeeManagementCenter } from '../components/admin/EmployeeManagementCenter';
-import { PricesModuleView } from '../components/modules/PricesModuleView';
-import { ReportsCenterView } from '../components/reports/ReportsCenterView';
-import { SettingsModuleView } from '../components/modules/SettingsModuleView';
-import { GlobalSearchModal } from '../components/search/GlobalSearchModal';
+import { ErrorBoundary } from '../components/ui/ErrorBoundary';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { useLanguage } from '../context/LanguageContext';
-import { ErpDataService } from '../services/ErpDataService';
 import { IdempotencyProtectionSystem } from '../services/IdempotencyService';
-import { ReportTab } from '../components/reports/ReportsCenterView';
+import type { ReportTab } from '../components/reports/ReportsCenterView';
 import {
   canConfigureEmployeePermissions,
   isSystemManager
 } from '../services/SecurityService';
 import { resolveAssetUrl } from '../config/appVersionContract';
 import { AppRoute } from '../utils/routing';
-import { getDesktopBridge, isDesktopApp } from '../utils/desktopBridge';
+import { getDesktopBridge } from '../utils/desktopBridge';
+import { lazyWithRetry } from '../utils/lazyWithRetry';
+
+const AdminDashboardOverview = lazyWithRetry(
+  () => import('../components/admin/AdminDashboardOverview').then((m) => ({ default: m.AdminDashboardOverview })),
+  'AdminDashboardOverview'
+);
+const TreasuryModuleView = lazyWithRetry(
+  () => import('../components/modules/TreasuryModuleView').then((m) => ({ default: m.TreasuryModuleView })),
+  'TreasuryModuleView'
+);
+const PurchasesModuleView = lazyWithRetry(
+  () => import('../components/modules/PurchasesModuleView').then((m) => ({ default: m.PurchasesModuleView })),
+  'PurchasesModuleView'
+);
+const SalesModuleView = lazyWithRetry(
+  () => import('../components/modules/SalesModuleView').then((m) => ({ default: m.SalesModuleView })),
+  'SalesModuleView'
+);
+const WarehousesModuleView = lazyWithRetry(
+  () => import('../components/modules/WarehousesModuleView').then((m) => ({ default: m.WarehousesModuleView })),
+  'WarehousesModuleView'
+);
+const FactoryModuleView = lazyWithRetry(
+  () => import('../components/modules/FactoryModuleView').then((m) => ({ default: m.FactoryModuleView })),
+  'FactoryModuleView'
+);
+const ChemistryLabModuleView = lazyWithRetry(
+  () => import('../components/modules/ChemistryLabModuleView').then((m) => ({ default: m.ChemistryLabModuleView })),
+  'ChemistryLabModuleView'
+);
+const EmployeeManagementCenter = lazyWithRetry(
+  () => import('../components/admin/EmployeeManagementCenter').then((m) => ({ default: m.EmployeeManagementCenter })),
+  'EmployeeManagementCenter'
+);
+const PricesModuleView = lazyWithRetry(
+  () => import('../components/modules/PricesModuleView').then((m) => ({ default: m.PricesModuleView })),
+  'PricesModuleView'
+);
+const ReportsCenterView = lazyWithRetry(
+  () => import('../components/reports/ReportsCenterView').then((m) => ({ default: m.ReportsCenterView })),
+  'ReportsCenterView'
+);
+const SettingsModuleView = lazyWithRetry(
+  () => import('../components/modules/SettingsModuleView').then((m) => ({ default: m.SettingsModuleView })),
+  'SettingsModuleView'
+);
+const GlobalSearchModal = lazyWithRetry(
+  () => import('../components/search/GlobalSearchModal').then((m) => ({ default: m.GlobalSearchModal })),
+  'GlobalSearchModal'
+);
+
+const ModuleLoadingSkeleton: React.FC<{ label?: string }> = ({ label }) => (
+  <div className="space-y-4 animate-pulse" role="status" aria-live="polite">
+    <div className="h-10 w-64 max-w-full rounded-xl bg-theme-surface border border-theme" />
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {[1, 2, 3, 4].map((idx) => (
+        <div key={idx} className="h-24 rounded-2xl bg-theme-surface border border-theme" />
+      ))}
+    </div>
+    <div className="h-64 rounded-2xl bg-theme-surface border border-theme flex items-center justify-center text-xs font-bold text-theme-secondary">
+      {label || 'جاري تحميل بيانات الوحدة...'}
+    </div>
+  </div>
+);
 
 export type PmpScreenRoute =
   | 'DASHBOARD'
@@ -248,11 +300,14 @@ export const PortalPage: React.FC<PortalPageProps> = ({
     }
   }, [userProfile?.permissions, userProfile?.role, activeTab]);
 
-  // Desktop enterprise keyboard shortcuts (Ctrl+K search, Ctrl+1..9 module jump, Ctrl+Shift+T/L)
+  // Universal enterprise keyboard shortcuts (Ctrl/Cmd+K search, Ctrl+1..9 module jump, Ctrl+Shift+T/L, Escape drawer)
   useEffect(() => {
-    if (!isDesktopApp()) return;
     const visibleItems = navMenuItems.filter((m) => m.visible);
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMobileDrawerOpen(false);
+        return;
+      }
       if (!(e.ctrlKey || e.metaKey)) return;
       const key = e.key.toLowerCase();
       if (key === 'k') {
@@ -627,28 +682,42 @@ export const PortalPage: React.FC<PortalPageProps> = ({
             </div>
           )}
 
-          {activeTab === 'DASHBOARD' && (
-            <AdminDashboardOverview onNavigateToModule={handleNavigateToModule} />
-          )}
-          {activeTab === 'TREASURY' && <TreasuryModuleView />}
-          {activeTab === 'PURCHASES' && <PurchasesModuleView />}
-          {activeTab === 'SALES' && <SalesModuleView />}
-          {activeTab === 'INVENTORY' && <WarehousesModuleView />}
-          {activeTab === 'FACTORY' && <FactoryModuleView />}
-          {activeTab === 'CHEMISTRY_LAB' && <ChemistryLabModuleView />}
-          {activeTab === 'USERS' && canAccessAdminArea && <EmployeeManagementCenter />}
-          {activeTab === 'POSTER' && <PricesModuleView />}
-          {activeTab === 'REPORTS' && <ReportsCenterView initialTab={reportsInitialTab} />}
-          {activeTab === 'SETTINGS' && <SettingsModuleView />}
+          <ErrorBoundary>
+            <Suspense
+              fallback={
+                <ModuleLoadingSkeleton
+                  label={language === 'ar' ? 'جاري تحميل بيانات الوحدة...' : 'Loading module...'}
+                />
+              }
+            >
+              {activeTab === 'DASHBOARD' && (
+                <AdminDashboardOverview onNavigateToModule={handleNavigateToModule} />
+              )}
+              {activeTab === 'TREASURY' && <TreasuryModuleView />}
+              {activeTab === 'PURCHASES' && <PurchasesModuleView />}
+              {activeTab === 'SALES' && <SalesModuleView />}
+              {activeTab === 'INVENTORY' && <WarehousesModuleView />}
+              {activeTab === 'FACTORY' && <FactoryModuleView />}
+              {activeTab === 'CHEMISTRY_LAB' && <ChemistryLabModuleView />}
+              {activeTab === 'USERS' && canAccessAdminArea && <EmployeeManagementCenter />}
+              {activeTab === 'POSTER' && <PricesModuleView />}
+              {activeTab === 'REPORTS' && <ReportsCenterView initialTab={reportsInitialTab} />}
+              {activeTab === 'SETTINGS' && <SettingsModuleView />}
+            </Suspense>
+          </ErrorBoundary>
         </main>
       </div>
 
       {/* Global Search Modal */}
-      <GlobalSearchModal
-        isOpen={isSearchOpen}
-        onClose={() => setIsSearchOpen(false)}
-        onSelectResult={handleNavigateToModule}
-      />
+      {isSearchOpen && (
+        <Suspense fallback={null}>
+          <GlobalSearchModal
+            isOpen={isSearchOpen}
+            onClose={() => setIsSearchOpen(false)}
+            onSelectResult={handleNavigateToModule}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

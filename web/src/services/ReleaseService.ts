@@ -462,6 +462,52 @@ export async function fetchReleaseFeed(): Promise<ReleaseFeedResult> {
   };
 }
 
+export interface DownloadMirrorEntry {
+  id: 'github-latest' | 'github-versioned' | 'server-stream';
+  labelAr: string;
+  labelEn: string;
+  url: string;
+}
+
+export function getDownloadMirrors(release: StableApkRelease | null | undefined): DownloadMirrorEntry[] {
+  const seen = new Set<string>();
+  const mirrors: DownloadMirrorEntry[] = [];
+
+  const addMirror = (entry: DownloadMirrorEntry) => {
+    if (!entry.url || seen.has(entry.url)) return;
+    seen.add(entry.url);
+    mirrors.push(entry);
+  };
+
+  if (release?.downloadUrl) {
+    const cleanUrl = sanitizeApkDownloadUrl(release.downloadUrl);
+    if (cleanUrl !== APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL) {
+      addMirror({
+        id: 'github-versioned',
+        labelAr: 'الرابط السريع المباشر (GitHub CDN)',
+        labelEn: 'Primary Direct CDN (GitHub)',
+        url: cleanUrl
+      });
+    }
+  }
+
+  addMirror({
+    id: 'github-latest',
+    labelAr: 'رابط آخر إصدار رسمي دائم',
+    labelEn: 'Permanent Latest Release Link',
+    url: APP_VERSION_CONTRACT.GITHUB_LATEST_APK_URL
+  });
+
+  addMirror({
+    id: 'server-stream',
+    labelAr: 'مسار التحميل المباشر من خادم المنظومة',
+    labelEn: 'ERP Server Direct Stream',
+    url: resolveAssetUrl('download-apk')
+  });
+
+  return mirrors;
+}
+
 export async function computeFileSha256Hex(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   const digest = await crypto.subtle.digest('SHA-256', buffer);

@@ -259,7 +259,9 @@ class PmpRepository(
             amount = amount,
             description = safeDesc,
             reference = safeRef,
-            createdBy = user
+            createdBy = user,
+            syncUuid = java.util.UUID.randomUUID().toString(),
+            updatedAt = System.currentTimeMillis()
         )
         val id = dao.insertMovement(movementEntity)
         accountingEngine?.postTreasuryMovementJournalInternal(movementEntity.copy(id = id))
@@ -273,14 +275,44 @@ class PmpRepository(
         Result.success(id)
     }
 
-    suspend fun deleteMovement(id: Long, user: String): Result<Unit> = runInTransaction(
+    suspend fun deleteMovement(id: Long, user: String): Result<MovementEntity?> = runInTransaction(
         operationName = "DELETE_MOVEMENT",
         entityType = "movements",
         details = "حذف الحركة المالية #$id"
     ) {
+        val existing = dao.getMovementByIdDirect(id)
+        val aliases = listOfNotNull(
+            id.toString(),
+            "MOV-$id",
+            existing?.reference?.takeIf { it.isNotBlank() },
+            existing?.cloudDocId?.takeIf { it.isNotBlank() },
+            existing?.syncUuid?.takeIf { it.isNotBlank() }
+        )
+        DeletedRecordsRegistry.registerDeletedWithAliases(
+            collection = "movements",
+            aliases = aliases,
+            primaryEntityId = id.toString(),
+            primaryDocId = existing?.cloudDocId?.ifBlank { "MOV-$id" } ?: "MOV-$id",
+            actor = user
+        )
         dao.deleteMovementById(id)
-        dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_MOVEMENT", detail = "حذف الحركة المالية #$id"))
-        Result.success(Unit)
+        if (!existing?.reference.isNullOrBlank()) {
+            dao.deleteMovementByReference(existing!!.reference)
+        }
+        if (!existing?.cloudDocId.isNullOrBlank()) {
+            dao.deleteMovementByCloudDocId(existing!!.cloudDocId)
+        }
+        if (!existing?.syncUuid.isNullOrBlank()) {
+            dao.deleteMovementBySyncUuid(existing!!.syncUuid)
+        }
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = user,
+                action = "DELETE_MOVEMENT",
+                detail = "حذف الحركة المالية #$id (${existing?.reference ?: ""})"
+            )
+        )
+        Result.success(existing)
     }
 
     suspend fun recordCustomerPayment(
@@ -538,6 +570,13 @@ class PmpRepository(
                 )
             )
         }
+        DeletedRecordsRegistry.registerDeletedWithAliases(
+            collection = "customers",
+            aliases = listOfNotNull(id.toString(), "CUST-$id", customerName.trim().takeIf { it.isNotBlank() }),
+            primaryEntityId = id.toString(),
+            primaryDocId = "CUST-$id",
+            actor = user
+        )
         dao.deleteCustomer(id)
         dao.insertAuditLog(
             AuditLogEntity(
@@ -1041,11 +1080,38 @@ class PmpRepository(
         return Result.success(Unit)
     }
 
-    suspend fun deleteWarehouse(id: Long, user: String): Result<Unit> {
+    suspend fun deleteWarehouse(id: Long, user: String): Result<Unit> = runInTransaction(
+        operationName = "DELETE_WAREHOUSE",
+        entityType = "warehouses",
+        details = "حذف المخزن #$id وتنظيف حركاته"
+    ) {
+        val existing = dao.getWarehouseByIdDirect(id)
+        val movesToDelete = dao.getStockMovesDirect().filter { it.warehouseId == id }
+        movesToDelete.forEach { sm ->
+            DeletedRecordsRegistry.registerDeletedWithAliases(
+                collection = "stock_moves",
+                aliases = listOf(sm.id.toString(), "SM-${sm.id}"),
+                primaryEntityId = sm.id.toString(),
+                primaryDocId = "SM-${sm.id}",
+                actor = user
+            )
+        }
+        DeletedRecordsRegistry.registerDeletedWithAliases(
+            collection = "warehouses",
+            aliases = listOfNotNull(
+                id.toString(),
+                "WH-$id",
+                existing?.name?.takeIf { it.isNotBlank() },
+                existing?.syncUuid?.takeIf { it.isNotBlank() }
+            ),
+            primaryEntityId = id.toString(),
+            primaryDocId = "WH-$id",
+            actor = user
+        )
         dao.clearStockMovesByWarehouse(id)
         dao.deleteWarehouse(id)
         dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_WAREHOUSE", detail = "حذف المخزن #$id وتنظيف حركاته"))
-        return Result.success(Unit)
+        Result.success(Unit)
     }
 
     suspend fun addProduct(
@@ -1213,23 +1279,92 @@ class PmpRepository(
         return Result.success(updatedCount)
     }
 
-    suspend fun deleteProduct(id: Long, productName: String, user: String): Result<Unit> {
+    suspend fun deleteProduct(id: Long, productName: String, user: String): Result<Unit> = runInTransaction(
+        operationName = "DELETE_PRODUCT",
+        entityType = "products",
+        details = "حذف صنف من النظام: $productName (#$id)"
+    ) {
+        val existing = dao.getProductByIdDirect(id)
+        val movesToDelete = dao.getStockMovesDirect().filter { it.productId == id }
+        movesToDelete.forEach { sm ->
+            DeletedRecordsRegistry.registerDeletedWithAliases(
+                collection = "stock_moves",
+                aliases = listOf(sm.id.toString(), "SM-${sm.id}"),
+                primaryEntityId = sm.id.toString(),
+                primaryDocId = "SM-${sm.id}",
+                actor = user
+            )
+        }
+        DeletedRecordsRegistry.registerDeletedWithAliases(
+            collection = "products",
+            aliases = listOfNotNull(
+                id.toString(),
+                "PROD-$id",
+                "PRD-$id",
+                existing?.syncUuid?.takeIf { it.isNotBlank() }
+            ),
+            primaryEntityId = id.toString(),
+            primaryDocId = "PROD-$id",
+            actor = user
+        )
         dao.clearStockMovesByProduct(id)
         dao.deleteProduct(id)
         dao.insertAuditLog(AuditLogEntity(username = user, action = "DELETE_PRODUCT", detail = "حذف صنف من النظام: $productName (#$id) مع تنظيف حركاته"))
-        return Result.success(Unit)
+        Result.success(Unit)
     }
 
-    suspend fun resetWarehouseStock(warehouseId: Long, warehouseName: String, user: String): Result<Unit> {
+    suspend fun resetWarehouseStock(warehouseId: Long, warehouseName: String, user: String): Result<List<StockMoveEntity>> = runInTransaction(
+        operationName = "ZERO_WAREHOUSE",
+        entityType = "stock_moves",
+        details = "تصفير كامل أرصدة مخزن: $warehouseName (#$warehouseId)"
+    ) {
+        val movesToDelete = dao.getStockMovesDirect().filter { it.warehouseId == warehouseId }
+        movesToDelete.forEach { sm ->
+            DeletedRecordsRegistry.registerDeletedWithAliases(
+                collection = "stock_moves",
+                aliases = listOf(sm.id.toString(), "SM-${sm.id}"),
+                primaryEntityId = sm.id.toString(),
+                primaryDocId = "SM-${sm.id}",
+                actor = user
+            )
+        }
         dao.clearStockMovesByWarehouse(warehouseId)
         dao.insertAuditLog(AuditLogEntity(username = user, action = "ZERO_WAREHOUSE", detail = "تصفير كامل أرصدة مخزن: $warehouseName (#$warehouseId)"))
-        return Result.success(Unit)
+        Result.success(movesToDelete)
     }
 
-    suspend fun resetCashboxBalance(cashboxName: String, user: String): Result<Unit> {
-        dao.clearMovementsByCashbox(cashboxName)
-        dao.insertAuditLog(AuditLogEntity(username = user, action = "ZERO_CASHBOX", detail = "تصفير كامل حركات ورصيد خزنة: $cashboxName"))
-        return Result.success(Unit)
+    suspend fun resetCashboxBalance(cashboxName: String, user: String): Result<List<MovementEntity>> = runInTransaction(
+        operationName = "ZERO_CASHBOX",
+        entityType = "movements",
+        details = "تصفير كامل حركات ورصيد خزنة: $cashboxName"
+    ) {
+        val cleanBox = cashboxName.trim()
+        val clearedMovements = dao.getMovementsByCashboxNormalized(cleanBox)
+        clearedMovements.forEach { m ->
+            val aliases = listOfNotNull(
+                m.id.toString(),
+                "MOV-${m.id}",
+                m.reference.takeIf { it.isNotBlank() },
+                m.cloudDocId.takeIf { it.isNotBlank() },
+                m.syncUuid.takeIf { it.isNotBlank() }
+            )
+            DeletedRecordsRegistry.registerDeletedWithAliases(
+                collection = "movements",
+                aliases = aliases,
+                primaryEntityId = m.id.toString(),
+                primaryDocId = m.cloudDocId.ifBlank { "MOV-${m.id}" },
+                actor = user
+            )
+        }
+        dao.clearMovementsByCashbox(cleanBox)
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = user,
+                action = "ZERO_CASHBOX",
+                detail = "تصفير كامل حركات ورصيد خزنة: $cleanBox (حذف ${clearedMovements.size} حركة وتسجيل شواهد منع العودة)"
+            )
+        )
+        Result.success(clearedMovements)
     }
 
     suspend fun recordStockMove(
@@ -1332,7 +1467,18 @@ class PmpRepository(
         return Result.success(Unit)
     }
 
-    suspend fun deleteFactoryItem(itemId: Long, itemName: String, actor: String = "إدارة المصنع"): Result<Unit> {
+    suspend fun deleteFactoryItem(itemId: Long, itemName: String, actor: String = "إدارة المصنع"): Result<Unit> = runInTransaction(
+        operationName = "DELETE_FACTORY_ITEM",
+        entityType = "factory_items",
+        details = "حذف صنف من المصنع: $itemName (ID: $itemId)"
+    ) {
+        DeletedRecordsRegistry.registerDeletedWithAliases(
+            collection = "factory_items",
+            aliases = listOfNotNull(itemId.toString(), "FI-$itemId", itemName.trim().takeIf { it.isNotBlank() }),
+            primaryEntityId = itemId.toString(),
+            primaryDocId = "FI-$itemId",
+            actor = actor
+        )
         dao.deleteFactoryItemById(itemId)
         dao.insertAuditLog(
             AuditLogEntity(
@@ -1341,7 +1487,7 @@ class PmpRepository(
                 detail = "حذف صنف من المصنع: $itemName (ID: $itemId)"
             )
         )
-        return Result.success(Unit)
+        Result.success(Unit)
     }
 
     suspend fun recordFactoryMove(

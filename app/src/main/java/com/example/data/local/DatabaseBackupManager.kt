@@ -12,19 +12,32 @@ object DatabaseBackupManager {
 
     private const val TAG = "DatabaseBackupManager"
     private const val BACKUP_FILE_NAME = "pmp_erp_persistent_backup.json"
+    private val snapshotLock = Any()
 
     /**
      * Creates an offline JSON snapshot of all core ERP tables.
-     * Stored in the app's permanent internal storage which survives APK version upgrades.
+     * Strictly excludes tombstoned / pre-epoch deleted records and embeds record_tombstones + clusterEpoch
+     * so deleted financial transactions can NEVER resurrect across APK upgrades or restores.
      */
     suspend fun saveLocalSnapshot(context: Context, dao: PmpDao): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
-            val root = JSONObject()
-            root.put("version", 5)
-            root.put("timestamp", System.currentTimeMillis())
+            DeletedAccountsRegistry.init(context)
+            DeletedRecordsRegistry.init(context)
+            DeletedRecordsRegistry.syncWithDao(dao)
 
-            // 1. Invoices
-            val invoices = dao.getInvoicesDirect()
+            val root = JSONObject()
+            root.put("version", 6)
+            root.put("timestamp", System.currentTimeMillis())
+            root.put("clusterEpoch", DeletedRecordsRegistry.getClusterEpoch())
+
+            // 1. Invoices (excluding deleted/pre-epoch)
+            val invoices = dao.getInvoicesDirect().filterNot { inv ->
+                DeletedRecordsRegistry.isPreEpoch(inv.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("invoices", inv.id) ||
+                    DeletedRecordsRegistry.isDeleted("invoices", "INV-${inv.id}") ||
+                    (inv.invoiceNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("invoices", inv.invoiceNo))
+            }
+            val validInvoiceIds = invoices.map { it.id }.toSet()
             val invArray = JSONArray()
             invoices.forEach { inv ->
                 invArray.put(JSONObject().apply {
@@ -46,8 +59,11 @@ object DatabaseBackupManager {
             }
             root.put("invoices", invArray)
 
-            // 2. Invoice Items
-            val items = dao.getInvoiceItemsDirect()
+            // 2. Invoice Items (only for surviving non-deleted invoices)
+            val items = dao.getInvoiceItemsDirect().filter { item ->
+                item.invoiceId in validInvoiceIds &&
+                    !DeletedRecordsRegistry.isDeleted("invoice_items", item.id)
+            }
             val itemArray = JSONArray()
             items.forEach { item ->
                 itemArray.put(JSONObject().apply {
@@ -63,8 +79,12 @@ object DatabaseBackupManager {
             }
             root.put("invoice_items", itemArray)
 
-            // 3. Invoice Payments
-            val payments = dao.getInvoicePaymentsDirect()
+            // 3. Invoice Payments (only for surviving non-deleted invoices)
+            val payments = dao.getInvoicePaymentsDirect().filter { pay ->
+                pay.invoiceId in validInvoiceIds &&
+                    !DeletedRecordsRegistry.isPreEpoch(pay.createdAt) &&
+                    !DeletedRecordsRegistry.isDeleted("invoice_payments", pay.id)
+            }
             val payArray = JSONArray()
             payments.forEach { pay ->
                 payArray.put(JSONObject().apply {
@@ -81,8 +101,10 @@ object DatabaseBackupManager {
             }
             root.put("invoice_payments", payArray)
 
-            // 4. Movements
-            val movements = dao.getMovementsDirect()
+            // 4. Movements (strictly excluding tombstoned & pre-epoch records)
+            val movements = dao.getMovementsDirect().filterNot { m ->
+                DeletedRecordsRegistry.isMovementDeleted(m)
+            }
             val movArray = JSONArray()
             movements.forEach { m ->
                 movArray.put(JSONObject().apply {
@@ -96,12 +118,20 @@ object DatabaseBackupManager {
                     put("reference", m.reference)
                     put("createdBy", m.createdBy)
                     put("createdAt", m.createdAt)
+                    put("cloudDocId", m.cloudDocId)
+                    put("syncUuid", m.syncUuid)
+                    put("updatedAt", m.updatedAt)
                 })
             }
             root.put("movements", movArray)
 
-            // 5. Customers
-            val customers = dao.getCustomersDirect()
+            // 5. Customers (excluding deleted)
+            val customers = dao.getCustomersDirect().filterNot { c ->
+                DeletedRecordsRegistry.isPreEpoch(c.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("customers", c.id) ||
+                    DeletedRecordsRegistry.isDeleted("customers", "CUST-${c.id}") ||
+                    DeletedRecordsRegistry.isDeleted("customers", c.name)
+            }
             val custArray = JSONArray()
             customers.forEach { c ->
                 custArray.put(JSONObject().apply {
@@ -116,8 +146,12 @@ object DatabaseBackupManager {
             }
             root.put("customers", custArray)
 
-            // 6. Products
-            val products = dao.getProductsDirect()
+            // 6. Products (excluding deleted)
+            val products = dao.getProductsDirect().filterNot { p ->
+                DeletedRecordsRegistry.isDeleted("products", p.id) ||
+                    DeletedRecordsRegistry.isDeleted("products", "PROD-${p.id}") ||
+                    DeletedRecordsRegistry.isDeleted("products", "PRD-${p.id}")
+            }
             val prodArray = JSONArray()
             products.forEach { p ->
                 prodArray.put(JSONObject().apply {
@@ -135,8 +169,14 @@ object DatabaseBackupManager {
             }
             root.put("products", prodArray)
 
-            // 7. Cashboxes
-            val cashboxes = dao.getCashboxesDirect()
+            // 7. Cashboxes (excluding deleted)
+            val cashboxes = dao.getCashboxesDirect().filterNot { cb ->
+                val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
+                DeletedRecordsRegistry.isDeleted("cashboxes", cb.id) ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", "BOX-${cb.id}") ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) ||
+                    DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId)
+            }
             val cashArray = JSONArray()
             cashboxes.forEach { cb ->
                 cashArray.put(JSONObject().apply {
@@ -165,7 +205,7 @@ object DatabaseBackupManager {
                         put("remoteServerId", u.remoteServerId)
                         put("syncStatus", u.syncStatus)
                         put("serverEndpoint", u.serverEndpoint)
-                        put("isCurrentSession", false) // Never leak active session flag across devices or exports
+                        put("isCurrentSession", false)
                         put("active", u.active)
                         put("createdAt", u.createdAt)
                     })
@@ -180,31 +220,82 @@ object DatabaseBackupManager {
             }
             root.put("deleted_accounts", tombstonesArray)
 
-            val file = File(context.filesDir, BACKUP_FILE_NAME)
-            file.writeText(root.toString(2))
-            Log.d(TAG, "Saved persistent ERP snapshot with ${invoices.size} invoices and ${movements.size} movements to ${file.absolutePath}")
-            file
+            // 10. Persistent Tombstones of All Deleted ERP Records (Financial, Invoices, Inventory, etc.)
+            val recordTombstonesArray = JSONArray()
+            DeletedRecordsRegistry.getAllTombstoneRecords().forEach { t ->
+                val obj = JSONObject()
+                t.forEach { (k, v) ->
+                    if (v is List<*>) obj.put(k, JSONArray(v)) else obj.put(k, v)
+                }
+                recordTombstonesArray.put(obj)
+            }
+            root.put("record_tombstones", recordTombstonesArray)
+
+            synchronized(snapshotLock) {
+                val file = File(context.filesDir, BACKUP_FILE_NAME)
+                val tmpFile = File(context.filesDir, "$BACKUP_FILE_NAME.tmp")
+                tmpFile.writeText(root.toString(2))
+                if (!tmpFile.renameTo(file)) {
+                    file.writeText(root.toString(2))
+                    tmpFile.delete()
+                }
+                Log.d(TAG, "Saved persistent ERP snapshot v6 with ${invoices.size} invoices and ${movements.size} movements to ${file.absolutePath}")
+                file
+            }
         }
     }
 
     /**
-     * Checks if the database is newly initialized or empty, and restores previous data from the snapshot.
+     * Checks if the database is newly initialized or empty, and restores previous data from the snapshot,
+     * applying all account & ERP record tombstones FIRST so deleted records never resurrect.
      */
     suspend fun restoreIfEmpty(context: Context, dao: PmpDao): Boolean = withContext(Dispatchers.IO) {
         val file = File(context.filesDir, BACKUP_FILE_NAME)
         if (!file.exists()) return@withContext false
 
         DeletedAccountsRegistry.init(context)
+        DeletedRecordsRegistry.init(context)
 
         val existingInvoices = dao.getInvoicesDirect()
         val existingMovements = dao.getMovementsDirect()
         val hasTransactions = existingInvoices.isNotEmpty() || existingMovements.isNotEmpty()
 
         try {
-            val jsonText = file.readText()
+            val jsonText = synchronized(snapshotLock) { file.readText() }
             val root = JSONObject(jsonText)
 
-            // 0. Load any tombstones first
+            // 0a. Restore cluster epoch and ERP record tombstones FIRST before restoring any entity!
+            val backupEpoch = root.optLong("clusterEpoch", 0L)
+            val recTombArray = root.optJSONArray("record_tombstones")
+            val remoteList = mutableListOf<Map<String, Any>>()
+            if (recTombArray != null) {
+                for (i in 0 until recTombArray.length()) {
+                    val obj = recTombArray.getJSONObject(i)
+                    val aliasesArr = obj.optJSONArray("aliases")
+                    val aliases = mutableListOf<String>()
+                    if (aliasesArr != null) {
+                        for (j in 0 until aliasesArr.length()) {
+                            val a = aliasesArr.optString(j, "").trim()
+                            if (a.isNotBlank()) aliases.add(a)
+                        }
+                    }
+                    val map = mutableMapOf<String, Any>(
+                        "collection" to obj.optString("collection"),
+                        "entityId" to obj.optString("entityId"),
+                        "docId" to obj.optString("docId"),
+                        "deletedAt" to obj.optLong("deletedAt", System.currentTimeMillis()),
+                        "deletedBy" to obj.optString("deletedBy", "مدير النظام")
+                    )
+                    if (aliases.isNotEmpty()) map["aliases"] = aliases
+                    remoteList.add(map)
+                }
+            }
+            if (remoteList.isNotEmpty() || backupEpoch > 0L) {
+                DeletedRecordsRegistry.mergeRemoteTombstones(remoteList, backupEpoch)
+            }
+            DeletedRecordsRegistry.syncWithDao(dao)
+
+            // 0b. Load account tombstones
             val delArray = root.optJSONArray("deleted_accounts")
             if (delArray != null && delArray.length() > 0) {
                 val listDel = mutableListOf<Map<String, Any>>()
@@ -273,20 +364,31 @@ object DatabaseBackupManager {
             }
 
             if (hasTransactions) {
-                // Transactions already populated, accounts successfully merged
                 return@withContext true
             }
 
-            // Restore Invoices
+            // Restore Invoices (excluding any tombstoned or pre-epoch invoices)
+            val restoredInvoiceIds = mutableSetOf<Long>()
             val invArray = root.optJSONArray("invoices")
             if (invArray != null && invArray.length() > 0) {
                 val list = mutableListOf<InvoiceEntity>()
                 for (i in 0 until invArray.length()) {
                     val obj = invArray.getJSONObject(i)
+                    val invId = obj.optLong("id")
+                    val invNo = obj.optString("invoiceNo")
+                    val createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                    if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("invoices", invId) ||
+                        DeletedRecordsRegistry.isDeleted("invoices", "INV-$invId") ||
+                        (invNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("invoices", invNo))
+                    ) {
+                        continue
+                    }
+                    restoredInvoiceIds.add(invId)
                     list.add(
                         InvoiceEntity(
-                            id = obj.optLong("id"),
-                            invoiceNo = obj.optString("invoiceNo"),
+                            id = invId,
+                            invoiceNo = invNo,
                             customerId = obj.optLong("customerId"),
                             customerName = obj.optString("customerName"),
                             invoiceDate = obj.optString("invoiceDate"),
@@ -298,25 +400,30 @@ object DatabaseBackupManager {
                             status = obj.optString("status", "active"),
                             cancelReason = obj.optString("cancelReason").ifBlank { null },
                             createdBy = obj.optString("createdBy", "المدير"),
-                            createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                            createdAt = createdAt
                         )
                     )
                 }
-                dao.upsertInvoices(list)
+                if (list.isNotEmpty()) dao.upsertInvoices(list)
             }
 
-            // Restore Invoice Items
+            // Restore Invoice Items (only for kept non-tombstoned invoices)
             val itemArray = root.optJSONArray("invoice_items")
             if (itemArray != null && itemArray.length() > 0) {
                 val list = mutableListOf<InvoiceItemEntity>()
                 for (i in 0 until itemArray.length()) {
                     val obj = itemArray.getJSONObject(i)
+                    val itemId = obj.optLong("id")
+                    val invoiceId = obj.optLong("invoiceId")
+                    if (invoiceId !in restoredInvoiceIds || DeletedRecordsRegistry.isDeleted("invoice_items", itemId)) {
+                        continue
+                    }
                     val prodId = obj.optLong("productId", -1L)
                     val whId = obj.optLong("warehouseId", -1L)
                     list.add(
                         InvoiceItemEntity(
-                            id = obj.optLong("id"),
-                            invoiceId = obj.optLong("invoiceId"),
+                            id = itemId,
+                            invoiceId = invoiceId,
                             description = obj.optString("description"),
                             quantity = obj.optDouble("quantity", 1.0),
                             unitPrice = obj.optDouble("unitPrice"),
@@ -326,78 +433,101 @@ object DatabaseBackupManager {
                         )
                     )
                 }
-                dao.upsertInvoiceItems(list)
+                if (list.isNotEmpty()) dao.upsertInvoiceItems(list)
             }
 
-            // Restore Invoice Payments
+            // Restore Invoice Payments (only for kept non-tombstoned invoices)
             val payArray = root.optJSONArray("invoice_payments")
             if (payArray != null && payArray.length() > 0) {
                 val list = mutableListOf<InvoicePaymentEntity>()
                 for (i in 0 until payArray.length()) {
                     val obj = payArray.getJSONObject(i)
+                    val payId = obj.optLong("id")
+                    val invoiceId = obj.optLong("invoiceId")
+                    val createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                    if (invoiceId !in restoredInvoiceIds ||
+                        DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("invoice_payments", payId)
+                    ) {
+                        continue
+                    }
                     list.add(
                         InvoicePaymentEntity(
-                            id = obj.optLong("id"),
-                            invoiceId = obj.optLong("invoiceId"),
+                            id = payId,
+                            invoiceId = invoiceId,
                             payDate = obj.optString("payDate"),
                             cashbox = obj.optString("cashbox"),
                             amount = obj.optDouble("amount"),
                             note = obj.optString("note"),
                             status = obj.optString("status", "active"),
                             createdBy = obj.optString("createdBy", "المدير"),
-                            createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                            createdAt = createdAt
                         )
                     )
                 }
-                dao.upsertInvoicePayments(list)
+                if (list.isNotEmpty()) dao.upsertInvoicePayments(list)
             }
 
-            // Restore Movements
+            // Restore Movements (strictly excluding tombstoned & pre-epoch records)
             val movArray = root.optJSONArray("movements")
             if (movArray != null && movArray.length() > 0) {
                 val list = mutableListOf<MovementEntity>()
                 for (i in 0 until movArray.length()) {
                     val obj = movArray.getJSONObject(i)
-                    list.add(
-                        MovementEntity(
-                            id = obj.optLong("id"),
-                            txDate = obj.optString("txDate"),
-                            cashbox = obj.optString("cashbox"),
-                            currency = obj.optString("currency", "SDG"),
-                            direction = obj.optString("direction"),
-                            amount = obj.optDouble("amount"),
-                            description = obj.optString("description"),
-                            reference = obj.optString("reference"),
-                            createdBy = obj.optString("createdBy", "المدير"),
-                            createdAt = obj.optLong("createdAt", System.currentTimeMillis())
-                        )
+                    val mov = MovementEntity(
+                        id = obj.optLong("id"),
+                        txDate = obj.optString("txDate"),
+                        cashbox = obj.optString("cashbox"),
+                        currency = obj.optString("currency", "SDG"),
+                        direction = obj.optString("direction"),
+                        amount = obj.optDouble("amount"),
+                        description = obj.optString("description"),
+                        reference = obj.optString("reference"),
+                        createdBy = obj.optString("createdBy", "المدير"),
+                        createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
+                        cloudDocId = obj.optString("cloudDocId", ""),
+                        syncUuid = obj.optString("syncUuid", ""),
+                        updatedAt = obj.optLong("updatedAt", 0L)
                     )
+                    if (!DeletedRecordsRegistry.isMovementDeleted(mov)) {
+                        list.add(mov)
+                    }
                 }
-                dao.upsertMovements(list)
+                if (list.isNotEmpty()) dao.upsertMovements(list)
             }
 
-            // Restore Customers
+            // Restore Customers (excluding tombstoned)
             val custArray = root.optJSONArray("customers")
             if (custArray != null && custArray.length() > 0) {
                 val list = mutableListOf<CustomerEntity>()
                 for (i in 0 until custArray.length()) {
                     val obj = custArray.getJSONObject(i)
+                    val custId = obj.optLong("id")
+                    val custName = obj.optString("name")
+                    val createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                    if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("customers", custId) ||
+                        DeletedRecordsRegistry.isDeleted("customers", "CUST-$custId") ||
+                        (custName.isNotBlank() && DeletedRecordsRegistry.isDeleted("customers", custName))
+                    ) {
+                        continue
+                    }
                     list.add(
                         CustomerEntity(
-                            id = obj.optLong("id"),
-                            name = obj.optString("name"),
+                            id = custId,
+                            name = custName,
                             phone = obj.optString("phone"),
                             address = obj.optString("address"),
                             notes = obj.optString("notes"),
                             active = obj.optBoolean("active", true),
-                            createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                            createdAt = createdAt
                         )
                     )
                 }
-                dao.upsertCustomers(list)
+                if (list.isNotEmpty()) dao.upsertCustomers(list)
             }
 
-            Log.i(TAG, "Successfully restored ERP data from persistent snapshot!")
+            Log.i(TAG, "Successfully restored ERP data from persistent snapshot v6 with tombstone protection!")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Error restoring from persistent snapshot", e)

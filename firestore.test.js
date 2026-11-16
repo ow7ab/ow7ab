@@ -498,3 +498,66 @@ test("15. Idempotency Protection: idempotency_requests enforce schema, block rev
   await assertFails(idemRef.update({ requestStatus: "FAILED", updatedAt: Date.now() }));
   await assertFails(idemRef.delete());
 });
+
+test("16. Hardened Movements, Transfers & Distributed Tombstone Non-Resurrection Rules", async () => {
+  await seedClusterRbac();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const managerDb = testEnv.authenticatedContext(MANAGER_UID).firestore();
+  const empDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+  const cMgr = managerDb.collection("erp_clusters").doc(CLUSTER);
+  const cAdm = adminDb.collection("erp_clusters").doc(CLUSTER);
+  const cEmp = empDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Invalid currency or negative transfer rate rejected
+  await assertFails(
+    cMgr.collection("movements").doc("MOV-BAD-CUR").set({
+      cashbox: "خزنة السودان",
+      currency: "EUR",
+      direction: "وارد",
+      amount: 500,
+    })
+  );
+  await assertFails(
+    cMgr.collection("transfers").doc("TRF-BAD-RATE").set({
+      sourceAmount: 1000,
+      destinationAmount: 500,
+      rate: 0,
+    })
+  );
+
+  // Manager CAN create & merge-update deleted_records tombstones with multi-aliases, CANNOT delete tombstones
+  const tombRef = cMgr.collection("deleted_records").doc("movements_MOV-500");
+  await assertSucceeds(
+    tombRef.set({
+      collection: "movements",
+      docId: "MOV-500",
+      entityId: "500",
+      numericId: 500,
+      aliases: ["500", "MOV-500", "REC-500"],
+      deletedBy: "mgr",
+    })
+  );
+  await assertSucceeds(
+    tombRef.set(
+      {
+        collection: "movements",
+        docId: "MOV-500",
+        entityId: "500",
+        aliases: ["500", "MOV-500", "REC-500", "UUID-500"],
+      },
+      { merge: true }
+    )
+  );
+  await assertFails(tombRef.delete());
+  await assertFails(
+    cEmp.collection("deleted_records").doc("movements_MOV-EMP").set({
+      collection: "movements",
+      docId: "MOV-EMP",
+      entityId: "1",
+    })
+  );
+
+  // Admin CAN delete tombstone only if explicitly restoring
+  await assertSucceeds(cAdm.collection("deleted_records").doc("movements_MOV-500").delete());
+});
+

@@ -290,7 +290,21 @@ service cloud.firestore {
           (!('customerName' in d) || isNonEmptyString(d.customerName, 200))
         )) &&
         (col != 'invoice_payments' || (!('amount' in d) || (d.amount is number && d.amount > 0))) &&
-        (col != 'movements' || (!('amount' in d) || (d.amount is number && d.amount >= 0))) &&
+        (col != 'movements' || (
+          (!('amount' in d) || (d.amount is number && d.amount >= 0)) &&
+          (!('direction' in d) || d.direction in ['وارد', 'منصرف', 'IN', 'OUT', 'INCOME', 'EXPENSE', 'TRANSFER_IN', 'TRANSFER_OUT', 'قبض', 'صرف']) &&
+          (!('currency' in d) || d.currency in ['SDG', 'EGP', 'USD']) &&
+          (!('cashbox' in d) || isNonEmptyString(d.cashbox, 120))
+        )) &&
+        (col != 'transfers' || (
+          (!('sourceAmount' in d) || (d.sourceAmount is number && d.sourceAmount >= 0)) &&
+          (!('destinationAmount' in d) || (d.destinationAmount is number && d.destinationAmount >= 0)) &&
+          (!('rate' in d) || (d.rate is number && d.rate > 0))
+        )) &&
+        (col != 'deleted_records' || (
+          isNonEmptyString(d.collection, 64) &&
+          ((('docId' in d) && isNonEmptyString(d.docId, 160)) || (('entityId' in d) && isNonEmptyString(d.entityId, 160)))
+        )) &&
         (col != 'stock_moves' || (
           (!('quantity' in d) || (d.quantity is number && d.quantity >= 0)) &&
           (!('kind' in d) || isNonEmptyString(d.kind, 40))
@@ -374,7 +388,8 @@ service cloud.firestore {
       let d = request.resource.data;
       return isSignedIn() && m.active == true && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
         isMemberAdmin(m) ||
-        (col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users'] && false) ||
+        (col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_users'] && false) ||
+        (col == 'deleted_records' && isMemberManager(m)) ||
         (col == 'journal_entries' && isMemberAccountant(m)) ||
         (col == 'inventory_movements' && (isMemberManager(m) || isMemberAccountant(m))) ||
         (col == 'accounting_accounts' && (isMemberManager(m) || isMemberAccountant(m))) ||
