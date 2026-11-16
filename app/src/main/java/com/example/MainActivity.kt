@@ -8,9 +8,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -19,6 +20,9 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -889,11 +893,22 @@ fun PmpAppContent(
                         .background(GlassBackgroundBrush)
                 ) {
                     val effectiveCurrentScreen = if (currentScreen in allowedScreens) currentScreen else PmpScreen.DASHBOARD
-                    // Fast, smooth screen transition with SaveableStateProvider so scroll positions and states are preserved across tabs
-                    // Resolving effectiveCurrentScreen BEFORE Crossfade prevents two Crossfade branches from ever mapping to the same SaveableStateProvider key ("dashboard") simultaneously.
-                    Crossfade(
+                    // Directional smooth screen transition with SaveableStateProvider so scroll positions and states are preserved across tabs
+                    AnimatedContent(
                         targetState = effectiveCurrentScreen,
-                        animationSpec = tween(durationMillis = 90),
+                        transitionSpec = {
+                            val fromIdx = orderedNavScreens.indexOf(initialState).let { if (it >= 0) it else 0 }
+                            val toIdx = orderedNavScreens.indexOf(targetState).let { if (it >= 0) it else 0 }
+                            val forward = toIdx >= fromIdx
+                            (slideInHorizontally(
+                                animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+                                initialOffsetX = { fullWidth -> if (forward) fullWidth / 12 else -fullWidth / 12 }
+                            ) + fadeIn(animationSpec = tween(durationMillis = 180))) togetherWith
+                                (slideOutHorizontally(
+                                    animationSpec = tween(durationMillis = 170, easing = FastOutSlowInEasing),
+                                    targetOffsetX = { fullWidth -> if (forward) -fullWidth / 16 else fullWidth / 16 }
+                                ) + fadeOut(animationSpec = tween(durationMillis = 150)))
+                        },
                         label = "ScreenTransition"
                     ) { screen ->
                         saveableStateHolder.SaveableStateProvider(screen.route) {
@@ -1124,17 +1139,24 @@ fun GlassBottomNavigationBar(
     val isDark = PmpThemeController.isDarkModeActive
     val distinctScreens = remember(allowedScreens) { allowedScreens.distinctBy { it.route } }
 
-    // Auto-scroll smoothly only when the active tab lies outside the visible viewport
+    // Auto-scroll smoothly and center the active tab when scrolled or near edges
     LaunchedEffect(currentScreen, distinctScreens) {
         val index = distinctScreens.indexOf(currentScreen)
         if (index >= 0) {
             val layoutInfo = listState.layoutInfo
             val itemInfo = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
-            val isFullyVisible = itemInfo != null &&
-                itemInfo.offset >= layoutInfo.viewportStartOffset &&
-                (itemInfo.offset + itemInfo.size) <= layoutInfo.viewportEndOffset
-            if (!isFullyVisible) {
+            if (itemInfo == null) {
                 listState.animateScrollToItem(index)
+            } else {
+                val viewportCenter = (layoutInfo.viewportStartOffset + layoutInfo.viewportEndOffset) / 2
+                val itemCenter = itemInfo.offset + itemInfo.size / 2
+                val delta = itemCenter - viewportCenter
+                if (kotlin.math.abs(delta) > itemInfo.size / 2) {
+                    listState.animateScrollToItem(
+                        index = index,
+                        scrollOffset = -(layoutInfo.viewportSize.width - itemInfo.size) / 2
+                    )
+                }
             }
         }
     }

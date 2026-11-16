@@ -88,6 +88,236 @@ class CloudErpSyncRepository(
             if (r.contains("محاسب") || r.contains("accountant")) return "ACCOUNTANT"
             return "EMPLOYEE"
         }
+
+        enum class TransactionViolationType { NONE, DUPLICATE, TAMPER }
+
+        data class TransactionCommitValidationResult(
+            val valid: Boolean,
+            val violationType: TransactionViolationType = TransactionViolationType.NONE,
+            val reason: String = "",
+            val matchedDocId: String = ""
+        )
+
+        private val VALID_CURRENCIES = setOf("SDG", "EGP", "USD")
+        private val VALID_DIRECTIONS = setOf("وارد", "منصرف", "IN", "OUT", "INCOME", "EXPENSE", "TRANSFER_IN", "TRANSFER_OUT", "قبض", "صرف")
+        private const val FINANCIAL_REALISTIC_MAX = 1_000_000_000_000.0
+
+        private fun normKey(raw: String?): String =
+            raw.orEmpty()
+                .trim()
+                .replace(Regex("[إأآا]"), "ا")
+                .replace("ة", "ه")
+                .replace("ى", "ي")
+                .replace(Regex("\\s+"), " ")
+                .lowercase(java.util.Locale.US)
+
+        private fun numVal(v: Any?): Double = when (v) {
+            is Number -> v.toDouble()
+            is String -> v.trim().toDoubleOrNull() ?: Double.NaN
+            else -> Double.NaN
+        }
+
+        fun buildFinancialCommitFingerprint(
+            collectionName: String,
+            payload: Map<String, Any?>
+        ): String {
+            val col = collectionName.trim().lowercase(java.util.Locale.US)
+            return when (col) {
+                "movements" -> {
+                    val ref = normKey((payload["reference"] ?: payload["referenceNo"] ?: "").toString())
+                    val box = normKey((payload["cashbox"] ?: "").toString())
+                    val dir = normKey((payload["direction"] ?: "").toString())
+                    val cur = (payload["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US)
+                    val amt = kotlin.math.round((numVal(payload["amount"]).takeIf { it.isFinite() } ?: 0.0) * 100.0).toLong()
+                    "MOV|$ref|$box|$dir|$cur|$amt"
+                }
+                "transfers" -> {
+                    val ref = normKey((payload["reference"] ?: "").toString())
+                    val src = normKey((payload["sourceCashbox"] ?: "").toString())
+                    val dst = normKey((payload["destinationCashbox"] ?: "").toString())
+                    val sCur = (payload["sourceCurrency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US)
+                    val dCur = (payload["destinationCurrency"] ?: "EGP").toString().trim().uppercase(java.util.Locale.US)
+                    val sAmt = kotlin.math.round((numVal(payload["sourceAmount"]).takeIf { it.isFinite() } ?: 0.0) * 100.0).toLong()
+                    "TRF|$ref|$src|$dst|$sCur|$dCur|$sAmt"
+                }
+                "invoices" -> {
+                    val invNo = normKey((payload["invoiceNo"] ?: payload["reference"] ?: "").toString())
+                    val cust = normKey((payload["customerName"] ?: "").toString())
+                    val cur = (payload["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US)
+                    val total = kotlin.math.round((numVal(payload["total"]).takeIf { it.isFinite() } ?: 0.0) * 100.0).toLong()
+                    "INV|$invNo|$cust|$cur|$total"
+                }
+                else -> "${col.uppercase(java.util.Locale.US)}|${normKey((payload["reference"] ?: payload["id"] ?: "").toString())}"
+            }
+        }
+
+        fun validateTransactionCommitPayload(
+            collectionName: String,
+            docId: String,
+            payload: Map<String, Any?>
+        ): TransactionCommitValidationResult {
+            val col = collectionName.trim().lowercase(java.util.Locale.US)
+            if (docId.isBlank()) {
+                return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "معرف المستند المالي فارغ أو غير صالح.")
+            }
+            if (payload.isEmpty()) {
+                return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "بيانات المعاملة المالية فارغة أو تالفة.")
+            }
+            when (col) {
+                "movements" -> {
+                    val amt = numVal(payload["amount"])
+                    val cur = (payload["currency"] ?: "").toString().trim().uppercase(java.util.Locale.US)
+                    val dir = (payload["direction"] ?: "").toString().trim()
+                    val cashbox = (payload["cashbox"] ?: "").toString().trim()
+                    if (!amt.isFinite() || amt <= 0.0 || amt > FINANCIAL_REALISTIC_MAX) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "قيمة الحركة المالية غير صالحة أو خارج النطاق (${payload["amount"]}).")
+                    }
+                    if (cur !in VALID_CURRENCIES) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "عملة غير معتمدة في المعاملة المالية: \"$cur\".")
+                    }
+                    if (dir !in VALID_DIRECTIONS) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "اتجاه حركة مالية غير مشروع: \"$dir\".")
+                    }
+                    if (cashbox.isBlank()) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "محاولة تسجيل حركة مالية بدون تحديد الخزنة المعتمدة.")
+                    }
+                }
+                "transfers" -> {
+                    val srcAmt = numVal(payload["sourceAmount"])
+                    val dstAmt = numVal(payload["destinationAmount"])
+                    val rate = numVal(payload["rate"])
+                    val srcBox = normKey((payload["sourceCashbox"] ?: "").toString())
+                    val dstBox = normKey((payload["destinationCashbox"] ?: "").toString())
+                    val srcCur = (payload["sourceCurrency"] ?: "").toString().trim().uppercase(java.util.Locale.US)
+                    val dstCur = (payload["destinationCurrency"] ?: "").toString().trim().uppercase(java.util.Locale.US)
+                    if (!srcAmt.isFinite() || srcAmt <= 0.0 || srcAmt > FINANCIAL_REALISTIC_MAX) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "مبلغ المصدر غير صالح (${payload["sourceAmount"]}).")
+                    }
+                    if (!dstAmt.isFinite() || dstAmt <= 0.0 || dstAmt > FINANCIAL_REALISTIC_MAX) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "مبلغ الوجهة غير صالح (${payload["destinationAmount"]}).")
+                    }
+                    if (!rate.isFinite() || rate <= 0.0 || rate > 1_000_000.0) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "سعر الصرف غير صالح (${payload["rate"]}).")
+                    }
+                    if (srcCur !in VALID_CURRENCIES || dstCur !in VALID_CURRENCIES) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "عملة تحويل غير معتمدة ($srcCur -> $dstCur).")
+                    }
+                    if (srcBox.isBlank() || dstBox.isBlank()) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "خزنة المصدر أو الوجهة مفقودة في التحويل.")
+                    }
+                    if (srcBox == dstBox && srcCur == dstCur) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "لا يمكن التحويل من وإلى نفس الخزنة وبنفس العملة.")
+                    }
+                    val expectedMul = kotlin.math.round(srcAmt * rate * 100.0) / 100.0
+                    val expectedDiv = kotlin.math.round((srcAmt / rate) * 100.0) / 100.0
+                    val tol = kotlin.math.max(0.1, kotlin.math.max(expectedMul, expectedDiv) * 0.005)
+                    if (kotlin.math.abs(dstAmt - expectedMul) > tol && kotlin.math.abs(dstAmt - expectedDiv) > tol) {
+                        return TransactionCommitValidationResult(
+                            false,
+                            TransactionViolationType.TAMPER,
+                            "عدم تطابق حساب التحويل ($srcAmt بسعر $rate لا يطابق المستلم $dstAmt) — احتمال تلاعب بالقيم."
+                        )
+                    }
+                }
+                "invoices" -> {
+                    val total = numVal(payload["total"])
+                    val paid = numVal(payload["paidAmount"] ?: 0.0).takeIf { it.isFinite() } ?: 0.0
+                    val cur = (payload["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US)
+                    if (!total.isFinite() || total < 0.0 || paid < 0.0 || total > FINANCIAL_REALISTIC_MAX) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "قيم مالية سالبة أو غير صالحة في الفاتورة.")
+                    }
+                    if (cur !in VALID_CURRENCIES) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "عملة فاتورة غير معتمدة: \"$cur\".")
+                    }
+                    if (paid > total + 0.05) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "المبلغ المدفوع ($paid) يتجاوز إجمالي الفاتورة ($total).")
+                    }
+                }
+                "invoice_payments" -> {
+                    val amt = numVal(payload["amount"])
+                    val cur = (payload["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US)
+                    if (!amt.isFinite() || amt <= 0.0 || amt > FINANCIAL_REALISTIC_MAX || cur !in VALID_CURRENCIES) {
+                        return TransactionCommitValidationResult(false, TransactionViolationType.TAMPER, "بيانات دفعة السداد غير صالحة (${payload["amount"]} $cur).")
+                    }
+                }
+            }
+            return TransactionCommitValidationResult(valid = true, violationType = TransactionViolationType.NONE)
+        }
+
+        fun checkExistingFinancialCommitConflict(
+            collectionName: String,
+            candidateDocId: String,
+            candidatePayload: Map<String, Any?>,
+            existingDocs: List<Pair<String, Map<String, Any?>>>
+        ): TransactionCommitValidationResult {
+            if (existingDocs.isEmpty()) return TransactionCommitValidationResult(true)
+            val col = collectionName.trim().lowercase(java.util.Locale.US)
+            val candUuid = (candidatePayload["syncUuid"] ?: "").toString().trim()
+            val candRef = (candidatePayload["reference"] ?: candidatePayload["referenceNo"] ?: candidatePayload["invoiceNo"] ?: "").toString().trim()
+
+            for ((exDocId, existing) in existingDocs) {
+                val exUuid = (existing["syncUuid"] ?: "").toString().trim()
+                val sameDocId = candidateDocId.isNotBlank() && exDocId.isNotBlank() && candidateDocId == exDocId
+                val sameUuid = candUuid.isNotBlank() && exUuid.isNotBlank() && candUuid == exUuid
+
+                when (col) {
+                    "movements" -> {
+                        val exRef = (existing["reference"] ?: existing["referenceNo"] ?: "").toString().trim()
+                        val sameRefAndLeg = candRef.isNotBlank() && exRef.isNotBlank() &&
+                            candRef.equals(exRef, ignoreCase = true) &&
+                            normKey(existing["cashbox"]?.toString()) == normKey(candidatePayload["cashbox"]?.toString()) &&
+                            normKey(existing["direction"]?.toString()) == normKey(candidatePayload["direction"]?.toString())
+                        if (sameDocId || sameUuid || sameRefAndLeg) {
+                            val sameAmt = kotlin.math.abs((numVal(existing["amount"]).takeIf { it.isFinite() } ?: 0.0) - (numVal(candidatePayload["amount"]).takeIf { it.isFinite() } ?: 0.0)) < 0.01
+                            val sameCur = (existing["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US) ==
+                                (candidatePayload["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US)
+                            val sameBox = normKey(existing["cashbox"]?.toString()) == normKey(candidatePayload["cashbox"]?.toString())
+                            return if (!sameAmt || !sameCur || !sameBox) {
+                                TransactionCommitValidationResult(
+                                    valid = false,
+                                    violationType = TransactionViolationType.TAMPER,
+                                    matchedDocId = exDocId,
+                                    reason = "رُصدت محاولة تعديل أو تلاعب في معاملة مالية مسجلة مسبقاً ($exDocId): المبلغ أو الخزنة أو العملة لا تطابق السجل المعتمد في Firestore."
+                                )
+                            } else {
+                                TransactionCommitValidationResult(
+                                    valid = false,
+                                    violationType = TransactionViolationType.DUPLICATE,
+                                    matchedDocId = exDocId,
+                                    reason = "المعاملة المالية مسجلة مسبقاً في Firestore ($exDocId) — تم منع التكرار."
+                                )
+                            }
+                        }
+                    }
+                    "transfers" -> {
+                        val exRef = (existing["reference"] ?: "").toString().trim()
+                        val sameRef = candRef.isNotBlank() && exRef.isNotBlank() && candRef.equals(exRef, ignoreCase = true)
+                        if (sameDocId || sameUuid || sameRef) {
+                            val sameSrc = kotlin.math.abs((numVal(existing["sourceAmount"]).takeIf { it.isFinite() } ?: 0.0) - (numVal(candidatePayload["sourceAmount"]).takeIf { it.isFinite() } ?: 0.0)) < 0.01
+                            val sameDst = kotlin.math.abs((numVal(existing["destinationAmount"]).takeIf { it.isFinite() } ?: 0.0) - (numVal(candidatePayload["destinationAmount"]).takeIf { it.isFinite() } ?: 0.0)) < 0.01
+                            val sameBoxes = normKey(existing["sourceCashbox"]?.toString()) == normKey(candidatePayload["sourceCashbox"]?.toString()) &&
+                                normKey(existing["destinationCashbox"]?.toString()) == normKey(candidatePayload["destinationCashbox"]?.toString())
+                            return if (!sameSrc || !sameDst || !sameBoxes) {
+                                TransactionCommitValidationResult(
+                                    valid = false,
+                                    violationType = TransactionViolationType.TAMPER,
+                                    matchedDocId = exDocId,
+                                    reason = "رُصدت محاولة تعديل أو تلاعب في تحويل خزينة مسجل مسبقاً ($exDocId)."
+                                )
+                            } else {
+                                TransactionCommitValidationResult(
+                                    valid = false,
+                                    violationType = TransactionViolationType.DUPLICATE,
+                                    matchedDocId = exDocId,
+                                    reason = "عملية التحويل مسجلة مسبقاً في Firestore ($exDocId) — تم منع التكرار."
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            return TransactionCommitValidationResult(valid = true)
+        }
     }
 
     private val _diagnostics = kotlinx.coroutines.flow.MutableStateFlow<List<SyncDiagnosticRecord>>(emptyList())
@@ -186,6 +416,66 @@ class CloudErpSyncRepository(
         val currentStruct = _structuredErrors.value.toMutableList()
         currentStruct.add(0, entry)
         _structuredErrors.value = if (currentStruct.size > 50) currentStruct.take(50) else currentStruct
+        return entry
+    }
+
+    private val recentFinancialFingerprints = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    fun recordTamperAttempt(
+        operation: String,
+        collectionPath: String,
+        reason: String,
+        actor: String = "",
+        deviceId: String = "ANDROID-CLIENT"
+    ): CloudErrorLogEntry {
+        val entry = CloudSyncErrorTracker.buildTamperLogEntry(
+            operation = operation,
+            collectionPath = collectionPath,
+            reason = reason,
+            actor = actor,
+            deviceId = deviceId
+        )
+        val currentStruct = _structuredErrors.value.toMutableList()
+        currentStruct.add(0, entry)
+        _structuredErrors.value = if (currentStruct.size > 50) currentStruct.take(50) else currentStruct
+        recordDiagnostic(operation, "FAILED", 0, entry.sanitizedMessage, deviceId)
+        RoomTransactionLogger.log(
+            operation = operation,
+            stage = TransactionStage.SYNC_BROKEN,
+            status = TraceStatus.FAILURE,
+            entityType = collectionPath,
+            recordId = "",
+            details = entry.sanitizedMessage
+        )
+        return entry
+    }
+
+    fun recordDuplicateAttempt(
+        operation: String,
+        collectionPath: String,
+        reason: String,
+        actor: String = "",
+        deviceId: String = "ANDROID-CLIENT"
+    ): CloudErrorLogEntry {
+        val entry = CloudSyncErrorTracker.buildDuplicateLogEntry(
+            operation = operation,
+            collectionPath = collectionPath,
+            reason = reason,
+            actor = actor,
+            deviceId = deviceId
+        )
+        val currentStruct = _structuredErrors.value.toMutableList()
+        currentStruct.add(0, entry)
+        _structuredErrors.value = if (currentStruct.size > 50) currentStruct.take(50) else currentStruct
+        recordDiagnostic(operation, "FAILED", 0, entry.sanitizedMessage, deviceId)
+        RoomTransactionLogger.log(
+            operation = operation,
+            stage = TransactionStage.SYNC_BROKEN,
+            status = TraceStatus.FAILURE,
+            entityType = collectionPath,
+            recordId = "",
+            details = entry.sanitizedMessage
+        )
         return entry
     }
 
@@ -5104,88 +5394,229 @@ class CloudErpSyncRepository(
     }
 
     /**
-     * Instantly pushes a single financial MovementEntity to Cloud Firestore in < 100ms
+     * Additional Validation Layer (`handleTransactionCommit`) executed before inserting any financial transaction
+     * into Firestore. Verifies payload integrity, blocks tombstone replays, detects duplicates across devices on
+     * Firestore server, detects tampering attempts against committed records, and logs violations to the error log
+     * and immutable `audit_logs`.
+     */
+    suspend fun handleTransactionCommit(
+        clusterCode: String,
+        collectionName: String,
+        docId: String,
+        payload: Map<String, Any>,
+        actor: String = currentActorId
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+        val col = collectionName.trim()
+        val cleanDocId = safeId(docId, "DOC-${System.currentTimeMillis()}")
+        val fullPath = "erp_clusters/$cleanCluster/$col/$cleanDocId"
+
+        if (cleanCluster.equals(DEPRECATED_V16_CLUSTER, ignoreCase = true)) {
+            val reason = "الكتابة في الكلاستر المهجور PMP-ERP-V16-CLUSTER مرفوضة أمنياً"
+            recordTamperAttempt("HANDLE_TRANSACTION_COMMIT", fullPath, reason, actor)
+            return@withContext Result.failure(SecurityException(reason))
+        }
+
+        // 1. Payload integrity & anti-tampering validation
+        val integrity = validateTransactionCommitPayload(col, cleanDocId, payload)
+        if (!integrity.valid) {
+            recordTamperAttempt("HANDLE_TRANSACTION_COMMIT", fullPath, integrity.reason, actor)
+            logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "رفض معاملة [$col/$cleanDocId]: ${integrity.reason}")
+            return@withContext Result.failure(SecurityException(integrity.reason))
+        }
+
+        // 2. Strict tombstone replay protection
+        val refStr = (payload["reference"] ?: payload["referenceNo"] ?: "").toString().trim()
+        val uuidStr = (payload["syncUuid"] ?: "").toString().trim()
+        val numericId = (payload["id"] as? Number)?.toLong() ?: 0L
+        val tombstoned = DeletedRecordsRegistry.isDeleted(col, cleanDocId) ||
+            (numericId > 0L && DeletedRecordsRegistry.isDeleted(col, numericId.toString())) ||
+            (refStr.isNotBlank() && DeletedRecordsRegistry.isDeleted(col, refStr)) ||
+            (uuidStr.isNotBlank() && DeletedRecordsRegistry.isDeleted(col, uuidStr))
+        if (tombstoned) {
+            val reason = "محاولة إعادة إدخال معاملة مالية محذوفة مسبقاً ($cleanDocId) — تم حظر الاسترجاع."
+            recordTamperAttempt("TOMBSTONE_REPLAY_BLOCKED", fullPath, reason, actor)
+            logValidationViolationToAudit(cleanCluster, actor, "TOMBSTONE_REPLAY_BLOCKED", "محاولة إعادة حقن سجل محذوف [$col/$cleanDocId]")
+            return@withContext Result.failure(SecurityException(reason))
+        }
+
+        // 3. Sliding-window fingerprint deduplication guard
+        val now = System.currentTimeMillis()
+        recentFinancialFingerprints.entries.removeIf { now - it.value > 12_000L }
+        val fingerprint = buildFinancialCommitFingerprint(col, payload)
+        val prevTs = recentFinancialFingerprints[fingerprint]
+        if (prevTs != null && now - prevTs < 10_000L) {
+            val reason = "معاملة مالية مكررة خلال نافذة الحماية ($fingerprint) — تم منع الإرسال المكرر إلى Firestore."
+            recordDuplicateAttempt("HANDLE_TRANSACTION_COMMIT", fullPath, reason, actor)
+            logValidationViolationToAudit(cleanCluster, actor, "DUPLICATE_TRANSACTION_BLOCKED", "منع تكرار فوري [$col/$cleanDocId] ($fingerprint)")
+            return@withContext Result.failure(IllegalStateException(reason))
+        }
+
+        // 4. Server-backed Firestore conflict & tamper inspection when Firebase Auth is active
+        val cRef = clusterRef(cleanCluster)
+        val colRef = cRef.collection(col)
+        val docRef = colRef.document(cleanDocId)
+        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+        if (fbUser != null) {
+            val existingById = linkedMapOf<String, Map<String, Any?>>()
+            runCatching {
+                val direct = runCatching { docRef.get(Source.SERVER).await() }
+                    .getOrElse { docRef.get().await() }
+                if (direct.exists()) {
+                    direct.data?.let { existingById[direct.id] = it }
+                }
+            }
+            val fieldProbes = buildList {
+                if (uuidStr.isNotBlank()) add("syncUuid" to uuidStr)
+                if (refStr.isNotBlank()) add("reference" to refStr)
+                val invNo = (payload["invoiceNo"] ?: "").toString().trim()
+                if (invNo.isNotBlank() && invNo != refStr) add("invoiceNo" to invNo)
+            }
+            for ((field, value) in fieldProbes) {
+                runCatching {
+                    val q = colRef.whereEqualTo(field, value).limit(10)
+                    val snap = runCatching { q.get(Source.SERVER).await() }.getOrElse { q.get().await() }
+                    for (docSnap in snap.documents) {
+                        docSnap.data?.let { existingById[docSnap.id] = it }
+                    }
+                }
+            }
+
+            val conflict = checkExistingFinancialCommitConflict(
+                collectionName = col,
+                candidateDocId = cleanDocId,
+                candidatePayload = payload,
+                existingDocs = existingById.entries.map { it.key to it.value }
+            )
+            if (!conflict.valid) {
+                val matchedId = conflict.matchedDocId.ifBlank { cleanDocId }
+                val conflictPath = "erp_clusters/$cleanCluster/$col/$matchedId"
+                if (conflict.violationType == TransactionViolationType.TAMPER) {
+                    recordTamperAttempt("HANDLE_TRANSACTION_COMMIT", conflictPath, conflict.reason, actor)
+                    logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "رصد تلاعب ضد سجل [$col/$matchedId]: ${conflict.reason}")
+                    return@withContext Result.failure(SecurityException(conflict.reason))
+                } else {
+                    recordDuplicateAttempt("HANDLE_TRANSACTION_COMMIT", conflictPath, conflict.reason, actor)
+                    logValidationViolationToAudit(cleanCluster, actor, "DUPLICATE_TRANSACTION_BLOCKED", "منع تكرار سجل [$col/$matchedId]: ${conflict.reason}")
+                    return@withContext Result.failure(IllegalStateException(conflict.reason))
+                }
+            }
+        }
+
+        // 5. Commit verified transaction atomically
+        recentFinancialFingerprints[fingerprint] = now
+        return@withContext runCatching {
+            val enriched = HashMap<String, Any>(payload).apply {
+                put("serverUpdatedBy", actor)
+                put("serverUpdatedAt", FieldValue.serverTimestamp())
+            }
+            docRef.set(enriched, SetOptions.merge()).await()
+            RoomTransactionLogger.log(
+                operation = "HANDLE_TRANSACTION_COMMIT",
+                stage = TransactionStage.SYNC_ACKNOWLEDGED,
+                status = TraceStatus.SUCCESS,
+                entityType = col,
+                recordId = cleanDocId,
+                details = "تم التحقق من سلامة المعاملة وعدم تكرارها واعتمادها بالسيرفر #$cleanDocId"
+            )
+            Unit
+        }.onFailure { err ->
+            recentFinancialFingerprints.remove(fingerprint)
+            recordStructuredError("COMMIT_${col.uppercase(java.util.Locale.US)}", fullPath, err)
+        }
+    }
+
+    private suspend fun logValidationViolationToAudit(
+        clusterCode: String,
+        actor: String,
+        action: String,
+        detail: String
+    ) {
+        if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) return
+        val now = System.currentTimeMillis()
+        val auditDocId = "LOG-$now-${(100..999).random()}"
+        runCatching {
+            clusterRef(clusterCode).collection("audit_logs").document(auditDocId).set(
+                mapOf(
+                    "id" to now,
+                    "username" to actor.ifBlank { "ANDROID_USER" },
+                    "action" to action,
+                    "detail" to CloudSyncErrorTracker.sanitizeCloudMessage(detail),
+                    "timestamp" to now,
+                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                ),
+                SetOptions.merge()
+            ).await()
+        }
+    }
+
+    /**
+     * Instantly pushes a single financial MovementEntity through `handleTransactionCommit` to Cloud Firestore
      */
     suspend fun syncSingleMovementToCloud(
         clusterCode: String,
         m: MovementEntity,
         actor: String = currentActorId
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
-            if (DeletedRecordsRegistry.isMovementDeleted(m)) {
-                return@runCatching Unit
-            }
-            val cRef = clusterRef(clusterCode)
-            val docId = m.cloudDocId.trim().ifBlank { "MOV-${m.id}" }
-            val data = mutableMapOf<String, Any>(
-                "id" to m.id,
-                "txDate" to m.txDate,
-                "cashbox" to m.cashbox,
-                "currency" to m.currency,
-                "direction" to m.direction,
-                "amount" to m.amount,
-                "description" to m.description,
-                "reference" to m.reference,
-                "createdBy" to m.createdBy,
-                "createdAt" to m.createdAt,
-                "cloudDocId" to docId,
-                "serverUpdatedBy" to actor,
-                "serverUpdatedAt" to FieldValue.serverTimestamp()
-            )
-            if (m.syncUuid.isNotBlank()) data["syncUuid"] = m.syncUuid
-            if (m.updatedAt > 0L) data["updatedAt"] = m.updatedAt
-            cRef.collection("movements").document(docId).set(data, SetOptions.merge()).await()
-            RoomTransactionLogger.log(
-                operation = "SYNC_SINGLE_MOVEMENT",
-                stage = TransactionStage.SYNC_ACKNOWLEDGED,
-                status = TraceStatus.SUCCESS,
-                entityType = "movements",
-                recordId = docId,
-                details = "تم تأكيد مزامنة الحركة #$docId بالسيرفر فورياً"
-            )
-            Unit
+        if (DeletedRecordsRegistry.isMovementDeleted(m)) {
+            return@withContext Result.success(Unit)
         }
+        val docId = m.cloudDocId.trim().ifBlank { "MOV-${m.id}" }
+        val data = mutableMapOf<String, Any>(
+            "id" to m.id,
+            "txDate" to m.txDate,
+            "cashbox" to m.cashbox,
+            "currency" to m.currency,
+            "direction" to m.direction,
+            "amount" to m.amount,
+            "description" to m.description,
+            "reference" to m.reference,
+            "createdBy" to m.createdBy,
+            "createdAt" to m.createdAt,
+            "cloudDocId" to docId
+        )
+        if (m.syncUuid.isNotBlank()) data["syncUuid"] = m.syncUuid
+        if (m.updatedAt > 0L) data["updatedAt"] = m.updatedAt
+        handleTransactionCommit(
+            clusterCode = clusterCode,
+            collectionName = "movements",
+            docId = docId,
+            payload = data,
+            actor = actor
+        )
     }
 
     /**
-     * Instantly pushes a single financial TransferEntity to Cloud Firestore in < 100ms
+     * Instantly pushes a single financial TransferEntity through `handleTransactionCommit` to Cloud Firestore
      */
     suspend fun syncSingleTransferToCloud(
         clusterCode: String,
         t: TransferEntity,
         actor: String = currentActorId
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
-            val cRef = clusterRef(clusterCode)
-            val docId = safeId("TRF-${t.id}-${t.reference}", "TRF-${t.id}")
-            val data = mapOf(
-                "id" to t.id,
-                "reference" to t.reference,
-                "txDate" to t.txDate,
-                "sourceCashbox" to t.sourceCashbox,
-                "destinationCashbox" to t.destinationCashbox,
-                "sourceCurrency" to t.sourceCurrency,
-                "destinationCurrency" to t.destinationCurrency,
-                "sourceAmount" to t.sourceAmount,
-                "rate" to t.rate,
-                "destinationAmount" to t.destinationAmount,
-                "description" to t.description,
-                "createdBy" to t.createdBy,
-                "createdAt" to t.createdAt,
-                "serverUpdatedBy" to actor,
-                "serverUpdatedAt" to FieldValue.serverTimestamp()
-            )
-            cRef.collection("transfers").document(docId).set(data, SetOptions.merge()).await()
-            RoomTransactionLogger.log(
-                operation = "SYNC_SINGLE_TRANSFER",
-                stage = TransactionStage.SYNC_ACKNOWLEDGED,
-                status = TraceStatus.SUCCESS,
-                entityType = "transfers",
-                recordId = docId,
-                details = "تم تأكيد مزامنة التحويل #$docId بالسيرفر فورياً"
-            )
-            Unit
-        }
+        val docId = safeId("TRF-${t.id}-${t.reference}", "TRF-${t.id}")
+        val data = mapOf<String, Any>(
+            "id" to t.id,
+            "reference" to t.reference,
+            "txDate" to t.txDate,
+            "sourceCashbox" to t.sourceCashbox,
+            "destinationCashbox" to t.destinationCashbox,
+            "sourceCurrency" to t.sourceCurrency,
+            "destinationCurrency" to t.destinationCurrency,
+            "sourceAmount" to t.sourceAmount,
+            "rate" to t.rate,
+            "destinationAmount" to t.destinationAmount,
+            "description" to t.description,
+            "createdBy" to t.createdBy,
+            "createdAt" to t.createdAt
+        )
+        handleTransactionCommit(
+            clusterCode = clusterCode,
+            collectionName = "transfers",
+            docId = docId,
+            payload = data,
+            actor = actor
+        )
     }
 
     /**

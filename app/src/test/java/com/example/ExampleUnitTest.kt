@@ -1989,5 +1989,124 @@ class ExampleUnitTest {
       com.example.util.EnterpriseRbacManager.getRejectedBackendRequests().size >= 2
     )
   }
+
+  @Test
+  fun testHandleTransactionCommitValidationAndTamperLogging() {
+    // 1. Valid movement & valid FX transfer pass payload validation
+    val validMov = com.example.data.remote.CloudErpSyncRepository.validateTransactionCommitPayload(
+      collectionName = "movements",
+      docId = "MOV-VALID-1",
+      payload = mapOf(
+        "cashbox" to "خزنة السودان",
+        "currency" to "SDG",
+        "direction" to "وارد",
+        "amount" to 5000.0,
+        "reference" to "REC-VALID-1"
+      )
+    )
+    assertTrue("Valid movement payload must pass", validMov.valid)
+
+    // 2. Negative/zero amount or invalid currency or mismatched transfer FX must fail as TAMPER
+    val badAmount = com.example.data.remote.CloudErpSyncRepository.validateTransactionCommitPayload(
+      collectionName = "movements",
+      docId = "MOV-TAMPER-1",
+      payload = mapOf(
+        "cashbox" to "خزنة السودان",
+        "currency" to "SDG",
+        "direction" to "وارد",
+        "amount" to -100.0
+      )
+    )
+    assertFalse("Negative amount must be blocked", badAmount.valid)
+    assertEquals(
+      com.example.data.remote.CloudErpSyncRepository.Companion.TransactionViolationType.TAMPER,
+      badAmount.violationType
+    )
+
+    val badTransferFx = com.example.data.remote.CloudErpSyncRepository.validateTransactionCommitPayload(
+      collectionName = "transfers",
+      docId = "TRF-TAMPER-1",
+      payload = mapOf(
+        "sourceCashbox" to "خزنة السودان",
+        "destinationCashbox" to "خزنة مصر",
+        "sourceCurrency" to "SDG",
+        "destinationCurrency" to "EGP",
+        "sourceAmount" to 100000.0,
+        "rate" to 50.0,
+        "destinationAmount" to 777777.0
+      )
+    )
+    assertFalse("Tampered transfer destination amount must be blocked", badTransferFx.valid)
+    assertEquals(
+      com.example.data.remote.CloudErpSyncRepository.Companion.TransactionViolationType.TAMPER,
+      badTransferFx.violationType
+    )
+
+    // 3. Conflict detection distinguishes DUPLICATE vs TAMPER against Firestore snapshot records
+    val existing = listOf(
+      "MOV-IDEM-900" to mapOf<String, Any?>(
+        "reference" to "REC-900",
+        "cashbox" to "خزنة السودان",
+        "direction" to "وارد",
+        "currency" to "SDG",
+        "amount" to 42000.0,
+        "syncUuid" to "uuid-900"
+      )
+    )
+    val dupCheck = com.example.data.remote.CloudErpSyncRepository.checkExistingFinancialCommitConflict(
+      collectionName = "movements",
+      candidateDocId = "MOV-ALT-900",
+      candidatePayload = mapOf(
+        "reference" to "REC-900",
+        "cashbox" to "خزنه السودان",
+        "direction" to "وارد",
+        "currency" to "SDG",
+        "amount" to 42000.0
+      ),
+      existingDocs = existing
+    )
+    assertFalse("Duplicate movement must be blocked", dupCheck.valid)
+    assertEquals(
+      com.example.data.remote.CloudErpSyncRepository.Companion.TransactionViolationType.DUPLICATE,
+      dupCheck.violationType
+    )
+
+    val tamperOverwrite = com.example.data.remote.CloudErpSyncRepository.checkExistingFinancialCommitConflict(
+      collectionName = "movements",
+      candidateDocId = "MOV-IDEM-900",
+      candidatePayload = mapOf(
+        "reference" to "REC-900",
+        "cashbox" to "خزنة السودان",
+        "direction" to "وارد",
+        "currency" to "SDG",
+        "amount" to 99000.0
+      ),
+      existingDocs = existing
+    )
+    assertFalse("Overwriting existing movement with tampered amount must be blocked", tamperOverwrite.valid)
+    assertEquals(
+      com.example.data.remote.CloudErpSyncRepository.Companion.TransactionViolationType.TAMPER,
+      tamperOverwrite.violationType
+    )
+
+    // 4. Error tracker builds SECURITY_TAMPER & DUPLICATE_TRANSACTION entries cleanly
+    val tamperLog = com.example.data.remote.CloudSyncErrorTracker.buildTamperLogEntry(
+      operation = "HANDLE_TRANSACTION_COMMIT",
+      collectionPath = "erp_clusters/PMP-ERP-MAIN-CLUSTER/movements/MOV-900",
+      reason = tamperOverwrite.reason,
+      actor = "user_1"
+    )
+    assertEquals(com.example.data.remote.CloudErrorCategory.SECURITY_TAMPER, tamperLog.category)
+    assertFalse(tamperLog.retryable)
+
+    val dupLog = com.example.data.remote.CloudSyncErrorTracker.buildDuplicateLogEntry(
+      operation = "HANDLE_TRANSACTION_COMMIT",
+      collectionPath = "erp_clusters/PMP-ERP-MAIN-CLUSTER/movements/MOV-900",
+      reason = dupCheck.reason,
+      actor = "user_1"
+    )
+    assertEquals(com.example.data.remote.CloudErrorCategory.DUPLICATE_TRANSACTION, dupLog.category)
+    assertFalse(dupLog.retryable)
+  }
 }
 

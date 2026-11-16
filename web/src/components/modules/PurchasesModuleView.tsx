@@ -135,7 +135,12 @@ export const PurchasesModuleView: React.FC = () => {
             createdBy: actor,
             createdAt: movId
           };
-          await ErpDataService.saveRecord('movements', `MOV-${idempotencyKey}`, cashMov, userProfile?.username);
+          await ErpDataService.handleTransactionCommit({
+            collectionName: 'movements',
+            docId: `MOV-${idempotencyKey}`,
+            payload: cashMov,
+            actorUsername: userProfile?.username
+          });
         }
 
         await ErpDataService.logAudit(

@@ -175,6 +175,65 @@ fun DashboardScreen(
                 }
             }
 
+            // Quick Command & Navigation Strip (1-tap smooth switching across permitted modules + security audit diagnostics)
+            item(key = "dashboard_quick_nav_strip") {
+                val quickLinks = buildList {
+                    if (canAccessTreasury) add(Triple("treasury", "حركة الخزينة", Icons.Default.AccountBalanceWallet))
+                    if (canAccessSales) add(Triple("sales", "المبيعات والفواتير", Icons.Default.ReceiptLong))
+                    if (canAccessInventory) add(Triple("inventory", "المخازن", Icons.Default.Warehouse))
+                    if (canAccessFactory || isManager) add(Triple("factory", "الإنتاج والمصنع", Icons.Default.PrecisionManufacturing))
+                    if (canAccessReports) add(Triple("reports", "التقارير", Icons.Default.Assessment))
+                    add(Triple("diagnostics", "درع الحماية والسجل", Icons.Default.Shield))
+                }
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(quickLinks, key = { it.first }) { (routeKey, label, icon) ->
+                        val isSecurity = routeKey == "diagnostics"
+                        Surface(
+                            onClick = {
+                                if (isSecurity) {
+                                    diagnosticInitialTab = 2
+                                    showDiagnosticDashboard = true
+                                } else {
+                                    onNavigate(routeKey)
+                                }
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            color = if (isSecurity) PmpBrandRed.copy(alpha = 0.12f) else PmpWhiteSurface,
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSecurity) PmpBrandRed.copy(alpha = 0.45f) else GlassBorder
+                            ),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("quick_nav_$routeKey")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = icon,
+                                    contentDescription = label,
+                                    tint = if (isSecurity) PmpBrandRed else PmpCyan,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = label,
+                                    color = TextDark,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             if (pendingOperationsCount > 0 || guardStatusMessages.isNotEmpty()) {
                 item(key = "pending_operations_recovery_banner") {
                     PendingOperationRecoveryBanner(

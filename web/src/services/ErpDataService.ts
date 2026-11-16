@@ -14,6 +14,7 @@ import {
   doc,
   getDoc,
   getDocFromServer,
+  getDocs,
   getDocsFromServer,
   limit,
   query,
@@ -21,6 +22,7 @@ import {
   deleteDoc,
   onSnapshot,
   serverTimestamp,
+  where,
   Unsubscribe
 } from 'firebase/firestore';
 import {
@@ -153,6 +155,9 @@ import {
   resolveWarehouseFilterIds,
   parseDateStringToEpochMs,
   compareRecordsChronologically,
+  buildFinancialTransactionFingerprint,
+  validateFinancialCommitPayload,
+  checkExistingFinancialConflict,
   DistinctCashboxSummary,
   WarehouseStockSummaryItem,
   ColorWeightStockRow,
@@ -545,6 +550,165 @@ class ErpDataServiceImpl {
     }
   }
 
+  private recentFinancialFingerprints: Map<string, number> = new Map();
+
+  private async collectMatchingFinancialDocs(
+    colRef: ReturnType<typeof collection>,
+    docRef: ReturnType<typeof doc>,
+    payload: Record<string, any>
+  ): Promise<Array<Record<string, any>>> {
+    const foundById = new Map<string, Record<string, any>>();
+    const addDocSnap = (d: { id: string; exists: () => boolean; data: () => any }) => {
+      if (!d.exists()) return;
+      foundById.set(d.id, { _docId: d.id, ...(d.data() || {}) });
+    };
+
+    try {
+      const directServerSnap = await getDocFromServer(docRef);
+      addDocSnap(directServerSnap);
+    } catch {
+      try {
+        const fallbackSnap = await getDoc(docRef);
+        addDocSnap(fallbackSnap);
+      } catch {
+        // Ignore unavailable direct lookup; proceed to field queries or offline check
+      }
+    }
+
+    const fieldProbes: Array<[string, string]> = [];
+    const syncUuid = String(payload.syncUuid || '').trim();
+    const reference = String(payload.reference || '').trim();
+    const referenceNo = String(payload.referenceNo || '').trim();
+    const invoiceNo = String(payload.invoiceNo || '').trim();
+    if (syncUuid) fieldProbes.push(['syncUuid', syncUuid]);
+    if (reference) fieldProbes.push(['reference', reference]);
+    if (referenceNo && referenceNo !== reference) fieldProbes.push(['referenceNo', referenceNo]);
+    if (invoiceNo && invoiceNo !== reference) fieldProbes.push(['invoiceNo', invoiceNo]);
+
+    for (const [field, val] of fieldProbes) {
+      const q = query(colRef, where(field, '==', val), limit(10));
+      try {
+        const snap = await getDocsFromServer(q);
+        snap.forEach((d) => foundById.set(d.id, { _docId: d.id, ...(d.data() || {}) }));
+      } catch {
+        try {
+          const fallbackSnap = await getDocs(q);
+          fallbackSnap.forEach((d) => foundById.set(d.id, { _docId: d.id, ...(d.data() || {}) }));
+        } catch {
+          // Graceful degradation when offline
+        }
+      }
+    }
+
+    return Array.from(foundById.values());
+  }
+
+  /**
+   * Additional Validation Layer (`handleTransactionCommit`) before inserting any financial transaction into Firestore.
+   * Verifies payload integrity, blocks tombstone/epoch replays, checks duplicate transactions on Firestore server,
+   * detects tampering attempts against already-committed records, and logs every violation to CloudErrorLogger + audit_logs.
+   */
+  async handleTransactionCommit<T extends Record<string, any>>(params: {
+    collectionName: ErpCollectionName | string;
+    docId: string;
+    payload: T;
+    actorUsername?: string;
+    clusterOverride?: string;
+  }): Promise<string> {
+    const colStr = String(params.collectionName || '').trim();
+    const cluster = params.clusterOverride || PRIMARY_CLUSTER;
+    if (cluster === REMOVED_V16_CLUSTER) {
+      const err = new Error('الكتابة في الكلاستر المهجور PMP-ERP-V16-CLUSTER مرفوضة أمنياً');
+      CloudErrorLogger.recordTamperAttempt('HANDLE_TRANSACTION_COMMIT', `erp_clusters/${cluster}/${colStr}`, err.message, params.actorUsername);
+      throw err;
+    }
+
+    const fbUser = auth.currentUser;
+    if (!fbUser) {
+      const err = new Error('جلسة المصادقة غير نشطة — يرجى إعادة تسجيل الدخول قبل حفظ المعاملة المالية.');
+      CloudErrorLogger.recordError('HANDLE_TRANSACTION_COMMIT_AUTH', this.collectionPath(colStr, cluster), err);
+      throw err;
+    }
+
+    const cleanId = safeId(params.docId, `DOC-${Date.now()}`);
+    const colPath = this.collectionPath(colStr, cluster);
+    const fullPath = `${colPath}/${cleanId}`;
+    const actor = params.actorUsername || fbUser.email || 'WEB_USER';
+    const dataToWrite: Record<string, any> = { ...params.payload };
+    delete dataToWrite._docId;
+
+    // 1. Payload integrity & anti-tampering validation
+    const integrity = validateFinancialCommitPayload(colStr, cleanId, dataToWrite);
+    if (!integrity.valid) {
+      const reason = integrity.reason || 'قيم مالية غير صالحة أو مشبوهة.';
+      CloudErrorLogger.recordTamperAttempt('HANDLE_TRANSACTION_COMMIT', fullPath, reason, actor);
+      void this.logAudit(actor, 'TAMPER_ATTEMPT_BLOCKED', `رفض معاملة [${colStr}/${cleanId}]: ${reason}`);
+      throw new Error(reason);
+    }
+
+    // 2. Strict tombstone & pre-epoch replay guard
+    if (this.isRecordTombstoned(colStr, { ...dataToWrite, _docId: cleanId })) {
+      const reason = `محاولة إعادة إدخال معاملة مالية محذوفة مسبقاً (${cleanId}) — تم حظر الاسترجاع.`;
+      CloudErrorLogger.recordTamperAttempt('TOMBSTONE_REPLAY_BLOCKED', fullPath, reason, actor);
+      void this.logAudit(actor, 'TOMBSTONE_REPLAY_BLOCKED', `محاولة إعادة حقن سجل محذوف [${colStr}/${cleanId}]`);
+      throw new Error(reason);
+    }
+
+    // 3. Sliding-window fingerprint deduplication guard (protects against race/bypass bursts)
+    const now = Date.now();
+    for (const [k, ts] of this.recentFinancialFingerprints.entries()) {
+      if (now - ts > 12_000) this.recentFinancialFingerprints.delete(k);
+    }
+    const fingerprint = buildFinancialTransactionFingerprint(colStr, dataToWrite);
+    const isInvoicePaidUpdate =
+      colStr === 'invoices' &&
+      Number(dataToWrite.paidAmount ?? 0) > 0 &&
+      Boolean(params.payload && (params.payload as any)._docId);
+    const recentTs = this.recentFinancialFingerprints.get(fingerprint);
+    if (!isInvoicePaidUpdate && recentTs && now - recentTs < 10_000) {
+      const reason = `معاملة مالية مكررة خلال نافذة الحماية (${fingerprint}) — تم منع الإرسال المكرر إلى Firestore.`;
+      CloudErrorLogger.recordDuplicateAttempt('HANDLE_TRANSACTION_COMMIT', fullPath, reason, actor);
+      void this.logAudit(actor, 'DUPLICATE_TRANSACTION_BLOCKED', `منع تكرار فوري [${colStr}/${cleanId}] (${fingerprint})`);
+      throw new Error(reason);
+    }
+
+    // 4. Server-backed Firestore conflict & tamper inspection
+    const colRef = collection(firestore, colPath);
+    const docRef = doc(firestore, colPath, cleanId);
+    const existingDocs = await this.collectMatchingFinancialDocs(colRef, docRef, dataToWrite);
+    const conflict = checkExistingFinancialConflict(colStr, cleanId, dataToWrite, existingDocs);
+    if (!conflict.valid) {
+      const targetRef = conflict.matchedDocId || cleanId;
+      const reason = conflict.reason || 'معاملة مالية مكررة أو معدلة بشكل غير مصرح به في Firestore.';
+      if (conflict.violationType === 'TAMPER') {
+        CloudErrorLogger.recordTamperAttempt('HANDLE_TRANSACTION_COMMIT', `${colPath}/${targetRef}`, reason, actor);
+        void this.logAudit(actor, 'TAMPER_ATTEMPT_BLOCKED', `رصد تلاعب ضد سجل [${colStr}/${targetRef}]: ${reason}`);
+      } else {
+        CloudErrorLogger.recordDuplicateAttempt('HANDLE_TRANSACTION_COMMIT', `${colPath}/${targetRef}`, reason, actor);
+        void this.logAudit(actor, 'DUPLICATE_TRANSACTION_BLOCKED', `منع تكرار سجل [${colStr}/${targetRef}]: ${reason}`);
+      }
+      throw new Error(reason);
+    }
+
+    // 5. Commit verified transaction atomically
+    this.recentFinancialFingerprints.set(fingerprint, now);
+    try {
+      await setDoc(
+        docRef,
+        {
+          ...dataToWrite,
+          serverUpdatedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+      return cleanId;
+    } catch (err) {
+      this.recentFinancialFingerprints.delete(fingerprint);
+      CloudErrorLogger.recordError(`COMMIT_${colStr.toUpperCase()}`, fullPath, err);
+      throw err;
+    }
+  }
+
   /**
    * Upserts a document into `/erp_clusters/PMP-ERP-MAIN-CLUSTER/{collectionName}/{docId}`
    * with `serverUpdatedAt` matching Android `CloudErpSyncRepository.kt`.
@@ -553,12 +717,24 @@ class ErpDataServiceImpl {
     collectionName: ErpCollectionName | string,
     docId: string,
     payload: T,
-    clusterOverride?: string
+    clusterOverride?: string,
+    options?: { skipCommitValidation?: boolean; actorUsername?: string }
   ): Promise<string> {
     if (clusterOverride === REMOVED_V16_CLUSTER) {
       const err = new Error('الكتابة في الكلاستر المهجور PMP-ERP-V16-CLUSTER مرفوضة أمنياً');
       CloudErrorLogger.recordError('UPSERT_BLOCKED', `erp_clusters/${REMOVED_V16_CLUSTER}/${collectionName}`, err);
       throw err;
+    }
+
+    const financialValidatedCollections = new Set(['movements', 'transfers', 'invoices', 'invoice_payments']);
+    if (!options?.skipCommitValidation && financialValidatedCollections.has(String(collectionName))) {
+      return this.handleTransactionCommit({
+        collectionName,
+        docId,
+        payload,
+        actorUsername: options?.actorUsername,
+        clusterOverride
+      });
     }
 
     const cleanId = safeId(docId, `DOC-${Date.now()}`);
@@ -622,9 +798,9 @@ class ErpDataServiceImpl {
     collectionName: ErpCollectionName | string,
     docId: string,
     payload: T,
-    _actorUsername?: string
+    actorUsername?: string
   ): Promise<string> {
-    return this.upsertDocument(collectionName, docId, payload);
+    return this.upsertDocument(collectionName, docId, payload, undefined, { actorUsername });
   }
 
   /**
@@ -634,9 +810,9 @@ class ErpDataServiceImpl {
     collectionName: ErpCollectionName | string,
     docId: string,
     payload: T,
-    _actorUsername?: string
+    actorUsername?: string
   ): Promise<string> {
-    return this.upsertDocument(collectionName, docId, payload);
+    return this.upsertDocument(collectionName, docId, payload, undefined, { actorUsername });
   }
 
   /**

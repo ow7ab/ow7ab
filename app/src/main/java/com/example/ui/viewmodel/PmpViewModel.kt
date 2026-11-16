@@ -1171,6 +1171,44 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             onComplete = onComplete
         ) { _ ->
             val autoDesc = description.trim().ifBlank { "حركة $direction بمبلغ $amount $currency في $cashbox" }
+            val prePayload = mapOf<String, Any?>(
+                "cashbox" to cashbox,
+                "currency" to currency,
+                "direction" to direction,
+                "amount" to amount,
+                "reference" to autoRef
+            )
+            val payloadCheck = CloudErpSyncRepository.validateTransactionCommitPayload("movements", autoRef, prePayload)
+            if (!payloadCheck.valid) {
+                cloudErpSyncRepo.recordTamperAttempt("ADD_MOVEMENT_VALIDATION", "movements/$autoRef", payloadCheck.reason, user)
+                return@launchGuardedTransaction Result.failure(SecurityException(payloadCheck.reason))
+            }
+            val existingLocal = movements.value.map { m ->
+                (m.cloudDocId.ifBlank { "MOV-${m.id}" }) to mapOf<String, Any?>(
+                    "reference" to m.reference,
+                    "cashbox" to m.cashbox,
+                    "direction" to m.direction,
+                    "currency" to m.currency,
+                    "amount" to m.amount,
+                    "syncUuid" to m.syncUuid
+                )
+            }
+            val localConflict = CloudErpSyncRepository.checkExistingFinancialCommitConflict(
+                collectionName = "movements",
+                candidateDocId = autoRef,
+                candidatePayload = prePayload,
+                existingDocs = existingLocal
+            )
+            if (!localConflict.valid) {
+                if (localConflict.violationType == CloudErpSyncRepository.Companion.TransactionViolationType.TAMPER) {
+                    cloudErpSyncRepo.recordTamperAttempt("ADD_MOVEMENT_VALIDATION", "movements/$autoRef", localConflict.reason, user)
+                    return@launchGuardedTransaction Result.failure(SecurityException(localConflict.reason))
+                } else {
+                    cloudErpSyncRepo.recordDuplicateAttempt("ADD_MOVEMENT_VALIDATION", "movements/$autoRef", localConflict.reason, user)
+                    return@launchGuardedTransaction Result.failure(IllegalStateException(localConflict.reason))
+                }
+            }
+
             val res = repository.recordMovement(cashbox, currency, direction, amount, autoDesc, autoRef, user)
             res.map { movId ->
                 DeletedRecordsRegistry.unregisterDeleted("movements", movId)
@@ -1190,7 +1228,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                             reference = autoRef,
                             createdBy = user
                         )
-                        cloudErpSyncRepo.syncSingleMovementToCloud(serverClusterCode.value, m)
+                        val syncRes = cloudErpSyncRepo.syncSingleMovementToCloud(serverClusterCode.value, m, user)
+                        syncRes.onFailure { err ->
+                            val msg = err.message.orEmpty()
+                            if (msg.contains("مكررة") || msg.contains("تلاعب") || msg.contains("مسبقاً")) {
+                                postMessage(msg, isError = true)
+                            }
+                        }
                     } catch (e: Exception) {
                         Log.w("PmpViewModel", "Direct movement sync deferred: ${e.message}")
                     }
@@ -1226,6 +1270,47 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             payloadSummary = "$sourceCashbox -> $destinationCashbox ($sourceAmount $sourceCurrency)",
             onComplete = onComplete
         ) { _ ->
+            val destAmtPreview = if (isInvertedRate && rate > 0) sourceAmount / rate else sourceAmount * rate
+            val prePayload = mapOf<String, Any?>(
+                "reference" to autoRef,
+                "sourceCashbox" to sourceCashbox,
+                "destinationCashbox" to destinationCashbox,
+                "sourceCurrency" to sourceCurrency,
+                "destinationCurrency" to destinationCurrency,
+                "sourceAmount" to sourceAmount,
+                "rate" to rate,
+                "destinationAmount" to destAmtPreview
+            )
+            val payloadCheck = CloudErpSyncRepository.validateTransactionCommitPayload("transfers", autoRef, prePayload)
+            if (!payloadCheck.valid) {
+                cloudErpSyncRepo.recordTamperAttempt("ADD_TRANSFER_VALIDATION", "transfers/$autoRef", payloadCheck.reason, user)
+                return@launchGuardedTransaction Result.failure(SecurityException(payloadCheck.reason))
+            }
+            val existingLocalTransfers = transfers.value.map { tr ->
+                "TRF-${tr.id}-${tr.reference}" to mapOf<String, Any?>(
+                    "reference" to tr.reference,
+                    "sourceCashbox" to tr.sourceCashbox,
+                    "destinationCashbox" to tr.destinationCashbox,
+                    "sourceAmount" to tr.sourceAmount,
+                    "destinationAmount" to tr.destinationAmount
+                )
+            }
+            val localConflict = CloudErpSyncRepository.checkExistingFinancialCommitConflict(
+                collectionName = "transfers",
+                candidateDocId = autoRef,
+                candidatePayload = prePayload,
+                existingDocs = existingLocalTransfers
+            )
+            if (!localConflict.valid) {
+                if (localConflict.violationType == CloudErpSyncRepository.Companion.TransactionViolationType.TAMPER) {
+                    cloudErpSyncRepo.recordTamperAttempt("ADD_TRANSFER_VALIDATION", "transfers/$autoRef", localConflict.reason, user)
+                    return@launchGuardedTransaction Result.failure(SecurityException(localConflict.reason))
+                } else {
+                    cloudErpSyncRepo.recordDuplicateAttempt("ADD_TRANSFER_VALIDATION", "transfers/$autoRef", localConflict.reason, user)
+                    return@launchGuardedTransaction Result.failure(IllegalStateException(localConflict.reason))
+                }
+            }
+
             val res = repository.recordTransfer(
                 sourceCashbox, destinationCashbox, sourceCurrency, destinationCurrency,
                 sourceAmount, rate, description, autoRef, user, halfaInvoiceId, halfaAmount,
@@ -1252,7 +1337,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                             halfaAmount = halfaAmount,
                             createdBy = user
                         )
-                        cloudErpSyncRepo.syncSingleTransferToCloud(serverClusterCode.value, t)
+                        val syncRes = cloudErpSyncRepo.syncSingleTransferToCloud(serverClusterCode.value, t, user)
+                        syncRes.onFailure { err ->
+                            val msg = err.message.orEmpty()
+                            if (msg.contains("مكررة") || msg.contains("تلاعب") || msg.contains("مسبقاً")) {
+                                postMessage(msg, isError = true)
+                            }
+                        }
                     } catch (e: Exception) {
                         Log.w("PmpViewModel", "Direct transfer sync deferred: ${e.message}")
                     }

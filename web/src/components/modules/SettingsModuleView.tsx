@@ -531,21 +531,40 @@ export const SettingsModuleView: React.FC = () => {
                 </GlassButton>
               </div>
               <div className="space-y-2 max-h-60 overflow-y-auto text-xs">
-                {cloudErrors.slice(0, 10).map((err) => (
-                  <div key={err.id} className="p-3 rounded-xl bg-red-500/5 border border-red-500/20 space-y-1">
-                    <div className="flex justify-between items-center gap-2">
-                      <span className="font-bold text-red-400">{err.categoryTitleAr}</span>
-                      <span className="font-mono text-[10px] text-theme-muted">
-                        {new Date(err.timestamp).toLocaleTimeString('ar-EG')}
-                      </span>
+                {cloudErrors.slice(0, 15).map((err) => {
+                  const isTamper = err.category === 'SECURITY_TAMPER';
+                  const isDuplicate = err.category === 'DUPLICATE_TRANSACTION';
+                  return (
+                    <div
+                      key={err.id}
+                      className={`p-3 rounded-xl border space-y-1 ${
+                        isTamper
+                          ? 'bg-rose-500/10 border-rose-500/40'
+                          : isDuplicate
+                          ? 'bg-amber-500/10 border-amber-500/40'
+                          : 'bg-red-500/5 border-red-500/20'
+                      }`}
+                    >
+                      <div className="flex justify-between items-center gap-2">
+                        <span
+                          className={`font-bold ${
+                            isTamper ? 'text-rose-400' : isDuplicate ? 'text-amber-400' : 'text-red-400'
+                          }`}
+                        >
+                          {err.categoryTitleAr}
+                        </span>
+                        <span className="font-mono text-[10px] text-theme-muted">
+                          {new Date(err.timestamp).toLocaleTimeString('ar-EG')}
+                        </span>
+                      </div>
+                      <div className="font-mono text-[10px] text-theme-muted">
+                        {err.operation} • {err.path}
+                      </div>
+                      <div className="text-[11px] text-theme-secondary">{err.sanitizedMessage}</div>
+                      <div className="text-[11px] text-amber-400">{err.remediationHintAr}</div>
                     </div>
-                    <div className="font-mono text-[10px] text-theme-muted">
-                      {err.operation} • {err.path}
-                    </div>
-                    <div className="text-[11px] text-theme-secondary">{err.sanitizedMessage}</div>
-                    <div className="text-[11px] text-amber-400">{err.remediationHintAr}</div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </GlassCard>
           )}

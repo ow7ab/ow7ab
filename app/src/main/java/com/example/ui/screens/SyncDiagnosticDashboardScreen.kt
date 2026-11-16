@@ -1040,8 +1040,16 @@ fun SyncDiagnosticDashboardView(
                                             )
                                         }
                                         GlassBadge(
-                                            text = if (sErr.retryable) "قابل للإعادة" else "صلاحية/إعداد",
-                                            color = if (sErr.retryable) PmpGold else PmpRed
+                                            text = when (sErr.category) {
+                                                com.example.data.remote.CloudErrorCategory.SECURITY_TAMPER -> "تنبيه تلاعب أمني"
+                                                com.example.data.remote.CloudErrorCategory.DUPLICATE_TRANSACTION -> "منع تكرار مالي"
+                                                else -> if (sErr.retryable) "قابل للإعادة" else "صلاحية/إعداد"
+                                            },
+                                            color = when (sErr.category) {
+                                                com.example.data.remote.CloudErrorCategory.SECURITY_TAMPER -> PmpRed
+                                                com.example.data.remote.CloudErrorCategory.DUPLICATE_TRANSACTION -> PmpGold
+                                                else -> if (sErr.retryable) PmpGold else PmpRed
+                                            }
                                         )
                                     }
 

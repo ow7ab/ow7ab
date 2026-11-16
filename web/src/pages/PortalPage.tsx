@@ -22,7 +22,9 @@ import {
   Menu,
   X,
   Download,
-  AlertTriangle
+  AlertTriangle,
+  ShieldCheck,
+  History
 } from 'lucide-react';
 import { GlassCard } from '../components/ui/GlassCard';
 import { GlassButton } from '../components/ui/GlassButton';
@@ -145,6 +147,10 @@ export const PortalPage: React.FC<PortalPageProps> = ({
   const [activeTab, setActiveTab] = useState<PmpScreenRoute>(() =>
     portalRoute === '/admin' && canAccessAdminArea ? 'USERS' : 'DASHBOARD'
   );
+  const [recentTabs, setRecentTabs] = useState<PmpScreenRoute[]>(() => [
+    portalRoute === '/admin' && canAccessAdminArea ? 'USERS' : 'DASHBOARD'
+  ]);
+  const mainScrollRef = React.useRef<HTMLElement>(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -152,6 +158,15 @@ export const PortalPage: React.FC<PortalPageProps> = ({
   const [pendingOpsCount, setPendingOpsCount] = useState<number>(() =>
     IdempotencyProtectionSystem.getUnresolvedRecords().length
   );
+
+  const navigateToTab = React.useCallback((nextTab: PmpScreenRoute) => {
+    setActiveTab(nextTab);
+    setRecentTabs((prev) => [nextTab, ...prev.filter((t) => t !== nextTab)].slice(0, 5));
+    setMobileDrawerOpen(false);
+    if (mainScrollRef.current) {
+      mainScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, []);
 
   useEffect(() => {
     const syncCount = () => {
@@ -175,11 +190,11 @@ export const PortalPage: React.FC<PortalPageProps> = ({
 
   useEffect(() => {
     if (portalRoute === '/admin') {
-      setActiveTab(canAccessAdminArea ? 'USERS' : 'DASHBOARD');
+      navigateToTab(canAccessAdminArea ? 'USERS' : 'DASHBOARD');
     } else if (portalRoute === '/employee' || portalRoute === '/dashboard') {
       setActiveTab((prev) => (prev === 'USERS' ? 'DASHBOARD' : prev));
     }
-  }, [portalRoute, canAccessAdminArea]);
+  }, [portalRoute, canAccessAdminArea, navigateToTab]);
 
   useEffect(() => {
     const bridge = getDesktopBridge();
@@ -324,13 +339,13 @@ export const PortalPage: React.FC<PortalPageProps> = ({
         const target = visibleItems[idx];
         if (target) {
           e.preventDefault();
-          setActiveTab(target.id);
+          navigateToTab(target.id);
         }
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [userProfile?.permissions, userProfile?.role, toggleTheme, toggleLanguage]);
+  }, [userProfile?.permissions, userProfile?.role, toggleTheme, toggleLanguage, navigateToTab]);
 
   if (!userProfile) {
     return (
@@ -372,11 +387,10 @@ export const PortalPage: React.FC<PortalPageProps> = ({
     const desired = targetMap[modId] || 'DASHBOARD';
     const item = navMenuItems.find((m) => m.id === desired);
     if (item && item.visible) {
-      setActiveTab(desired);
+      navigateToTab(desired);
     } else {
-      setActiveTab('DASHBOARD');
+      navigateToTab('DASHBOARD');
     }
-    setMobileDrawerOpen(false);
   };
 
   return (
@@ -442,7 +456,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
                 type="button"
                 onClick={() => {
                   setReportsInitialTab('متابعة العمليات');
-                  setActiveTab('REPORTS');
+                  navigateToTab('REPORTS');
                 }}
                 className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 text-xs min-h-[38px] font-bold"
                 title="توجد عمليات بانتظار تأكيد الخادم - لا تعِد إدخالها"
@@ -530,7 +544,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => setActiveTab(item.id)}
+                    onClick={() => navigateToTab(item.id)}
                     className={`w-full flex items-center gap-3 p-2.5 rounded-xl text-xs font-bold transition-all text-right min-h-[42px] ${
                       isActive
                         ? 'bg-pmp-primary text-white shadow-md'
@@ -608,10 +622,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
                         <button
                           key={item.id}
                           type="button"
-                          onClick={() => {
-                            setActiveTab(item.id);
-                            setMobileDrawerOpen(false);
-                          }}
+                          onClick={() => navigateToTab(item.id)}
                           className={`w-full flex items-center gap-3 p-2.5 rounded-xl text-xs font-bold transition-all text-right min-h-[44px] ${
                             isActive
                               ? 'bg-pmp-primary text-white shadow-md'
@@ -670,7 +681,67 @@ export const PortalPage: React.FC<PortalPageProps> = ({
         )}
 
         {/* Main Content Workspace — EXACT 11 MODULE VIEWS */}
-        <main className="flex-1 overflow-y-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6">
+        <main ref={mainScrollRef} className="flex-1 overflow-y-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6">
+          {/* Active Module Breadcrumb + Quick-Switch Recent Tabs + Security Shield Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-2xl bg-theme-surface/85 border border-theme backdrop-blur-md">
+            <div className="flex items-center gap-2.5 min-w-0">
+              {(() => {
+                const currentMeta = navMenuItems.find((m) => m.id === activeTab);
+                return (
+                  <>
+                    <span className="w-8 h-8 rounded-xl bg-pmp-primary/15 border border-pmp-primary/30 text-pmp-primary flex items-center justify-center shrink-0">
+                      {currentMeta?.icon}
+                    </span>
+                    <div className="min-w-0">
+                      <span className="text-xs sm:text-sm font-black text-theme-primary block truncate">
+                        {language === 'ar' ? currentMeta?.labelAr : currentMeta?.labelEn}
+                      </span>
+                      <span className="text-[10px] text-theme-muted hidden sm:block">
+                        {language === 'ar'
+                          ? 'Ctrl+K للبحث الشامل • Ctrl+1..9 للتنقل السريع'
+                          : 'Ctrl+K Global Search • Ctrl+1..9 Quick Jump'}
+                      </span>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full">
+              <span className="hidden lg:inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 text-[10px] font-bold shrink-0">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>{language === 'ar' ? 'حماية المعاملات المزدوجة نشطة' : 'Anti-Duplicate Guard Active'}</span>
+              </span>
+
+              {recentTabs.length > 1 && (
+                <div className="flex items-center gap-1 pr-1 border-r border-theme">
+                  <History className="w-3.5 h-3.5 text-theme-muted hidden sm:block shrink-0" />
+                  {recentTabs
+                    .map((tid) => navMenuItems.find((m) => m.id === tid && m.visible))
+                    .filter((m): m is NonNullable<typeof m> => Boolean(m))
+                    .map((tabMeta) => {
+                      const isCur = tabMeta.id === activeTab;
+                      return (
+                        <button
+                          key={`recent_${tabMeta.id}`}
+                          type="button"
+                          onClick={() => navigateToTab(tabMeta.id)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all whitespace-nowrap flex items-center gap-1 min-h-[30px] ${
+                            isCur
+                              ? 'bg-pmp-primary text-white shadow-sm'
+                              : 'bg-theme-base border border-theme text-theme-secondary hover:text-theme-primary hover:border-pmp-primary/40'
+                          }`}
+                        >
+                          {tabMeta.icon}
+                          <span>{language === 'ar' ? tabMeta.labelAr : tabMeta.labelEn}</span>
+                        </button>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
+          </div>
+
           {portalRoute === '/admin' && !canAccessAdminArea && (
             <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400 flex items-center gap-2 font-bold">
               <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -690,19 +761,21 @@ export const PortalPage: React.FC<PortalPageProps> = ({
                 />
               }
             >
-              {activeTab === 'DASHBOARD' && (
-                <AdminDashboardOverview onNavigateToModule={handleNavigateToModule} />
-              )}
-              {activeTab === 'TREASURY' && <TreasuryModuleView />}
-              {activeTab === 'PURCHASES' && <PurchasesModuleView />}
-              {activeTab === 'SALES' && <SalesModuleView />}
-              {activeTab === 'INVENTORY' && <WarehousesModuleView />}
-              {activeTab === 'FACTORY' && <FactoryModuleView />}
-              {activeTab === 'CHEMISTRY_LAB' && <ChemistryLabModuleView />}
-              {activeTab === 'USERS' && canAccessAdminArea && <EmployeeManagementCenter />}
-              {activeTab === 'POSTER' && <PricesModuleView />}
-              {activeTab === 'REPORTS' && <ReportsCenterView initialTab={reportsInitialTab} />}
-              {activeTab === 'SETTINGS' && <SettingsModuleView />}
+              <div key={activeTab} className="pmp-tab-transition">
+                {activeTab === 'DASHBOARD' && (
+                  <AdminDashboardOverview onNavigateToModule={handleNavigateToModule} />
+                )}
+                {activeTab === 'TREASURY' && <TreasuryModuleView />}
+                {activeTab === 'PURCHASES' && <PurchasesModuleView />}
+                {activeTab === 'SALES' && <SalesModuleView />}
+                {activeTab === 'INVENTORY' && <WarehousesModuleView />}
+                {activeTab === 'FACTORY' && <FactoryModuleView />}
+                {activeTab === 'CHEMISTRY_LAB' && <ChemistryLabModuleView />}
+                {activeTab === 'USERS' && canAccessAdminArea && <EmployeeManagementCenter />}
+                {activeTab === 'POSTER' && <PricesModuleView />}
+                {activeTab === 'REPORTS' && <ReportsCenterView initialTab={reportsInitialTab} />}
+                {activeTab === 'SETTINGS' && <SettingsModuleView />}
+              </div>
             </Suspense>
           </ErrorBoundary>
         </main>

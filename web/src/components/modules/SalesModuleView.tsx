@@ -361,7 +361,12 @@ export const SalesModuleView: React.FC = () => {
           timestamp: now
         };
 
-        await ErpDataService.upsertDocument('invoices', invoiceNo, newInv);
+        await ErpDataService.handleTransactionCommit({
+          collectionName: 'invoices',
+          docId: invoiceNo,
+          payload: newInv,
+          actorUsername: userProfile?.username
+        });
 
         const whObj = warehouses.find((w) => Number(w.id) === Number(invWarehouseId));
         for (let idx = 0; idx < draftLines.length; idx++) {
@@ -401,7 +406,12 @@ export const SalesModuleView: React.FC = () => {
             createdAt: now,
             timestamp: now
           };
-          await ErpDataService.upsertDocument('invoice_payments', `PAY-${idempotencyKey}`, payDoc);
+          await ErpDataService.handleTransactionCommit({
+            collectionName: 'invoice_payments',
+            docId: `PAY-${idempotencyKey}`,
+            payload: payDoc,
+            actorUsername: userProfile?.username
+          });
 
           const tm: TreasuryMovement = {
             id: now + 101,
@@ -421,7 +431,12 @@ export const SalesModuleView: React.FC = () => {
             createdAt: now,
             timestamp: now
           };
-          await ErpDataService.upsertDocument('movements', `MOV-${idempotencyKey}`, tm);
+          await ErpDataService.handleTransactionCommit({
+            collectionName: 'movements',
+            docId: `MOV-${idempotencyKey}`,
+            payload: tm,
+            actorUsername: userProfile?.username
+          });
         }
 
         const totalCogs = draftLines.reduce((sum, l) => {
@@ -543,13 +558,28 @@ export const SalesModuleView: React.FC = () => {
         };
 
         await Promise.all([
-          ErpDataService.upsertDocument('invoices', invDocId, {
-            ...payingInvoice,
-            paidAmount: newPaid,
-            status: newStatus
+          ErpDataService.handleTransactionCommit({
+            collectionName: 'invoices',
+            docId: invDocId,
+            payload: {
+              ...payingInvoice,
+              paidAmount: newPaid,
+              status: newStatus
+            },
+            actorUsername: userProfile?.username
           }),
-          ErpDataService.upsertDocument('invoice_payments', payDocId, payDoc),
-          ErpDataService.upsertDocument('movements', `MOV-${idempotencyKey}`, tm)
+          ErpDataService.handleTransactionCommit({
+            collectionName: 'invoice_payments',
+            docId: payDocId,
+            payload: payDoc,
+            actorUsername: userProfile?.username
+          }),
+          ErpDataService.handleTransactionCommit({
+            collectionName: 'movements',
+            docId: `MOV-${idempotencyKey}`,
+            payload: tm,
+            actorUsername: userProfile?.username
+          })
         ]);
 
         const cashCode = resolveCashAccountCode(targetCashbox, payingInvoice.currency);

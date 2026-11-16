@@ -11,7 +11,9 @@ export type CloudErrorCategory =
   | 'RESOURCE_EXHAUSTED'
   | 'FAILED_PRECONDITION'
   | 'NETWORK_ERROR'
-  | 'DATA_CONFLICT';
+  | 'DATA_CONFLICT'
+  | 'SECURITY_TAMPER'
+  | 'DUPLICATE_TRANSACTION';
 
 export type ServiceProbeId =
   | 'NETWORK'
@@ -93,6 +95,14 @@ const CATEGORY_METADATA: Record<CloudErrorCategory, { titleAr: string; remediati
   DATA_CONFLICT: {
     titleAr: 'تعارض أو رفض تحقق البيانات (DATA_CONFLICT)',
     remediationHintAr: 'تحقق من توازن القيود المحاسبية أو القواعد الثابتة للسجلات غير القابلة للتعديل.'
+  },
+  SECURITY_TAMPER: {
+    titleAr: 'تنبيه أمني: محاولة تلاعب في معاملة مالية (SECURITY_TAMPER)',
+    remediationHintAr: 'تم إيقاف العملية تلقائياً وتوثيقها في سجل التدقيق والأخطاء. راجع تفاصيل المستخدم والمرجع فوراً.'
+  },
+  DUPLICATE_TRANSACTION: {
+    titleAr: 'منع تكرار معاملة مالية في Firestore (DUPLICATE_TRANSACTION)',
+    remediationHintAr: 'المعاملة مسجلة مسبقاً بنفس المرجع أو البصمة المالية؛ تم حظر الإدخال المكرر لحماية الأرصدة.'
   }
 };
 
@@ -125,6 +135,19 @@ export function classifyCloudError(err: unknown): {
   let category: CloudErrorCategory = 'DATA_CONFLICT';
 
   if (
+    haystack.includes('tamper') ||
+    haystack.includes('تلاعب') ||
+    haystack.includes('security_tamper') ||
+    haystack.includes('tombstone_replay')
+  ) {
+    category = 'SECURITY_TAMPER';
+  } else if (
+    haystack.includes('duplicate_transaction') ||
+    haystack.includes('معاملة مالية مكررة') ||
+    haystack.includes('مسجلة مسبقاً')
+  ) {
+    category = 'DUPLICATE_TRANSACTION';
+  } else if (
     haystack.includes('permission-denied') ||
     haystack.includes('permission_denied') ||
     haystack.includes('missing or insufficient permissions') ||
@@ -205,6 +228,32 @@ class CloudErrorLoggerImpl {
     this.entries = [entry, ...this.entries].slice(0, MAX_BUFFER);
     this.notify();
     return entry;
+  }
+
+  recordTamperAttempt(
+    operation: string,
+    path: string,
+    reason: string,
+    actor?: string
+  ): CloudErrorLogEntry {
+    const taggedError = Object.assign(
+      new Error(`[محاولة تلاعب] ${actor ? `(${actor}) ` : ''}${reason}`),
+      { code: 'SECURITY_TAMPER' }
+    );
+    return this.recordError(operation || 'TRANSACTION_COMMIT_TAMPER', path, taggedError);
+  }
+
+  recordDuplicateAttempt(
+    operation: string,
+    path: string,
+    reason: string,
+    actor?: string
+  ): CloudErrorLogEntry {
+    const taggedError = Object.assign(
+      new Error(`[معاملة مالية مكررة] ${actor ? `(${actor}) ` : ''}${reason}`),
+      { code: 'DUPLICATE_TRANSACTION' }
+    );
+    return this.recordError(operation || 'TRANSACTION_COMMIT_DUPLICATE', path, taggedError);
   }
 
   getEntries(): CloudErrorLogEntry[] {

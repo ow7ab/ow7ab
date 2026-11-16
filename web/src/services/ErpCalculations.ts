@@ -1452,3 +1452,334 @@ export function compareRecordsChronologically(
   return 0;
 }
 
+export type TransactionCommitViolationType = 'NONE' | 'DUPLICATE' | 'TAMPER';
+
+export interface TransactionValidationOutcome {
+  valid: boolean;
+  violationType: TransactionCommitViolationType;
+  reason?: string;
+  matchedDocId?: string;
+}
+
+const VALID_CURRENCIES = new Set(['SDG', 'EGP', 'USD']);
+const VALID_MOVEMENT_DIRECTIONS = new Set([
+  'وارد',
+  'منصرف',
+  'IN',
+  'OUT',
+  'INCOME',
+  'EXPENSE',
+  'TRANSFER_IN',
+  'TRANSFER_OUT',
+  'قبض',
+  'صرف'
+]);
+const FINANCIAL_REALISTIC_MAX = 1_000_000_000_000;
+
+export function buildFinancialTransactionFingerprint(
+  collectionName: string,
+  payload: Record<string, any>
+): string {
+  const col = String(collectionName || '').trim().toLowerCase();
+  if (col === 'movements') {
+    const ref = normalizeEntityKey(String(payload.reference || payload.referenceNo || ''));
+    const box = normalizeEntityKey(String(payload.cashbox || ''));
+    const dir = normalizeEntityKey(String(payload.direction || ''));
+    const cur = String(payload.currency || 'SDG').trim().toUpperCase();
+    const amt = Math.round((Number(payload.amount) || 0) * 100);
+    return `MOV|${ref}|${box}|${dir}|${cur}|${amt}`;
+  }
+  if (col === 'transfers') {
+    const ref = normalizeEntityKey(String(payload.reference || ''));
+    const src = normalizeEntityKey(String(payload.sourceCashbox || ''));
+    const dst = normalizeEntityKey(String(payload.destinationCashbox || ''));
+    const sCur = String(payload.sourceCurrency || 'SDG').trim().toUpperCase();
+    const dCur = String(payload.destinationCurrency || 'EGP').trim().toUpperCase();
+    const sAmt = Math.round((Number(payload.sourceAmount) || 0) * 100);
+    return `TRF|${ref}|${src}|${dst}|${sCur}|${dCur}|${sAmt}`;
+  }
+  if (col === 'invoices') {
+    const invNo = normalizeEntityKey(String(payload.invoiceNo || payload.reference || ''));
+    const cust = normalizeEntityKey(String(payload.customerName || ''));
+    const cur = String(payload.currency || 'SDG').trim().toUpperCase();
+    const total = Math.round((Number(payload.total) || 0) * 100);
+    return `INV|${invNo}|${cust}|${cur}|${total}`;
+  }
+  if (col === 'invoice_payments') {
+    const invId = String(payload.invoiceId || '').trim();
+    const box = normalizeEntityKey(String(payload.cashbox || ''));
+    const cur = String(payload.currency || 'SDG').trim().toUpperCase();
+    const amt = Math.round((Number(payload.amount) || 0) * 100);
+    return `PAY|${invId}|${box}|${cur}|${amt}`;
+  }
+  return `${col.toUpperCase()}|${normalizeEntityKey(String(payload.reference || payload.id || ''))}`;
+}
+
+export function validateFinancialCommitPayload(
+  collectionName: string,
+  docId: string,
+  payload: Record<string, any>
+): TransactionValidationOutcome {
+  const col = String(collectionName || '').trim().toLowerCase();
+  if (!docId || !String(docId).trim()) {
+    return { valid: false, violationType: 'TAMPER', reason: 'معرف المستند المالي فارغ أو غير صالح.' };
+  }
+  if (!payload || typeof payload !== 'object') {
+    return { valid: false, violationType: 'TAMPER', reason: 'بيانات المعاملة المالية فارغة أو تالفة.' };
+  }
+
+  if (col === 'movements') {
+    const amt = Number(payload.amount);
+    const cur = String(payload.currency || '').trim().toUpperCase();
+    const dir = String(payload.direction || '').trim();
+    const cashbox = String(payload.cashbox || '').trim();
+    if (!Number.isFinite(amt) || amt <= 0 || amt > FINANCIAL_REALISTIC_MAX) {
+      return {
+        valid: false,
+        violationType: 'TAMPER',
+        reason: `قيمة الحركة المالية غير صالحة أو خارج النطاق المسموح (${payload.amount}).`
+      };
+    }
+    if (!VALID_CURRENCIES.has(cur)) {
+      return {
+        valid: false,
+        violationType: 'TAMPER',
+        reason: `عملة غير معتمدة في المعاملة المالية: "${payload.currency}".`
+      };
+    }
+    if (!VALID_MOVEMENT_DIRECTIONS.has(dir)) {
+      return {
+        valid: false,
+        violationType: 'TAMPER',
+        reason: `اتجاه حركة مالية غير مشروع: "${payload.direction}".`
+      };
+    }
+    if (!cashbox) {
+      return {
+        valid: false,
+        violationType: 'TAMPER',
+        reason: 'محاولة تسجيل حركة مالية بدون تحديد الخزنة المعتمدة.'
+      };
+    }
+  } else if (col === 'transfers') {
+    const srcAmt = Number(payload.sourceAmount);
+    const dstAmt = Number(payload.destinationAmount);
+    const rate = Number(payload.rate);
+    const srcBox = normalizeEntityKey(String(payload.sourceCashbox || ''));
+    const dstBox = normalizeEntityKey(String(payload.destinationCashbox || ''));
+    const srcCur = String(payload.sourceCurrency || '').trim().toUpperCase();
+    const dstCur = String(payload.destinationCurrency || '').trim().toUpperCase();
+
+    if (!Number.isFinite(srcAmt) || srcAmt <= 0 || srcAmt > FINANCIAL_REALISTIC_MAX) {
+      return { valid: false, violationType: 'TAMPER', reason: `مبلغ المصدر غير صالح (${payload.sourceAmount}).` };
+    }
+    if (!Number.isFinite(dstAmt) || dstAmt <= 0 || dstAmt > FINANCIAL_REALISTIC_MAX) {
+      return { valid: false, violationType: 'TAMPER', reason: `مبلغ الوجهة غير صالح (${payload.destinationAmount}).` };
+    }
+    if (!Number.isFinite(rate) || rate <= 0 || rate > 1_000_000) {
+      return { valid: false, violationType: 'TAMPER', reason: `سعر الصرف غير صالح (${payload.rate}).` };
+    }
+    if (!VALID_CURRENCIES.has(srcCur) || !VALID_CURRENCIES.has(dstCur)) {
+      return { valid: false, violationType: 'TAMPER', reason: `عملة تحويل غير معتمدة (${srcCur} -> ${dstCur}).` };
+    }
+    if (!srcBox || !dstBox) {
+      return { valid: false, violationType: 'TAMPER', reason: 'خزنة المصدر أو الوجهة مفقودة في التحويل.' };
+    }
+    if (srcBox === dstBox && srcCur === dstCur) {
+      return {
+        valid: false,
+        violationType: 'TAMPER',
+        reason: 'لا يمكن التحويل من وإلى نفس الخزنة وبنفس العملة.'
+      };
+    }
+    const expectedMul = Math.round(srcAmt * rate * 100) / 100;
+    const expectedDiv = Math.round((srcAmt / rate) * 100) / 100;
+    const tol = Math.max(0.1, Math.max(expectedMul, expectedDiv) * 0.005);
+    if (Math.abs(dstAmt - expectedMul) > tol && Math.abs(dstAmt - expectedDiv) > tol) {
+      return {
+        valid: false,
+        violationType: 'TAMPER',
+        reason: `عدم تطابق حساب التحويل (${srcAmt} بسعر ${rate} لا يطابق المستلم ${dstAmt}) — احتمال تلاعب بالقيم.`
+      };
+    }
+  } else if (col === 'invoices') {
+    const subtotal = payload.subtotal !== undefined ? Number(payload.subtotal) : Number(payload.total || 0);
+    const discount = Number(payload.discount ?? payload.discountAmount ?? 0);
+    const total = Number(payload.total ?? 0);
+    const paid = Number(payload.paidAmount ?? 0);
+    const cur = String(payload.currency || 'SDG').trim().toUpperCase();
+
+    if (
+      !Number.isFinite(subtotal) ||
+      !Number.isFinite(discount) ||
+      !Number.isFinite(total) ||
+      !Number.isFinite(paid) ||
+      subtotal < 0 ||
+      discount < 0 ||
+      total < 0 ||
+      paid < 0 ||
+      total > FINANCIAL_REALISTIC_MAX
+    ) {
+      return { valid: false, violationType: 'TAMPER', reason: 'قيم مالية سالبة أو غير صالحة في بيانات الفاتورة.' };
+    }
+    if (!VALID_CURRENCIES.has(cur)) {
+      return { valid: false, violationType: 'TAMPER', reason: `عملة فاتورة غير معتمدة: "${cur}".` };
+    }
+    if (paid > total + 0.05) {
+      return {
+        valid: false,
+        violationType: 'TAMPER',
+        reason: `المبلغ المدفوع (${paid}) يتجاوز إجمالي الفاتورة (${total}).`
+      };
+    }
+    if (payload.subtotal !== undefined && Math.abs(Math.max(0, subtotal - discount) - total) > 0.5) {
+      return {
+        valid: false,
+        violationType: 'TAMPER',
+        reason: `عدم تطابق صافي الفاتورة (${total}) مع الإجمالي الفرعي (${subtotal}) والخصم (${discount}).`
+      };
+    }
+  } else if (col === 'invoice_payments') {
+    const amt = Number(payload.amount);
+    const cur = String(payload.currency || 'SDG').trim().toUpperCase();
+    if (!Number.isFinite(amt) || amt <= 0 || amt > FINANCIAL_REALISTIC_MAX) {
+      return { valid: false, violationType: 'TAMPER', reason: `قيمة دفعة السداد غير صالحة (${payload.amount}).` };
+    }
+    if (!VALID_CURRENCIES.has(cur)) {
+      return { valid: false, violationType: 'TAMPER', reason: `عملة سداد غير معتمدة: "${cur}".` };
+    }
+  }
+
+  return { valid: true, violationType: 'NONE' };
+}
+
+export function checkExistingFinancialConflict(
+  collectionName: string,
+  candidateDocId: string,
+  candidatePayload: Record<string, any>,
+  existingDocs: Array<Record<string, any>>
+): TransactionValidationOutcome {
+  if (!Array.isArray(existingDocs) || existingDocs.length === 0) {
+    return { valid: true, violationType: 'NONE' };
+  }
+
+  const col = String(collectionName || '').trim().toLowerCase();
+  const candDoc = String(candidateDocId || '').trim();
+  const candUuid = String(candidatePayload.syncUuid || '').trim();
+  const candRef = String(candidatePayload.reference || candidatePayload.referenceNo || candidatePayload.invoiceNo || '').trim();
+
+  for (const existing of existingDocs) {
+    if (!existing || typeof existing !== 'object') continue;
+    const exDocId = String(existing._docId || '').trim();
+    const exUuid = String(existing.syncUuid || '').trim();
+    const sameDocId = Boolean(candDoc && exDocId && candDoc === exDocId);
+    const sameUuid = Boolean(candUuid && exUuid && candUuid === exUuid);
+
+    if (col === 'movements') {
+      const exRef = String(existing.reference || existing.referenceNo || '').trim();
+      const sameRefAndLeg =
+        Boolean(candRef && exRef && candRef.toLowerCase() === exRef.toLowerCase()) &&
+        normalizeEntityKey(String(existing.cashbox || '')) === normalizeEntityKey(String(candidatePayload.cashbox || '')) &&
+        normalizeEntityKey(String(existing.direction || '')) === normalizeEntityKey(String(candidatePayload.direction || ''));
+
+      if (sameDocId || sameUuid || sameRefAndLeg) {
+        const sameAmount = Math.abs((Number(existing.amount) || 0) - (Number(candidatePayload.amount) || 0)) < 0.01;
+        const sameCurrency =
+          String(existing.currency || 'SDG').trim().toUpperCase() ===
+          String(candidatePayload.currency || 'SDG').trim().toUpperCase();
+        const sameBox =
+          normalizeEntityKey(String(existing.cashbox || '')) ===
+          normalizeEntityKey(String(candidatePayload.cashbox || ''));
+
+        if (!sameAmount || !sameCurrency || !sameBox) {
+          return {
+            valid: false,
+            violationType: 'TAMPER',
+            matchedDocId: exDocId,
+            reason: `رُصدت محاولة تعديل أو تلاعب في معاملة مالية مسجلة مسبقاً (${exDocId || exRef}): المبلغ أو الخزنة أو العملة لا تطابق السجل المعتمد في Firestore.`
+          };
+        }
+        return {
+          valid: false,
+          violationType: 'DUPLICATE',
+          matchedDocId: exDocId,
+          reason: `المعاملة المالية مسجلة مسبقاً في Firestore (${exDocId || exRef}) — تم منع التكرار.`
+        };
+      }
+    } else if (col === 'transfers') {
+      const exRef = String(existing.reference || '').trim();
+      const sameRef = Boolean(candRef && exRef && candRef.toLowerCase() === exRef.toLowerCase());
+      if (sameDocId || sameUuid || sameRef) {
+        const sameSrc = Math.abs((Number(existing.sourceAmount) || 0) - (Number(candidatePayload.sourceAmount) || 0)) < 0.01;
+        const sameDst = Math.abs((Number(existing.destinationAmount) || 0) - (Number(candidatePayload.destinationAmount) || 0)) < 0.01;
+        const sameBoxes =
+          normalizeEntityKey(String(existing.sourceCashbox || '')) === normalizeEntityKey(String(candidatePayload.sourceCashbox || '')) &&
+          normalizeEntityKey(String(existing.destinationCashbox || '')) === normalizeEntityKey(String(candidatePayload.destinationCashbox || ''));
+
+        if (!sameSrc || !sameDst || !sameBoxes) {
+          return {
+            valid: false,
+            violationType: 'TAMPER',
+            matchedDocId: exDocId,
+            reason: `رُصدت محاولة تعديل أو تلاعب في تحويل خزينة مسجل مسبقاً (${exDocId || exRef}).`
+          };
+        }
+        return {
+          valid: false,
+          violationType: 'DUPLICATE',
+          matchedDocId: exDocId,
+          reason: `عملية التحويل مسجلة مسبقاً في Firestore (${exDocId || exRef}) — تم منع التكرار.`
+        };
+      }
+    } else if (col === 'invoices') {
+      const exNo = String(existing.invoiceNo || '').trim();
+      const sameNo = Boolean(candRef && exNo && candRef.toLowerCase() === exNo.toLowerCase());
+      if (sameDocId || sameUuid || sameNo) {
+        const sameTotal = Math.abs((Number(existing.total) || 0) - (Number(candidatePayload.total) || 0)) < 0.01;
+        const sameCurrency =
+          String(existing.currency || 'SDG').trim().toUpperCase() ===
+          String(candidatePayload.currency || 'SDG').trim().toUpperCase();
+        // Updating invoice paidAmount/status after recording a customer payment is a legitimate lifecycle update when docId & total match
+        if (sameDocId && sameTotal && sameCurrency && Number(candidatePayload.paidAmount ?? 0) >= Number(existing.paidAmount ?? 0)) {
+          continue;
+        }
+        if (!sameTotal || !sameCurrency) {
+          return {
+            valid: false,
+            violationType: 'TAMPER',
+            matchedDocId: exDocId,
+            reason: `رُصدت محاولة تلاعب بإجمالي أو عملة فاتورة معتمدة (${exDocId || exNo}).`
+          };
+        }
+        return {
+          valid: false,
+          violationType: 'DUPLICATE',
+          matchedDocId: exDocId,
+          reason: `الفاتورة مسجلة مسبقاً في Firestore (${exDocId || exNo}) — تم منع التكرار.`
+        };
+      }
+    } else if (col === 'invoice_payments') {
+      if (sameDocId || sameUuid) {
+        const sameAmount = Math.abs((Number(existing.amount) || 0) - (Number(candidatePayload.amount) || 0)) < 0.01;
+        if (!sameAmount) {
+          return {
+            valid: false,
+            violationType: 'TAMPER',
+            matchedDocId: exDocId,
+            reason: `محاولة تلاعب بقيمة دفعة سداد مسجلة مسبقاً (${exDocId}).`
+          };
+        }
+        return {
+          valid: false,
+          violationType: 'DUPLICATE',
+          matchedDocId: exDocId,
+          reason: `دفعة السداد مسجلة مسبقاً في Firestore (${exDocId}) — تم منع التكرار.`
+        };
+      }
+    }
+  }
+
+  return { valid: true, violationType: 'NONE' };
+}
+
+

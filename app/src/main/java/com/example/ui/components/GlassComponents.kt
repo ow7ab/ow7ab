@@ -33,7 +33,11 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -448,19 +452,30 @@ fun GlassTabRow(
     if (tabs.isEmpty()) return
 
     val scrollState = rememberScrollState()
+    val haptic = LocalHapticFeedback.current
+    val tabBounds = remember(tabs.size) { mutableStateMapOf<Int, Pair<Int, Int>>() }
+    var viewportWidthPx by remember { mutableIntStateOf(0) }
 
-    // Smoothly bring selected tab into view
-    LaunchedEffect(selectedIndex, tabs.size) {
+    // Smoothly center the selected tab using its measured position inside the scroll container
+    LaunchedEffect(selectedIndex, tabs.size, viewportWidthPx) {
         if (selectedIndex in tabs.indices && scrollState.maxValue > 0) {
-            val step = scrollState.maxValue.toFloat() / (tabs.size - 1).coerceAtLeast(1)
-            val targetScroll = (selectedIndex * step).toInt().coerceIn(0, scrollState.maxValue)
-            scrollState.animateScrollTo(targetScroll)
+            val bounds = tabBounds[selectedIndex]
+            if (bounds != null && viewportWidthPx > 0) {
+                val (leftPx, widthPx) = bounds
+                val targetScroll = (leftPx + widthPx / 2 - viewportWidthPx / 2).coerceIn(0, scrollState.maxValue)
+                scrollState.animateScrollTo(targetScroll)
+            } else {
+                val step = scrollState.maxValue.toFloat() / (tabs.size - 1).coerceAtLeast(1)
+                val targetScroll = (selectedIndex * step).toInt().coerceIn(0, scrollState.maxValue)
+                scrollState.animateScrollTo(targetScroll)
+            }
         }
     }
 
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .onGloballyPositioned { coords -> viewportWidthPx = coords.size.width }
             .horizontalScroll(scrollState)
             .padding(horizontal = 4.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -470,8 +485,16 @@ fun GlassTabRow(
             GlassTabPill(
                 text = tabName,
                 selected = selectedIndex == index,
-                onClick = { onTabSelected(index) },
-                modifier = Modifier.wrapContentWidth(unbounded = true)
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onTabSelected(index)
+                },
+                modifier = Modifier
+                    .wrapContentWidth(unbounded = true)
+                    .onGloballyPositioned { coords ->
+                        tabBounds[index] = coords.positionInParent().x.toInt() to coords.size.width
+                    }
+                    .testTag("glass_tab_item_$index")
             )
         }
     }
@@ -486,8 +509,7 @@ private fun GlassTabPill(
 ) {
     Box(
         modifier = modifier
-            .defaultMinSize(minWidth = 84.dp)
-            .heightIn(min = 42.dp)
+            .defaultMinSize(minWidth = 84.dp, minHeight = 48.dp)
             .clip(SharedTabPillShape)
             .background(if (selected) GlassAccentBlueGradient else GlassCardGradient)
             .border(
@@ -498,7 +520,7 @@ private fun GlassTabPill(
             .clickable(onClick = onClick)
             .padding(
                 horizontal = 16.dp,
-                vertical = 9.dp
+                vertical = 10.dp
             ),
         contentAlignment = Alignment.Center
     ) {

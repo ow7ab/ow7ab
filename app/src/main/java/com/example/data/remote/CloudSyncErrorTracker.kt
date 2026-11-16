@@ -59,6 +59,16 @@ enum class CloudErrorCategory(
         arabicTitle = "تعارض أو رفض تحقق البيانات (DATA_CONFLICT)",
         isTransientRetryable = false,
         remediationHint = "تحقق من توازن القيود المحاسبية أو القواعد الثابتة للسجلات غير القابلة للتعديل."
+    ),
+    SECURITY_TAMPER(
+        arabicTitle = "تنبيه أمني: محاولة تلاعب في معاملة مالية (SECURITY_TAMPER)",
+        isTransientRetryable = false,
+        remediationHint = "تم إيقاف العملية تلقائياً وتوثيقها في سجل التدقيق والأخطاء. راجع تفاصيل المستخدم والمرجع فوراً."
+    ),
+    DUPLICATE_TRANSACTION(
+        arabicTitle = "منع تكرار معاملة مالية في Firestore (DUPLICATE_TRANSACTION)",
+        isTransientRetryable = false,
+        remediationHint = "المعاملة مسجلة مسبقاً بنفس المرجع أو البصمة المالية؛ تم حظر الإدخال المكرر لحماية الأرصدة."
     )
 }
 
@@ -245,9 +255,65 @@ object CloudSyncErrorTracker {
         )
     }
 
+    fun buildTamperLogEntry(
+        operation: String,
+        collectionPath: String,
+        reason: String,
+        actor: String = "",
+        deviceId: String = "ANDROID-CLIENT"
+    ): CloudErrorLogEntry {
+        val now = System.currentTimeMillis()
+        val timeStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(now))
+        val actorPrefix = if (actor.isNotBlank()) "($actor) " else ""
+        val cat = CloudErrorCategory.SECURITY_TAMPER
+        return CloudErrorLogEntry(
+            timestamp = now,
+            formattedTime = timeStr,
+            deviceId = deviceId.ifBlank { "ANDROID-CLIENT" },
+            operation = operation.ifBlank { "HANDLE_TRANSACTION_COMMIT" },
+            collectionPath = collectionPath.ifBlank { "/" },
+            category = cat,
+            code = cat.name,
+            sanitizedMessage = sanitizeCloudMessage("[محاولة تلاعب] $actorPrefix$reason"),
+            remediationHint = cat.remediationHint,
+            retryable = false
+        )
+    }
+
+    fun buildDuplicateLogEntry(
+        operation: String,
+        collectionPath: String,
+        reason: String,
+        actor: String = "",
+        deviceId: String = "ANDROID-CLIENT"
+    ): CloudErrorLogEntry {
+        val now = System.currentTimeMillis()
+        val timeStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(now))
+        val actorPrefix = if (actor.isNotBlank()) "($actor) " else ""
+        val cat = CloudErrorCategory.DUPLICATE_TRANSACTION
+        return CloudErrorLogEntry(
+            timestamp = now,
+            formattedTime = timeStr,
+            deviceId = deviceId.ifBlank { "ANDROID-CLIENT" },
+            operation = operation.ifBlank { "HANDLE_TRANSACTION_COMMIT" },
+            collectionPath = collectionPath.ifBlank { "/" },
+            category = cat,
+            code = cat.name,
+            sanitizedMessage = sanitizeCloudMessage("[معاملة مالية مكررة] $actorPrefix$reason"),
+            remediationHint = cat.remediationHint,
+            retryable = false
+        )
+    }
+
     private fun classifyFromMessage(sanitizedLowerSource: String): CloudErrorCategory {
         val h = sanitizedLowerSource.lowercase(Locale.US)
         return when {
+            h.contains("security_tamper") || h.contains("tamper") ||
+                h.contains("تلاعب") || h.contains("tombstone_replay") ->
+                CloudErrorCategory.SECURITY_TAMPER
+            h.contains("duplicate_transaction") || h.contains("معاملة مالية مكررة") ||
+                h.contains("مسجلة مسبقاً") || h.contains("تم منع التكرار") ->
+                CloudErrorCategory.DUPLICATE_TRANSACTION
             h.contains("permission_denied") || h.contains("permission-denied") ||
                 h.contains("missing or insufficient permissions") || h.contains("صلاحية") ->
                 CloudErrorCategory.PERMISSION_DENIED

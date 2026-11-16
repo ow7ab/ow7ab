@@ -292,7 +292,12 @@ export const TreasuryModuleView: React.FC = () => {
           createdAt: id
         };
 
-        await ErpDataService.saveDocument('movements', movDocId, newMov);
+        await ErpDataService.handleTransactionCommit({
+          collectionName: 'movements',
+          docId: movDocId,
+          payload: newMov,
+          actorUsername: userProfile?.username
+        });
 
         const matchedBox = distinctCashboxes.find(
           (c) => normalizeEntityKey(c.name) === normalizeEntityKey(movForm.cashbox)
@@ -467,9 +472,24 @@ export const TreasuryModuleView: React.FC = () => {
         };
 
         await Promise.all([
-          ErpDataService.saveDocument('transfers', trfDocId, newTrf),
-          ErpDataService.saveDocument('movements', `MOV-${idempotencyKey}-OUT`, outMov),
-          ErpDataService.saveDocument('movements', `MOV-${idempotencyKey}-IN`, inMov)
+          ErpDataService.handleTransactionCommit({
+            collectionName: 'transfers',
+            docId: trfDocId,
+            payload: newTrf,
+            actorUsername: userProfile?.username
+          }),
+          ErpDataService.handleTransactionCommit({
+            collectionName: 'movements',
+            docId: `MOV-${idempotencyKey}-OUT`,
+            payload: outMov,
+            actorUsername: userProfile?.username
+          }),
+          ErpDataService.handleTransactionCommit({
+            collectionName: 'movements',
+            docId: `MOV-${idempotencyKey}-IN`,
+            payload: inMov,
+            actorUsername: userProfile?.username
+          })
         ]);
 
         const trfJournals = buildTreasuryTransferJournalPayloads({
@@ -900,11 +920,11 @@ export const TreasuryModuleView: React.FC = () => {
         {/* 5 Sub-tabs Bar */}
         <div className="flex flex-wrap gap-2 mt-5 pt-4 border-t border-theme">
           {[
-            { id: 'MOVEMENT' as TreasurySubTab, label: 'حركة مالية', visible: canAccessTreasury },
-            { id: 'TRANSFER' as TreasurySubTab, label: 'تحويل خزن', visible: canAccessTransfers },
-            { id: 'CLOSING' as TreasurySubTab, label: 'إقفال اليومية', visible: canAccessTreasury },
-            { id: 'STATEMENT' as TreasurySubTab, label: 'كشف الحساب', visible: canAccessTreasury },
-            { id: 'MANAGE_BOXES' as TreasurySubTab, label: 'إدارة الخزن', visible: canAccessTreasury || isManager }
+            { id: 'MOVEMENT' as TreasurySubTab, label: 'حركة مالية', count: movements.length, visible: canAccessTreasury },
+            { id: 'TRANSFER' as TreasurySubTab, label: 'تحويل خزن', count: transfers.length, visible: canAccessTransfers },
+            { id: 'CLOSING' as TreasurySubTab, label: 'إقفال اليومية', count: closings.length, visible: canAccessTreasury },
+            { id: 'STATEMENT' as TreasurySubTab, label: 'كشف الحساب', count: null as number | null, visible: canAccessTreasury },
+            { id: 'MANAGE_BOXES' as TreasurySubTab, label: 'إدارة الخزن', count: distinctCashboxes.length, visible: canAccessTreasury || isManager }
           ]
             .filter((t) => t.visible)
             .map((t) => (
@@ -912,13 +932,22 @@ export const TreasuryModuleView: React.FC = () => {
                 key={t.id}
                 type="button"
                 onClick={() => setActiveSubTab(t.id)}
-                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all min-h-[38px] ${
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all duration-200 min-h-[40px] flex items-center gap-2 ${
                   activeSubTab === t.id
-                    ? 'bg-pmp-primary text-white shadow-md'
-                    : 'bg-theme-base border border-theme text-theme-secondary hover:text-theme-primary'
+                    ? 'bg-pmp-primary text-white shadow-md scale-[1.01]'
+                    : 'bg-theme-base border border-theme text-theme-secondary hover:text-theme-primary hover:border-pmp-primary/40'
                 }`}
               >
-                {t.label}
+                <span>{t.label}</span>
+                {t.count !== null && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono ${
+                      activeSubTab === t.id ? 'bg-white/20 text-white' : 'bg-theme-surface text-theme-muted'
+                    }`}
+                  >
+                    {t.count}
+                  </span>
+                )}
               </button>
             ))}
         </div>
