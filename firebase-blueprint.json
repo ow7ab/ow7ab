@@ -19,7 +19,7 @@
         },
         "clusterCode": {
           "type": "string",
-          "description": "Enterprise cluster identifier (e.g., PMP-ERP-V16-CLUSTER)."
+          "description": "Enterprise cluster identifier (PMP-ERP-MAIN-CLUSTER)."
         },
         "fullName": {
           "type": "string",
@@ -75,6 +75,80 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "ClusterMember": {
+      "title": "ClusterMember",
+      "description": "Authoritative server-side RBAC membership document keyed by Firebase Auth UID inside an ERP cluster.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the document ID."
+        },
+        "userCode": {
+          "type": "string",
+          "description": "Linked ERP user account code."
+        },
+        "email": {
+          "type": "string",
+          "description": "Verified corporate/Google email."
+        },
+        "emailKey": {
+          "type": "string",
+          "description": "Sanitized email directory document key used during self-claim."
+        },
+        "roleKey": {
+          "type": "string",
+          "enum": ["ADMIN", "MANAGER", "ACCOUNTANT", "DEPUTY_ACCOUNTANT", "EMPLOYEE"],
+          "description": "Canonical server-enforced RBAC role."
+        },
+        "branch": {
+          "type": "string",
+          "description": "Assigned branch or ALL for multi-branch administrators."
+        },
+        "permissions": {
+          "type": "string",
+          "description": "Granular module and action permission tokens."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the member is permitted to access the cluster."
+        }
+      },
+      "required": ["uid", "userCode", "roleKey", "branch", "active"]
+    },
+    "EmailDirectoryEntry": {
+      "title": "EmailDirectoryEntry",
+      "description": "Admin/Manager pre-provisioned verified email binding for zero-trust Google Sign-In claim.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "Normalized lowercase employee email."
+        },
+        "userCode": {
+          "type": "string",
+          "description": "Linked ERP userCode."
+        },
+        "roleKey": {
+          "type": "string",
+          "enum": ["ADMIN", "MANAGER", "ACCOUNTANT", "DEPUTY_ACCOUNTANT", "EMPLOYEE"],
+          "description": "Authoritative RBAC role assigned by Admin/Manager."
+        },
+        "branch": {
+          "type": "string",
+          "description": "Assigned branch scope."
+        },
+        "permissions": {
+          "type": "string",
+          "description": "Assigned permissions string."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the directory binding is active."
+        }
+      },
+      "required": ["email", "userCode", "roleKey", "branch", "active"]
     }
   },
   "firestore": {
@@ -84,12 +158,24 @@
       },
       "description": "Stores cloud-linked user accounts and manager-assigned employee permissions."
     },
+    "/erp_clusters/{clusterCode}/cluster_members/{memberUid}": {
+      "schema": {
+        "$ref": "#/entities/ClusterMember"
+      },
+      "description": "Server-side authoritative RBAC directory keyed by Firebase Auth UID."
+    },
+    "/erp_clusters/{clusterCode}/email_directory/{emailKey}": {
+      "schema": {
+        "$ref": "#/entities/EmailDirectoryEntry"
+      },
+      "description": "Pre-provisioned email-to-role bindings allowing verified Google users to claim their assigned membership safely."
+    },
     "/erp_clusters/{clusterCode}/{collectionName}/{docId}": {
       "schema": {
         "type": "object",
-        "description": "Enterprise cloud ERP central documents for phone and Windows clients (invoices, movements, customers, products, cashboxes)."
+        "description": "Enterprise cloud ERP central documents for Android, Web, and Windows Desktop clients."
       },
-      "description": "Enterprise central database synchronization cluster connecting Android phone and Windows desktop clients."
+      "description": "Enterprise central database synchronization cluster connecting Android, Web, and Windows clients."
     }
   }
 }

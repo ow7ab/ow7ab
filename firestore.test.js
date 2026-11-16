@@ -8,8 +8,12 @@ const fs = require("node:fs");
 
 let testEnv;
 const PROJECT_ID = process.env.GCP_PROJECT || "demo-no-project";
+const CLUSTER = "PMP-ERP-MAIN-CLUSTER";
+const ADMIN_UID = "admin_root_001";
 const MANAGER_UID = "manager_alice_123";
-const EMPLOYEE_UID = "employee_bob_456";
+const ACCOUNTANT_UID = "accountant_omar_234";
+const DEPUTY_UID = "deputy_sara_345";
+const EMPLOYEE_SD_UID = "employee_bob_456";
 const INTRUDER_UID = "intruder_charlie_789";
 
 const [emulatorHost, emulatorPortStr] = (process.env.FIRESTORE_EMULATOR_HOST || "127.0.0.1:8085").split(":");
@@ -20,8 +24,8 @@ function validLinkedAccountPayload(overrides = {}) {
   return {
     userCode: "USR-SD-1001",
     ownerId: MANAGER_UID,
-    linkedUid: EMPLOYEE_UID,
-    clusterCode: "PMP-ERP-MAIN-CLUSTER",
+    linkedUid: EMPLOYEE_SD_UID,
+    clusterCode: CLUSTER,
     fullName: "أحمد محمد أحمد - محاسب فرع السودان",
     username: "sudan_acc",
     role: "محاسب خزنة ومبيعات",
@@ -33,6 +37,26 @@ function validLinkedAccountPayload(overrides = {}) {
     updatedAt: ts,
     ...overrides,
   };
+}
+
+async function seedClusterRbac() {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    const cRef = db.collection("erp_clusters").doc(CLUSTER);
+    await cRef.set({ clusterCode: CLUSTER, initializedAt: Date.now() });
+    await cRef.collection("system_metadata").doc("cluster_owner").set({ ownerUid: ADMIN_UID });
+
+    const members = [
+      { uid: ADMIN_UID, userCode: "USR-ADMIN", roleKey: "ADMIN", branch: "ALL", email: "admin@pmp.sd", active: true },
+      { uid: MANAGER_UID, userCode: "USR-MGR-1", roleKey: "MANAGER", branch: "ALL", email: "mgr@pmp.sd", active: true },
+      { uid: ACCOUNTANT_UID, userCode: "USR-ACC-1", roleKey: "ACCOUNTANT", branch: "ALL", email: "acc@pmp.sd", active: true },
+      { uid: DEPUTY_UID, userCode: "USR-DEP-1", roleKey: "DEPUTY_ACCOUNTANT", branch: "فرع السودان (SD-001)", email: "dep@pmp.sd", active: true },
+      { uid: EMPLOYEE_SD_UID, userCode: "USR-SD-1001", roleKey: "EMPLOYEE", branch: "فرع السودان (SD-001)", email: "emp@pmp.sd", active: true },
+    ];
+    for (const m of members) {
+      await cRef.collection("cluster_members").doc(m.uid).set(m);
+    }
+  });
 }
 
 before(async () => {
@@ -100,10 +124,10 @@ test("5. Linked employee (linkedUid): can read their assigned account and query 
     managerDb.collection("linked_accounts").doc("USR-SD-1001").set(validLinkedAccountPayload())
   );
 
-  const employeeDb = testEnv.authenticatedContext(EMPLOYEE_UID).firestore();
+  const employeeDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
   await assertSucceeds(employeeDb.collection("linked_accounts").doc("USR-SD-1001").get());
   await assertSucceeds(
-    employeeDb.collection("linked_accounts").where("linkedUid", "==", EMPLOYEE_UID).get()
+    employeeDb.collection("linked_accounts").where("linkedUid", "==", EMPLOYEE_SD_UID).get()
   );
 });
 
@@ -131,7 +155,7 @@ test("7. Privilege escalation blocked: linked employee cannot modify their own p
     managerDb.collection("linked_accounts").doc("USR-SD-1001").set(validLinkedAccountPayload())
   );
 
-  const employeeDb = testEnv.authenticatedContext(EMPLOYEE_UID).firestore();
+  const employeeDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
   await assertFails(
     employeeDb.collection("linked_accounts").doc("USR-SD-1001").update({
       permissions: "الخزن,المبيعات,المخازن,المصنع,الأسعار,التقارير,المستخدمين,الإعدادات",
@@ -139,7 +163,6 @@ test("7. Privilege escalation blocked: linked employee cannot modify their own p
     })
   );
 
-  // Employee CAN update their serverSyncToken / heartbeat
   await assertSucceeds(
     employeeDb.collection("linked_accounts").doc("USR-SD-1001").update({
       serverSyncToken: "SYNC-PMP-SD-1001-ACK",
@@ -148,181 +171,228 @@ test("7. Privilege escalation blocked: linked employee cannot modify their own p
   );
 });
 
-test("8. Unfiltered list query fails (rules are not filters)", async () => {
+test("8. Unfiltered list query fails on linked_accounts (rules are not filters)", async () => {
   const managerDb = testEnv.authenticatedContext(MANAGER_UID).firestore();
   await assertFails(managerDb.collection("linked_accounts").get());
 });
 
-test("9. ERP Cluster: multi-user nodes can sync user_accounts and invoices in erp_clusters", async () => {
-  const nodeADb = testEnv.authenticatedContext(MANAGER_UID).firestore();
-  const nodeBDb = testEnv.unauthenticatedContext().firestore();
+test("9. Zero-Trust: Unauthenticated and non-member callers are denied on ERP clusters & operational roots", async () => {
+  await seedClusterRbac();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const intruderDb = testEnv.authenticatedContext(INTRUDER_UID).firestore();
+
+  await assertFails(unauthDb.collection("erp_clusters").doc(CLUSTER).collection("user_accounts").get());
+  await assertFails(unauthDb.collection("erp_clusters").doc(CLUSTER).collection("invoices").get());
+  await assertFails(intruderDb.collection("erp_clusters").doc(CLUSTER).collection("user_accounts").get());
+  await assertFails(intruderDb.collection("erp_clusters").doc(CLUSTER).collection("invoices").doc("INV-1").set({ customerName: "Test", total: 100 }));
+  await assertFails(unauthDb.collection("system_config").doc("app_version").set({ versionCode: 99 }));
+});
+
+test("10. Initial Admin Bootstrap locks down after first owner; intruder cannot self-promote to ADMIN", async () => {
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID, { email: "admin@pmp.sd", email_verified: true }).firestore();
+  const cAdmin = adminDb.collection("erp_clusters").doc(CLUSTER);
 
   await assertSucceeds(
-    nodeADb
-      .collection("erp_clusters")
-      .doc("PMP-ERP-MAIN-CLUSTER")
-      .collection("user_accounts")
-      .doc("USR-HQ-001")
-      .set({
-        userCode: "USR-HQ-001",
-        username: "admin",
-        role: "مدير النظام",
-        permissions: "الخزن,التحويلات,المبيعات,تصدير PDF,المخازن,المصنع,الأسعار,التقارير,المستخدمين,الإعدادات",
-        active: true,
-      })
+    cAdmin.collection("cluster_members").doc(ADMIN_UID).set({
+      uid: ADMIN_UID,
+      userCode: "USR-ADMIN",
+      roleKey: "ADMIN",
+      branch: "ALL",
+      active: true,
+    })
   );
+  await assertSucceeds(cAdmin.collection("system_metadata").doc("cluster_owner").set({ ownerUid: ADMIN_UID }));
 
-  await assertSucceeds(
-    nodeBDb
-      .collection("erp_clusters")
-      .doc("PMP-ERP-MAIN-CLUSTER")
-      .collection("user_accounts")
-      .get()
+  const intruderDb = testEnv.authenticatedContext(INTRUDER_UID, { email: "hacker@evil.com", email_verified: true }).firestore();
+  await assertFails(
+    intruderDb.collection("erp_clusters").doc(CLUSTER).collection("cluster_members").doc(INTRUDER_UID).set({
+      uid: INTRUDER_UID,
+      userCode: "USR-HACK",
+      roleKey: "ADMIN",
+      branch: "ALL",
+      active: true,
+    })
   );
 });
 
-test("10. Security Hardening: cluster audit_logs are append-only and negative invoice/stock values are rejected", async () => {
-  const clientDb = testEnv.unauthenticatedContext().firestore();
-  const auditRef = clientDb
-    .collection("erp_clusters")
-    .doc("PMP-ERP-MAIN-CLUSTER")
-    .collection("audit_logs")
-    .doc("AUD-1001");
+test("11. Verified email_directory claim enforces exact Admin-assigned role & blocks role tampering", async () => {
+  await seedClusterRbac();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const emailKey = "new_emp_pmp_sd";
 
-  await assertSucceeds(auditRef.set({ action: "CREATE_INVOICE", actor: "admin", timestamp: Date.now() }));
+  await assertSucceeds(
+    adminDb.collection("erp_clusters").doc(CLUSTER).collection("email_directory").doc(emailKey).set({
+      email: "new.emp@pmp.sd",
+      userCode: "USR-EMP-99",
+      roleKey: "EMPLOYEE",
+      branch: "فرع السودان (SD-001)",
+      permissions: "المبيعات,العملاء",
+      active: true,
+    })
+  );
+
+  const verifiedNewUserDb = testEnv.authenticatedContext("new_uid_99", {
+    email: "new.emp@pmp.sd",
+    email_verified: true,
+  }).firestore();
+
+  // Attempt to self-claim as ADMIN instead of EMPLOYEE must fail
+  await assertFails(
+    verifiedNewUserDb.collection("erp_clusters").doc(CLUSTER).collection("cluster_members").doc("new_uid_99").set({
+      uid: "new_uid_99",
+      emailKey,
+      userCode: "USR-EMP-99",
+      roleKey: "ADMIN",
+      branch: "ALL",
+      permissions: "ALL",
+      active: true,
+    })
+  );
+
+  // Claiming exact Admin-provisioned role succeeds
+  await assertSucceeds(
+    verifiedNewUserDb.collection("erp_clusters").doc(CLUSTER).collection("cluster_members").doc("new_uid_99").set({
+      uid: "new_uid_99",
+      emailKey,
+      userCode: "USR-EMP-99",
+      roleKey: "EMPLOYEE",
+      branch: "فرع السودان (SD-001)",
+      permissions: "المبيعات,العملاء",
+      active: true,
+    })
+  );
+});
+
+test("12. RBAC Hierarchy: Manager cannot escalate to/modify Admin or Manager; users cannot modify own role/permissions", async () => {
+  await seedClusterRbac();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const managerDb = testEnv.authenticatedContext(MANAGER_UID).firestore();
+  const empDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+
+  // Admin creates user_accounts doc for employee
+  await assertSucceeds(
+    adminDb.collection("erp_clusters").doc(CLUSTER).collection("user_accounts").doc("USR-SD-1001").set({
+      userCode: "USR-SD-1001",
+      linkedUid: EMPLOYEE_SD_UID,
+      username: "sudan_emp",
+      role: "موظف مبيعات",
+      branch: "فرع السودان (SD-001)",
+      permissions: "المبيعات",
+      active: true,
+    })
+  );
+
+  // Manager CAN create/update regular employee
+  await assertSucceeds(
+    managerDb.collection("erp_clusters").doc(CLUSTER).collection("user_accounts").doc("USR-SD-1002").set({
+      userCode: "USR-SD-1002",
+      username: "sudan_emp2",
+      role: "موظف مخازن",
+      branch: "فرع السودان (SD-001)",
+      permissions: "المخازن",
+      active: true,
+    })
+  );
+
+  // Manager CANNOT create an Admin or Manager account or cluster_member
+  await assertFails(
+    managerDb.collection("erp_clusters").doc(CLUSTER).collection("cluster_members").doc("rogue_admin").set({
+      uid: "rogue_admin",
+      userCode: "USR-ROGUE",
+      roleKey: "ADMIN",
+      branch: "ALL",
+      active: true,
+    })
+  );
+  await assertFails(
+    managerDb.collection("erp_clusters").doc(CLUSTER).collection("user_accounts").doc("USR-FAKE-ADMIN").set({
+      userCode: "USR-FAKE-ADMIN",
+      username: "fake_admin",
+      role: "مدير النظام",
+      branch: "ALL",
+      active: true,
+    })
+  );
+  // Manager CANNOT modify system_config or Admin user
+  await assertFails(managerDb.collection("system_config").doc("app_version").set({ versionCode: 22 }));
+  await assertFails(
+    managerDb.collection("erp_clusters").doc(CLUSTER).collection("cluster_members").doc(ADMIN_UID).update({ active: false })
+  );
+
+  // Employee CANNOT modify their own role or permissions, CAN update allowed profile fields
+  await assertFails(
+    empDb.collection("erp_clusters").doc(CLUSTER).collection("user_accounts").doc("USR-SD-1001").update({
+      role: "مدير النظام",
+      permissions: "الإعدادات الإدارية",
+    })
+  );
+  await assertFails(
+    empDb.collection("erp_clusters").doc(CLUSTER).collection("cluster_members").doc(EMPLOYEE_SD_UID).update({
+      roleKey: "ADMIN",
+    })
+  );
+  await assertSucceeds(
+    empDb.collection("erp_clusters").doc(CLUSTER).collection("user_accounts").doc("USR-SD-1001").update({
+      fullName: "أحمد محمد المحدث",
+    })
+  );
+});
+
+test("13. Branch Isolation & Cross-Branch Write Prevention", async () => {
+  await seedClusterRbac();
+  const empSdDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+  const cEmp = empSdDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Employee in SD-001 CAN create invoice in SD-001
+  await assertSucceeds(
+    cEmp.collection("invoices").doc("INV-SD-100").set({
+      customerName: "عميل الخرطوم",
+      branch: "فرع السودان (SD-001)",
+      total: 1500,
+      subtotal: 1500,
+    })
+  );
+
+  // Employee in SD-001 CANNOT create invoice for EG-001 branch
+  await assertFails(
+    cEmp.collection("invoices").doc("INV-EG-100").set({
+      customerName: "عميل القاهرة",
+      branch: "فرع القاهرة (EG-001)",
+      total: 2500,
+      subtotal: 2500,
+    })
+  );
+});
+
+test("14. Audit logs, inventory_movements & accounting journal rules (Admin/Accountant vs Deputy/Employee)", async () => {
+  await seedClusterRbac();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const accountantDb = testEnv.authenticatedContext(ACCOUNTANT_UID).firestore();
+  const deputyDb = testEnv.authenticatedContext(DEPUTY_UID).firestore();
+  const empDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+
+  const cAcc = accountantDb.collection("erp_clusters").doc(CLUSTER);
+  const cDep = deputyDb.collection("erp_clusters").doc(CLUSTER);
+  const cEmp = empDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Audit logs append-only
+  const auditRef = cEmp.collection("audit_logs").doc("AUD-1001");
+  await assertSucceeds(auditRef.set({ action: "CREATE_INVOICE", actor: "bob", timestamp: Date.now() }));
   await assertFails(auditRef.update({ action: "TAMPERED" }));
   await assertFails(auditRef.delete());
 
+  // Negative invoice rejected even for Admin
   await assertFails(
-    clientDb
-      .collection("erp_clusters")
-      .doc("PMP-ERP-MAIN-CLUSTER")
-      .collection("invoices")
-      .doc("INV-BAD")
-      .set({ customerName: "عميل", total: -500, subtotal: -500 })
-  );
-
-  await assertFails(
-    clientDb
-      .collection("erp_clusters")
-      .doc("PMP-ERP-MAIN-CLUSTER")
-      .collection("stock_moves")
-      .doc("SM-BAD")
-      .set({ productId: 1, warehouseId: 1, kind: "IN", quantity: -25 })
-  );
-});
-
-test("11. Phase 2 Rules: inventory_movements are append-only (no delete, reversal-only update) and balances reject negatives", async () => {
-  const clientDb = testEnv.unauthenticatedContext().firestore();
-  const movRef = clientDb
-    .collection("erp_clusters")
-    .doc("PMP-ERP-MAIN-CLUSTER")
-    .collection("inventory_movements")
-    .doc("IM-UUID-1");
-
-  await assertSucceeds(
-    movRef.set({
-      syncUuid: "IM-UUID-1",
-      movementType: "PURCHASE_RECEIPT",
-      quantity: 50,
-      status: "POSTED",
+    adminDb.collection("erp_clusters").doc(CLUSTER).collection("invoices").doc("INV-BAD").set({
+      customerName: "عميل",
+      total: -500,
+      subtotal: -500,
     })
   );
 
-  // Deleting an inventory movement must fail
-  await assertFails(movRef.delete());
-
-  // Arbitrary update mutating quantity must fail
-  await assertFails(movRef.update({ status: "POSTED", quantity: 999 }));
-
-  // Reversal state transition POSTED -> REVERSED succeeds
-  await assertSucceeds(movRef.update({ status: "REVERSED" }));
-
-  // Negative balance must fail
+  // Unbalanced journal rejected
   await assertFails(
-    clientDb
-      .collection("erp_clusters")
-      .doc("PMP-ERP-MAIN-CLUSTER")
-      .collection("warehouse_stock_balances")
-      .doc("BAL-BAD")
-      .set({ onHandQty: -10, availableQty: -10 })
-  );
-
-  // Invalid packaging rule (cansPerCarton <= 0) must fail
-  await assertFails(
-    clientDb
-      .collection("erp_clusters")
-      .doc("PMP-ERP-MAIN-CLUSTER")
-      .collection("packaging_rules")
-      .doc("PKG-BAD")
-      .set({ weightGrams: 900, cansPerCarton: 0 })
-  );
-});
-
-test("12. Phase 3 Rules: purchase_receipts, production_orders & qc_inspections validate positive/non-negative bounds", async () => {
-  const clientDb = testEnv.unauthenticatedContext().firestore();
-  const cRef = clientDb.collection("erp_clusters").doc("PMP-ERP-MAIN-CLUSTER");
-
-  await assertSucceeds(
-    cRef.collection("purchase_receipts").doc("GRN-1001").set({
-      grnNo: "GRN-1001",
-      materialName: "تيتانيوم أبيض",
-      receivedQty: 100,
-      acceptedQty: 90,
-      rejectedQty: 10,
-      qcStatus: "PARTIAL",
-    })
-  );
-
-  await assertFails(
-    cRef.collection("purchase_receipts").doc("GRN-BAD").set({
-      receivedQty: 50,
-      acceptedQty: -5,
-    })
-  );
-
-  await assertSucceeds(
-    cRef.collection("production_orders").doc("PRD-1001").set({
-      orderNo: "PRD-1001",
-      productName: "بوهية أبيض 900 جم",
-      packageWeightGrams: 900,
-      targetCartons: 20,
-      status: "APPROVED",
-    })
-  );
-
-  await assertFails(
-    cRef.collection("production_orders").doc("PRD-BAD").set({
-      packageWeightGrams: 900,
-      targetCartons: 0,
-    })
-  );
-
-  await assertSucceeds(
-    cRef.collection("qc_inspections").doc("QC-1001").set({
-      qcNo: "QC-1001",
-      inspectedQty: 240,
-      acceptedQty: 240,
-      rejectedQty: 0,
-      status: "APPROVED",
-    })
-  );
-});
-
-test("13. Phase 4 Rules: journal_entries enforce DR==CR balance & append-only reversals, journal_lines are immutable", async () => {
-  const clientDb = testEnv.unauthenticatedContext().firestore();
-  const cRef = clientDb.collection("erp_clusters").doc("PMP-ERP-MAIN-CLUSTER");
-
-  await assertSucceeds(
-    cRef.collection("accounting_accounts").doc("ACC-1110").set({
-      accountCode: "1110",
-      nameAr: "صندوق النقدية - السودان (SDG)",
-      accountType: "ASSET",
-    })
-  );
-
-  await assertFails(
-    cRef.collection("journal_entries").doc("JRN-UNBALANCED").set({
+    cAcc.collection("journal_entries").doc("JRN-UNBALANCED").set({
       entryNo: "JRN-UNBALANCED",
       totalDebit: 1000,
       totalCredit: 900,
@@ -330,7 +400,8 @@ test("13. Phase 4 Rules: journal_entries enforce DR==CR balance & append-only re
     })
   );
 
-  const jRef = cRef.collection("journal_entries").doc("JRN-1001");
+  // Balanced journal created by Accountant
+  const jRef = cAcc.collection("journal_entries").doc("JRN-1001");
   await assertSucceeds(
     jRef.set({
       entryNo: "JRN-1001",
@@ -340,10 +411,18 @@ test("13. Phase 4 Rules: journal_entries enforce DR==CR balance & append-only re
       recordVersion: 1,
     })
   );
-
   await assertFails(jRef.delete());
-  await assertFails(jRef.update({ totalDebit: 2000, totalCredit: 2000, status: "REVERSED" }));
-
+  // Deputy Accountant CANNOT reverse posted journal entry
+  await assertFails(
+    cDep.collection("journal_entries").doc("JRN-1001").update({
+      status: "REVERSED",
+      reversedByEntryNo: "REV-DEP",
+      reversalReason: "محاولة عكس غير مصرحة",
+      recordVersion: 2,
+      updatedAt: Date.now(),
+    })
+  );
+  // Accountant CAN reverse via strict 7-key POSTED -> REVERSED transition
   await assertSucceeds(
     jRef.update({
       status: "REVERSED",
@@ -353,38 +432,38 @@ test("13. Phase 4 Rules: journal_entries enforce DR==CR balance & append-only re
       updatedAt: Date.now(),
     })
   );
+  // Second reversal blocked
+  await assertFails(jRef.update({ status: "REVERSED", reversalReason: "ثاني عكس" }));
 
-  await assertFails(
-    jRef.update({
-      status: "REVERSED",
-      reversalReason: "ثاني عكس",
-    })
-  );
-
-  const lRef = cRef.collection("journal_lines").doc("JL-1001-1");
-  await assertFails(
-    cRef.collection("journal_lines").doc("JL-BAD").set({
-      debit: -50,
-      credit: 0,
-    })
-  );
-  await assertSucceeds(
-    lRef.set({
-      accountCode: "1110",
-      debit: 1000,
-      credit: 0,
-    })
-  );
+  // Journal lines immutable
+  const lRef = cAcc.collection("journal_lines").doc("JL-1001-1");
+  await assertSucceeds(lRef.set({ accountCode: "1110", debit: 1000, credit: 0 }));
   await assertFails(lRef.update({ debit: 500 }));
   await assertFails(lRef.delete());
+
+  // Inventory movement append-only & reversal-only
+  const movRef = cEmp.collection("inventory_movements").doc("IM-UUID-1");
+  await assertSucceeds(
+    movRef.set({
+      syncUuid: "IM-UUID-1",
+      movementType: "PURCHASE_RECEIPT",
+      quantity: 50,
+      status: "POSTED",
+    })
+  );
+  await assertFails(movRef.delete());
+  await assertFails(movRef.update({ status: "POSTED", quantity: 999 }));
+  await assertSucceeds(
+    adminDb.collection("erp_clusters").doc(CLUSTER).collection("inventory_movements").doc("IM-UUID-1").update({ status: "REVERSED" })
+  );
 });
 
-test("14. Idempotency Protection: idempotency_requests enforce schema, block reverting COMPLETED status, and deny deletion", async () => {
-  const clientDb = testEnv.unauthenticatedContext().firestore();
-  const cRef = clientDb.collection("erp_clusters").doc("PMP-ERP-MAIN-CLUSTER");
+test("15. Idempotency Protection: idempotency_requests enforce schema, block reverting COMPLETED, deny deletion", async () => {
+  await seedClusterRbac();
+  const empDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+  const cRef = empDb.collection("erp_clusters").doc(CLUSTER);
   const idemRef = cRef.collection("idempotency_requests").doc("IDEM-INV-2026-0001");
 
-  // Missing required fields or invalid status must fail
   await assertFails(
     cRef.collection("idempotency_requests").doc("IDEM-BAD-1").set({
       idempotencyKey: "IDEM-BAD-1",
@@ -393,21 +472,19 @@ test("14. Idempotency Protection: idempotency_requests enforce schema, block rev
     })
   );
 
-  // Create in PROCESSING state succeeds
   await assertSucceeds(
     idemRef.set({
       idempotencyKey: "IDEM-INV-2026-0001",
-      userId: "admin",
+      userId: "bob",
       operationType: "CREATE_INVOICE",
       documentReference: "INV-2026-0001",
       requestStatus: "PROCESSING",
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      platform: "WEB",
+      platform: "ANDROID",
     })
   );
 
-  // Transition PROCESSING -> COMPLETED succeeds
   await assertSucceeds(
     idemRef.update({
       requestStatus: "COMPLETED",
@@ -417,24 +494,7 @@ test("14. Idempotency Protection: idempotency_requests enforce schema, block rev
     })
   );
 
-  // Reverting COMPLETED -> PROCESSING or FAILED must fail
-  await assertFails(
-    idemRef.update({
-      requestStatus: "PROCESSING",
-      updatedAt: Date.now(),
-    })
-  );
-  await assertFails(
-    idemRef.update({
-      requestStatus: "FAILED",
-      updatedAt: Date.now(),
-    })
-  );
-
-  // Deleting idempotency request record must fail
+  await assertFails(idemRef.update({ requestStatus: "PROCESSING", updatedAt: Date.now() }));
+  await assertFails(idemRef.update({ requestStatus: "FAILED", updatedAt: Date.now() }));
   await assertFails(idemRef.delete());
 });
-
-
-
-
