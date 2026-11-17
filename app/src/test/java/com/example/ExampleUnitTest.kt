@@ -578,7 +578,7 @@ class ExampleUnitTest {
 
   @Test
   fun testRuntimeCrashPreventionGuards() {
-    // 1. Verify MainActivity resolves effectiveCurrentScreen BEFORE Crossfade so SaveableStateProvider never receives duplicate keys
+    // 1. Verify MainActivity resolves effectiveCurrentScreen BEFORE AnimatedContent/Crossfade so SaveableStateProvider never receives duplicate keys
     val mainActivityFile = listOf(
       java.io.File("app/src/main/java/com/example/MainActivity.kt"),
       java.io.File("src/main/java/com/example/MainActivity.kt")
@@ -586,8 +586,9 @@ class ExampleUnitTest {
     assertNotNull("MainActivity.kt must exist", mainActivityFile)
     val mainContent = mainActivityFile!!.readText(Charsets.UTF_8)
     assertTrue(
-      "MainActivity must pass effectiveCurrentScreen into Crossfade to prevent duplicate SaveableStateProvider keys",
-      mainContent.contains("Crossfade(") && mainContent.contains("targetState = effectiveCurrentScreen")
+      "MainActivity must pass effectiveCurrentScreen into AnimatedContent/Crossfade to prevent duplicate SaveableStateProvider keys",
+      (mainContent.contains("AnimatedContent(") || mainContent.contains("Crossfade(")) &&
+        mainContent.contains("targetState = effectiveCurrentScreen")
     )
     assertTrue(
       "MainActivity must install defensive UncaughtExceptionHandler",
