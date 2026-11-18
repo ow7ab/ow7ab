@@ -696,6 +696,18 @@ export function receivePurchaseToRawMaterialsInState(
   return { receipt, state: nextState };
 }
 
+export function isFormulaApprovedForProduction(formula?: LabFormulation | null): boolean {
+  if (!formula) return true;
+  const statusUpper = String(formula.approvalStatus || '').trim().toUpperCase();
+  if (statusUpper === 'NEEDS_REVIEW' || statusUpper === 'REJECTED' || statusUpper === 'ARCHIVED') {
+    return false;
+  }
+  if (!formula.approvedForProduction && statusUpper !== 'APPROVED') {
+    return false;
+  }
+  return true;
+}
+
 export function createProductionOrderModel(params: {
   formula?: LabFormulation | null;
   productId?: number | null;
@@ -711,6 +723,11 @@ export function createProductionOrderModel(params: {
   customRules?: PackagingRule[];
   now?: number;
 }): ProductionOrder {
+  if (params.formula && !isFormulaApprovedForProduction(params.formula)) {
+    throw new Error(
+      `لا يمكن بدء أمر الإنتاج للتركيبة (${params.formula.formulaNo}) لأنها غير معتمدة للإنتاج (${params.formula.approvalStatus || 'قيد المراجعة'}).`
+    );
+  }
   const now = params.now ?? Date.now();
   const cartons = Math.max(1, Math.floor(params.targetCartons));
   const cansPerCarton = getCansPerCarton(params.packageWeightGrams, params.customRules || DEFAULT_PACKAGING_RULES);

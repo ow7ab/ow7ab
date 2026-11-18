@@ -246,7 +246,13 @@ data class FactoryItemEntity(
     val syncUuid: String = "",
     val updatedAt: Long = 0L,
     val recordVersion: Int = 1,
-    val deviceId: String = ""
+    val deviceId: String = "",
+    val supplierName: String = "",
+    val lastPurchasePrice: Double = 0.0,
+    val lastPriceCurrency: String = "EGP",
+    val lastPriceUpdatedAt: Long = 0L,
+    val density: Double = 1.0,
+    val solidsPercent: Double = 100.0
 )
 
 @Entity(tableName = "factory_machines")
@@ -357,7 +363,23 @@ data class FormulationEntity(
     val notes: String = "",
     val approvedForProduction: Boolean = false,
     val createdBy: String = "مهندس المختبر الكيميائي",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val syncUuid: String = "",
+    val linkedProductId: Long? = null,
+    val linkedProductSku: String = "",
+    val category: String = "معجونات ودهانات",
+    val versionNumber: Int = 1,
+    val approvalStatus: String = "DRAFT", // DRAFT, NEEDS_REVIEW, APPROVED, REJECTED, ARCHIVED
+    val approvedBy: String = "",
+    val approvedAt: Long = 0L,
+    val historicalTotalCost: Double = 0.0,
+    val historicalCostPerKg: Double = 0.0,
+    val currency: String = "EGP",
+    val changeReason: String = "",
+    val updatedBy: String = "",
+    val updatedAt: Long = 0L,
+    val confidentialCiphertext: String = "",
+    val isConfidentialSealed: Boolean = false
 )
 
 data class FormulationIngredient(
@@ -368,7 +390,11 @@ data class FormulationIngredient(
     val density: Double, // جم/سم³ أو كجم/لتر
     val solidsPercent: Double = 100.0, // %
     val unitCost: Double = 0.0, // تكلفة الكيلو
-    val notes: String = ""
+    val notes: String = "",
+    val materialId: Long? = null,
+    val itemCode: String = "",
+    val unit: String = "كجم",
+    val supplierName: String = ""
 )
 
 @Entity(tableName = "chemical_safety")

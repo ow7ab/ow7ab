@@ -4,6 +4,8 @@ import androidx.room.withTransaction
 import com.example.data.local.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -15,6 +17,7 @@ class PmpRepository(
 ) {
 
     fun getDao(): PmpDao = dao
+    fun getLabDao(): LabDao? = database?.labDao()
     fun getErpInventoryDao(): ErpInventoryDao? = database?.erpInventoryDao()
     fun getErpAccountingDao(): ErpAccountingDao? = database?.erpAccountingDao()
     val inventoryEngine: com.example.domain.inventory.InventoryMovementEngine? by lazy {
@@ -2337,28 +2340,590 @@ class PmpRepository(
         toDelete.forEach { dao.deleteUserAccount(it) }
     }
 
-    // --- PMP Science & Chemistry Lab (Formulations & Safety) ---
+    // --- PMP Science & Chemistry Lab (Formulations, Versions, Experiments, Raw Prices, Excel Import & Safety) ---
     fun getFormulations(): Flow<List<FormulationEntity>> = dao.getAllFormulations()
     fun getChemicalSafety(): Flow<List<ChemicalSafetyEntity>> = dao.getAllChemicalSafety()
+    fun getFormulationVersions(formulaId: Long): Flow<List<FormulationVersionEntity>> =
+        (getLabDao()?.getAllFormulaVersions() ?: kotlinx.coroutines.flow.flowOf(emptyList()))
+            .map { list -> list.filter { it.formulaId == formulaId } }
+    fun getAllFormulationVersions(): Flow<List<FormulationVersionEntity>> =
+        getLabDao()?.getAllFormulaVersions() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getAllLabExperiments(): Flow<List<LabExperimentEntity>> =
+        getLabDao()?.getAllLabExperiments() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getAllRawMaterialPriceHistory(): Flow<List<RawMaterialPriceHistoryEntity>> =
+        getLabDao()?.getAllRawMaterialPriceHistory() ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    fun getAllLabExcelImports(): Flow<List<LabExcelImportBatchEntity>> =
+        getLabDao()?.getAllExcelImports() ?: kotlinx.coroutines.flow.flowOf(emptyList())
 
-    suspend fun saveFormulation(formulation: FormulationEntity, user: String): Result<Long> {
-        val id = if (formulation.id == 0L) {
-            dao.insertFormulation(formulation)
-        } else {
-            dao.updateFormulation(formulation)
-            formulation.id
-        }
-        dao.insertAuditLog(
-            AuditLogEntity(
-                username = user,
-                action = "SAVE_FORMULATION",
-                detail = "حفظ تركيبة: ${formulation.productName} (#${formulation.formulaNo}) | PVC: ${formulation.calculatedPvc}%"
+    /**
+     * Backward-compatible save helper that delegates to immutable version-controlled persistence.
+     */
+    suspend fun saveFormulation(
+        formulation: FormulationEntity,
+        user: String,
+        actorAccount: UserAccountEntity? = null,
+        changeReason: String = "تحديث تركيبة مخبرية"
+    ): Result<Long> = saveFormulationWithVersioning(
+        formulation = formulation,
+        actorName = user,
+        actorAccount = actorAccount,
+        changeReason = changeReason
+    )
+
+    /**
+     * Saves a formulation with strict RBAC, Keystore payload sealing, and immutable version archiving.
+     * - Editing an already APPROVED formulation NEVER overwrites the approved historical version or cost:
+     *   it increments versionNumber (v+1), sets approvalStatus = NEEDS_REVIEW and approvedForProduction = false,
+     *   while locking the old version snapshot & historicalTotalCost in lab_formula_versions.
+     */
+    suspend fun saveFormulationWithVersioning(
+        formulation: FormulationEntity,
+        actorName: String,
+        actorAccount: UserAccountEntity? = null,
+        changeReason: String = "تعديل مواصفات التركيبة",
+        initialStatus: String? = null
+    ): Result<Long> = runCatching {
+        if (actorAccount != null && !com.example.util.LabSecurityManager.canCreateOrEditFormulas(actorAccount)) {
+            com.example.util.LabSecurityManager.logLabAccessOrDenial(
+                dao = dao,
+                user = actorAccount,
+                action = "EDIT_FORMULATION",
+                formulaCode = formulation.formulaNo,
+                allowed = false,
+                note = "محاولة حفظ أو تعديل تركيبة بدون صلاحية المختبر"
             )
-        )
-        return Result.success(id)
+            throw SecurityException("غير مصرح لك بإنشاء أو تعديل التركيبات الكيميائية.")
+        }
+
+        runInTransaction(
+            operationName = "LAB_SAVE_VERSIONED_FORMULA",
+            entityType = "lab_formulations",
+            details = "حفظ التركيبة ${formulation.formulaNo}"
+        ) {
+            val now = System.currentTimeMillis()
+            val labDao = getLabDao()
+            val ingredients = com.example.util.PvcEngine.jsonToIngredients(formulation.ingredientsJson)
+            val sealedPayload = com.example.util.LabSecurityManager.sealWithDeviceKey(formulation.ingredientsJson)
+                .getOrDefault("")
+
+            val existing = if (formulation.id > 0L) dao.getFormulationById(formulation.id) else null
+            val wasApproved = existing != null &&
+                (existing.approvedForProduction || existing.approvalStatus.equals("APPROVED", ignoreCase = true))
+
+            val nextVersion = if (existing == null) {
+                formulation.versionNumber.coerceAtLeast(1)
+            } else if (wasApproved) {
+                existing.versionNumber + 1
+            } else {
+                existing.versionNumber.coerceAtLeast(1)
+            }
+
+            val resolvedStatus = when {
+                !initialStatus.isNullOrBlank() -> initialStatus
+                wasApproved -> "NEEDS_REVIEW"
+                existing == null -> "DRAFT"
+                existing.approvalStatus == "REJECTED" -> "NEEDS_REVIEW"
+                else -> existing.approvalStatus.ifBlank { "DRAFT" }
+            }
+
+            // Preserve historical approved cost untouched when moving from APPROVED -> v+1 NEEDS_REVIEW
+            val preservedHistTotal = existing?.historicalTotalCost?.takeIf { it > 0.0 }
+                ?: if (existing != null && wasApproved) existing.totalCost else 0.0
+            val preservedHistPerKg = existing?.historicalCostPerKg?.takeIf { it > 0.0 }
+                ?: if (existing != null && wasApproved) existing.costPerKg else 0.0
+
+            val normalized = formulation.copy(
+                syncUuid = formulation.syncUuid.ifBlank { existing?.syncUuid ?: java.util.UUID.randomUUID().toString() },
+                versionNumber = nextVersion,
+                approvalStatus = resolvedStatus,
+                approvedForProduction = false, // Requires explicit approval step
+                approvedBy = if (wasApproved) "" else existing?.approvedBy.orEmpty(),
+                approvedAt = if (wasApproved) 0L else (existing?.approvedAt ?: 0L),
+                historicalTotalCost = preservedHistTotal,
+                historicalCostPerKg = preservedHistPerKg,
+                updatedBy = actorName,
+                updatedAt = now,
+                changeReason = changeReason.ifBlank { "تحديث تركيبة" },
+                confidentialCiphertext = sealedPayload.ifBlank { formulation.confidentialCiphertext },
+                isConfidentialSealed = sealedPayload.isNotBlank() || formulation.isConfidentialSealed
+            )
+
+            val savedId = if (existing == null) {
+                dao.insertFormulation(normalized)
+            } else {
+                dao.updateFormulation(normalized)
+                existing.id
+            }
+
+            if (labDao != null) {
+                val prevIngredients = existing?.let { com.example.util.PvcEngine.jsonToIngredients(it.ingredientsJson) }.orEmpty()
+                val diffSummary = if (existing == null) {
+                    "إنشاء النسخة الأولى v1"
+                } else {
+                    com.example.util.PvcEngine.summarizeIngredientChanges(prevIngredients, ingredients, includeSensitiveNumbers = false)
+                }
+
+                // Mark prior approved snapshots as ARCHIVED when creating a new review draft
+                if (existing != null && wasApproved) {
+                    val priorVersions = labDao.getVersionsForFormulaDirect(savedId)
+                    priorVersions.filter { it.status == "APPROVED" }.forEach { prior ->
+                        labDao.upsertFormulaVersion(prior.copy(status = "ARCHIVED"))
+                    }
+                    // Ensure snapshot of previous approved version exists cleanly
+                    if (priorVersions.none { it.versionNumber == existing.versionNumber }) {
+                        labDao.upsertFormulaVersion(
+                            FormulationVersionEntity(
+                                syncUuid = "VER-${existing.formulaNo}-V${existing.versionNumber}",
+                                formulaId = savedId,
+                                formulaNo = existing.formulaNo,
+                                productName = existing.productName,
+                                versionNumber = existing.versionNumber,
+                                previousVersionNumber = (existing.versionNumber - 1).coerceAtLeast(0),
+                                status = "ARCHIVED",
+                                changeReason = existing.changeReason.ifBlank { "النسخة المعتمدة المرجعية" },
+                                diffSummaryJson = "لقطة مرجعية محفوظة قبل التعديل إلى v$nextVersion",
+                                previousCostPerKg = existing.costPerKg,
+                                newCostPerKg = existing.costPerKg,
+                                historicalTotalCost = existing.historicalTotalCost.takeIf { it > 0.0 } ?: existing.totalCost,
+                                calculatedPvc = existing.calculatedPvc,
+                                calculatedDensity = existing.calculatedDensity,
+                                currency = existing.currency,
+                                ingredientsSnapshotJson = existing.ingredientsJson,
+                                encryptedSnapshotCiphertext = existing.confidentialCiphertext,
+                                createdBy = existing.createdBy,
+                                approvedBy = existing.approvedBy,
+                                approvedAt = existing.approvedAt,
+                                createdAt = existing.updatedAt.takeIf { it > 0L } ?: existing.createdAt
+                            )
+                        )
+                    }
+                }
+
+                labDao.upsertFormulaVersion(
+                    FormulationVersionEntity(
+                        syncUuid = "VER-${normalized.formulaNo}-V${nextVersion}-$now",
+                        formulaId = savedId,
+                        formulaNo = normalized.formulaNo,
+                        productName = normalized.productName,
+                        versionNumber = nextVersion,
+                        previousVersionNumber = existing?.versionNumber ?: 0,
+                        status = resolvedStatus,
+                        changeReason = changeReason.ifBlank { "حفظ تركيبة" },
+                        diffSummaryJson = diffSummary,
+                        previousCostPerKg = existing?.costPerKg ?: normalized.costPerKg,
+                        newCostPerKg = normalized.costPerKg,
+                        historicalTotalCost = preservedHistTotal,
+                        calculatedPvc = normalized.calculatedPvc,
+                        calculatedDensity = normalized.calculatedDensity,
+                        currency = normalized.currency,
+                        ingredientsSnapshotJson = normalized.ingredientsJson,
+                        encryptedSnapshotCiphertext = normalized.confidentialCiphertext,
+                        createdBy = actorName,
+                        createdAt = now
+                    )
+                )
+            }
+
+            dao.insertAuditLog(
+                AuditLogEntity(
+                    username = actorName,
+                    action = "SAVE_FORMULATION",
+                    detail = "حفظ تركيبة: ${normalized.productName} (#${normalized.formulaNo} v$nextVersion) | الحالة: $resolvedStatus | PVC: ${normalized.calculatedPvc}%"
+                )
+            )
+            savedId
+        }
     }
 
-    suspend fun deleteFormulation(id: Long, user: String): Result<Unit> {
+    /**
+     * Explicit Admin / Approver workflow to APPROVE, REJECT, or request REVIEW on a formulation.
+     * Locks historicalTotalCost and historicalCostPerKg upon approval so future raw material price spikes
+     * NEVER rewrite historical approved baseline costs.
+     */
+    suspend fun decideFormulationApproval(
+        formulaId: Long,
+        decisionStatus: String, // "APPROVED", "REJECTED", "NEEDS_REVIEW"
+        decisionNote: String,
+        actorAccount: UserAccountEntity?,
+        actorName: String
+    ): Result<FormulationEntity> = runCatching {
+        if (actorAccount != null && !com.example.util.LabSecurityManager.canApproveFormulas(actorAccount)) {
+            com.example.util.LabSecurityManager.logLabAccessOrDenial(
+                dao = dao,
+                user = actorAccount,
+                action = "APPROVE_FORMULATION",
+                formulaCode = "FRM-$formulaId",
+                allowed = false,
+                note = "محاولة اعتماد/رفض تركيبة بدون صلاحية الاعتماد"
+            )
+            throw SecurityException("غير مصرح لك باعتماد أو رفض التركيبات الكيميائية.")
+        }
+        val cleanStatus = decisionStatus.trim().uppercase(Locale.US)
+        require(cleanStatus in setOf("APPROVED", "REJECTED", "NEEDS_REVIEW")) { "حالة الاعتماد غير صالحة." }
+
+        runInTransaction(
+            operationName = "LAB_FORMULA_APPROVAL_DECISION",
+            entityType = "lab_formulations",
+            details = "قرار $cleanStatus للتركيبة #$formulaId"
+        ) {
+            val formula = dao.getFormulationById(formulaId)
+                ?: throw IllegalArgumentException("التركيبة غير موجودة.")
+            val now = System.currentTimeMillis()
+            val approved = cleanStatus == "APPROVED"
+
+            val updated = formula.copy(
+                approvalStatus = cleanStatus,
+                approvedForProduction = approved,
+                approvedBy = if (approved) actorName else formula.approvedBy,
+                approvedAt = if (approved) now else formula.approvedAt,
+                historicalTotalCost = if (approved) formula.totalCost else formula.historicalTotalCost,
+                historicalCostPerKg = if (approved) formula.costPerKg else formula.historicalCostPerKg,
+                updatedBy = actorName,
+                updatedAt = now,
+                changeReason = decisionNote.ifBlank { if (approved) "اعتماد نهائي للإنتاج" else "ملاحظات مراجعة" }
+            )
+            dao.updateFormulation(updated)
+
+            getLabDao()?.let { labDao ->
+                val latestVer = labDao.getVersionsForFormulaDirect(formulaId)
+                    .firstOrNull { it.versionNumber == formula.versionNumber }
+                if (latestVer != null) {
+                    labDao.upsertFormulaVersion(
+                        latestVer.copy(
+                            status = cleanStatus,
+                            historicalTotalCost = if (approved) formula.totalCost else latestVer.historicalTotalCost,
+                            approvedBy = if (approved) actorName else latestVer.approvedBy,
+                            approvedAt = if (approved) now else latestVer.approvedAt,
+                            changeReason = decisionNote.ifBlank { latestVer.changeReason }
+                        )
+                    )
+                }
+            }
+
+            dao.insertAuditLog(
+                AuditLogEntity(
+                    username = actorName,
+                    action = "FORMULATION_$cleanStatus",
+                    detail = "قرار اعتماد التركيبة (${formula.formulaNo} v${formula.versionNumber}): $cleanStatus"
+                )
+            )
+            updated
+        }
+    }
+
+    /**
+     * Records or updates a Lab Experiment pinned to an exact formulation version, integrating with QC decisions.
+     */
+    suspend fun recordLabExperiment(
+        experiment: LabExperimentEntity,
+        actorAccount: UserAccountEntity?
+    ): Result<Long> = runCatching {
+        if (actorAccount != null && !com.example.util.LabSecurityManager.canLogLabExperiments(actorAccount)) {
+            com.example.util.LabSecurityManager.logLabAccessOrDenial(
+                dao = dao,
+                user = actorAccount,
+                action = "LOG_LAB_EXPERIMENT",
+                formulaCode = experiment.formulaNo,
+                allowed = false,
+                note = "محاولة تسجيل تجربة مخبرية بدون صلاحية"
+            )
+            throw SecurityException("غير مصرح لك بتسجيل التجارب المخبرية.")
+        }
+        val labDao = getLabDao() ?: throw IllegalStateException("قاعدة بيانات المختبر غير مهيأة.")
+        val now = System.currentTimeMillis()
+        val expNo = experiment.experimentNo.ifBlank { "EXP-${now.toString().takeLast(6)}" }
+        val clean = experiment.copy(
+            syncUuid = experiment.syncUuid.ifBlank { "EXP-$expNo-$now" },
+            experimentNo = expNo,
+            experimentDate = experiment.experimentDate.ifBlank { currentDateString() },
+            createdAt = if (experiment.createdAt > 0L) experiment.createdAt else now,
+            updatedAt = now
+        )
+        val savedId = labDao.upsertLabExperiment(clean)
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = experiment.technicianName.ifBlank { actorAccount?.username ?: "Lab" },
+                action = "LAB_EXPERIMENT_SAVED",
+                detail = "تسجيل تجربة معملية $expNo للتركيبة ${experiment.formulaNo} v${experiment.versionNumber} | الحالة: ${experiment.status}"
+            )
+        )
+        savedId
+    }
+
+    suspend fun decideLabExperimentQc(
+        experimentId: Long,
+        decisionStatus: String, // "PASSED", "REJECTED", "RETEST_REQUIRED"
+        decisionNote: String,
+        actorAccount: UserAccountEntity?,
+        actorName: String
+    ): Result<LabExperimentEntity> = runCatching {
+        if (actorAccount != null && !com.example.util.LabSecurityManager.canDecideQcGate(actorAccount)) {
+            com.example.util.LabSecurityManager.logLabAccessOrDenial(
+                dao = dao,
+                user = actorAccount,
+                action = "QC_EXPERIMENT_DECISION",
+                formulaCode = "EXP-$experimentId",
+                allowed = false,
+                note = "محاولة اعتماد أو رفض تجربة جودة بدون صلاحية"
+            )
+            throw SecurityException("غير مصرح لك باعتماد أو رفض نتائج فحوصات الجودة.")
+        }
+        val cleanDecision = decisionStatus.trim().uppercase(Locale.US)
+        require(cleanDecision in setOf("PASSED", "REJECTED", "RETEST_REQUIRED")) { "قرار الجودة غير صالح." }
+        val labDao = getLabDao() ?: throw IllegalStateException("قاعدة بيانات المختبر غير مهيأة.")
+        val existing = labDao.getAllLabExperimentsDirect().firstOrNull { it.id == experimentId }
+            ?: throw IllegalArgumentException("التجربة غير موجودة.")
+        val now = System.currentTimeMillis()
+        val updated = existing.copy(
+            status = cleanDecision,
+            decision = decisionNote.trim().ifBlank { cleanDecision },
+            decidedBy = actorName,
+            decidedAt = now,
+            notes = if (decisionNote.isNotBlank() && existing.notes.isBlank()) decisionNote.trim() else existing.notes,
+            updatedAt = now
+        )
+        labDao.upsertLabExperiment(updated)
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = actorName,
+                action = "LAB_EXPERIMENT_$cleanDecision",
+                detail = "قرار الجودة للتجربة ${existing.experimentNo} (${existing.formulaNo} v${existing.versionNumber}): $cleanDecision"
+            )
+        )
+        updated
+    }
+
+    /**
+     * Unified Raw Material Registry price updater with price-history tracking.
+     * Leaves locked historical approved formula snapshots untouched while recalculating live delta impact.
+     */
+    suspend fun updateRawMaterialRegistryPrice(
+        materialId: Long,
+        newPrice: Double,
+        currency: String = "EGP",
+        supplierName: String = "",
+        density: Double? = null,
+        solidsPercent: Double? = null,
+        reason: String = "تحديث سعر خامة في السجل الموحد",
+        actorName: String,
+        actorAccount: UserAccountEntity? = null
+    ): Result<FactoryItemEntity> = runCatching {
+        if (actorAccount != null && !com.example.util.LabSecurityManager.canCreateOrEditFormulas(actorAccount) &&
+            !com.example.util.LabSecurityManager.canViewFormulaCosts(actorAccount)
+        ) {
+            throw SecurityException("غير مصرح لك بتعديل أسعار أو مواصفات المواد الخام.")
+        }
+        require(newPrice >= 0.0) { "السعر لا يمكن أن يكون سالباً." }
+        val labDao = getLabDao() ?: throw IllegalStateException("قاعدة بيانات المختبر غير مهيأة.")
+        val item = dao.getFactoryItemsDirect().firstOrNull { it.id == materialId }
+            ?: throw IllegalArgumentException("المادة الخام غير موجودة.")
+        val prevPrice = item.lastPurchasePrice.takeIf { it > 0.0 } ?: item.unitCostEgp
+        val now = System.currentTimeMillis()
+        val updated = item.copy(
+            lastPurchasePrice = newPrice,
+            lastPriceCurrency = currency.ifBlank { item.lastPriceCurrency },
+            lastPriceUpdatedAt = now,
+            supplierName = supplierName.ifBlank { item.supplierName },
+            unitCostEgp = if (currency.equals("EGP", ignoreCase = true)) newPrice else item.unitCostEgp,
+            density = density?.takeIf { it > 0.0 } ?: item.density,
+            solidsPercent = solidsPercent?.coerceIn(0.0, 100.0) ?: item.solidsPercent
+        )
+        labDao.updateFactoryItem(updated)
+        labDao.upsertPriceHistory(
+            RawMaterialPriceHistoryEntity(
+                syncUuid = "PRC-REG-${item.id}-$now",
+                materialId = item.id,
+                itemCode = item.itemCode,
+                materialName = item.name,
+                supplierName = updated.supplierName,
+                unitPrice = newPrice,
+                previousPrice = prevPrice,
+                currency = updated.lastPriceCurrency,
+                sourceType = "MANUAL_LAB",
+                sourceDocNo = "REG-${now.toString().takeLast(5)}",
+                effectiveDate = currentDateString(),
+                recordedBy = actorName,
+                createdAt = now
+            )
+        )
+        dao.insertAuditLog(
+            AuditLogEntity(
+                username = actorName,
+                action = "RAW_MATERIAL_PRICE_UPDATED",
+                detail = "تحديث سعر الخامة ${item.name} في السجل الموحد"
+            )
+        )
+        updated
+    }
+
+    /**
+     * Stages vetted Excel workbook drafts into PMP strictly as NEEDS_REVIEW ("تحتاج إلى مراجعة واعتماد"),
+     * deduplicates raw materials into factory_items, preserves original source snapshots, and records batch metadata.
+     */
+    suspend fun commitStagedExcelImport(
+        analysis: com.example.util.LabExcelAnalyzer.WorkbookAnalysisResult,
+        selectedDrafts: List<com.example.util.LabExcelAnalyzer.ImportedFormulaDraft>,
+        archiveFilePath: String,
+        actorName: String,
+        actorAccount: UserAccountEntity?
+    ): Result<Int> = runCatching {
+        if (actorAccount != null && !com.example.util.LabSecurityManager.canCreateOrEditFormulas(actorAccount)) {
+            com.example.util.LabSecurityManager.logLabAccessOrDenial(
+                dao = dao,
+                user = actorAccount,
+                action = "IMPORT_EXCEL",
+                formulaCode = analysis.fileName,
+                allowed = false,
+                note = "محاولة استيراد ملف تركيبات Excel بدون صلاحية المختبر"
+            )
+            throw SecurityException("غير مصرح لك باستيراد ملفات التركيبات.")
+        }
+        require(selectedDrafts.isNotEmpty()) { "يرجى اختيار تركيبة واحدة على الأقل للاستيراد." }
+
+        runInTransaction(
+            operationName = "LAB_EXCEL_STAGED_IMPORT",
+            entityType = "lab_excel_imports",
+            details = "استيراد ملف ${analysis.fileName}"
+        ) {
+            val labDao = getLabDao() ?: throw IllegalStateException("قاعدة بيانات المختبر غير مهيأة.")
+            val existingItems = dao.getFactoryItemsDirect().toMutableList()
+
+            // Step 1: Upsert deduplicated new raw materials cleanly into FactoryItemEntity
+            for (cand in analysis.deduplicatedMaterials) {
+                val alreadyExists = existingItems.any {
+                    it.id == cand.matchedExistingItemId ||
+                        it.name.trim().equals(cand.rawName.trim(), ignoreCase = true)
+                }
+                if (!alreadyExists && cand.isNewMaterial) {
+                    val newMat = FactoryItemEntity(
+                        name = cand.rawName.trim(),
+                        unit = cand.unit.ifBlank { "كجم" },
+                        category = "raw",
+                        unitCostEgp = cand.importedPrice.coerceAtLeast(0.0),
+                        lastPurchasePrice = cand.importedPrice.coerceAtLeast(0.0),
+                        lastPriceCurrency = "EGP",
+                        lastPriceUpdatedAt = if (cand.importedPrice > 0.0) System.currentTimeMillis() else 0L
+                    )
+                    val insertedMatId = dao.insertFactoryItem(newMat)
+                    existingItems.add(newMat.copy(id = insertedMatId))
+                }
+            }
+
+            // Step 2: Import each selected formula strictly as NEEDS_REVIEW (never overwriting existing approved versions!)
+            var importedCount = 0
+            for (draft in selectedDrafts) {
+                // Re-bind materialIds after dedup creation
+                val reboundIngredients = draft.ingredients.map { ing ->
+                    val matched = existingItems.firstOrNull {
+                        it.id == ing.materialId || it.name.trim().equals(ing.name.trim(), ignoreCase = true)
+                    }
+                    if (matched != null) ing.copy(materialId = matched.id, supplierName = matched.supplierName) else ing
+                }
+                val calc = com.example.util.PvcEngine.calculate(reboundIngredients)
+                val ingredientsJson = com.example.util.PvcEngine.ingredientsToJson(reboundIngredients)
+
+                val existingFormula = draft.matchingExistingFormulaId?.let { dao.getFormulationById(it) }
+                val targetEntity = if (existingFormula != null) {
+                    existingFormula.copy(
+                        productName = draft.productName,
+                        category = draft.category,
+                        targetPvc = calc.calculatedPvc,
+                        calculatedPvc = calc.calculatedPvc,
+                        cpvcEstimated = calc.cpvcEstimated,
+                        totalSolidsWeight = calc.totalSolidsWeight,
+                        totalSolidsVolume = calc.totalSolidsVolume,
+                        totalBatchWeight = calc.totalBatchWeight,
+                        totalBatchVolume = calc.totalBatchVolume,
+                        calculatedDensity = calc.calculatedDensity,
+                        totalCost = calc.totalCost,
+                        costPerKg = calc.costPerKg,
+                        ingredientsJson = ingredientsJson,
+                        technicalAnalysis = calc.technicalAnalysisText,
+                        notes = "مستورد للمراجعة من ${analysis.fileName} (ورقة: ${draft.sourceSheetName})"
+                    )
+                } else {
+                    FormulationEntity(
+                        formulaNo = draft.suggestedFormulaNo,
+                        productName = draft.productName,
+                        category = draft.category,
+                        paintType = "أكريليك مائي",
+                        baseKind = "أبيض / أساس",
+                        targetPvc = calc.calculatedPvc,
+                        calculatedPvc = calc.calculatedPvc,
+                        cpvcEstimated = calc.cpvcEstimated,
+                        totalSolidsWeight = calc.totalSolidsWeight,
+                        totalSolidsVolume = calc.totalSolidsVolume,
+                        totalBatchWeight = calc.totalBatchWeight,
+                        totalBatchVolume = calc.totalBatchVolume,
+                        calculatedDensity = calc.calculatedDensity,
+                        totalCost = calc.totalCost,
+                        costPerKg = calc.costPerKg,
+                        ingredientsJson = ingredientsJson,
+                        technicalAnalysis = calc.technicalAnalysisText,
+                        notes = "مستورد للمراجعة من ${analysis.fileName} (ورقة: ${draft.sourceSheetName})",
+                        approvedForProduction = false,
+                        approvalStatus = "NEEDS_REVIEW",
+                        createdBy = actorName
+                    )
+                }
+
+                saveFormulationWithVersioning(
+                    formulation = targetEntity,
+                    actorName = actorName,
+                    actorAccount = actorAccount,
+                    changeReason = "استيراد إكسل مرحلي (${analysis.fileName} / ${draft.sourceSheetName}) - بانتظار المراجعة",
+                    initialStatus = "NEEDS_REVIEW"
+                ).getOrThrow()
+                importedCount++
+            }
+
+            val batchNow = System.currentTimeMillis()
+            val importNo = "XLS-${batchNow.toString().takeLast(6)}"
+            labDao.upsertExcelImport(
+                LabExcelImportBatchEntity(
+                    syncUuid = "XLS-${analysis.sha256Hex.take(12)}-$batchNow",
+                    importNo = importNo,
+                    fileName = analysis.fileName,
+                    sheetCount = analysis.worksheetCount,
+                    formulasDetected = analysis.candidateFormulas.size,
+                    formulasImported = importedCount,
+                    materialsMatched = analysis.deduplicatedMaterials.count { !it.isNewMaterial },
+                    materialsCreated = analysis.deduplicatedMaterials.count { it.isNewMaterial },
+                    externalLinksDetected = analysis.externalWorkbookLinks.size,
+                    brokenRefsDetected = analysis.brokenReferenceIssues.size,
+                    warningsCount = analysis.brokenReferenceIssues.size + analysis.externalWorkbookLinks.size + analysis.formulaVerificationMismatches.size,
+                    approvalStatus = "NEEDS_REVIEW",
+                    checksumSha256 = analysis.sha256Hex,
+                    restrictedSummaryJson = (analysis.brokenReferenceIssues + analysis.externalWorkbookLinks + analysis.formulaVerificationMismatches)
+                        .take(8)
+                        .joinToString(" | "),
+                    referenceArchivePath = archiveFilePath,
+                    importedBy = actorName,
+                    idempotencyKey = "XLS-$importNo",
+                    createdAt = batchNow
+                )
+            )
+
+            // Sanitized audit entry without exposing confidential ratios/recipes
+            dao.insertAuditLog(
+                AuditLogEntity(
+                    username = actorName,
+                    action = "LAB_EXCEL_IMPORT_STAGED",
+                    detail = "استيراد $importedCount تركيبة بوضع NEEDS_REVIEW من ملف (${analysis.worksheetCount} أوراق عمل)"
+                )
+            )
+            importedCount
+        }
+    }
+
+    suspend fun deleteFormulation(
+        id: Long,
+        user: String,
+        actorAccount: UserAccountEntity? = null
+    ): Result<Unit> {
+        if (actorAccount != null && !com.example.util.LabSecurityManager.canApproveFormulas(actorAccount)) {
+            return Result.failure(SecurityException("غير مصرح لك بحذف التركيبات الكيميائية المعتمدة أو المسجلة."))
+        }
         dao.deleteFormulation(id)
         dao.insertAuditLog(
             AuditLogEntity(
@@ -2399,28 +2964,52 @@ class PmpRepository(
         return Result.success(Unit)
     }
 
+    /**
+     * Strict Gate: Blocks creating normal factory production orders from unapproved formulations!
+     * Never auto-flips approvedForProduction = true inside this method.
+     */
     suspend fun createFactoryOrderFromFormulation(
         formulationId: Long,
         batchMultiplier: Double,
-        user: String
+        user: String,
+        actorAccount: UserAccountEntity? = null
     ): Result<Long> {
         val formulation = dao.getFormulationById(formulationId)
             ?: return Result.failure(Exception("لم يتم العثور على التركيبة المطلوبة"))
 
+        val blockedStatus = formulation.approvalStatus.trim().uppercase(Locale.US) in setOf("NEEDS_REVIEW", "REJECTED", "ARCHIVED")
+        val isApproved = !blockedStatus && (formulation.approvedForProduction || formulation.approvalStatus.equals("APPROVED", ignoreCase = true))
+        if (!isApproved) {
+            dao.insertAuditLog(
+                AuditLogEntity(
+                    username = user,
+                    action = "BLOCKED_UNAPPROVED_FACTORY_ORDER",
+                    detail = "منع أمر تشغيل مصنعي من تركيبة غير معتمدة (${formulation.formulaNo} | الحالة: ${formulation.approvalStatus})"
+                )
+            )
+            return Result.failure(
+                SecurityException("لا يمكن بدء الإنتاج من تركيبة غير معتمدة (${formulation.formulaNo} - حالتها: ${formulation.approvalStatus}). يجب اعتمادها أولاً.")
+            )
+        }
+
         val mult = if (batchMultiplier > 0) batchMultiplier else 1.0
         val ingredients = com.example.util.PvcEngine.jsonToIngredients(formulation.ingredientsJson)
         val today = currentDateString()
-        val batchCode = "${formulation.formulaNo}-${System.currentTimeMillis() % 10000}"
+        val batchCode = "${formulation.formulaNo}-V${formulation.versionNumber}-${System.currentTimeMillis() % 10000}"
 
         // Record factory raw material intake / disbursement moves for each ingredient
         for (ing in ingredients) {
             val reqQty = ing.weight * mult
-            val existingItem = dao.getFactoryItemsDirect().find { it.name.trim().equals(ing.name.trim(), ignoreCase = true) }
+            val existingItem = dao.getFactoryItemsDirect().find {
+                it.id == ing.materialId || it.name.trim().equals(ing.name.trim(), ignoreCase = true)
+            }
             val itemId = existingItem?.id ?: dao.insertFactoryItem(
                 FactoryItemEntity(
                     name = ing.name.trim(),
-                    unit = "كجم",
-                    category = "raw"
+                    unit = ing.unit.ifBlank { "كجم" },
+                    category = "raw",
+                    unitCostEgp = ing.unitCost,
+                    lastPurchasePrice = ing.unitCost
                 )
             )
 
@@ -2432,7 +3021,7 @@ class PmpRepository(
                     itemName = ing.name.trim(),
                     qty = reqQty,
                     batch = batchCode,
-                    note = "صرف لخلاط الإنتاج وفق تركيبة ${formulation.productName}",
+                    note = "صرف لخلاط الإنتاج وفق تركيبة ${formulation.productName} v${formulation.versionNumber}",
                     actor = user,
                     counterparty = "مختبر PMP",
                     linked = true
@@ -2459,19 +3048,18 @@ class PmpRepository(
                 itemName = formulation.productName.trim(),
                 qty = totalBatchWeight,
                 batch = batchCode,
-                note = "أمر تشغيل مصنعي معتمد من المختبر الكيميائي (PVC: ${formulation.calculatedPvc}%)",
+                note = "أمر تشغيل مصنعي معتمد من المختبر الكيميائي (${formulation.formulaNo} v${formulation.versionNumber})",
                 actor = user,
                 counterparty = "خط إنتاج PMP",
                 linked = true
             )
         )
 
-        dao.updateFormulation(formulation.copy(approvedForProduction = true))
         dao.insertAuditLog(
             AuditLogEntity(
                 username = user,
                 action = "FACTORY_WORK_ORDER_CREATED",
-                detail = "توليد أمر تشغيل مصنعي #${moveId} للخلطة ${formulation.formulaNo} بحجم ${totalBatchWeight} كجم"
+                detail = "توليد أمر تشغيل مصنعي #${moveId} للخلطة ${formulation.formulaNo} v${formulation.versionNumber} بحجم ${totalBatchWeight} كجم"
             )
         )
 

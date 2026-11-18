@@ -732,4 +732,274 @@ test("18. Treasury Permission Grant for Cashiers & Direct Idempotency Completion
   await assertFails(directIdemRef.set({ requestStatus: "PROCESSING", updatedAt: Date.now() }, { merge: true }));
 });
 
+test("19. Chemical Lab RBAC & IP Protection: plain employee denied secret formulas, Lab Officer edits NEEDS_REVIEW only, Approver approves, explicitly denied Manager blocked", async () => {
+  await seedClusterRbac();
+  const LAB_OFFICER_UID = "lab_officer_uid_701";
+  const LAB_VIEWONLY_UID = "lab_viewonly_uid_702";
+  const DENIED_MGR_UID = "denied_mgr_uid_703";
+
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("cluster_members").doc(LAB_OFFICER_UID).set({
+      uid: LAB_OFFICER_UID,
+      userCode: "USR-LAB-1",
+      roleKey: "EMPLOYEE",
+      branch: "فرع السودان (SD-001)",
+      permissions: "VIEW_SECRET_FORMULAS,المختبر الكيميائي",
+      active: true,
+    });
+    await cRef.collection("cluster_members").doc(LAB_VIEWONLY_UID).set({
+      uid: LAB_VIEWONLY_UID,
+      userCode: "USR-LAB-2",
+      roleKey: "EMPLOYEE",
+      branch: "فرع السودان (SD-001)",
+      permissions: "المختبر الكيميائي,VIEW_ONLY",
+      active: true,
+    });
+    await cRef.collection("cluster_members").doc(DENIED_MGR_UID).set({
+      uid: DENIED_MGR_UID,
+      userCode: "USR-MGR-DENY",
+      roleKey: "MANAGER",
+      branch: "ALL",
+      permissions: "DENY:VIEW_SECRET_FORMULAS,DENY:APPROVE_FORMULAS",
+      active: true,
+    });
+  });
+
+  const empDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+  const labDb = testEnv.authenticatedContext(LAB_OFFICER_UID).firestore();
+  const viewOnlyDb = testEnv.authenticatedContext(LAB_VIEWONLY_UID).firestore();
+  const deniedMgrDb = testEnv.authenticatedContext(DENIED_MGR_UID).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+
+  const cEmp = empDb.collection("erp_clusters").doc(CLUSTER);
+  const cLab = labDb.collection("erp_clusters").doc(CLUSTER);
+  const cView = viewOnlyDb.collection("erp_clusters").doc(CLUSTER);
+  const cDeniedMgr = deniedMgrDb.collection("erp_clusters").doc(CLUSTER);
+  const cAdmin = adminDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Plain employee CANNOT create or read secret formulations or versions
+  await assertFails(
+    cEmp.collection("lab_formulations").doc("LAB-1").set({
+      productName: "Secret Gloss",
+      approvalStatus: "NEEDS_REVIEW",
+      ingredientsJson: "[{\"name\":\"TiO2\",\"pct\":25}]",
+    })
+  );
+
+  // Lab Officer CAN create formula with NEEDS_REVIEW
+  await assertSucceeds(
+    cLab.collection("lab_formulations").doc("LAB-1").set({
+      productName: "Acrylic Coat v1",
+      branch: "فرع السودان (SD-001)",
+      approvalStatus: "NEEDS_REVIEW",
+      approvedForProduction: false,
+      ingredientsJson: "[{\"name\":\"Resin\",\"pct\":45}]",
+    })
+  );
+
+  // Lab Officer CANNOT self-approve formula to APPROVED / approvedForProduction = true
+  await assertFails(
+    cLab.collection("lab_formulations").doc("LAB-SELF-APP").set({
+      productName: "Bypass Attempt",
+      branch: "فرع السودان (SD-001)",
+      approvalStatus: "APPROVED",
+      approvedForProduction: true,
+      ingredientsJson: "[]",
+    })
+  );
+  await assertFails(
+    cLab.collection("lab_formulations").doc("LAB-1").update({
+      approvalStatus: "APPROVED",
+      approvedForProduction: true,
+    })
+  );
+
+  // View-only Lab user CAN read secret formula, CANNOT modify it
+  await assertSucceeds(cView.collection("lab_formulations").doc("LAB-1").get());
+  await assertFails(
+    cView.collection("lab_formulations").doc("LAB-1").update({
+      productName: "Tampered",
+    })
+  );
+
+  // Plain employee CANNOT read secret formula
+  await assertFails(cEmp.collection("lab_formulations").doc("LAB-1").get());
+
+  // Admin CAN approve formula
+  await assertSucceeds(
+    cAdmin.collection("lab_formulations").doc("LAB-1").update({
+      approvalStatus: "APPROVED",
+      approvedForProduction: true,
+    })
+  );
+
+  // Manager with explicit DENY:VIEW_SECRET_FORMULAS / DENY:APPROVE_FORMULAS is blocked even with MANAGER roleKey
+  await assertFails(cDeniedMgr.collection("lab_formulations").doc("LAB-1").get());
+  await assertFails(
+    cDeniedMgr.collection("lab_formulations").doc("LAB-1").update({
+      approvalStatus: "APPROVED",
+      approvedForProduction: true,
+    })
+  );
+});
+
+test("20. Chemical Lab Non-Secret Summary Enforcement & Version Immutability", async () => {
+  await seedClusterRbac();
+  const LAB_OFFICER_UID = "lab_officer_uid_704";
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("cluster_members").doc(LAB_OFFICER_UID).set({
+      uid: LAB_OFFICER_UID,
+      userCode: "USR-LAB-4",
+      roleKey: "EMPLOYEE",
+      branch: "ALL",
+      permissions: "المختبر الكيميائي",
+      active: true,
+    });
+  });
+
+  const cLab = testEnv.authenticatedContext(LAB_OFFICER_UID).firestore().collection("erp_clusters").doc(CLUSTER);
+  const cEmp = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore().collection("erp_clusters").doc(CLUSTER);
+  const cMgr = testEnv.authenticatedContext(MANAGER_UID).firestore().collection("erp_clusters").doc(CLUSTER);
+
+  // Non-secret summary write MUST reject secret fields (ingredientsJson / confidentialCiphertext)
+  await assertFails(
+    cLab.collection("lab_formula_summaries").doc("LAB-1").set({
+      formulaId: "LAB-1",
+      productName: "Acrylic Satin",
+      ingredientsJson: "[{\"name\":\"Secret\"}]",
+    })
+  );
+
+  // Valid non-secret summary succeeds & is readable by active Production/Sales employees
+  await assertSucceeds(
+    cLab.collection("lab_formula_summaries").doc("LAB-1").set({
+      formulaId: "LAB-1",
+      code: "PMP-101",
+      productName: "Acrylic Satin",
+      approvalStatus: "APPROVED",
+      approvedForProduction: true,
+    })
+  );
+  await assertSucceeds(cEmp.collection("lab_formula_summaries").doc("LAB-1").get());
+
+  // Plain employee CANNOT overwrite summary
+  await assertFails(
+    cEmp.collection("lab_formula_summaries").doc("LAB-1").update({ productName: "Hacked" })
+  );
+
+  // Manager approves version snapshot; Lab Officer CANNOT subsequently mutate APPROVED version snapshot
+  await assertSucceeds(
+    cMgr.collection("lab_formula_versions").doc("LAB-1-v1").set({
+      formulaId: "LAB-1",
+      version: 1,
+      approvalStatus: "APPROVED",
+      lockedTotalCost: 240.5,
+      ingredientsJson: "[{\"name\":\"Resin\",\"pct\":40}]",
+    })
+  );
+  await assertFails(
+    cLab.collection("lab_formula_versions").doc("LAB-1-v1").update({
+      lockedTotalCost: 999,
+    })
+  );
+  await assertFails(cLab.collection("lab_formula_versions").doc("LAB-1-v1").delete());
+});
+
+test("21. Chemical Lab QC Gate, Price History & Staged Excel Imports Isolation", async () => {
+  await seedClusterRbac();
+  const LAB_OFFICER_UID = "lab_officer_uid_705";
+  const QC_OFFICER_UID = "qc_officer_uid_706";
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("cluster_members").doc(LAB_OFFICER_UID).set({
+      uid: LAB_OFFICER_UID,
+      userCode: "USR-LAB-5",
+      roleKey: "EMPLOYEE",
+      branch: "ALL",
+      permissions: "المختبر الكيميائي",
+      active: true,
+    });
+    await cRef.collection("cluster_members").doc(QC_OFFICER_UID).set({
+      uid: QC_OFFICER_UID,
+      userCode: "USR-QC-6",
+      roleKey: "EMPLOYEE",
+      branch: "ALL",
+      permissions: "الجودة,QC_OFFICER",
+      active: true,
+    });
+  });
+
+  const cLab = testEnv.authenticatedContext(LAB_OFFICER_UID).firestore().collection("erp_clusters").doc(CLUSTER);
+  const cQc = testEnv.authenticatedContext(QC_OFFICER_UID).firestore().collection("erp_clusters").doc(CLUSTER);
+  const cAcc = testEnv.authenticatedContext(ACCOUNTANT_UID).firestore().collection("erp_clusters").doc(CLUSTER);
+  const cEmp = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore().collection("erp_clusters").doc(CLUSTER);
+
+  // Lab Officer CAN create PENDING experiment (without secret ingredientsJson)
+  await assertSucceeds(
+    cLab.collection("lab_experiments").doc("EXP-1").set({
+      formulaId: "LAB-1",
+      formulaVersion: 1,
+      status: "PENDING",
+      viscosityMeasured: 92,
+      pvcMeasured: 41.2,
+    })
+  );
+
+  // Lab Officer CANNOT pass/approve their own QC experiment
+  await assertFails(
+    cLab.collection("lab_experiments").doc("EXP-1").update({
+      status: "PASSED",
+      decision: "APPROVED",
+    })
+  );
+
+  // QC Officer CAN approve the QC experiment
+  await assertSucceeds(
+    cQc.collection("lab_experiments").doc("EXP-1").update({
+      status: "PASSED",
+      decision: "APPROVED",
+    })
+  );
+
+  // Secret fields rejected inside lab_experiments
+  await assertFails(
+    cLab.collection("lab_experiments").doc("EXP-LEAK").set({
+      formulaId: "LAB-1",
+      status: "PENDING",
+      ingredientsJson: "[]",
+    })
+  );
+
+  // Price history accessible to Accountant & Lab Officer, denied to plain Sales Employee
+  await assertSucceeds(
+    cAcc.collection("raw_material_price_history").doc("PH-1").set({
+      materialId: "RM-TiO2",
+      previousPrice: 120,
+      newPrice: 135,
+      sourceType: "GRN",
+    })
+  );
+  await assertFails(cEmp.collection("raw_material_price_history").doc("PH-1").get());
+
+  // Staged Excel import batches accessible ONLY to Lab Secret readers/editors
+  await assertSucceeds(
+    cLab.collection("lab_excel_imports").doc("IMP-1").set({
+      fileName: "formulations.xlsx",
+      workbookSha256: "abc123",
+      candidateCount: 3,
+      approvalStatus: "NEEDS_REVIEW",
+    })
+  );
+  await assertFails(cEmp.collection("lab_excel_imports").doc("IMP-1").get());
+  await assertFails(
+    cEmp.collection("lab_excel_imports").doc("IMP-EMP").set({
+      fileName: "hack.xlsx",
+      candidateCount: 1,
+    })
+  );
+});
+
+
 

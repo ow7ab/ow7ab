@@ -366,6 +366,12 @@ export interface FactoryItem {
   deviceId?: string;
   actualBalance?: number;
   reorderLevel?: number;
+  lastPurchasePrice?: number;
+  lastPriceUpdatedAt?: number;
+  supplierName?: string;
+  density?: number;
+  solidsPercent?: number;
+  chemicalType?: string;
 }
 
 export interface FactoryMachine {
@@ -562,12 +568,18 @@ export interface AuditLog {
   timestamp: number;
 }
 
+export type FormulaApprovalStatus = 'DRAFT' | 'NEEDS_REVIEW' | 'APPROVED' | 'REJECTED' | 'ARCHIVED';
+
 export interface LabFormulation {
   id: number;
+  syncUuid?: string;
   formulaNo: string;
   productName: string;
   paintType: string;
   baseKind: string;
+  linkedProductId?: number | null;
+  linkedProductSku?: string;
+  category?: string;
   targetPvc: number;
   calculatedPvc: number;
   cpvcEstimated: number;
@@ -578,16 +590,30 @@ export interface LabFormulation {
   calculatedDensity: number;
   totalCost: number;
   costPerKg: number;
+  historicalTotalCost?: number;
+  historicalCostPerKg?: number;
+  currency?: CurrencyCode | string;
   ingredientsJson: string;
   technicalAnalysis: string;
   notes: string;
   approvedForProduction: boolean;
+  approvalStatus?: FormulaApprovalStatus | string;
+  versionNumber?: number;
+  approvedBy?: string;
+  approvedAt?: number;
+  changeReason?: string;
   createdBy: string;
+  updatedBy?: string;
   createdAt: number;
+  updatedAt?: number;
+  confidentialCiphertext?: string;
+  isConfidentialSealed?: boolean;
 }
 
 export interface FormulationIngredient {
   id: string;
+  materialId?: number | null;
+  itemCode?: string;
   name: string;
   type: string;
   weight: number;
@@ -595,6 +621,129 @@ export interface FormulationIngredient {
   solidsPercent: number;
   unitCost: number;
   notes: string;
+}
+
+export interface FormulationVersion {
+  id?: number;
+  syncUuid: string;
+  formulaId: number;
+  formulaNo: string;
+  productName: string;
+  versionNumber: number;
+  previousVersionNumber: number;
+  status: FormulaApprovalStatus | string;
+  changeReason: string;
+  diffSummaryJson: string;
+  previousCostPerKg: number;
+  newCostPerKg: number;
+  historicalTotalCost: number;
+  calculatedPvc: number;
+  calculatedDensity: number;
+  currency: CurrencyCode | string;
+  ingredientsSnapshotJson: string;
+  encryptedSnapshotCiphertext?: string;
+  createdBy: string;
+  approvedBy?: string;
+  approvedAt?: number;
+  createdAt: number;
+}
+
+export interface LabExperiment {
+  id: number;
+  syncUuid: string;
+  experimentNo: string;
+  formulaId: number;
+  formulaNo: string;
+  formulaVersionId?: number | null;
+  versionNumber: number;
+  productId?: number | null;
+  productName: string;
+  experimentDate: string;
+  technicianName: string;
+  materialsUsedJson: string;
+  measuredDensity: number;
+  measuredViscosity: string;
+  measuredPh: number;
+  measuredGrindMicrons: number;
+  hidingPowerPercent: number;
+  notes: string;
+  status: 'PENDING' | 'PASSED' | 'FAILED' | 'RETEST_REQUIRED' | string;
+  decision: 'PENDING' | 'APPROVED' | 'REJECTED' | 'RETEST' | string;
+  decidedBy: string;
+  decidedAt: number;
+  linkedQcNo?: string;
+  idempotencyKey?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface RawMaterialPriceHistory {
+  id: number;
+  syncUuid: string;
+  materialId: number;
+  itemCode: string;
+  materialName: string;
+  supplierName: string;
+  unitPrice: number;
+  previousPrice: number;
+  currency: CurrencyCode | string;
+  sourceType: 'PURCHASE_GRN' | 'MANUAL_LAB' | 'EXCEL_IMPORT' | string;
+  sourceDocNo: string;
+  effectiveDate: string;
+  recordedBy: string;
+  createdAt: number;
+}
+
+export interface LabExcelImportBatch {
+  id: number;
+  syncUuid: string;
+  importNo: string;
+  fileName: string;
+  sheetCount: number;
+  formulasDetected: number;
+  formulasImported: number;
+  materialsMatched: number;
+  materialsCreated: number;
+  externalLinksDetected: number;
+  brokenRefsDetected: number;
+  warningsCount: number;
+  approvalStatus: 'NEEDS_REVIEW' | 'REVIEWED' | 'ARCHIVED' | string;
+  checksumSha256: string;
+  restrictedSummaryJson: string;
+  importedBy: string;
+  idempotencyKey?: string;
+  createdAt: number;
+}
+
+export interface IngredientCostBreakdown {
+  name: string;
+  type: string;
+  materialId?: number | null;
+  itemCode?: string;
+  weightKg: number;
+  weightPercent: number;
+  unitCost: number;
+  lineCost: number;
+  costSharePercent: number;
+}
+
+export interface ThreeCostComparisonReport {
+  formulaNo: string;
+  versionNumber: number;
+  historicalTotalCost: number;
+  historicalCostPerKg: number;
+  currentTotalCost: number;
+  currentCostPerKg: number;
+  actualProductionTotalCost: number | null;
+  actualProductionCostPerKg: number | null;
+  priceDeltaTotal: number;
+  priceDeltaPercent: number;
+  changedMaterials: Array<{
+    name: string;
+    oldUnitCost: number;
+    currentUnitCost: number;
+    deltaPerKgImpact: number;
+  }>;
 }
 
 export interface ChemicalSafety {

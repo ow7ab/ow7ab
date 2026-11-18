@@ -508,6 +508,38 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    val formulationVersions = repository.getAllFormulationVersions()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in formulationVersions flow", e)
+            emit(emptyList())
+        }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val labExperiments = repository.getAllLabExperiments()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in labExperiments flow", e)
+            emit(emptyList())
+        }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val rawMaterialPriceHistory = repository.getAllRawMaterialPriceHistory()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in rawMaterialPriceHistory flow", e)
+            emit(emptyList())
+        }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val labExcelImports = repository.getAllLabExcelImports()
+        .catch { e ->
+            android.util.Log.e("PmpViewModel", "Error in labExcelImports flow", e)
+            emit(emptyList())
+        }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
 
     // --- PubChem Search State ---
     private val _isSearchingPubChem = MutableStateFlow(false)
@@ -5009,8 +5041,30 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun canViewSecretFormulas(): Boolean =
+        com.example.util.LabSecurityManager.canViewSecretFormulas(currentUser.value)
+
+    fun canEditSecretFormulas(): Boolean =
+        com.example.util.LabSecurityManager.canCreateOrEditFormulas(currentUser.value)
+
+    fun canApproveFormulas(): Boolean =
+        com.example.util.LabSecurityManager.canApproveFormulas(currentUser.value)
+
+    fun canLogLabExperiments(): Boolean =
+        com.example.util.LabSecurityManager.canLogLabExperiments(currentUser.value)
+
+    fun canDecideQcGate(): Boolean =
+        com.example.util.LabSecurityManager.canDecideQcGate(currentUser.value)
+
+    fun canViewFormulaCosts(): Boolean =
+        com.example.util.LabSecurityManager.canViewFormulaCosts(currentUser.value)
+
+    fun canExportSecretFormulas(): Boolean =
+        com.example.util.LabSecurityManager.canExportSecretFormulas(currentUser.value)
+
     fun saveFormulation(
         formulation: FormulationEntity,
+        changeReason: String = "تحديث مواصفات التركيبة",
         guardKey: String = "save_formulation",
         onComplete: ((Boolean) -> Unit)? = null
     ) {
@@ -5019,23 +5073,207 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             operationType = if (formulation.id > 0L) com.example.util.IdempotencyOperationType.UPDATE else com.example.util.IdempotencyOperationType.SAVE,
             actionLabel = "حفظ تركيبة دهانات بالمختبر",
             documentReference = "FRM-${formulation.formulaNo}",
-            targetCollection = "formulations",
+            targetCollection = "lab_formulations",
             payloadSummary = "حفظ تركيبة ${formulation.productName}",
             onComplete = onComplete
         ) { _ ->
             val actor = resolveUserActor("مهندس المختبر")
-            val res = repository.saveFormulation(formulation, actor)
+            val res = repository.saveFormulationWithVersioning(
+                formulation = formulation,
+                actorName = actor,
+                actorAccount = currentUser.value,
+                changeReason = changeReason
+            )
             res.map { savedId ->
-                val entityToSync = formulation.copy(id = savedId)
+                val savedEntity = repository.getDao().getFormulationById(savedId) ?: formulation.copy(id = savedId)
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
-                        cloudErpSyncRepo.syncSingleFormulationToCloud(serverClusterCode.value, entityToSync)
+                        cloudErpSyncRepo.syncSingleFormulationToCloud(serverClusterCode.value, savedEntity)
+                        com.example.data.local.DatabaseBackupManager.saveLocalSnapshot(
+                            getApplication(),
+                            repository.getDao(),
+                            repository.getLabDao()
+                        )
                     } catch (e: Exception) {
-                        Log.w("PmpViewModel", "Cloud formulation sync warning: ${e.message}")
+                        Log.w("PmpViewModel", "Cloud formulation sync warning: ${com.example.util.LabSecurityManager.sanitizeLogText(e.message.orEmpty())}")
                     }
                 }
-                postMessage("تم حفظ ومزامنة التركيبة (${formulation.productName}) على السحابة | PVC: ${formulation.calculatedPvc}%")
-                "FRM-$savedId" to savedId
+                postMessage("تم حفظ التركيبة (${savedEntity.productName} v${savedEntity.versionNumber}) | الحالة: ${savedEntity.approvalStatus}")
+                "FRM-$savedId-V${savedEntity.versionNumber}" to savedId
+            }
+        }
+    }
+
+    fun decideFormulationApproval(
+        formulaId: Long,
+        decisionStatus: String,
+        decisionNote: String,
+        guardKey: String = "decide_formula_approval_$formulaId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.APPROVE_INVOICE,
+            actionLabel = "اعتماد / مراجعة التركيبة الكيميائية",
+            documentReference = "FRM-APR-$formulaId",
+            targetCollection = "lab_formulations",
+            payloadSummary = "قرار اعتماد تركيبة #$formulaId ($decisionStatus)",
+            onComplete = onComplete
+        ) { _ ->
+            val actor = resolveUserActor("مدير الاعتماد")
+            val res = repository.decideFormulationApproval(
+                formulaId = formulaId,
+                decisionStatus = decisionStatus,
+                decisionNote = decisionNote,
+                actorAccount = currentUser.value,
+                actorName = actor
+            )
+            res.map { updated ->
+                viewModelScope.launch(Dispatchers.IO) {
+                    runCatching {
+                        cloudErpSyncRepo.syncSingleFormulationToCloud(serverClusterCode.value, updated)
+                    }
+                }
+                postMessage("تم تحديث حالة اعتماد التركيبة ${updated.formulaNo} v${updated.versionNumber} إلى: ${updated.approvalStatus}")
+                "FRM-DEC-$formulaId-$decisionStatus" to updated
+            }
+        }
+    }
+
+    fun recordLabExperiment(
+        experiment: LabExperimentEntity,
+        guardKey: String = "record_lab_experiment",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SAVE,
+            actionLabel = "تسجيل تجربة مخبرية وفحص عينة",
+            documentReference = "EXP-${experiment.formulaNo}-V${experiment.versionNumber}",
+            targetCollection = "lab_experiments",
+            payloadSummary = "تجربة ${experiment.productName} v${experiment.versionNumber}",
+            onComplete = onComplete
+        ) { _ ->
+            val actor = resolveUserActor("فني المختبر")
+            val payload = experiment.copy(
+                technicianName = experiment.technicianName.ifBlank { actor }
+            )
+            val res = repository.recordLabExperiment(payload, currentUser.value)
+            res.map { expId ->
+                postMessage("تم تسجيل التجربة المخبرية للتركيبة ${experiment.formulaNo} v${experiment.versionNumber} بنجاح")
+                "EXP-$expId" to expId
+            }
+        }
+    }
+
+    fun decideLabExperimentQc(
+        experimentId: Long,
+        decisionStatus: String,
+        decisionNote: String,
+        guardKey: String = "decide_exp_qc_$experimentId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.APPROVE_INVOICE,
+            actionLabel = "قرار الجودة للتجربة المخبرية",
+            documentReference = "EXP-QC-$experimentId",
+            targetCollection = "lab_experiments",
+            payloadSummary = "قرار جودة $decisionStatus لتجربة #$experimentId",
+            onComplete = onComplete
+        ) { _ ->
+            val actor = resolveUserActor("مسؤول الجودة")
+            val res = repository.decideLabExperimentQc(
+                experimentId = experimentId,
+                decisionStatus = decisionStatus,
+                decisionNote = decisionNote,
+                actorAccount = currentUser.value,
+                actorName = actor
+            )
+            res.map { updated ->
+                postMessage("تم تسجيل قرار الجودة (${updated.status}) للتجربة ${updated.experimentNo}")
+                "EXP-QC-$experimentId-$decisionStatus" to updated
+            }
+        }
+    }
+
+    fun updateRawMaterialPriceAndImpact(
+        materialId: Long,
+        newPrice: Double,
+        currency: String = "EGP",
+        supplierName: String = "",
+        density: Double? = null,
+        solidsPercent: Double? = null,
+        reason: String = "تحديث سعر خامة في المختبر والمشتريات",
+        guardKey: String = "update_raw_mat_price_$materialId",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.UPDATE,
+            actionLabel = "تحديث سعر المادة الخام في السجل الموحد",
+            documentReference = "RAW-PRC-$materialId",
+            targetCollection = "factory_items",
+            payloadSummary = "تحديث سعر الخامة #$materialId",
+            onComplete = onComplete
+        ) { _ ->
+            val actor = resolveUserActor("مسؤول المشتريات/المختبر")
+            val res = repository.updateRawMaterialRegistryPrice(
+                materialId = materialId,
+                newPrice = newPrice,
+                currency = currency,
+                supplierName = supplierName,
+                density = density,
+                solidsPercent = solidsPercent,
+                reason = reason,
+                actorName = actor,
+                actorAccount = currentUser.value
+            )
+            res.map { updated ->
+                postMessage("تم تحديث السعر الحالي للخامة (${updated.name}) مع بقاء التكلفة التاريخية المعتمدة للتركيبات ثابتة")
+                persistAndSyncToServer()
+                "RAW-$materialId-$newPrice" to updated
+            }
+        }
+    }
+
+    fun commitStagedExcelImport(
+        analysis: com.example.util.LabExcelAnalyzer.WorkbookAnalysisResult,
+        selectedDrafts: List<com.example.util.LabExcelAnalyzer.ImportedFormulaDraft>,
+        rawBytes: ByteArray?,
+        guardKey: String = "commit_lab_excel_import",
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        launchGuardedTransaction(
+            guardKey = guardKey,
+            operationType = com.example.util.IdempotencyOperationType.SAVE,
+            actionLabel = "استيراد مرحلي لتركيبات الإكسل (NEEDS_REVIEW)",
+            documentReference = "XLS-${analysis.sha256Hex.take(10)}",
+            targetCollection = "lab_formulations",
+            payloadSummary = "استيراد ${selectedDrafts.size} تركيبة للمراجعة من ${analysis.fileName}",
+            onComplete = onComplete
+        ) { _ ->
+            val actor = resolveUserActor("مهندس المختبر")
+            val archivePath = if (rawBytes != null && rawBytes.isNotEmpty()) {
+                com.example.util.LabExcelAnalyzer.archiveOriginalWorkbookPrivately(
+                    context = getApplication(),
+                    fileName = analysis.fileName,
+                    bytes = rawBytes,
+                    sha256 = analysis.sha256Hex
+                )
+            } else ""
+
+            val res = repository.commitStagedExcelImport(
+                analysis = analysis,
+                selectedDrafts = selectedDrafts,
+                archiveFilePath = archivePath,
+                actorName = actor,
+                actorAccount = currentUser.value
+            )
+            res.map { count ->
+                postMessage("تم استيراد $count تركيبة بحالة (تحتاج إلى مراجعة واعتماد) مع الاحتفاظ بالبيانات السابقة")
+                persistAndSyncToServer()
+                "XLS-${analysis.sha256Hex.take(10)}" to count
             }
         }
     }
@@ -5050,12 +5288,12 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             operationType = com.example.util.IdempotencyOperationType.DELETE,
             actionLabel = "حذف تركيبة من المختبر",
             documentReference = "FRM-${formulation.id}",
-            targetCollection = "formulations",
+            targetCollection = "lab_formulations",
             payloadSummary = "حذف تركيبة ${formulation.formulaNo}",
             onComplete = onComplete
         ) { _ ->
             val actor = resolveUserActor("مهندس المختبر")
-            val res = repository.deleteFormulation(formulation.id, actor)
+            val res = repository.deleteFormulation(formulation.id, actor, currentUser.value)
             res.map {
                 viewModelScope.launch(Dispatchers.IO) {
                     try {

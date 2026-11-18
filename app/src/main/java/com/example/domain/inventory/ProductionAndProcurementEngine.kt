@@ -93,6 +93,7 @@ class ProductionAndProcurementEngine(
 ) {
     private val dao = database.pmpDao()
     private val invDao = database.erpInventoryDao()
+    private val labDao = database.labDao()
     private val accountingEngine = AccountingLedgerEngine(database)
 
     companion object {
@@ -304,6 +305,46 @@ class ProductionAndProcurementEngine(
                 val insertedId = invDao.upsertPurchaseReceipt(receipt)
                 val savedReceipt = receipt.copy(id = if (receipt.id > 0) receipt.id else insertedId)
                 accountingEngine.postPurchaseReceiptJournalInternal(savedReceipt)
+
+                // Update unified Raw Materials Registry (FactoryItemEntity) & append price history WITHOUT mutating locked historical formula costs
+                if (input.acceptedQty > 0.0 && input.unitCost > 0.0) {
+                    val existingMat = dao.getFactoryItemsDirect().firstOrNull {
+                        it.id == input.materialId || it.name.trim().equals(input.materialName.trim(), ignoreCase = true)
+                    }
+                    if (existingMat != null) {
+                        val prevPrice = existingMat.lastPurchasePrice.takeIf { it > 0.0 } ?: existingMat.unitCostEgp
+                        val priceChanged = kotlin.math.abs(prevPrice - input.unitCost) > 0.0001
+                        labDao.updateFactoryItem(
+                            existingMat.copy(
+                                lastPurchasePrice = input.unitCost,
+                                lastPriceCurrency = input.currency.ifBlank { "EGP" },
+                                lastPriceUpdatedAt = now,
+                                supplierName = cleanSupplier,
+                                unitCostEgp = if (input.currency.equals("EGP", ignoreCase = true)) input.unitCost else existingMat.unitCostEgp
+                            )
+                        )
+                        if (priceChanged || prevPrice <= 0.0) {
+                            labDao.upsertPriceHistory(
+                                RawMaterialPriceHistoryEntity(
+                                    syncUuid = "PRC-$grnNo-${existingMat.id}-$now",
+                                    materialId = existingMat.id,
+                                    itemCode = existingMat.itemCode,
+                                    materialName = existingMat.name,
+                                    supplierName = cleanSupplier,
+                                    unitPrice = input.unitCost,
+                                    previousPrice = prevPrice,
+                                    currency = input.currency.ifBlank { "EGP" },
+                                    sourceType = "PURCHASE_GRN",
+                                    sourceDocNo = grnNo,
+                                    effectiveDate = todayDate(),
+                                    recordedBy = input.performedBy.ifBlank { "المشتريات" },
+                                    createdAt = now
+                                )
+                            )
+                        }
+                    }
+                }
+
                 savedReceipt
             }
         }
@@ -336,6 +377,23 @@ class ProductionAndProcurementEngine(
                 val targetWeightKg = (targetCans * input.packageWeightGrams.toDouble()) / 1000.0
 
                 val formula = input.formulaId?.let { dao.getFormulationById(it) }
+                if (input.formulaId != null) {
+                    if (formula == null) {
+                        throw IllegalArgumentException("التركيبة الكيميائية المحددة غير موجودة.")
+                    }
+                    val blockedStatus = formula.approvalStatus.trim().uppercase(Locale.US) in setOf("NEEDS_REVIEW", "REJECTED", "ARCHIVED")
+                    val isApproved = !blockedStatus && (formula.approvedForProduction || formula.approvalStatus.equals("APPROVED", ignoreCase = true))
+                    if (!isApproved) {
+                        dao.insertAuditLog(
+                            AuditLogEntity(
+                                username = input.approvedBy.ifBlank { input.productionEngineer },
+                                action = "BLOCKED_UNAPPROVED_FORMULA_PRODUCTION",
+                                detail = "تم منع إنشاء أمر إنتاج من تركيبة غير معتمدة (${formula.formulaNo} | الحالة: ${formula.approvalStatus})"
+                            )
+                        )
+                        throw SecurityException("لا يمكن إصدار أمر إنتاج من تركيبة غير معتمدة (${formula.formulaNo} - الحالة: ${formula.approvalStatus}). يجب اعتمادها أولاً.")
+                    }
+                }
                 val bomArr = JSONArray()
                 if (formula != null) {
                     val reqs = ErpLifecycleEngine.calculateTheoreticalBomRequirements(formula, targetWeightKg)

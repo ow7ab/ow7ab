@@ -1984,6 +1984,12 @@ class CloudErpSyncRepository(
                                         "category" to fi.category,
                                         "itemCode" to fi.itemCode.ifBlank { "RAW-${fi.id}" },
                                         "unitCostEgp" to fi.unitCostEgp,
+                                        "supplierName" to fi.supplierName,
+                                        "lastPurchasePrice" to fi.lastPurchasePrice,
+                                        "lastPriceCurrency" to fi.lastPriceCurrency,
+                                        "lastPriceUpdatedAt" to fi.lastPriceUpdatedAt,
+                                        "density" to fi.density,
+                                        "solidsPercent" to fi.solidsPercent,
                                         "minStock" to fi.minStock,
                                         "maxStock" to fi.maxStock,
                                         "batchTrackingRequired" to fi.batchTrackingRequired,
@@ -2055,19 +2061,32 @@ class CloudErpSyncRepository(
                         DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-${form.id}") ||
                         (form.formulaNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", form.formulaNo))
                 }
-                if (formulations.isNotEmpty()) {
+                val canPushSecretLab = activeLocalAccount == null ||
+                    isCloudAdmin ||
+                    isCloudManager ||
+                    com.example.util.LabSecurityManager.canCreateOrEditFormulas(activeLocalAccount) ||
+                    com.example.util.LabSecurityManager.canApproveFormulas(activeLocalAccount)
+                if (formulations.isNotEmpty() && canPushSecretLab) {
                     runSyncStep("مزامنة تركيبات المختبر الكيميائي", "lab_formulations", critical = false) {
                         var committed = 0
-                        formulations.chunked(300).forEach { chunk ->
+                        formulations.chunked(250).forEach { chunk ->
                             val batch = firestore.batch()
                             chunk.forEach { form ->
                                 val docId = safeId(form.formulaNo, "FORM-${form.id}")
                                 val payload = mapOf(
                                     "id" to form.id,
+                                    "syncUuid" to form.syncUuid,
                                     "formulaNo" to form.formulaNo,
                                     "productName" to form.productName,
+                                    "linkedProductId" to (form.linkedProductId ?: 0L),
+                                    "linkedProductSku" to form.linkedProductSku,
+                                    "category" to form.category,
                                     "paintType" to form.paintType,
                                     "baseKind" to form.baseKind,
+                                    "versionNumber" to form.versionNumber,
+                                    "approvalStatus" to form.approvalStatus,
+                                    "approvedBy" to form.approvedBy,
+                                    "approvedAt" to form.approvedAt,
                                     "targetPvc" to form.targetPvc,
                                     "calculatedPvc" to form.calculatedPvc,
                                     "cpvcEstimated" to form.cpvcEstimated,
@@ -2078,7 +2097,15 @@ class CloudErpSyncRepository(
                                     "calculatedDensity" to form.calculatedDensity,
                                     "totalCost" to form.totalCost,
                                     "costPerKg" to form.costPerKg,
+                                    "historicalTotalCost" to form.historicalTotalCost,
+                                    "historicalCostPerKg" to form.historicalCostPerKg,
+                                    "currency" to form.currency,
+                                    "changeReason" to form.changeReason,
+                                    "updatedBy" to form.updatedBy,
+                                    "updatedAt" to form.updatedAt,
                                     "ingredientsJson" to form.ingredientsJson,
+                                    "confidentialCiphertext" to form.confidentialCiphertext,
+                                    "isConfidentialSealed" to form.isConfidentialSealed,
                                     "technicalAnalysis" to form.technicalAnalysis,
                                     "notes" to form.notes,
                                     "approvedForProduction" to form.approvedForProduction,
@@ -2087,7 +2114,26 @@ class CloudErpSyncRepository(
                                     "serverUpdatedBy" to actor,
                                     "serverUpdatedAt" to FieldValue.serverTimestamp()
                                 )
+                                val summaryPayload = mapOf(
+                                    "id" to form.id,
+                                    "formulaNo" to form.formulaNo,
+                                    "productName" to form.productName,
+                                    "linkedProductId" to (form.linkedProductId ?: 0L),
+                                    "category" to form.category,
+                                    "paintType" to form.paintType,
+                                    "baseKind" to form.baseKind,
+                                    "versionNumber" to form.versionNumber,
+                                    "approvalStatus" to form.approvalStatus,
+                                    "calculatedPvc" to form.calculatedPvc,
+                                    "calculatedDensity" to form.calculatedDensity,
+                                    "costPerKg" to form.costPerKg,
+                                    "historicalCostPerKg" to form.historicalCostPerKg,
+                                    "currency" to form.currency,
+                                    "approvedForProduction" to form.approvedForProduction,
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                )
                                 batch.set(cRef.collection("lab_formulations").document(docId), payload, SetOptions.merge())
+                                batch.set(cRef.collection("lab_formula_summaries").document(docId), summaryPayload, SetOptions.merge())
                             }
                             batch.commit().await()
                             committed += chunk.size
@@ -2795,6 +2841,12 @@ class CloudErpSyncRepository(
                     category = doc.getString("category") ?: "raw",
                     itemCode = doc.getString("itemCode") ?: "RAW-$id",
                     unitCostEgp = doc.safeDouble("unitCostEgp") ?: 0.0,
+                    supplierName = doc.getString("supplierName") ?: "",
+                    lastPurchasePrice = doc.safeDouble("lastPurchasePrice") ?: (doc.safeDouble("unitCostEgp") ?: 0.0),
+                    lastPriceCurrency = doc.getString("lastPriceCurrency") ?: "EGP",
+                    lastPriceUpdatedAt = doc.safeLong("lastPriceUpdatedAt") ?: 0L,
+                    density = doc.safeDouble("density") ?: 1.0,
+                    solidsPercent = doc.safeDouble("solidsPercent") ?: 100.0,
                     minStock = doc.safeDouble("minStock") ?: 0.0,
                     maxStock = doc.safeDouble("maxStock") ?: 0.0,
                     batchTrackingRequired = doc.safeBoolean("batchTrackingRequired") ?: false,
@@ -2843,176 +2895,11 @@ class CloudErpSyncRepository(
                 restoredCount += restoredFactoryMoves.size
             }
 
-            // 8b. Fetch Chemical Formulations from Cloud (with tombstone & epoch shield)
-            val formSnapshot = cRef.collection("lab_formulations").get().await()
-            val restoredFormulations = formSnapshot.documents.mapNotNull { doc ->
-                val id = doc.getLong("id") ?: return@mapNotNull null
-                val fNo = doc.getString("formulaNo") ?: doc.id
-                val createdAt = doc.getLong("createdAt") ?: 0L
-                if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("lab_formulations", id) ||
-                    DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-$id") ||
-                    DeletedRecordsRegistry.isDeleted("lab_formulations", doc.id) ||
-                    (fNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", fNo))
-                ) {
-                    runCatching { doc.reference.delete() }
-                    dao.deleteFormulation(id)
-                    return@mapNotNull null
-                }
-                FormulationEntity(
-                    id = id,
-                    formulaNo = fNo,
-                    productName = doc.getString("productName") ?: "تركيبة معملية",
-                    paintType = doc.getString("paintType") ?: "مطفي معماري (Matt)",
-                    baseKind = doc.getString("baseKind") ?: "أبيض",
-                    targetPvc = doc.getDouble("targetPvc") ?: 0.0,
-                    calculatedPvc = doc.getDouble("calculatedPvc") ?: 0.0,
-                    cpvcEstimated = doc.getDouble("cpvcEstimated") ?: 52.0,
-                    totalSolidsWeight = doc.getDouble("totalSolidsWeight") ?: 0.0,
-                    totalSolidsVolume = doc.getDouble("totalSolidsVolume") ?: 0.0,
-                    totalBatchWeight = doc.getDouble("totalBatchWeight") ?: 0.0,
-                    totalBatchVolume = doc.getDouble("totalBatchVolume") ?: 0.0,
-                    calculatedDensity = doc.getDouble("calculatedDensity") ?: 0.0,
-                    totalCost = doc.getDouble("totalCost") ?: 0.0,
-                    costPerKg = doc.getDouble("costPerKg") ?: 0.0,
-                    ingredientsJson = doc.getString("ingredientsJson") ?: "[]",
-                    technicalAnalysis = doc.getString("technicalAnalysis") ?: "",
-                    notes = doc.getString("notes") ?: "",
-                    approvedForProduction = doc.getBoolean("approvedForProduction") ?: false,
-                    createdBy = doc.getString("createdBy") ?: "مهندس المختبر الكيميائي",
-                    createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
-                )
-            }
-            if (restoredFormulations.isNotEmpty()) {
-                dao.upsertFormulations(restoredFormulations)
-                restoredCount += restoredFormulations.size
-            }
+            // 8b & 8c. Restore Chemical Formulations & Daily Production Batches
+            restoredCount += restoreLabAndBatchesFromCloud(cRef, dao)
 
-            // 8c. Fetch Daily Production Batches from Cloud (with tombstone & epoch shield)
-            val batchSnapshot = cRef.collection("paint_batches").get().await()
-            val restoredBatches = batchSnapshot.documents.mapNotNull { doc ->
-                val id = doc.getLong("id") ?: return@mapNotNull null
-                val bNo = doc.getString("batchNumber") ?: doc.id
-                val createdAt = doc.getLong("createdAt") ?: 0L
-                if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("paint_batches", id) ||
-                    DeletedRecordsRegistry.isDeleted("paint_batches", "BATCH-$id") ||
-                    DeletedRecordsRegistry.isDeleted("paint_batches", doc.id) ||
-                    (bNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("paint_batches", bNo))
-                ) {
-                    runCatching { doc.reference.delete() }
-                    dao.deleteProductionBatch(id)
-                    return@mapNotNull null
-                }
-                ProductionBatchEntity(
-                    id = id,
-                    batchNumber = bNo,
-                    productionDate = doc.getString("productionDate") ?: "",
-                    formulaId = doc.getLong("formulaId"),
-                    formulaNo = doc.getString("formulaNo") ?: "",
-                    productName = doc.getString("productName") ?: "تشغيلة دهان",
-                    paintType = doc.getString("paintType") ?: "مطفي معماري (Matt)",
-                    baseKind = doc.getString("baseKind") ?: "أبيض",
-                    targetPvc = doc.getDouble("targetPvc") ?: 0.0,
-                    targetWeightKg = doc.getDouble("targetWeightKg") ?: 0.0,
-                    actualWeightKg = doc.getDouble("actualWeightKg") ?: 0.0,
-                    targetVolumeLiters = doc.getDouble("targetVolumeLiters") ?: 0.0,
-                    cartonsCount = doc.getLong("cartonsCount")?.toInt() ?: 0,
-                    packageUnit = doc.getString("packageUnit") ?: "كرتونة 900 مل",
-                    machineId = doc.getLong("machineId"),
-                    machineName = doc.getString("machineName") ?: "",
-                    qualityStatus = doc.getString("qualityStatus") ?: "معتمد ومطابق",
-                    measuredDensity = doc.getDouble("measuredDensity") ?: 0.0,
-                    measuredViscosity = doc.getString("measuredViscosity") ?: "",
-                    scaledIngredientsJson = doc.getString("scaledIngredientsJson") ?: "[]",
-                    supervisorOrEngineer = doc.getString("supervisorOrEngineer") ?: "مهندس الإنتاج",
-                    shift = doc.getString("shift") ?: "الوردية الصباحية",
-                    notes = doc.getString("notes") ?: "",
-                    syncStatus = "SYNCED",
-                    createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
-                )
-            }
-            if (restoredBatches.isNotEmpty()) {
-                dao.upsertProductionBatches(restoredBatches)
-                restoredCount += restoredBatches.size
-            }
-
-            // 9. Fetch Stock Moves (with tombstone shield & deleted-product/warehouse cleanup)
-            val currentProdIds = dao.getProductsDirect().map { it.id }.toSet()
-            val smSnapshot = cRef.collection("stock_moves").get().await()
-            val restoredStockMoves = smSnapshot.documents.mapNotNull { doc ->
-                val id = doc.getLong("id") ?: return@mapNotNull null
-                val prodId = doc.getLong("productId") ?: 0L
-                val whId = doc.getLong("warehouseId") ?: 0L
-                val docCreatedAt = doc.getLong("createdAt") ?: 0L
-                val isMoveDeleted = DeletedRecordsRegistry.isDeleted("stock_moves", id) ||
-                    DeletedRecordsRegistry.isDeleted("stock_moves", "SM-$id") ||
-                    DeletedRecordsRegistry.isDeleted("stock_moves", doc.id) ||
-                    DeletedRecordsRegistry.isDeleted("products", prodId) ||
-                    DeletedRecordsRegistry.isDeleted("warehouses", whId) ||
-                    DeletedRecordsRegistry.isPreEpoch(docCreatedAt) ||
-                    (currentProdIds.isNotEmpty() && prodId !in currentProdIds)
-                if (isMoveDeleted) {
-                    runCatching { doc.reference.delete() }
-                    dao.deleteStockMoveById(id)
-                    return@mapNotNull null
-                }
-                StockMoveEntity(
-                    id = id,
-                    warehouseId = whId.takeIf { it > 0L } ?: 1L,
-                    productId = prodId.takeIf { it > 0L } ?: 1L,
-                    quantity = doc.getDouble("quantity") ?: 1.0,
-                    kind = doc.getString("kind") ?: "IN",
-                    invoiceId = doc.getLong("invoiceId")?.takeIf { it > 0 },
-                    note = doc.getString("note") ?: "",
-                    createdBy = doc.getString("createdBy") ?: "المدير",
-                    createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis()
-                )
-            }
-            if (restoredStockMoves.isNotEmpty()) {
-                dao.upsertStockMoves(restoredStockMoves)
-                restoredCount += restoredStockMoves.size
-            }
-
-            // 10. Fetch Halfa & Egypt Invoices (with tombstone & epoch shield)
-            val hiSnapshot = cRef.collection("halfa_invoices").get().await()
-            val restoredHalfaInvoices = hiSnapshot.documents.mapNotNull { doc ->
-                val id = doc.getLong("id") ?: return@mapNotNull null
-                val invNo = doc.getString("invoiceNo") ?: "HINV-$id"
-                val createdAt = doc.getLong("createdAt") ?: 0L
-                if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("halfa_invoices", id) ||
-                    DeletedRecordsRegistry.isDeleted("halfa_invoices", "HINV-$id") ||
-                    DeletedRecordsRegistry.isDeleted("halfa_invoices", doc.id) ||
-                    DeletedRecordsRegistry.isDeleted("halfa_invoices", invNo)
-                ) {
-                    runCatching { doc.reference.delete() }
-                    dao.deleteHalfaInvoiceById(id)
-                    return@mapNotNull null
-                }
-                HalfaInvoiceEntity(
-                    id = id,
-                    invoiceNo = invNo,
-                    invoiceDate = doc.getString("invoiceDate") ?: "2026-10-26",
-                    cashbox = doc.getString("cashbox") ?: "خزنة مصر",
-                    currency = doc.getString("currency") ?: "EGP",
-                    warehouseId = doc.getLong("warehouseId") ?: 1L,
-                    productId = doc.getLong("productId") ?: 1L,
-                    productName = doc.getString("productName") ?: "منتج",
-                    quantity = doc.getDouble("quantity") ?: 1.0,
-                    unitPrice = doc.getDouble("unitPrice") ?: 0.0,
-                    total = doc.getDouble("total") ?: 0.0,
-                    factoryMoveId = doc.getLong("factoryMoveId")?.takeIf { it > 0 },
-                    note = doc.getString("note") ?: "",
-                    status = doc.getString("status") ?: "active",
-                    createdBy = doc.getString("createdBy") ?: "مسؤول التحميل",
-                    createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
-                )
-            }
-            if (restoredHalfaInvoices.isNotEmpty()) {
-                dao.upsertHalfaInvoices(restoredHalfaInvoices)
-                restoredCount += restoredHalfaInvoices.size
-            }
+            // 9 & 10. Restore Stock Moves & Halfa Invoices
+            restoredCount += restoreStockMovesAndHalfaInvoicesFromCloud(cRef, dao)
 
             // 10b. Restore Phase 2 Packaging Rules, Inventory Movements, Balances & Transfers
             val resolvedInvDao = invDao ?: runCatching {
@@ -3058,6 +2945,209 @@ class CloudErpSyncRepository(
         }
     }
 }
+
+    private suspend fun restoreLabAndBatchesFromCloud(
+        cRef: com.google.firebase.firestore.DocumentReference,
+        dao: PmpDao
+    ): Int {
+        var restoredCount = 0
+        // 8b. Fetch Chemical Formulations from Cloud (with RBAC/permission graceful fallback to non-secret summaries)
+        val formSnapshot = runCatching { cRef.collection("lab_formulations").get().await() }.getOrNull()
+            ?: runCatching { cRef.collection("lab_formula_summaries").get().await() }.getOrNull()
+        val restoredFormulations = formSnapshot?.documents.orEmpty().mapNotNull { doc ->
+            val id = doc.getLong("id") ?: return@mapNotNull null
+            val fNo = doc.getString("formulaNo") ?: doc.id
+            val createdAt = doc.getLong("createdAt") ?: 0L
+            if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                DeletedRecordsRegistry.isDeleted("lab_formulations", id) ||
+                DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-$id") ||
+                DeletedRecordsRegistry.isDeleted("lab_formulations", doc.id) ||
+                (fNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", fNo))
+            ) {
+                runCatching { doc.reference.delete() }
+                dao.deleteFormulation(id)
+                return@mapNotNull null
+            }
+            val approvedFlag = doc.getBoolean("approvedForProduction") ?: false
+            FormulationEntity(
+                id = id,
+                syncUuid = doc.getString("syncUuid") ?: "",
+                formulaNo = fNo,
+                productName = doc.getString("productName") ?: "تركيبة معملية",
+                linkedProductId = doc.getLong("linkedProductId")?.takeIf { it > 0L },
+                linkedProductSku = doc.getString("linkedProductSku") ?: "",
+                category = doc.getString("category") ?: "بوهيات",
+                paintType = doc.getString("paintType") ?: "مطفي معماري (Matt)",
+                baseKind = doc.getString("baseKind") ?: "أبيض",
+                versionNumber = (doc.getLong("versionNumber") ?: 1L).toInt().coerceAtLeast(1),
+                approvalStatus = doc.getString("approvalStatus") ?: if (approvedFlag) "APPROVED" else "DRAFT",
+                approvedBy = doc.getString("approvedBy") ?: "",
+                approvedAt = doc.getLong("approvedAt") ?: 0L,
+                targetPvc = doc.getDouble("targetPvc") ?: 0.0,
+                calculatedPvc = doc.getDouble("calculatedPvc") ?: 0.0,
+                cpvcEstimated = doc.getDouble("cpvcEstimated") ?: 52.0,
+                totalSolidsWeight = doc.getDouble("totalSolidsWeight") ?: 0.0,
+                totalSolidsVolume = doc.getDouble("totalSolidsVolume") ?: 0.0,
+                totalBatchWeight = doc.getDouble("totalBatchWeight") ?: 0.0,
+                totalBatchVolume = doc.getDouble("totalBatchVolume") ?: 0.0,
+                calculatedDensity = doc.getDouble("calculatedDensity") ?: 0.0,
+                totalCost = doc.getDouble("totalCost") ?: 0.0,
+                costPerKg = doc.getDouble("costPerKg") ?: 0.0,
+                historicalTotalCost = doc.getDouble("historicalTotalCost") ?: 0.0,
+                historicalCostPerKg = doc.getDouble("historicalCostPerKg") ?: 0.0,
+                currency = doc.getString("currency") ?: "EGP",
+                changeReason = doc.getString("changeReason") ?: "",
+                updatedBy = doc.getString("updatedBy") ?: "",
+                updatedAt = doc.getLong("updatedAt") ?: 0L,
+                ingredientsJson = doc.getString("ingredientsJson") ?: "[]",
+                confidentialCiphertext = doc.getString("confidentialCiphertext") ?: "",
+                isConfidentialSealed = doc.getBoolean("isConfidentialSealed") ?: false,
+                technicalAnalysis = doc.getString("technicalAnalysis") ?: "",
+                notes = doc.getString("notes") ?: "",
+                approvedForProduction = approvedFlag,
+                createdBy = doc.getString("createdBy") ?: "مهندس المختبر الكيميائي",
+                createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
+            )
+        }
+        if (restoredFormulations.isNotEmpty()) {
+            dao.upsertFormulations(restoredFormulations)
+            restoredCount += restoredFormulations.size
+        }
+
+        // 8c. Fetch Daily Production Batches from Cloud (with tombstone & epoch shield)
+        val batchSnapshot = cRef.collection("paint_batches").get().await()
+        val restoredBatches = batchSnapshot.documents.mapNotNull { doc ->
+            val id = doc.getLong("id") ?: return@mapNotNull null
+            val bNo = doc.getString("batchNumber") ?: doc.id
+            val createdAt = doc.getLong("createdAt") ?: 0L
+            if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                DeletedRecordsRegistry.isDeleted("paint_batches", id) ||
+                DeletedRecordsRegistry.isDeleted("paint_batches", "BATCH-$id") ||
+                DeletedRecordsRegistry.isDeleted("paint_batches", doc.id) ||
+                (bNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("paint_batches", bNo))
+            ) {
+                runCatching { doc.reference.delete() }
+                dao.deleteProductionBatch(id)
+                return@mapNotNull null
+            }
+            ProductionBatchEntity(
+                id = id,
+                batchNumber = bNo,
+                productionDate = doc.getString("productionDate") ?: "",
+                formulaId = doc.getLong("formulaId"),
+                formulaNo = doc.getString("formulaNo") ?: "",
+                productName = doc.getString("productName") ?: "تشغيلة دهان",
+                paintType = doc.getString("paintType") ?: "مطفي معماري (Matt)",
+                baseKind = doc.getString("baseKind") ?: "أبيض",
+                targetPvc = doc.getDouble("targetPvc") ?: 0.0,
+                targetWeightKg = doc.getDouble("targetWeightKg") ?: 0.0,
+                actualWeightKg = doc.getDouble("actualWeightKg") ?: 0.0,
+                targetVolumeLiters = doc.getDouble("targetVolumeLiters") ?: 0.0,
+                cartonsCount = doc.getLong("cartonsCount")?.toInt() ?: 0,
+                packageUnit = doc.getString("packageUnit") ?: "كرتونة 900 مل",
+                machineId = doc.getLong("machineId"),
+                machineName = doc.getString("machineName") ?: "",
+                qualityStatus = doc.getString("qualityStatus") ?: "معتمد ومطابق",
+                measuredDensity = doc.getDouble("measuredDensity") ?: 0.0,
+                measuredViscosity = doc.getString("measuredViscosity") ?: "",
+                scaledIngredientsJson = doc.getString("scaledIngredientsJson") ?: "[]",
+                supervisorOrEngineer = doc.getString("supervisorOrEngineer") ?: "مهندس الإنتاج",
+                shift = doc.getString("shift") ?: "الوردية الصباحية",
+                notes = doc.getString("notes") ?: "",
+                syncStatus = "SYNCED",
+                createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
+            )
+        }
+        if (restoredBatches.isNotEmpty()) {
+            dao.upsertProductionBatches(restoredBatches)
+            restoredCount += restoredBatches.size
+        }
+        return restoredCount
+    }
+
+    private suspend fun restoreStockMovesAndHalfaInvoicesFromCloud(
+        cRef: com.google.firebase.firestore.DocumentReference,
+        dao: PmpDao
+    ): Int {
+        var restoredCount = 0
+        // 9. Fetch Stock Moves (with tombstone shield & deleted-product/warehouse cleanup)
+        val currentProdIds = dao.getProductsDirect().map { it.id }.toSet()
+        val smSnapshot = cRef.collection("stock_moves").get().await()
+        val restoredStockMoves = smSnapshot.documents.mapNotNull { doc ->
+            val id = doc.getLong("id") ?: return@mapNotNull null
+            val prodId = doc.getLong("productId") ?: 0L
+            val whId = doc.getLong("warehouseId") ?: 0L
+            val docCreatedAt = doc.getLong("createdAt") ?: 0L
+            val isMoveDeleted = DeletedRecordsRegistry.isDeleted("stock_moves", id) ||
+                DeletedRecordsRegistry.isDeleted("stock_moves", "SM-$id") ||
+                DeletedRecordsRegistry.isDeleted("stock_moves", doc.id) ||
+                DeletedRecordsRegistry.isDeleted("products", prodId) ||
+                DeletedRecordsRegistry.isDeleted("warehouses", whId) ||
+                DeletedRecordsRegistry.isPreEpoch(docCreatedAt) ||
+                (currentProdIds.isNotEmpty() && prodId !in currentProdIds)
+            if (isMoveDeleted) {
+                runCatching { doc.reference.delete() }
+                dao.deleteStockMoveById(id)
+                return@mapNotNull null
+            }
+            StockMoveEntity(
+                id = id,
+                warehouseId = whId.takeIf { it > 0L } ?: 1L,
+                productId = prodId.takeIf { it > 0L } ?: 1L,
+                quantity = doc.getDouble("quantity") ?: 1.0,
+                kind = doc.getString("kind") ?: "IN",
+                invoiceId = doc.getLong("invoiceId")?.takeIf { it > 0 },
+                note = doc.getString("note") ?: "",
+                createdBy = doc.getString("createdBy") ?: "المدير",
+                createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis()
+            )
+        }
+        if (restoredStockMoves.isNotEmpty()) {
+            dao.upsertStockMoves(restoredStockMoves)
+            restoredCount += restoredStockMoves.size
+        }
+
+        // 10. Fetch Halfa & Egypt Invoices (with tombstone & epoch shield)
+        val hiSnapshot = cRef.collection("halfa_invoices").get().await()
+        val restoredHalfaInvoices = hiSnapshot.documents.mapNotNull { doc ->
+            val id = doc.getLong("id") ?: return@mapNotNull null
+            val invNo = doc.getString("invoiceNo") ?: "HINV-$id"
+            val createdAt = doc.getLong("createdAt") ?: 0L
+            if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                DeletedRecordsRegistry.isDeleted("halfa_invoices", id) ||
+                DeletedRecordsRegistry.isDeleted("halfa_invoices", "HINV-$id") ||
+                DeletedRecordsRegistry.isDeleted("halfa_invoices", doc.id) ||
+                DeletedRecordsRegistry.isDeleted("halfa_invoices", invNo)
+            ) {
+                runCatching { doc.reference.delete() }
+                dao.deleteHalfaInvoiceById(id)
+                return@mapNotNull null
+            }
+            HalfaInvoiceEntity(
+                id = id,
+                invoiceNo = invNo,
+                invoiceDate = doc.getString("invoiceDate") ?: "2026-10-26",
+                cashbox = doc.getString("cashbox") ?: "خزنة مصر",
+                currency = doc.getString("currency") ?: "EGP",
+                warehouseId = doc.getLong("warehouseId") ?: 1L,
+                productId = doc.getLong("productId") ?: 1L,
+                productName = doc.getString("productName") ?: "منتج",
+                quantity = doc.getDouble("quantity") ?: 1.0,
+                unitPrice = doc.getDouble("unitPrice") ?: 0.0,
+                total = doc.getDouble("total") ?: 0.0,
+                factoryMoveId = doc.getLong("factoryMoveId")?.takeIf { it > 0 },
+                note = doc.getString("note") ?: "",
+                status = doc.getString("status") ?: "active",
+                createdBy = doc.getString("createdBy") ?: "مسؤول التحميل",
+                createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis()
+            )
+        }
+        if (restoredHalfaInvoices.isNotEmpty()) {
+            dao.upsertHalfaInvoices(restoredHalfaInvoices)
+            restoredCount += restoredHalfaInvoices.size
+        }
+        return restoredCount
+    }
 
     private suspend fun pushPhase2InventoryToCloud(
         cRef: com.google.firebase.firestore.DocumentReference,
@@ -5115,10 +5205,18 @@ class CloudErpSyncRepository(
             }
             val payload = mapOf(
                 "id" to form.id,
+                "syncUuid" to form.syncUuid,
                 "formulaNo" to form.formulaNo,
                 "productName" to form.productName,
+                "linkedProductId" to (form.linkedProductId ?: 0L),
+                "linkedProductSku" to form.linkedProductSku,
+                "category" to form.category,
                 "paintType" to form.paintType,
                 "baseKind" to form.baseKind,
+                "versionNumber" to form.versionNumber,
+                "approvalStatus" to form.approvalStatus,
+                "approvedBy" to form.approvedBy,
+                "approvedAt" to form.approvedAt,
                 "targetPvc" to form.targetPvc,
                 "calculatedPvc" to form.calculatedPvc,
                 "cpvcEstimated" to form.cpvcEstimated,
@@ -5129,7 +5227,15 @@ class CloudErpSyncRepository(
                 "calculatedDensity" to form.calculatedDensity,
                 "totalCost" to form.totalCost,
                 "costPerKg" to form.costPerKg,
+                "historicalTotalCost" to form.historicalTotalCost,
+                "historicalCostPerKg" to form.historicalCostPerKg,
+                "currency" to form.currency,
+                "changeReason" to form.changeReason,
+                "updatedBy" to form.updatedBy,
+                "updatedAt" to form.updatedAt,
                 "ingredientsJson" to form.ingredientsJson,
+                "confidentialCiphertext" to form.confidentialCiphertext,
+                "isConfidentialSealed" to form.isConfidentialSealed,
                 "technicalAnalysis" to form.technicalAnalysis,
                 "notes" to form.notes,
                 "approvedForProduction" to form.approvedForProduction,
@@ -5137,9 +5243,27 @@ class CloudErpSyncRepository(
                 "createdAt" to form.createdAt,
                 "serverUpdatedAt" to FieldValue.serverTimestamp()
             )
+            val summaryPayload = mapOf(
+                "id" to form.id,
+                "formulaNo" to form.formulaNo,
+                "productName" to form.productName,
+                "linkedProductId" to (form.linkedProductId ?: 0L),
+                "category" to form.category,
+                "paintType" to form.paintType,
+                "baseKind" to form.baseKind,
+                "versionNumber" to form.versionNumber,
+                "approvalStatus" to form.approvalStatus,
+                "calculatedPvc" to form.calculatedPvc,
+                "calculatedDensity" to form.calculatedDensity,
+                "costPerKg" to form.costPerKg,
+                "historicalCostPerKg" to form.historicalCostPerKg,
+                "currency" to form.currency,
+                "approvedForProduction" to form.approvedForProduction,
+                "serverUpdatedAt" to FieldValue.serverTimestamp()
+            )
             cRef.collection("lab_formulations").document(docId).set(payload, SetOptions.merge()).await()
             runCatching {
-                firestore.collection("lab_formulations").document(docId).set(payload, SetOptions.merge()).await()
+                cRef.collection("lab_formula_summaries").document(docId).set(summaryPayload, SetOptions.merge()).await()
             }
             Unit
         }

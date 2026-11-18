@@ -19,14 +19,27 @@ object DatabaseBackupManager {
      * Strictly excludes tombstoned / pre-epoch deleted records and embeds record_tombstones + clusterEpoch
      * so deleted financial transactions can NEVER resurrect across APK upgrades or restores.
      */
-    suspend fun saveLocalSnapshot(context: Context, dao: PmpDao): Result<File> = withContext(Dispatchers.IO) {
+    suspend fun saveLocalSnapshot(
+        context: Context,
+        dao: PmpDao,
+        labDao: LabDao? = null
+    ): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
             DeletedAccountsRegistry.init(context)
             DeletedRecordsRegistry.init(context)
             DeletedRecordsRegistry.syncWithDao(dao)
 
+            // Preserve any prior snapshot version before overwriting with v7
+            synchronized(snapshotLock) {
+                val currentBackup = File(context.filesDir, BACKUP_FILE_NAME)
+                val preUpgradeBackup = File(context.filesDir, "pmp_erp_pre_v17_backup.json")
+                if (currentBackup.exists() && !preUpgradeBackup.exists()) {
+                    runCatching { currentBackup.copyTo(preUpgradeBackup, overwrite = false) }
+                }
+            }
+
             val root = JSONObject()
-            root.put("version", 6)
+            root.put("version", 7)
             root.put("timestamp", System.currentTimeMillis())
             root.put("clusterEpoch", DeletedRecordsRegistry.getClusterEpoch())
 
@@ -231,6 +244,168 @@ object DatabaseBackupManager {
             }
             root.put("record_tombstones", recordTombstonesArray)
 
+            // 11. Chemical Formulations & Version History (excluding deleted/pre-epoch)
+            val formulations = dao.getFormulationsDirect().filterNot { f ->
+                DeletedRecordsRegistry.isPreEpoch(f.createdAt) ||
+                    DeletedRecordsRegistry.isDeleted("lab_formulations", f.id) ||
+                    DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-${f.id}") ||
+                    (f.formulaNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", f.formulaNo))
+            }
+            val frmArray = JSONArray()
+            formulations.forEach { f ->
+                frmArray.put(JSONObject().apply {
+                    put("id", f.id)
+                    put("formulaNo", f.formulaNo)
+                    put("productName", f.productName)
+                    put("paintType", f.paintType)
+                    put("baseKind", f.baseKind)
+                    put("targetPvc", f.targetPvc)
+                    put("calculatedPvc", f.calculatedPvc)
+                    put("cpvcEstimated", f.cpvcEstimated)
+                    put("totalSolidsWeight", f.totalSolidsWeight)
+                    put("totalSolidsVolume", f.totalSolidsVolume)
+                    put("totalBatchWeight", f.totalBatchWeight)
+                    put("totalBatchVolume", f.totalBatchVolume)
+                    put("calculatedDensity", f.calculatedDensity)
+                    put("totalCost", f.totalCost)
+                    put("costPerKg", f.costPerKg)
+                    put("ingredientsJson", if (f.isConfidentialSealed) "[]" else f.ingredientsJson)
+                    put("technicalAnalysis", f.technicalAnalysis)
+                    put("notes", f.notes)
+                    put("approvedForProduction", f.approvedForProduction)
+                    put("createdBy", f.createdBy)
+                    put("createdAt", f.createdAt)
+                    put("syncUuid", f.syncUuid)
+                    put("linkedProductId", f.linkedProductId ?: -1L)
+                    put("linkedProductSku", f.linkedProductSku)
+                    put("category", f.category)
+                    put("versionNumber", f.versionNumber)
+                    put("approvalStatus", f.approvalStatus)
+                    put("approvedBy", f.approvedBy)
+                    put("approvedAt", f.approvedAt)
+                    put("historicalTotalCost", f.historicalTotalCost)
+                    put("historicalCostPerKg", f.historicalCostPerKg)
+                    put("currency", f.currency)
+                    put("changeReason", f.changeReason)
+                    put("updatedBy", f.updatedBy)
+                    put("updatedAt", f.updatedAt)
+                    put("confidentialCiphertext", f.confidentialCiphertext)
+                    put("isConfidentialSealed", f.isConfidentialSealed)
+                })
+            }
+            root.put("lab_formulations", frmArray)
+
+            if (labDao != null) {
+                val versionsArray = JSONArray()
+                labDao.getAllFormulaVersionsDirect().forEach { v ->
+                    versionsArray.put(JSONObject().apply {
+                        put("id", v.id)
+                        put("syncUuid", v.syncUuid)
+                        put("formulaId", v.formulaId)
+                        put("formulaNo", v.formulaNo)
+                        put("productName", v.productName)
+                        put("versionNumber", v.versionNumber)
+                        put("previousVersionNumber", v.previousVersionNumber)
+                        put("status", v.status)
+                        put("changeReason", v.changeReason)
+                        put("diffSummaryJson", v.diffSummaryJson)
+                        put("previousCostPerKg", v.previousCostPerKg)
+                        put("newCostPerKg", v.newCostPerKg)
+                        put("historicalTotalCost", v.historicalTotalCost)
+                        put("calculatedPvc", v.calculatedPvc)
+                        put("calculatedDensity", v.calculatedDensity)
+                        put("currency", v.currency)
+                        put("ingredientsSnapshotJson", if (v.encryptedSnapshotCiphertext.isNotBlank()) "[]" else v.ingredientsSnapshotJson)
+                        put("encryptedSnapshotCiphertext", v.encryptedSnapshotCiphertext)
+                        put("createdBy", v.createdBy)
+                        put("approvedBy", v.approvedBy)
+                        put("approvedAt", v.approvedAt)
+                        put("createdAt", v.createdAt)
+                    })
+                }
+                root.put("lab_formula_versions", versionsArray)
+
+                val expArray = JSONArray()
+                labDao.getAllLabExperimentsDirect().forEach { ex ->
+                    expArray.put(JSONObject().apply {
+                        put("id", ex.id)
+                        put("syncUuid", ex.syncUuid)
+                        put("experimentNo", ex.experimentNo)
+                        put("formulaId", ex.formulaId)
+                        put("formulaNo", ex.formulaNo)
+                        put("formulaVersionId", ex.formulaVersionId ?: -1L)
+                        put("versionNumber", ex.versionNumber)
+                        put("productId", ex.productId ?: -1L)
+                        put("productName", ex.productName)
+                        put("experimentDate", ex.experimentDate)
+                        put("technicianName", ex.technicianName)
+                        put("materialsUsedJson", ex.materialsUsedJson)
+                        put("measuredDensity", ex.measuredDensity)
+                        put("measuredViscosity", ex.measuredViscosity)
+                        put("measuredPh", ex.measuredPh)
+                        put("measuredGrindMicrons", ex.measuredGrindMicrons)
+                        put("hidingPowerPercent", ex.hidingPowerPercent)
+                        put("notes", ex.notes)
+                        put("status", ex.status)
+                        put("decision", ex.decision)
+                        put("decidedBy", ex.decidedBy)
+                        put("decidedAt", ex.decidedAt)
+                        put("linkedQcNo", ex.linkedQcNo)
+                        put("idempotencyKey", ex.idempotencyKey)
+                        put("createdAt", ex.createdAt)
+                        put("updatedAt", ex.updatedAt)
+                    })
+                }
+                root.put("lab_experiments", expArray)
+
+                val priceHistArray = JSONArray()
+                labDao.getAllRawMaterialPriceHistoryDirect().forEach { ph ->
+                    priceHistArray.put(JSONObject().apply {
+                        put("id", ph.id)
+                        put("syncUuid", ph.syncUuid)
+                        put("materialId", ph.materialId)
+                        put("itemCode", ph.itemCode)
+                        put("materialName", ph.materialName)
+                        put("supplierName", ph.supplierName)
+                        put("unitPrice", ph.unitPrice)
+                        put("previousPrice", ph.previousPrice)
+                        put("currency", ph.currency)
+                        put("sourceType", ph.sourceType)
+                        put("sourceDocNo", ph.sourceDocNo)
+                        put("effectiveDate", ph.effectiveDate)
+                        put("recordedBy", ph.recordedBy)
+                        put("createdAt", ph.createdAt)
+                    })
+                }
+                root.put("raw_material_price_history", priceHistArray)
+
+                val excelArray = JSONArray()
+                labDao.getAllExcelImportsDirect().forEach { exImp ->
+                    excelArray.put(JSONObject().apply {
+                        put("id", exImp.id)
+                        put("syncUuid", exImp.syncUuid)
+                        put("importNo", exImp.importNo)
+                        put("fileName", exImp.fileName)
+                        put("sheetCount", exImp.sheetCount)
+                        put("formulasDetected", exImp.formulasDetected)
+                        put("formulasImported", exImp.formulasImported)
+                        put("materialsMatched", exImp.materialsMatched)
+                        put("materialsCreated", exImp.materialsCreated)
+                        put("externalLinksDetected", exImp.externalLinksDetected)
+                        put("brokenRefsDetected", exImp.brokenRefsDetected)
+                        put("warningsCount", exImp.warningsCount)
+                        put("approvalStatus", exImp.approvalStatus)
+                        put("checksumSha256", exImp.checksumSha256)
+                        put("restrictedSummaryJson", exImp.restrictedSummaryJson)
+                        put("referenceArchivePath", exImp.referenceArchivePath)
+                        put("importedBy", exImp.importedBy)
+                        put("idempotencyKey", exImp.idempotencyKey)
+                        put("createdAt", exImp.createdAt)
+                    })
+                }
+                root.put("lab_excel_imports", excelArray)
+            }
+
             synchronized(snapshotLock) {
                 val file = File(context.filesDir, BACKUP_FILE_NAME)
                 val tmpFile = File(context.filesDir, "$BACKUP_FILE_NAME.tmp")
@@ -239,7 +414,7 @@ object DatabaseBackupManager {
                     file.writeText(root.toString(2))
                     tmpFile.delete()
                 }
-                Log.d(TAG, "Saved persistent ERP snapshot v6 with ${invoices.size} invoices and ${movements.size} movements to ${file.absolutePath}")
+                Log.d(TAG, "Saved persistent ERP snapshot v7 with ${invoices.size} invoices, ${movements.size} movements, ${formulations.size} formulations")
                 file
             }
         }
@@ -249,7 +424,11 @@ object DatabaseBackupManager {
      * Checks if the database is newly initialized or empty, and restores previous data from the snapshot,
      * applying all account & ERP record tombstones FIRST so deleted records never resurrect.
      */
-    suspend fun restoreIfEmpty(context: Context, dao: PmpDao): Boolean = withContext(Dispatchers.IO) {
+    suspend fun restoreIfEmpty(
+        context: Context,
+        dao: PmpDao,
+        labDao: LabDao? = null
+    ): Boolean = withContext(Dispatchers.IO) {
         val file = File(context.filesDir, BACKUP_FILE_NAME)
         if (!file.exists()) return@withContext false
 
@@ -527,7 +706,208 @@ object DatabaseBackupManager {
                 if (list.isNotEmpty()) dao.upsertCustomers(list)
             }
 
-            Log.i(TAG, "Successfully restored ERP data from persistent snapshot v6 with tombstone protection!")
+            // Restore Lab Formulations if empty (excluding tombstoned)
+            val frmArray = root.optJSONArray("lab_formulations")
+            if (frmArray != null && frmArray.length() > 0 && dao.getFormulationsDirect().isEmpty()) {
+                val list = mutableListOf<FormulationEntity>()
+                for (i in 0 until frmArray.length()) {
+                    val obj = frmArray.getJSONObject(i)
+                    val fId = obj.optLong("id")
+                    val fNo = obj.optString("formulaNo")
+                    val createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                    if (DeletedRecordsRegistry.isPreEpoch(createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("lab_formulations", fId) ||
+                        DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-$fId") ||
+                        (fNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", fNo))
+                    ) {
+                        continue
+                    }
+                    val prodIdRaw = obj.optLong("linkedProductId", -1L)
+                    list.add(
+                        FormulationEntity(
+                            id = fId,
+                            formulaNo = fNo,
+                            productName = obj.optString("productName"),
+                            paintType = obj.optString("paintType", "مطفي معماري (Matt)"),
+                            baseKind = obj.optString("baseKind", "أبيض"),
+                            targetPvc = obj.optDouble("targetPvc", 0.0),
+                            calculatedPvc = obj.optDouble("calculatedPvc", 0.0),
+                            cpvcEstimated = obj.optDouble("cpvcEstimated", 52.0),
+                            totalSolidsWeight = obj.optDouble("totalSolidsWeight", 0.0),
+                            totalSolidsVolume = obj.optDouble("totalSolidsVolume", 0.0),
+                            totalBatchWeight = obj.optDouble("totalBatchWeight", 0.0),
+                            totalBatchVolume = obj.optDouble("totalBatchVolume", 0.0),
+                            calculatedDensity = obj.optDouble("calculatedDensity", 1.0),
+                            totalCost = obj.optDouble("totalCost", 0.0),
+                            costPerKg = obj.optDouble("costPerKg", 0.0),
+                            ingredientsJson = obj.optString("ingredientsJson", "[]"),
+                            technicalAnalysis = obj.optString("technicalAnalysis", ""),
+                            notes = obj.optString("notes", ""),
+                            approvedForProduction = obj.optBoolean("approvedForProduction", false),
+                            createdBy = obj.optString("createdBy", "مهندس المختبر الكيميائي"),
+                            createdAt = createdAt,
+                            syncUuid = obj.optString("syncUuid", "FRM-UUID-$fId"),
+                            linkedProductId = if (prodIdRaw > 0L) prodIdRaw else null,
+                            linkedProductSku = obj.optString("linkedProductSku", ""),
+                            category = obj.optString("category", "معجونات ودهانات"),
+                            versionNumber = obj.optInt("versionNumber", 1),
+                            approvalStatus = obj.optString("approvalStatus", "DRAFT"),
+                            approvedBy = obj.optString("approvedBy", ""),
+                            approvedAt = obj.optLong("approvedAt", 0L),
+                            historicalTotalCost = obj.optDouble("historicalTotalCost", 0.0),
+                            historicalCostPerKg = obj.optDouble("historicalCostPerKg", 0.0),
+                            currency = obj.optString("currency", "EGP"),
+                            changeReason = obj.optString("changeReason", ""),
+                            updatedBy = obj.optString("updatedBy", ""),
+                            updatedAt = obj.optLong("updatedAt", createdAt),
+                            confidentialCiphertext = obj.optString("confidentialCiphertext", ""),
+                            isConfidentialSealed = obj.optBoolean("isConfidentialSealed", false)
+                        )
+                    )
+                }
+                if (list.isNotEmpty()) dao.upsertFormulations(list)
+            }
+
+            if (labDao != null) {
+                val verArray = root.optJSONArray("lab_formula_versions")
+                if (verArray != null && verArray.length() > 0 && labDao.getAllFormulaVersionsDirect().isEmpty()) {
+                    val vList = mutableListOf<FormulationVersionEntity>()
+                    for (i in 0 until verArray.length()) {
+                        val o = verArray.getJSONObject(i)
+                        vList.add(
+                            FormulationVersionEntity(
+                                id = o.optLong("id"),
+                                syncUuid = o.optString("syncUuid"),
+                                formulaId = o.optLong("formulaId"),
+                                formulaNo = o.optString("formulaNo"),
+                                productName = o.optString("productName"),
+                                versionNumber = o.optInt("versionNumber", 1),
+                                previousVersionNumber = o.optInt("previousVersionNumber", 0),
+                                status = o.optString("status", "NEEDS_REVIEW"),
+                                changeReason = o.optString("changeReason", ""),
+                                diffSummaryJson = o.optString("diffSummaryJson", "{}"),
+                                previousCostPerKg = o.optDouble("previousCostPerKg", 0.0),
+                                newCostPerKg = o.optDouble("newCostPerKg", 0.0),
+                                historicalTotalCost = o.optDouble("historicalTotalCost", 0.0),
+                                calculatedPvc = o.optDouble("calculatedPvc", 0.0),
+                                calculatedDensity = o.optDouble("calculatedDensity", 1.0),
+                                currency = o.optString("currency", "EGP"),
+                                ingredientsSnapshotJson = o.optString("ingredientsSnapshotJson", "[]"),
+                                encryptedSnapshotCiphertext = o.optString("encryptedSnapshotCiphertext", ""),
+                                createdBy = o.optString("createdBy", ""),
+                                approvedBy = o.optString("approvedBy", ""),
+                                approvedAt = o.optLong("approvedAt", 0L),
+                                createdAt = o.optLong("createdAt", System.currentTimeMillis())
+                            )
+                        )
+                    }
+                    if (vList.isNotEmpty()) labDao.upsertFormulaVersions(vList)
+                }
+
+                val expArray = root.optJSONArray("lab_experiments")
+                if (expArray != null && expArray.length() > 0 && labDao.getAllLabExperimentsDirect().isEmpty()) {
+                    val eList = mutableListOf<LabExperimentEntity>()
+                    for (i in 0 until expArray.length()) {
+                        val o = expArray.getJSONObject(i)
+                        val fvId = o.optLong("formulaVersionId", -1L)
+                        val pId = o.optLong("productId", -1L)
+                        eList.add(
+                            LabExperimentEntity(
+                                id = o.optLong("id"),
+                                syncUuid = o.optString("syncUuid"),
+                                experimentNo = o.optString("experimentNo"),
+                                formulaId = o.optLong("formulaId"),
+                                formulaNo = o.optString("formulaNo"),
+                                formulaVersionId = if (fvId > 0L) fvId else null,
+                                versionNumber = o.optInt("versionNumber", 1),
+                                productId = if (pId > 0L) pId else null,
+                                productName = o.optString("productName"),
+                                experimentDate = o.optString("experimentDate"),
+                                technicianName = o.optString("technicianName"),
+                                materialsUsedJson = o.optString("materialsUsedJson", "[]"),
+                                measuredDensity = o.optDouble("measuredDensity", 0.0),
+                                measuredViscosity = o.optString("measuredViscosity", ""),
+                                measuredPh = o.optDouble("measuredPh", 0.0),
+                                measuredGrindMicrons = o.optDouble("measuredGrindMicrons", 0.0),
+                                hidingPowerPercent = o.optDouble("hidingPowerPercent", 0.0),
+                                notes = o.optString("notes", ""),
+                                status = o.optString("status", "PENDING"),
+                                decision = o.optString("decision", "PENDING"),
+                                decidedBy = o.optString("decidedBy", ""),
+                                decidedAt = o.optLong("decidedAt", 0L),
+                                linkedQcNo = o.optString("linkedQcNo", ""),
+                                idempotencyKey = o.optString("idempotencyKey", ""),
+                                createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+                                updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
+                            )
+                        )
+                    }
+                    if (eList.isNotEmpty()) labDao.upsertLabExperiments(eList)
+                }
+
+                val phArray = root.optJSONArray("raw_material_price_history")
+                if (phArray != null && phArray.length() > 0 && labDao.getAllRawMaterialPriceHistoryDirect().isEmpty()) {
+                    val phList = mutableListOf<RawMaterialPriceHistoryEntity>()
+                    for (i in 0 until phArray.length()) {
+                        val o = phArray.getJSONObject(i)
+                        phList.add(
+                            RawMaterialPriceHistoryEntity(
+                                id = o.optLong("id"),
+                                syncUuid = o.optString("syncUuid"),
+                                materialId = o.optLong("materialId"),
+                                itemCode = o.optString("itemCode", ""),
+                                materialName = o.optString("materialName"),
+                                supplierName = o.optString("supplierName", ""),
+                                unitPrice = o.optDouble("unitPrice", 0.0),
+                                previousPrice = o.optDouble("previousPrice", 0.0),
+                                currency = o.optString("currency", "EGP"),
+                                sourceType = o.optString("sourceType", "MANUAL_LAB"),
+                                sourceDocNo = o.optString("sourceDocNo", ""),
+                                effectiveDate = o.optString("effectiveDate", ""),
+                                recordedBy = o.optString("recordedBy", ""),
+                                createdAt = o.optLong("createdAt", System.currentTimeMillis())
+                            )
+                        )
+                    }
+                    if (phList.isNotEmpty()) labDao.upsertPriceHistories(phList)
+                }
+
+                val xlsArray = root.optJSONArray("lab_excel_imports")
+                if (xlsArray != null && xlsArray.length() > 0 && labDao.getAllExcelImportsDirect().isEmpty()) {
+                    val xlsList = mutableListOf<LabExcelImportBatchEntity>()
+                    for (i in 0 until xlsArray.length()) {
+                        val o = xlsArray.getJSONObject(i)
+                        xlsList.add(
+                            LabExcelImportBatchEntity(
+                                id = o.optLong("id"),
+                                syncUuid = o.optString("syncUuid"),
+                                importNo = o.optString("importNo"),
+                                fileName = o.optString("fileName"),
+                                sheetCount = o.optInt("sheetCount", 0),
+                                formulasDetected = o.optInt("formulasDetected", 0),
+                                formulasImported = o.optInt("formulasImported", 0),
+                                materialsMatched = o.optInt("materialsMatched", 0),
+                                materialsCreated = o.optInt("materialsCreated", 0),
+                                externalLinksDetected = o.optInt("externalLinksDetected", 0),
+                                brokenRefsDetected = o.optInt("brokenRefsDetected", 0),
+                                warningsCount = o.optInt("warningsCount", 0),
+                                approvalStatus = o.optString("approvalStatus", "NEEDS_REVIEW"),
+                                checksumSha256 = o.optString("checksumSha256", ""),
+                                restrictedSummaryJson = o.optString("restrictedSummaryJson", "{}"),
+                                referenceArchivePath = o.optString("referenceArchivePath", ""),
+                                importedBy = o.optString("importedBy", ""),
+                                idempotencyKey = o.optString("idempotencyKey", ""),
+                                createdAt = o.optLong("createdAt", System.currentTimeMillis())
+                            )
+                        )
+                    }
+                    if (xlsList.isNotEmpty()) {
+                        xlsList.forEach { labDao.upsertExcelImport(it) }
+                    }
+                }
+            }
+
+            Log.i(TAG, "Successfully restored ERP data from persistent snapshot v7 with tombstone protection!")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Error restoring from persistent snapshot", e)

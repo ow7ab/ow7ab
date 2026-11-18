@@ -126,6 +126,72 @@ service cloud.firestore {
         !m.permissions.matches('.*DENY:(الخزن|العمليات المالية).*');
     }
 
+    function memberHasPermString(m) {
+      return ('permissions' in m) && (m.permissions is string);
+    }
+
+    function isLabSecretDenied(m) {
+      return memberHasPermString(m) &&
+        m.permissions.matches('.*DENY:(VIEW_SECRET_FORMULAS|المختبر الكيميائي|المختبر الكيميائي:VIEW|CHEMISTRY_LAB).*');
+    }
+
+    function hasLabSecretRead(m) {
+      return m.active == true && (
+        isMemberAdmin(m) ||
+        (isMemberManager(m) && !isLabSecretDenied(m)) ||
+        (memberHasPermString(m) &&
+          m.permissions.matches('.*(VIEW_SECRET_FORMULAS|المختبر الكيميائي|Chemistry Lab|CHEMISTRY_LAB).*') &&
+          !isLabSecretDenied(m))
+      );
+    }
+
+    function hasLabEdit(m) {
+      return hasLabSecretRead(m) && !(
+        memberHasPermString(m) &&
+        m.permissions.matches('.*(VIEW_ONLY|عرض فقط|DENY:EDIT|DENY:CREATE|DENY:EDIT_FORMULAS|DENY:المختبر الكيميائي:EDIT|DENY:المختبر الكيميائي:CREATE).*')
+      );
+    }
+
+    function hasLabApprove(m) {
+      return m.active == true && (
+        isMemberAdmin(m) ||
+        isMemberManager(m) ||
+        (memberHasPermString(m) &&
+          m.permissions.matches('.*(APPROVE_FORMULAS|اعتماد التركيبات|GRANT:المختبر الكيميائي:APPROVE).*'))
+      ) && !(
+        memberHasPermString(m) &&
+        m.permissions.matches('.*DENY:(APPROVE_FORMULAS|APPROVE|المختبر الكيميائي:APPROVE).*')
+      );
+    }
+
+    function hasQcGate(m) {
+      return m.active == true && (
+        isMemberAdmin(m) ||
+        isMemberManager(m) ||
+        (memberHasPermString(m) &&
+          m.permissions.matches('.*(الجودة|QC|اعتماد الجودة|QC_OFFICER|LAB_EXPERIMENT).*'))
+      ) && !(
+        memberHasPermString(m) &&
+        m.permissions.matches('.*DENY:(QC_DECISION|APPROVE|الجودة).*')
+      );
+    }
+
+    function hasProcurementOrCostRead(m) {
+      return m.active == true && (
+        isMemberAdmin(m) ||
+        isMemberManager(m) ||
+        isMemberAccountant(m) ||
+        hasLabSecretRead(m) ||
+        (memberHasPermString(m) &&
+          m.permissions.matches('.*(المشتريات|المخازن|PURCHAS|WAREHOUSE|خامات المصنع).*'))
+      );
+    }
+
+    function isApprovingFormulaWrite(d) {
+      return (('approvalStatus' in d) && d.approvalStatus == 'APPROVED') ||
+        (('approvedForProduction' in d) && d.approvedForProduction == true);
+    }
+
     function isAllowedErpCollection(col) {
       return col in [
         'user_accounts', 'pending_requests',
@@ -136,7 +202,9 @@ service cloud.firestore {
         'factory_items', 'factory_machines', 'factory_moves',
         'halfa_invoices', 'poster_prices', 'audit_logs',
         'server_status', 'deleted_users',
-        'lab_formulations', 'formulations', 'paint_batches', 'chemical_safety',
+        'lab_formulations', 'formulations', 'lab_formula_summaries',
+        'lab_formula_versions', 'lab_experiments', 'raw_material_price_history', 'lab_excel_imports',
+        'paint_batches', 'chemical_safety',
         'purchase_orders', 'purchase_receipts', 'goods_receipts', 'production_orders', 'qc_inspections', 'fg_receipts', 'sales_deliveries',
         'inventory_movements', 'warehouse_stock_balances', 'warehouse_transfers', 'warehouse_transfer_items', 'packaging_rules', 'stock_batches',
         'accounting_accounts', 'journal_entries', 'journal_lines',
@@ -255,10 +323,12 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // 6. Chemical Formulations and Paint Batch Data (Requires Authenticated Cluster Member)
+    // 6. Chemical Formulations and Paint Batch Data (RBAC-Protected Lab IP & Batch Data)
     match /lab_formulations/{formulaId} {
-      allow read: if isSignedIn() && isValidId(formulaId) && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
-      allow create, update: if isSignedIn() && isValidId(formulaId) && isReasonablePayload() && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
+      allow read: if isSignedIn() && isValidId(formulaId) && hasLabSecretRead(resolveMember('PMP-ERP-MAIN-CLUSTER'));
+      allow create, update: if isSignedIn() && isValidId(formulaId) && isReasonablePayload() &&
+        hasLabEdit(resolveMember('PMP-ERP-MAIN-CLUSTER')) &&
+        (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember('PMP-ERP-MAIN-CLUSTER')));
       allow delete: if isSignedIn() && isValidId(formulaId) && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
     }
 
@@ -358,6 +428,23 @@ service cloud.firestore {
         (col != 'journal_lines' || (
           (!('debit' in d) || (d.debit is number && d.debit >= 0)) &&
           (!('credit' in d) || (d.credit is number && d.credit >= 0))
+        )) &&
+        (col != 'lab_formula_summaries' || (
+          !('ingredientsJson' in d) &&
+          !('ingredients' in d) &&
+          !('confidentialCiphertext' in d) &&
+          !('saltBase64' in d) &&
+          !('ivBase64' in d)
+        )) &&
+        (col != 'lab_experiments' || (
+          !('ingredientsJson' in d) &&
+          !('confidentialCiphertext' in d) &&
+          !('saltBase64' in d) &&
+          !('ivBase64' in d)
+        )) &&
+        (col != 'raw_material_price_history' || (
+          (!('newPrice' in d) || (d.newPrice is number && d.newPrice >= 0)) &&
+          (!('previousPrice' in d) || (d.previousPrice is number && d.previousPrice >= 0))
         ));
     }
 
@@ -619,18 +706,98 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // 8d-lab. Dedicated Low-Expression Rules for Chemical Lab IP, Versions, QC & Price History
+    function isLabCollection(col) {
+      return col in [
+        'lab_formulations', 'formulations', 'lab_formula_versions',
+        'lab_formula_summaries', 'lab_experiments', 'lab_excel_imports', 'raw_material_price_history'
+      ];
+    }
+
+    match /erp_clusters/{clusterCode}/lab_formulations/{docId} {
+      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+        hasLabSecretRead(resolveMember(clusterCode));
+      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+        (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode))) &&
+        (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember(clusterCode)));
+      allow delete: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
+        (isClusterAdmin(clusterCode) || (isClusterManager(clusterCode) && !isLabSecretDenied(resolveMember(clusterCode))));
+    }
+
+    match /erp_clusters/{clusterCode}/formulations/{docId} {
+      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+        hasLabSecretRead(resolveMember(clusterCode));
+      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+        (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode))) &&
+        (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember(clusterCode)));
+      allow delete: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
+        (isClusterAdmin(clusterCode) || (isClusterManager(clusterCode) && !isLabSecretDenied(resolveMember(clusterCode))));
+    }
+
+    match /erp_clusters/{clusterCode}/lab_formula_versions/{docId} {
+      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+        hasLabSecretRead(resolveMember(clusterCode));
+      allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+        (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode))) &&
+        (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember(clusterCode)));
+      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+        (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode))) &&
+        (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember(clusterCode))) &&
+        (!('approvalStatus' in resource.data) || resource.data.approvalStatus != 'APPROVED' || hasLabApprove(resolveMember(clusterCode)));
+      allow delete: if isValidId(clusterCode) && isValidId(docId) && isClusterAdmin(clusterCode);
+    }
+
+    match /erp_clusters/{clusterCode}/lab_formula_summaries/{docId} {
+      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
+      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+        !('ingredientsJson' in request.resource.data) && !('ingredients' in request.resource.data) &&
+        !('confidentialCiphertext' in request.resource.data) && !('saltBase64' in request.resource.data) && !('ivBase64' in request.resource.data) &&
+        (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode)));
+      allow delete: if isValidId(clusterCode) && isValidId(docId) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
+    }
+
+    match /erp_clusters/{clusterCode}/lab_experiments/{docId} {
+      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
+      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+        !('ingredientsJson' in request.resource.data) && !('confidentialCiphertext' in request.resource.data) &&
+        !('saltBase64' in request.resource.data) && !('ivBase64' in request.resource.data) &&
+        (hasLabEdit(resolveMember(clusterCode)) || hasQcGate(resolveMember(clusterCode))) &&
+        (!('decision' in request.resource.data) || !(request.resource.data.decision in ['APPROVED', 'REJECTED', 'RETEST']) || hasQcGate(resolveMember(clusterCode))) &&
+        (!('status' in request.resource.data) || !(request.resource.data.status in ['PASSED', 'FAILED', 'RETEST_REQUIRED']) || hasQcGate(resolveMember(clusterCode)));
+      allow delete: if isValidId(clusterCode) && isValidId(docId) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
+    }
+
+    match /erp_clusters/{clusterCode}/lab_excel_imports/{docId} {
+      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && hasLabSecretRead(resolveMember(clusterCode));
+      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+        hasLabEdit(resolveMember(clusterCode));
+      allow delete: if isValidId(clusterCode) && isValidId(docId) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
+    }
+
+    match /erp_clusters/{clusterCode}/raw_material_price_history/{docId} {
+      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+        hasProcurementOrCostRead(resolveMember(clusterCode));
+      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+        hasProcurementOrCostRead(resolveMember(clusterCode)) &&
+        (!('newPrice' in request.resource.data) || (request.resource.data.newPrice is number && request.resource.data.newPrice >= 0)) &&
+        (!('previousPrice' in request.resource.data) || (request.resource.data.previousPrice is number && request.resource.data.previousPrice >= 0));
+      allow delete: if isValidId(clusterCode) && isValidId(docId) && isClusterAdmin(clusterCode);
+    }
+
     // 8e. Operational ERP Collections inside Cluster
     match /erp_clusters/{clusterCode}/{collectionName}/{docId} {
       allow get, list: if isValidId(clusterCode) &&
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         !(collectionName in ['user_accounts', 'pending_requests', 'idempotency_requests']) &&
+        !isLabCollection(collectionName) &&
         canReadErpCollection(clusterCode, collectionName);
 
       allow create: if isValidId(clusterCode) &&
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         !(collectionName in ['user_accounts', 'pending_requests', 'idempotency_requests']) &&
+        !isLabCollection(collectionName) &&
         isValidId(docId) &&
         isValidErpDocWrite(collectionName) &&
         canCreateErpCollection(clusterCode, collectionName);
@@ -639,6 +806,7 @@ service cloud.firestore {
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         !(collectionName in ['user_accounts', 'pending_requests', 'idempotency_requests']) &&
+        !isLabCollection(collectionName) &&
         !isImmutableAuditCollection(collectionName) &&
         !isImmutableJournalLineCollection(collectionName) &&
         isValidId(docId) &&
@@ -654,6 +822,7 @@ service cloud.firestore {
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         !(collectionName in ['user_accounts', 'pending_requests', 'idempotency_requests']) &&
+        !isLabCollection(collectionName) &&
         !isImmutableAuditCollection(collectionName) &&
         !isAppendOnlyMovementCollection(collectionName) &&
         !isImmutableJournalLineCollection(collectionName) &&

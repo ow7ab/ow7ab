@@ -51,9 +51,13 @@ import kotlinx.coroutines.sync.withLock
         JournalEntryEntity::class,
         JournalLineEntity::class,
         IdempotencyRequestEntity::class,
-        RecordTombstoneEntity::class
+        RecordTombstoneEntity::class,
+        FormulationVersionEntity::class,
+        LabExperimentEntity::class,
+        RawMaterialPriceHistoryEntity::class,
+        LabExcelImportBatchEntity::class
     ],
-    version = 16,
+    version = 17,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
@@ -62,6 +66,7 @@ abstract class PmpDatabase : RoomDatabase() {
     abstract fun erpInventoryDao(): ErpInventoryDao
     abstract fun erpAccountingDao(): ErpAccountingDao
     abstract fun idempotencyDao(): IdempotencyDao
+    abstract fun labDao(): LabDao
 
     companion object {
         @Volatile
@@ -293,6 +298,9 @@ abstract class PmpDatabase : RoomDatabase() {
 
             // Ensure V16 movements columns & indices and record_tombstones table match Room schema
             upgradeSchemaToV16TombstonesAndHardening(db)
+
+            // Ensure V17 Chemical Lab versioning, experiments, raw material price history & Excel import batch schema
+            upgradeSchemaToV17ChemicalLab(db)
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -1153,6 +1161,218 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private fun upgradeSchemaToV17ChemicalLab(db: SupportSQLiteDatabase) {
+            // 1. Preserve a non-destructive pre-migration shadow backup of existing lab_formulations if present
+            val lfCols = getTableColumns(db, "lab_formulations").toMutableSet()
+            if (lfCols.isNotEmpty()) {
+                addColumnIfMissing(db, "lab_formulations", "syncUuid", "TEXT NOT NULL DEFAULT ''", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "linkedProductId", "INTEGER", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "linkedProductSku", "TEXT NOT NULL DEFAULT ''", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "category", "TEXT NOT NULL DEFAULT 'معجونات ودهانات'", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "versionNumber", "INTEGER NOT NULL DEFAULT 1", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "approvalStatus", "TEXT NOT NULL DEFAULT 'DRAFT'", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "approvedBy", "TEXT NOT NULL DEFAULT ''", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "approvedAt", "INTEGER NOT NULL DEFAULT 0", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "historicalTotalCost", "REAL NOT NULL DEFAULT 0.0", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "historicalCostPerKg", "REAL NOT NULL DEFAULT 0.0", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "currency", "TEXT NOT NULL DEFAULT 'EGP'", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "changeReason", "TEXT NOT NULL DEFAULT ''", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "updatedBy", "TEXT NOT NULL DEFAULT ''", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "updatedAt", "INTEGER NOT NULL DEFAULT 0", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "confidentialCiphertext", "TEXT NOT NULL DEFAULT ''", lfCols)
+                addColumnIfMissing(db, "lab_formulations", "isConfidentialSealed", "INTEGER NOT NULL DEFAULT 0", lfCols)
+
+                db.execSQL(
+                    """
+                    UPDATE `lab_formulations` SET
+                        `syncUuid` = CASE WHEN TRIM(`syncUuid`) = '' THEN 'FRM-UUID-' || `id` ELSE `syncUuid` END,
+                        `approvalStatus` = CASE
+                            WHEN `approvedForProduction` = 1 AND `approvalStatus` = 'DRAFT' THEN 'APPROVED'
+                            ELSE `approvalStatus`
+                        END,
+                        `historicalTotalCost` = CASE
+                            WHEN `approvedForProduction` = 1 AND `historicalTotalCost` = 0.0 THEN `totalCost`
+                            ELSE `historicalTotalCost`
+                        END,
+                        `historicalCostPerKg` = CASE
+                            WHEN `approvedForProduction` = 1 AND `historicalCostPerKg` = 0.0 THEN `costPerKg`
+                            ELSE `historicalCostPerKg`
+                        END,
+                        `updatedAt` = CASE WHEN `updatedAt` = 0 THEN `createdAt` ELSE `updatedAt` END
+                    """.trimIndent()
+                )
+            }
+
+            // 2. Extend factory_items with unified raw material pricing & spec attributes
+            val fiCols = getTableColumns(db, "factory_items").toMutableSet()
+            if (fiCols.isNotEmpty()) {
+                addColumnIfMissing(db, "factory_items", "supplierName", "TEXT NOT NULL DEFAULT ''", fiCols)
+                addColumnIfMissing(db, "factory_items", "lastPurchasePrice", "REAL NOT NULL DEFAULT 0.0", fiCols)
+                addColumnIfMissing(db, "factory_items", "lastPriceCurrency", "TEXT NOT NULL DEFAULT 'EGP'", fiCols)
+                addColumnIfMissing(db, "factory_items", "lastPriceUpdatedAt", "INTEGER NOT NULL DEFAULT 0", fiCols)
+                addColumnIfMissing(db, "factory_items", "density", "REAL NOT NULL DEFAULT 1.0", fiCols)
+                addColumnIfMissing(db, "factory_items", "solidsPercent", "REAL NOT NULL DEFAULT 100.0", fiCols)
+            }
+
+            // 3. Create immutable lab_formula_versions table
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `lab_formula_versions` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `formulaId` INTEGER NOT NULL,
+                    `formulaNo` TEXT NOT NULL,
+                    `productName` TEXT NOT NULL,
+                    `versionNumber` INTEGER NOT NULL,
+                    `previousVersionNumber` INTEGER NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `changeReason` TEXT NOT NULL,
+                    `diffSummaryJson` TEXT NOT NULL,
+                    `previousCostPerKg` REAL NOT NULL,
+                    `newCostPerKg` REAL NOT NULL,
+                    `historicalTotalCost` REAL NOT NULL,
+                    `calculatedPvc` REAL NOT NULL,
+                    `calculatedDensity` REAL NOT NULL,
+                    `currency` TEXT NOT NULL,
+                    `ingredientsSnapshotJson` TEXT NOT NULL,
+                    `encryptedSnapshotCiphertext` TEXT NOT NULL,
+                    `createdBy` TEXT NOT NULL,
+                    `approvedBy` TEXT NOT NULL,
+                    `approvedAt` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_lab_ver_uuid` ON `lab_formula_versions` (`syncUuid`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_lab_ver_formula` ON `lab_formula_versions` (`formulaId`, `versionNumber`)")
+
+            // Backfill v1 snapshots from any existing lab_formulations so history is never empty
+            db.execSQL(
+                """
+                INSERT OR IGNORE INTO `lab_formula_versions` (
+                    `syncUuid`, `formulaId`, `formulaNo`, `productName`, `versionNumber`,
+                    `previousVersionNumber`, `status`, `changeReason`, `diffSummaryJson`,
+                    `previousCostPerKg`, `newCostPerKg`, `historicalTotalCost`, `calculatedPvc`,
+                    `calculatedDensity`, `currency`, `ingredientsSnapshotJson`, `encryptedSnapshotCiphertext`,
+                    `createdBy`, `approvedBy`, `approvedAt`, `createdAt`
+                )
+                SELECT
+                    'FRM-VER-' || `id` || '-V' || `versionNumber`,
+                    `id`, `formulaNo`, `productName`, `versionNumber`,
+                    0,
+                    CASE WHEN `approvedForProduction` = 1 THEN 'APPROVED' ELSE `approvalStatus` END,
+                    'ترحيل غير إتلافي من سجل التركيبات السابق',
+                    '{}',
+                    `costPerKg`, `costPerKg`,
+                    CASE WHEN `historicalTotalCost` > 0 THEN `historicalTotalCost` ELSE `totalCost` END,
+                    `calculatedPvc`, `calculatedDensity`, `currency`,
+                    `ingredientsJson`, `confidentialCiphertext`,
+                    `createdBy`, `approvedBy`, `approvedAt`, `createdAt`
+                FROM `lab_formulations`
+                """.trimIndent()
+            )
+
+            // 4. Create lab_experiments table
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `lab_experiments` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `experimentNo` TEXT NOT NULL,
+                    `formulaId` INTEGER NOT NULL,
+                    `formulaNo` TEXT NOT NULL,
+                    `formulaVersionId` INTEGER,
+                    `versionNumber` INTEGER NOT NULL,
+                    `productId` INTEGER,
+                    `productName` TEXT NOT NULL,
+                    `experimentDate` TEXT NOT NULL,
+                    `technicianName` TEXT NOT NULL,
+                    `materialsUsedJson` TEXT NOT NULL,
+                    `measuredDensity` REAL NOT NULL,
+                    `measuredViscosity` TEXT NOT NULL,
+                    `measuredPh` REAL NOT NULL,
+                    `measuredGrindMicrons` REAL NOT NULL,
+                    `hidingPowerPercent` REAL NOT NULL,
+                    `notes` TEXT NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `decision` TEXT NOT NULL,
+                    `decidedBy` TEXT NOT NULL,
+                    `decidedAt` INTEGER NOT NULL,
+                    `linkedQcNo` TEXT NOT NULL,
+                    `idempotencyKey` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_lab_exp_uuid` ON `lab_experiments` (`syncUuid`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_lab_exp_formula` ON `lab_experiments` (`formulaId`, `formulaVersionId`)")
+
+            // 5. Create raw_material_price_history table
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `raw_material_price_history` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `materialId` INTEGER NOT NULL,
+                    `itemCode` TEXT NOT NULL,
+                    `materialName` TEXT NOT NULL,
+                    `supplierName` TEXT NOT NULL,
+                    `unitPrice` REAL NOT NULL,
+                    `previousPrice` REAL NOT NULL,
+                    `currency` TEXT NOT NULL,
+                    `sourceType` TEXT NOT NULL,
+                    `sourceDocNo` TEXT NOT NULL,
+                    `effectiveDate` TEXT NOT NULL,
+                    `recordedBy` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_rm_price_uuid` ON `raw_material_price_history` (`syncUuid`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `idx_rm_price_mat` ON `raw_material_price_history` (`materialId`, `createdAt`)")
+
+            // 6. Create lab_excel_imports table
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `lab_excel_imports` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `importNo` TEXT NOT NULL,
+                    `fileName` TEXT NOT NULL,
+                    `sheetCount` INTEGER NOT NULL,
+                    `formulasDetected` INTEGER NOT NULL,
+                    `formulasImported` INTEGER NOT NULL,
+                    `materialsMatched` INTEGER NOT NULL,
+                    `materialsCreated` INTEGER NOT NULL,
+                    `externalLinksDetected` INTEGER NOT NULL,
+                    `brokenRefsDetected` INTEGER NOT NULL,
+                    `warningsCount` INTEGER NOT NULL,
+                    `approvalStatus` TEXT NOT NULL,
+                    `checksumSha256` TEXT NOT NULL,
+                    `restrictedSummaryJson` TEXT NOT NULL,
+                    `referenceArchivePath` TEXT NOT NULL,
+                    `importedBy` TEXT NOT NULL,
+                    `idempotencyKey` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `idx_lab_xlsx_uuid` ON `lab_excel_imports` (`syncUuid`)")
+        }
+
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+                upgradeSchemaToV12AndBackfill(db)
+                upgradeSchemaToV13Phase3(db)
+                upgradeSchemaToV14Accounting(db)
+                upgradeSchemaToV15Idempotency(db)
+                upgradeSchemaToV16TombstonesAndHardening(db)
+                upgradeSchemaToV17ChemicalLab(db)
+            }
+        }
+
         private val dbCallbackMutex = Mutex()
         private val dbCallbackScope = CoroutineScope(
             SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
@@ -1325,7 +1545,8 @@ abstract class PmpDatabase : RoomDatabase() {
                         MIGRATION_12_13,
                         MIGRATION_13_14,
                         MIGRATION_14_15,
-                        MIGRATION_15_16
+                        MIGRATION_15_16,
+                        MIGRATION_16_17
                     )
                     .addCallback(DatabaseCallback(appContext))
                     .build()
@@ -1345,8 +1566,9 @@ abstract class PmpDatabase : RoomDatabase() {
                         DeletedRecordsRegistry.init(appContext)
                         INSTANCE?.let { database ->
                             val dao = database.pmpDao()
+                            val labDao = database.labDao()
                             DeletedRecordsRegistry.syncWithDao(dao)
-                            val restored = DatabaseBackupManager.restoreIfEmpty(appContext, dao)
+                            val restored = DatabaseBackupManager.restoreIfEmpty(appContext, dao, labDao)
                             if (!restored) {
                                 seedInitialData(dao, database.erpInventoryDao())
                             } else {
@@ -1354,7 +1576,7 @@ abstract class PmpDatabase : RoomDatabase() {
                             }
                             purgeTombstonedRecordsLocally(dao)
                             seedDefaultChartOfAccountsIfEmpty(database.erpAccountingDao())
-                            DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
+                            DatabaseBackupManager.saveLocalSnapshot(appContext, dao, labDao)
                         }
                     } catch (t: Throwable) {
                         Log.e("PmpDatabase", "Error in DatabaseCallback.onCreate", t)
@@ -1375,13 +1597,14 @@ abstract class PmpDatabase : RoomDatabase() {
                         DeletedRecordsRegistry.init(appContext)
                         INSTANCE?.let { database ->
                             val dao = database.pmpDao()
+                            val labDao = database.labDao()
                             DeletedRecordsRegistry.syncWithDao(dao)
-                            DatabaseBackupManager.restoreIfEmpty(appContext, dao)
+                            DatabaseBackupManager.restoreIfEmpty(appContext, dao, labDao)
                             purgeTombstonedRecordsLocally(dao)
                             seedDefaultUsersIfEmpty(dao)
                             seedDefaultPackagingRulesIfEmpty(database.erpInventoryDao())
                             seedDefaultChartOfAccountsIfEmpty(database.erpAccountingDao())
-                            DatabaseBackupManager.saveLocalSnapshot(appContext, dao)
+                            DatabaseBackupManager.saveLocalSnapshot(appContext, dao, labDao)
                         }
                     } catch (t: Throwable) {
                         Log.e("PmpDatabase", "Error in DatabaseCallback.onOpen", t)

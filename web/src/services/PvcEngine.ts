@@ -3,7 +3,13 @@
  * Exact TypeScript port of Android `com.example.util.PvcEngine` (`PvcEngine.kt`).
  */
 
-import { FormulationIngredient } from '../types/erp';
+import {
+  FactoryItem,
+  FormulationIngredient,
+  IngredientCostBreakdown,
+  LabFormulation,
+  ThreeCostComparisonReport
+} from '../types/erp';
 
 export interface PvcCalculationResult {
   calculatedPvc: number;
@@ -20,6 +26,7 @@ export interface PvcCalculationResult {
   paintClassification: string;
   technicalAnalysisText: string;
   warnings: string[];
+  breakdown: IngredientCostBreakdown[];
 }
 
 export interface PresetMaterial {
@@ -51,8 +58,11 @@ export const PRESET_MATERIALS: PresetMaterial[] = [
   { name: 'مبيد حفظ العبوات (In-can Biocide)', type: 'إضافات ومساعدات', defaultDensity: 1.05, defaultSolidsPercent: 20.0, defaultUnitCost: 8.00, notes: 'حفظ مضاد للبكتيريا والفطريات' }
 ];
 
-const round2 = (v: number): number => Math.round(v * 100) / 100;
-const round3 = (v: number): number => Math.round(v * 1000) / 1000;
+const SCALE_INT = 1_000_000;
+const round2 = (v: number): number => Math.round((v + Number.EPSILON) * 100) / 100;
+const round3 = (v: number): number => Math.round((v + Number.EPSILON) * 1000) / 1000;
+const round4 = (v: number): number => Math.round((v + Number.EPSILON) * 10000) / 10000;
+const toScaledInt = (v: number): number => Math.round((Number.isFinite(v) ? v : 0) * SCALE_INT);
 
 function evaluatePaintProperties(pvc: number, cpvc: number): [string, string] {
   if (pvc < 1.0) {
@@ -88,35 +98,43 @@ function evaluatePaintProperties(pvc: number, cpvc: number): [string, string] {
 export function calculatePvc(ingredients: FormulationIngredient[]): PvcCalculationResult {
   const warnings: string[] = [];
 
-  let totalBatchWeight = 0;
-  let totalSolidsWeight = 0;
-  let totalWetVolume = 0;
-  let totalDryVolume = 0;
-  let pigmentVolume = 0;
-  let binderDryVolume = 0;
-  let totalCost = 0;
+  let totalWeightInt = 0;
+  let totalSolidsWeightInt = 0;
+  let totalWetVolInt = 0;
+  let totalDryVolInt = 0;
+  let pigmentVolInt = 0;
+  let binderDryVolInt = 0;
+  let totalCostInt = 0;
+
+  const tempLines: Array<{
+    item: FormulationIngredient;
+    weight: number;
+    lineCost: number;
+  }> = [];
 
   for (const item of ingredients) {
     const weight = Math.max(0, Number(item.weight) || 0);
     const rawDensity = Number(item.density) || 0;
     const density = rawDensity > 0.01 ? rawDensity : 1.0;
     const solidsPct = Math.min(100, Math.max(0, Number(item.solidsPercent) || 0));
+    const unitCost = Math.max(0, Number(item.unitCost) || 0);
 
     if (rawDensity <= 0.01 && weight > 0) {
       warnings.push(`المادة '${item.name}' تم إدخال كثافتها بصفر أو فارغة؛ تم اعتبار الكثافة 1.0 افتراضياً.`);
     }
 
-    totalBatchWeight += weight;
     const dryWeight = weight * (solidsPct / 100.0);
-    totalSolidsWeight += dryWeight;
-
     const wetVol = density > 0 ? weight / density : 0;
-    totalWetVolume += wetVol;
-
     const dryVol = density > 0 ? dryWeight / density : 0;
-    totalDryVolume += dryVol;
+    const lineCost = weight * unitCost;
 
-    totalCost += weight * (Number(item.unitCost) || 0);
+    totalWeightInt += toScaledInt(weight);
+    totalSolidsWeightInt += toScaledInt(dryWeight);
+    totalWetVolInt += toScaledInt(wetVol);
+    totalDryVolInt += toScaledInt(dryVol);
+    totalCostInt += toScaledInt(lineCost);
+
+    tempLines.push({ item, weight, lineCost });
 
     const typeLower = (item.type || '').trim().toLowerCase();
     const isPigmentOrExtender =
@@ -136,11 +154,19 @@ export function calculatePvc(ingredients: FormulationIngredient[]): PvcCalculati
       typeLower.includes('emulsion');
 
     if (isPigmentOrExtender) {
-      pigmentVolume += dryVol;
+      pigmentVolInt += toScaledInt(dryVol);
     } else if (isBinder) {
-      binderDryVolume += dryVol;
+      binderDryVolInt += toScaledInt(dryVol);
     }
   }
+
+  const totalBatchWeight = totalWeightInt / SCALE_INT;
+  const totalSolidsWeight = totalSolidsWeightInt / SCALE_INT;
+  const totalWetVolume = totalWetVolInt / SCALE_INT;
+  const totalDryVolume = totalDryVolInt / SCALE_INT;
+  const pigmentVolume = pigmentVolInt / SCALE_INT;
+  const binderDryVolume = binderDryVolInt / SCALE_INT;
+  const totalCost = totalCostInt / SCALE_INT;
 
   const totalPigmentAndBinderVol = pigmentVolume + binderDryVolume;
   const calculatedPvc =
@@ -154,6 +180,18 @@ export function calculatePvc(ingredients: FormulationIngredient[]): PvcCalculati
 
   const calculatedDensity = totalWetVolume > 0.0001 ? totalBatchWeight / totalWetVolume : 1.0;
   const costPerKg = totalBatchWeight > 0.0001 ? totalCost / totalBatchWeight : 0.0;
+
+  const breakdown: IngredientCostBreakdown[] = tempLines.map(({ item, weight, lineCost }) => ({
+    name: item.name,
+    type: item.type,
+    materialId: item.materialId ?? null,
+    itemCode: item.itemCode || '',
+    weightKg: round3(weight),
+    weightPercent: totalBatchWeight > 0.0001 ? round2((weight / totalBatchWeight) * 100.0) : 0,
+    unitCost: round4(Number(item.unitCost) || 0),
+    lineCost: round2(lineCost),
+    costSharePercent: totalCost > 0.0001 ? round2((lineCost / totalCost) * 100.0) : 0
+  }));
 
   const cpvcEstimated = 52.0;
   const roundedPvc = round2(calculatedPvc);
@@ -173,7 +211,170 @@ export function calculatePvc(ingredients: FormulationIngredient[]): PvcCalculati
     binderDryVolume: round3(binderDryVolume),
     paintClassification,
     technicalAnalysisText,
-    warnings
+    warnings,
+    breakdown
+  };
+}
+
+export function scaleFormulation(
+  ingredients: FormulationIngredient[],
+  targetBatchWeightKg: number
+): { scaledIngredients: FormulationIngredient[]; pvc: PvcCalculationResult } {
+  const currentTotal = ingredients.reduce((acc, i) => acc + Math.max(0, Number(i.weight) || 0), 0);
+  if (currentTotal <= 0.0001 || targetBatchWeightKg <= 0) {
+    return { scaledIngredients: [...ingredients], pvc: calculatePvc(ingredients) };
+  }
+  const factor = targetBatchWeightKg / currentTotal;
+  const scaledIngredients = ingredients.map((ing) => ({
+    ...ing,
+    weight: round3(Math.max(0, Number(ing.weight) || 0) * factor)
+  }));
+  return {
+    scaledIngredients,
+    pvc: calculatePvc(scaledIngredients)
+  };
+}
+
+function findMatchingRegistryMaterial(
+  ing: FormulationIngredient,
+  factoryItems: FactoryItem[]
+): FactoryItem | undefined {
+  if (ing.materialId && Number(ing.materialId) > 0) {
+    const byId = factoryItems.find((fi) => Number(fi.id) === Number(ing.materialId));
+    if (byId) return byId;
+  }
+  const cleanCode = (ing.itemCode || '').trim().toLowerCase();
+  if (cleanCode) {
+    const byCode = factoryItems.find((fi) => (fi.itemCode || '').trim().toLowerCase() === cleanCode);
+    if (byCode) return byCode;
+  }
+  const cleanName = (ing.name || '').trim().toLowerCase();
+  if (!cleanName) return undefined;
+  return factoryItems.find((fi) => {
+    const fiName = (fi.name || '').trim().toLowerCase();
+    return fiName === cleanName || (fiName.length >= 4 && cleanName.includes(fiName)) || (cleanName.length >= 4 && fiName.includes(cleanName));
+  });
+}
+
+/**
+ * Computes 3-way cost comparison without mutating historical locked costs:
+ * 1. Historical Approved Cost (locked on formula approval)
+ * 2. Live Current Cost (re-priced dynamically against latest GRN / FactoryItem unitCostEgp)
+ * 3. Actual Production Cost (if batch execution data is supplied)
+ */
+export function compareThreeCosts(
+  formula: LabFormulation,
+  ingredients: FormulationIngredient[],
+  factoryItems: FactoryItem[],
+  actualProducedQtyKg?: number | null,
+  actualProductionTotalCost?: number | null
+): ThreeCostComparisonReport {
+  const baselinePvc = calculatePvc(ingredients);
+  const historicalTotal =
+    Number(formula.historicalTotalCost || 0) > 0 ? Number(formula.historicalTotalCost) : baselinePvc.totalCost;
+  const historicalPerKg =
+    Number(formula.historicalCostPerKg || 0) > 0 ? Number(formula.historicalCostPerKg) : baselinePvc.costPerKg;
+
+  const changedMaterials: ThreeCostComparisonReport['changedMaterials'] = [];
+  const currentIngredients = ingredients.map((ing) => {
+    const matched = findMatchingRegistryMaterial(ing, factoryItems);
+    const liveUnitCost = matched
+      ? Number(matched.lastPurchasePrice || matched.unitCostEgp || ing.unitCost || 0)
+      : Number(ing.unitCost || 0);
+    const oldCost = Number(ing.unitCost || 0);
+    if (Math.abs(liveUnitCost - oldCost) > 0.0001 && baselinePvc.totalBatchWeight > 0) {
+      const impactPerKg = ((liveUnitCost - oldCost) * (Number(ing.weight) || 0)) / baselinePvc.totalBatchWeight;
+      changedMaterials.push({
+        name: ing.name,
+        oldUnitCost: round4(oldCost),
+        currentUnitCost: round4(liveUnitCost),
+        deltaPerKgImpact: round4(impactPerKg)
+      });
+    }
+    return { ...ing, unitCost: liveUnitCost };
+  });
+
+  const livePvc = calculatePvc(currentIngredients);
+  const priceDeltaTotal = round2(livePvc.totalCost - historicalTotal);
+  const priceDeltaPercent =
+    historicalTotal > 0.0001 ? round2((priceDeltaTotal / historicalTotal) * 100.0) : 0;
+
+  const actualTotal =
+    actualProductionTotalCost !== undefined && actualProductionTotalCost !== null && actualProductionTotalCost >= 0
+      ? round2(actualProductionTotalCost)
+      : null;
+  const actualPerKg =
+    actualTotal !== null && actualProducedQtyKg && actualProducedQtyKg > 0.0001
+      ? round3(actualTotal / actualProducedQtyKg)
+      : null;
+
+  return {
+    formulaNo: formula.formulaNo,
+    versionNumber: formula.versionNumber || 1,
+    historicalTotalCost: round2(historicalTotal),
+    historicalCostPerKg: round3(historicalPerKg),
+    currentTotalCost: livePvc.totalCost,
+    currentCostPerKg: livePvc.costPerKg,
+    actualProductionTotalCost: actualTotal,
+    actualProductionCostPerKg: actualPerKg,
+    priceDeltaTotal,
+    priceDeltaPercent,
+    changedMaterials
+  };
+}
+
+/**
+ * Builds a non-secret structural diff JSON summary between versions (never leaks full ratios).
+ */
+export function summarizeIngredientChanges(
+  oldIngredients: FormulationIngredient[],
+  newIngredients: FormulationIngredient[]
+): {
+  addedCount: number;
+  removedCount: number;
+  modifiedCount: number;
+  previousBatchKg: number;
+  newBatchKg: number;
+  changedMaterialNames: string[];
+} {
+  const oldMap = new Map<string, FormulationIngredient>();
+  const newMap = new Map<string, FormulationIngredient>();
+  oldIngredients.forEach((i) => oldMap.set(i.name.trim().toLowerCase(), i));
+  newIngredients.forEach((i) => newMap.set(i.name.trim().toLowerCase(), i));
+
+  let addedCount = 0;
+  let removedCount = 0;
+  let modifiedCount = 0;
+  const changedMaterialNames: string[] = [];
+
+  newMap.forEach((newItem, key) => {
+    const oldItem = oldMap.get(key);
+    if (!oldItem) {
+      addedCount++;
+      changedMaterialNames.push(`+ ${newItem.name}`);
+    } else if (
+      Math.abs((Number(newItem.weight) || 0) - (Number(oldItem.weight) || 0)) > 0.001 ||
+      Math.abs((Number(newItem.unitCost) || 0) - (Number(oldItem.unitCost) || 0)) > 0.001
+    ) {
+      modifiedCount++;
+      changedMaterialNames.push(`~ ${newItem.name}`);
+    }
+  });
+
+  oldMap.forEach((oldItem, key) => {
+    if (!newMap.has(key)) {
+      removedCount++;
+      changedMaterialNames.push(`- ${oldItem.name}`);
+    }
+  });
+
+  return {
+    addedCount,
+    removedCount,
+    modifiedCount,
+    previousBatchKg: round2(oldIngredients.reduce((s, i) => s + (Number(i.weight) || 0), 0)),
+    newBatchKg: round2(newIngredients.reduce((s, i) => s + (Number(i.weight) || 0), 0)),
+    changedMaterialNames
   };
 }
 
@@ -184,6 +385,8 @@ export function jsonToIngredients(json?: string | null): FormulationIngredient[]
     if (!Array.isArray(parsed)) return [];
     return parsed.map((o, idx) => ({
       id: String(o.id || `ing-${idx}-${Date.now()}`),
+      materialId: o.materialId !== undefined && o.materialId !== null ? Number(o.materialId) : null,
+      itemCode: o.itemCode ? String(o.itemCode) : '',
       name: String(o.name || 'مادة خام'),
       type: String(o.type || 'صبغة / ملون'),
       weight: Number(o.weight) || 0,

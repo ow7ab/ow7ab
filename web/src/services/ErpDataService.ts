@@ -88,8 +88,17 @@ import {
   ReconciliationItem,
   CurrencyFxRates,
   ConsolidatedFxSummary,
-  UserAccount
+  UserAccount,
+  FormulationIngredient,
+  FormulationVersion,
+  LabExperiment,
+  RawMaterialPriceHistory,
+  LabExcelImportBatch,
+  ThreeCostComparisonReport
 } from '../types/erp';
+import { calculatePvc, ingredientsToJson, jsonToIngredients, summarizeIngredientChanges } from './PvcEngine';
+import { sanitizeLabLog } from './LabSecurityService';
+import type { ExcelWorkbookAnalysisReport } from './ExcelFormulaAnalyzer';
 import {
   DEFAULT_CHART_OF_ACCOUNTS,
   resolveCashAccountCode,
@@ -124,6 +133,7 @@ import {
   convertCartonsToCans,
   receivePurchaseToRawMaterialsInState,
   createProductionOrderModel,
+  isFormulaApprovedForProduction,
   issueRawMaterialsForOrderInState,
   inspectQcAndPostToFinishedGoodsInState
 } from './InventoryMovementEngine';
@@ -206,6 +216,7 @@ export {
   convertCartonsToCans,
   receivePurchaseToRawMaterialsInState,
   createProductionOrderModel,
+  isFormulaApprovedForProduction,
   issueRawMaterialsForOrderInState,
   inspectQcAndPostToFinishedGoodsInState,
   DEFAULT_CHART_OF_ACCOUNTS,
@@ -254,6 +265,11 @@ export type ErpCollectionName =
   | 'qc_inspections'
   | 'paint_batches'
   | 'lab_formulations'
+  | 'lab_formula_summaries'
+  | 'lab_formula_versions'
+  | 'lab_experiments'
+  | 'raw_material_price_history'
+  | 'lab_excel_imports'
   | 'chemical_safety'
   | 'halfa_invoices'
   | 'poster_prices'
@@ -482,6 +498,7 @@ class ErpDataServiceImpl {
 
     this.activeCollectionRefreshers.add(refilterAndEmit);
 
+    let fallbackUnsub: Unsubscribe | null = null;
     const unsubPrimary = onSnapshot(
       primaryColRef,
       (snap) => {
@@ -495,6 +512,13 @@ class ErpDataServiceImpl {
       },
       (err) => {
         const path = this.collectionPath(collectionName, PRIMARY_CLUSTER);
+        const msg = String((err as any)?.code || (err as any)?.message || '');
+        if (collectionName === 'lab_formulations' && msg.toLowerCase().includes('permission')) {
+          if (!fallbackUnsub) {
+            fallbackUnsub = this.subscribeToCollection<T>('lab_formula_summaries', onData, onError);
+          }
+          return;
+        }
         CloudErrorLogger.recordError(`SUBSCRIBE_${String(collectionName).toUpperCase()}`, path, err);
         console.error(`Firestore subscription error on [${collectionName}]:`, sanitizeCloudMessage(err));
         if (onError) onError(err);
@@ -504,6 +528,7 @@ class ErpDataServiceImpl {
     return () => {
       this.activeCollectionRefreshers.delete(refilterAndEmit);
       unsubPrimary();
+      if (fallbackUnsub) fallbackUnsub();
     };
   }
 
@@ -1407,6 +1432,476 @@ class ErpDataServiceImpl {
       if (p) await this.persistJournalPayload(p);
     }
   }
+
+  /**
+   * Builds a non-secret operational summary of a formulation (strictly strips secret ingredient ratios & ciphertext).
+   */
+  buildNonSecretFormulaSummary(f: LabFormulation): Record<string, any> {
+    return {
+      id: f.id,
+      syncUuid: f.syncUuid || f.formulaNo,
+      formulaNo: f.formulaNo,
+      productName: f.productName,
+      paintType: f.paintType,
+      baseKind: f.baseKind,
+      linkedProductId: f.linkedProductId ?? null,
+      linkedProductSku: f.linkedProductSku || '',
+      category: f.category || 'معجونات ودهانات',
+      calculatedPvc: f.calculatedPvc,
+      cpvcEstimated: f.cpvcEstimated,
+      calculatedDensity: f.calculatedDensity,
+      totalBatchWeight: f.totalBatchWeight,
+      totalBatchVolume: f.totalBatchVolume,
+      totalSolidsWeight: f.totalSolidsWeight,
+      totalSolidsVolume: f.totalSolidsVolume,
+      approvedForProduction: Boolean(f.approvedForProduction),
+      approvalStatus: f.approvalStatus || (f.approvedForProduction ? 'APPROVED' : 'NEEDS_REVIEW'),
+      versionNumber: f.versionNumber || 1,
+      approvedBy: f.approvedBy || '',
+      approvedAt: f.approvedAt || 0,
+      createdBy: f.createdBy,
+      createdAt: f.createdAt,
+      updatedAt: f.updatedAt || f.createdAt
+    };
+  }
+
+  /**
+   * Immutable Formulation Versioning:
+   * - If editing an APPROVED formulation, archives the prior approved version & advances to v+1 in NEEDS_REVIEW
+   *   (`approvedForProduction = false`) without overwriting the historical snapshot or locked cost.
+   */
+  async saveFormulationWithVersioning(params: {
+    existing?: LabFormulation | null;
+    productName: string;
+    paintType: string;
+    baseKind: string;
+    notes?: string;
+    category?: string;
+    currency?: string;
+    ingredients: FormulationIngredient[];
+    changeReason: string;
+    actor: string;
+    confidentialCiphertext?: string;
+    isConfidentialSealed?: boolean;
+  }): Promise<{ formula: LabFormulation; version: FormulationVersion; docId: string }> {
+    const now = Date.now();
+    const pvc = calculatePvc(params.ingredients);
+    const existing = params.existing || null;
+    const isRevision = Boolean(existing);
+    const oldVersion = existing ? existing.versionNumber || 1 : 0;
+    const wasApproved = Boolean(
+      existing && (existing.approvedForProduction || existing.approvalStatus === 'APPROVED')
+    );
+    const nextVersion = existing ? (wasApproved ? oldVersion + 1 : oldVersion) : 1;
+    const nextStatus = existing ? 'NEEDS_REVIEW' : 'NEEDS_REVIEW';
+    const formulaNo = existing?.formulaNo || `FORM-${String(now).slice(-5)}`;
+    const docId = (existing as any)?._docId || safeId(formulaNo, `FORM-${now}`);
+
+    if (existing && wasApproved) {
+      const archivedSnap: FormulationVersion = {
+        syncUuid: `VER-${formulaNo}-v${oldVersion}-ARCH`,
+        formulaId: existing.id,
+        formulaNo,
+        productName: existing.productName,
+        versionNumber: oldVersion,
+        previousVersionNumber: Math.max(0, oldVersion - 1),
+        status: 'ARCHIVED',
+        changeReason: existing.changeReason || 'لقطة معتمدة محفوظة قبل التعديل',
+        diffSummaryJson: JSON.stringify({ archivedBeforeRevision: nextVersion }),
+        previousCostPerKg: existing.historicalCostPerKg || existing.costPerKg,
+        newCostPerKg: existing.historicalCostPerKg || existing.costPerKg,
+        historicalTotalCost: existing.historicalTotalCost || existing.totalCost,
+        calculatedPvc: existing.calculatedPvc,
+        calculatedDensity: existing.calculatedDensity,
+        currency: existing.currency || 'EGP',
+        ingredientsSnapshotJson: existing.isConfidentialSealed ? '[]' : existing.ingredientsJson,
+        encryptedSnapshotCiphertext: existing.confidentialCiphertext || '',
+        createdBy: existing.createdBy,
+        approvedBy: existing.approvedBy || '',
+        approvedAt: existing.approvedAt || 0,
+        createdAt: existing.createdAt
+      };
+      await this.upsertDocument('lab_formula_versions', archivedSnap.syncUuid, archivedSnap).catch(() => {});
+    }
+
+    const oldIngredients = existing ? jsonToIngredients(existing.ingredientsJson) : [];
+    const diffSummary = summarizeIngredientChanges(oldIngredients, params.ingredients);
+
+    const formula: LabFormulation = {
+      id: existing?.id || now,
+      syncUuid: existing?.syncUuid || formulaNo,
+      formulaNo,
+      productName: params.productName.trim(),
+      paintType: params.paintType.trim() || 'مطفي معماري',
+      baseKind: params.baseKind.trim() || 'أبيض',
+      linkedProductId: existing?.linkedProductId ?? null,
+      linkedProductSku: existing?.linkedProductSku || '',
+      category: params.category || existing?.category || 'معجونات ودهانات',
+      targetPvc: pvc.calculatedPvc,
+      calculatedPvc: pvc.calculatedPvc,
+      cpvcEstimated: pvc.cpvcEstimated,
+      totalSolidsWeight: pvc.totalSolidsWeight,
+      totalSolidsVolume: pvc.totalSolidsVolume,
+      totalBatchWeight: pvc.totalBatchWeight,
+      totalBatchVolume: pvc.totalBatchVolume,
+      calculatedDensity: pvc.calculatedDensity,
+      totalCost: pvc.totalCost,
+      costPerKg: pvc.costPerKg,
+      historicalTotalCost:
+        existing && (existing.historicalTotalCost || 0) > 0
+          ? existing.historicalTotalCost
+          : 0,
+      historicalCostPerKg:
+        existing && (existing.historicalCostPerKg || 0) > 0
+          ? existing.historicalCostPerKg
+          : 0,
+      currency: params.currency || existing?.currency || 'EGP',
+      ingredientsJson: params.isConfidentialSealed ? '[]' : ingredientsToJson(params.ingredients),
+      technicalAnalysis: pvc.technicalAnalysisText,
+      notes: (params.notes || '').trim() || pvc.paintClassification,
+      approvedForProduction: false,
+      approvalStatus: nextStatus,
+      versionNumber: nextVersion,
+      approvedBy: '',
+      approvedAt: 0,
+      changeReason: params.changeReason.trim() || (isRevision ? 'تعديل إصدار تركيبة' : 'إنشاء تركيبة جديدة'),
+      createdBy: existing?.createdBy || params.actor,
+      updatedBy: params.actor,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+      confidentialCiphertext: params.confidentialCiphertext || '',
+      isConfidentialSealed: Boolean(params.isConfidentialSealed)
+    };
+
+    const versionRecord: FormulationVersion = {
+      syncUuid: `VER-${formulaNo}-v${nextVersion}-${now}`,
+      formulaId: formula.id,
+      formulaNo,
+      productName: formula.productName,
+      versionNumber: nextVersion,
+      previousVersionNumber: oldVersion,
+      status: nextStatus,
+      changeReason: formula.changeReason || '',
+      diffSummaryJson: JSON.stringify(diffSummary),
+      previousCostPerKg: existing ? existing.costPerKg : 0,
+      newCostPerKg: pvc.costPerKg,
+      historicalTotalCost: existing?.historicalTotalCost || 0,
+      calculatedPvc: pvc.calculatedPvc,
+      calculatedDensity: pvc.calculatedDensity,
+      currency: formula.currency || 'EGP',
+      ingredientsSnapshotJson: formula.ingredientsJson,
+      encryptedSnapshotCiphertext: formula.confidentialCiphertext || '',
+      createdBy: params.actor,
+      approvedBy: '',
+      approvedAt: 0,
+      createdAt: now
+    };
+
+    await this.upsertDocument('lab_formulations', docId, formula, undefined, { actorUsername: params.actor });
+    await this.upsertDocument('lab_formula_summaries', docId, this.buildNonSecretFormulaSummary(formula), undefined, {
+      actorUsername: params.actor
+    }).catch(() => {});
+    await this.upsertDocument('lab_formula_versions', versionRecord.syncUuid, versionRecord, undefined, {
+      actorUsername: params.actor
+    });
+
+    await this.logAudit(
+      params.actor,
+      isRevision ? 'LAB_FORMULA_REVISION' : 'LAB_FORMULA_CREATE',
+      sanitizeLabLog(
+        `${isRevision ? 'تحديث إصدار' : 'إنشاء'} تركيبة ${formulaNo} v${nextVersion} (${formula.productName}) بالحالة NEEDS_REVIEW`
+      )
+    );
+
+    return { formula, version: versionRecord, docId };
+  }
+
+  async decideFormulationApproval(params: {
+    formula: LabFormulation;
+    decision: 'APPROVED' | 'REJECTED' | 'NEEDS_REVIEW';
+    actor: string;
+    reason?: string;
+  }): Promise<LabFormulation> {
+    const now = Date.now();
+    const docId = (params.formula as any)._docId || safeId(params.formula.formulaNo, `FORM-${params.formula.id}`);
+    const isApproved = params.decision === 'APPROVED';
+    const updated: LabFormulation = {
+      ...params.formula,
+      approvalStatus: params.decision,
+      approvedForProduction: isApproved,
+      approvedBy: isApproved ? params.actor : '',
+      approvedAt: isApproved ? now : 0,
+      historicalTotalCost: isApproved
+        ? params.formula.totalCost
+        : params.formula.historicalTotalCost || 0,
+      historicalCostPerKg: isApproved
+        ? params.formula.costPerKg
+        : params.formula.historicalCostPerKg || 0,
+      changeReason: (params.reason || '').trim() || params.formula.changeReason || '',
+      updatedBy: params.actor,
+      updatedAt: now
+    };
+
+    await this.upsertDocument('lab_formulations', docId, updated, undefined, { actorUsername: params.actor });
+    await this.upsertDocument('lab_formula_summaries', docId, this.buildNonSecretFormulaSummary(updated), undefined, {
+      actorUsername: params.actor
+    }).catch(() => {});
+
+    const verSnapshot: FormulationVersion = {
+      syncUuid: `VER-${updated.formulaNo}-v${updated.versionNumber || 1}-${params.decision}-${now}`,
+      formulaId: updated.id,
+      formulaNo: updated.formulaNo,
+      productName: updated.productName,
+      versionNumber: updated.versionNumber || 1,
+      previousVersionNumber: updated.versionNumber || 1,
+      status: params.decision,
+      changeReason: (params.reason || '').trim() || `قرار الاعتماد: ${params.decision}`,
+      diffSummaryJson: JSON.stringify({ approvalDecision: params.decision }),
+      previousCostPerKg: params.formula.costPerKg,
+      newCostPerKg: updated.costPerKg,
+      historicalTotalCost: updated.historicalTotalCost || updated.totalCost,
+      calculatedPvc: updated.calculatedPvc,
+      calculatedDensity: updated.calculatedDensity,
+      currency: updated.currency || 'EGP',
+      ingredientsSnapshotJson: updated.isConfidentialSealed ? '[]' : updated.ingredientsJson,
+      encryptedSnapshotCiphertext: updated.confidentialCiphertext || '',
+      createdBy: params.actor,
+      approvedBy: isApproved ? params.actor : '',
+      approvedAt: isApproved ? now : 0,
+      createdAt: now
+    };
+    await this.upsertDocument('lab_formula_versions', verSnapshot.syncUuid, verSnapshot, undefined, {
+      actorUsername: params.actor
+    }).catch(() => {});
+
+    await this.logAudit(
+      params.actor,
+      `LAB_FORMULA_${params.decision}`,
+      sanitizeLabLog(`قرار ${params.decision} للتركيبة ${updated.formulaNo} v${updated.versionNumber || 1}: ${params.reason || ''}`)
+    );
+    return updated;
+  }
+
+  async recordLabExperiment(params: {
+    formula: LabFormulation;
+    experimentDate: string;
+    technicianName: string;
+    measuredDensity: number;
+    measuredViscosity: string;
+    measuredPh: number;
+    measuredGrindMicrons: number;
+    hidingPowerPercent: number;
+    notes: string;
+    actor: string;
+  }): Promise<LabExperiment> {
+    const now = Date.now();
+    const expNo = `EXP-${String(now).slice(-6)}`;
+    const syncUuid = `EXP-${params.formula.formulaNo}-${now}`;
+    const record: LabExperiment = {
+      id: now,
+      syncUuid,
+      experimentNo: expNo,
+      formulaId: params.formula.id,
+      formulaNo: params.formula.formulaNo,
+      versionNumber: params.formula.versionNumber || 1,
+      productId: params.formula.linkedProductId ?? null,
+      productName: params.formula.productName,
+      experimentDate: params.experimentDate || new Date(now).toISOString().split('T')[0],
+      technicianName: params.technicianName.trim() || params.actor,
+      materialsUsedJson: '[]', // Keep confidential formula breakdown redacted out of experiment records
+      measuredDensity: Number(params.measuredDensity) || 0,
+      measuredViscosity: params.measuredViscosity.trim(),
+      measuredPh: Number(params.measuredPh) || 0,
+      measuredGrindMicrons: Number(params.measuredGrindMicrons) || 0,
+      hidingPowerPercent: Number(params.hidingPowerPercent) || 0,
+      notes: sanitizeLabLog(params.notes.trim()),
+      status: 'PENDING',
+      decision: 'PENDING',
+      decidedBy: '',
+      decidedAt: 0,
+      idempotencyKey: syncUuid,
+      createdAt: now,
+      updatedAt: now
+    };
+    await this.upsertDocument('lab_experiments', syncUuid, record, undefined, { actorUsername: params.actor });
+    await this.logAudit(
+      params.actor,
+      'LAB_EXPERIMENT_CREATE',
+      sanitizeLabLog(`تسجيل تجربة مخبرية ${expNo} للتركيبة ${params.formula.formulaNo} v${record.versionNumber}`)
+    );
+    return record;
+  }
+
+  async decideLabExperimentQc(params: {
+    experiment: LabExperiment;
+    decision: 'APPROVED' | 'REJECTED' | 'RETEST';
+    actor: string;
+    linkedQcNo?: string;
+    notes?: string;
+  }): Promise<LabExperiment> {
+    const now = Date.now();
+    const statusMap: Record<'APPROVED' | 'REJECTED' | 'RETEST', LabExperiment['status']> = {
+      APPROVED: 'PASSED',
+      REJECTED: 'FAILED',
+      RETEST: 'RETEST_REQUIRED'
+    };
+    const updated: LabExperiment = {
+      ...params.experiment,
+      status: statusMap[params.decision],
+      decision: params.decision,
+      decidedBy: params.actor,
+      decidedAt: now,
+      linkedQcNo: params.linkedQcNo || params.experiment.linkedQcNo || '',
+      notes: params.notes ? sanitizeLabLog(params.notes) : params.experiment.notes,
+      updatedAt: now
+    };
+    const docId = (params.experiment as any)._docId || params.experiment.syncUuid;
+    await this.upsertDocument('lab_experiments', docId, updated, undefined, { actorUsername: params.actor });
+    await this.logAudit(
+      params.actor,
+      'LAB_EXPERIMENT_QC_DECISION',
+      sanitizeLabLog(`قرار الجودة ${params.decision} للتجربة ${updated.experimentNo} (${updated.formulaNo})`)
+    );
+    return updated;
+  }
+
+  async updateRawMaterialRegistryPrice(params: {
+    item: FactoryItem;
+    newPrice: number;
+    supplierName: string;
+    sourceType: 'PURCHASE_GRN' | 'MANUAL_LAB' | 'EXCEL_IMPORT';
+    sourceDocNo: string;
+    currency?: string;
+    actor: string;
+  }): Promise<RawMaterialPriceHistory> {
+    const now = Date.now();
+    const prevPrice = Number(params.item.lastPurchasePrice || params.item.unitCostEgp || 0);
+    const updatedItem: FactoryItem = {
+      ...params.item,
+      unitCostEgp: params.newPrice,
+      lastPurchasePrice: params.newPrice,
+      lastPriceUpdatedAt: now,
+      supplierName: params.supplierName.trim() || params.item.supplierName || '',
+      updatedAt: now
+    };
+    const itemDocId = (params.item as any)._docId || safeId(params.item.syncUuid || `FI-${params.item.id}`, `FI-${params.item.id}`);
+    await this.upsertDocument('factory_items', itemDocId, updatedItem, undefined, { actorUsername: params.actor });
+
+    const phSyncUuid = `PRC-${params.item.id}-${now}`;
+    const hist: RawMaterialPriceHistory = {
+      id: now,
+      syncUuid: phSyncUuid,
+      materialId: params.item.id,
+      itemCode: params.item.itemCode || `RAW-${params.item.id}`,
+      materialName: params.item.name,
+      supplierName: updatedItem.supplierName || '',
+      unitPrice: params.newPrice,
+      previousPrice: prevPrice,
+      currency: params.currency || params.item.defaultCurrency || 'EGP',
+      sourceType: params.sourceType,
+      sourceDocNo: params.sourceDocNo || '-',
+      effectiveDate: new Date(now).toISOString().split('T')[0],
+      recordedBy: params.actor,
+      createdAt: now
+    };
+    await this.upsertDocument('raw_material_price_history', phSyncUuid, hist, undefined, { actorUsername: params.actor });
+    return hist;
+  }
+
+  async commitStagedExcelImport(params: {
+    report: ExcelWorkbookAnalysisReport;
+    selectedCandidateIndices: number[];
+    existingItems: FactoryItem[];
+    actor: string;
+  }): Promise<{ importedCount: number; createdMaterialsCount: number; batch: LabExcelImportBatch }> {
+    const now = Date.now();
+    const currentItems = [...params.existingItems];
+    let createdMaterialsCount = 0;
+    let importedCount = 0;
+
+    for (const cIdx of params.selectedCandidateIndices) {
+      const candidate = params.report.candidates[cIdx];
+      if (!candidate) continue;
+
+      const resolvedIngredients: FormulationIngredient[] = [];
+      for (const ing of candidate.ingredients) {
+        let matched = currentItems.find(
+          (fi) =>
+            (ing.materialId && Number(fi.id) === Number(ing.materialId)) ||
+            (ing.itemCode && (fi.itemCode || '').toLowerCase() === ing.itemCode.toLowerCase()) ||
+            fi.name.trim().toLowerCase() === ing.name.trim().toLowerCase()
+        );
+        if (!matched) {
+          const newId = Date.now() + createdMaterialsCount + Math.floor(Math.random() * 100);
+          const itemCode = ing.itemCode || `RM-XLS-${String(newId).slice(-5)}`;
+          matched = {
+            id: newId,
+            syncUuid: `FI-${newId}`,
+            itemCode,
+            name: ing.name,
+            unit: 'كجم',
+            category: 'خامات إنتاج',
+            defaultCurrency: 'EGP',
+            unitCostEgp: ing.unitCost,
+            lastPurchasePrice: ing.unitCost,
+            lastPriceUpdatedAt: now,
+            density: ing.density,
+            solidsPercent: ing.solidsPercent,
+            chemicalType: ing.type,
+            updatedAt: now
+          };
+          await this.upsertDocument('factory_items', matched.syncUuid!, matched, undefined, { actorUsername: params.actor });
+          currentItems.push(matched);
+          createdMaterialsCount++;
+        }
+        resolvedIngredients.push({
+          ...ing,
+          materialId: matched.id,
+          itemCode: matched.itemCode || ing.itemCode || ''
+        });
+      }
+
+      await this.saveFormulationWithVersioning({
+        productName: candidate.productName,
+        paintType: candidate.paintType,
+        baseKind: candidate.baseKind,
+        notes: `[استيراد إكسل: ${params.report.fileName} / ${candidate.sheetName}] ${candidate.warnings.join(' | ')}`,
+        ingredients: resolvedIngredients,
+        changeReason: `استيراد أولي من Excel (${candidate.formulaKind}) — يحتاج مراجعة واعتماد`,
+        actor: params.actor
+      });
+      importedCount++;
+    }
+
+    const importNo = `XLS-${String(now).slice(-6)}`;
+    const batch: LabExcelImportBatch = {
+      id: now,
+      syncUuid: importNo,
+      importNo,
+      fileName: params.report.fileName,
+      sheetCount: params.report.sheets.length,
+      formulasDetected: params.report.candidates.length,
+      formulasImported: importedCount,
+      materialsMatched: params.report.materialsMatchedCount,
+      materialsCreated: createdMaterialsCount,
+      externalLinksDetected: params.report.externalLinksDetected,
+      brokenRefsDetected: params.report.brokenRefsDetected,
+      warningsCount: params.report.warningsCount,
+      approvalStatus: 'NEEDS_REVIEW',
+      checksumSha256: params.report.checksumSha256,
+      restrictedSummaryJson: JSON.stringify(params.report.nonSecretSummary),
+      importedBy: params.actor,
+      idempotencyKey: `IMP-${params.report.checksumSha256.slice(0, 16)}-${now}`,
+      createdAt: now
+    };
+    await this.upsertDocument('lab_excel_imports', importNo, batch, undefined, { actorUsername: params.actor });
+    await this.logAudit(
+      params.actor,
+      'LAB_EXCEL_IMPORT',
+      sanitizeLabLog(`استيراد ملف (${params.report.fileName}): ${importedCount} تركيبة بحالة NEEDS_REVIEW (checksum=${params.report.checksumSha256.slice(0, 12)})`)
+    );
+    return { importedCount, createdMaterialsCount, batch };
+  }
 }
 
 export const ErpDataService = new ErpDataServiceImpl();
@@ -1458,5 +1953,11 @@ export type {
   BalanceSheetReport,
   ReconciliationItem,
   CurrencyFxRates,
-  ConsolidatedFxSummary
+  ConsolidatedFxSummary,
+  FormulationIngredient,
+  FormulationVersion,
+  LabExperiment,
+  RawMaterialPriceHistory,
+  LabExcelImportBatch,
+  ThreeCostComparisonReport
 };

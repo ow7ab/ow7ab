@@ -2,6 +2,8 @@ package com.example.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
@@ -43,13 +45,21 @@ import com.example.data.local.FormulationEntity
 import com.example.data.local.FormulationIngredient
 import com.example.data.local.ProductionBatchEntity
 import com.example.ui.components.DailyProductionBatchModal
+import com.example.ui.components.FormulaApprovalDialog
+import com.example.ui.components.FormulaStatusChip
+import com.example.ui.components.FormulaVersionHistoryDialog
 import com.example.ui.components.GlassButton
 import com.example.ui.components.GlassCard
+import com.example.ui.components.LabExcelImportPreviewDialog
+import com.example.ui.components.LabExperimentsAndQcTab
 import com.example.ui.components.ProvideShimmerEffect
 import com.example.ui.components.ShimmerListRowCardSkeleton
+import com.example.ui.components.ThreeCostComparisonDialog
+import com.example.ui.components.UnifiedRawMaterialsRegistryTab
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.PmpViewModel
 import com.example.util.FormulationPdfExporter
+import com.example.util.LabExcelAnalyzer
 import com.example.util.PubChemService
 import com.example.util.PvcEngine
 import java.text.NumberFormat
@@ -66,7 +76,8 @@ fun ChemistryLabScreen(
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf(
         "التركيبات والنسب" to Icons.Default.Calculate,
-        "دليل المواد الخام" to Icons.Default.MenuBook,
+        "التجارب والجودة" to Icons.Default.Biotech,
+        "المواد الخام" to Icons.Default.Inventory2,
         "معايير السلامة" to Icons.Default.HealthAndSafety
     )
 
@@ -140,9 +151,10 @@ fun ChemistryLabScreen(
             }
         }
 
-        // Navigation Tabs (Mobile-First scrollable row with active indicators)
-        TabRow(
+        // Navigation Tabs (Scrollable for clean compact & tablet widths)
+        ScrollableTabRow(
             selectedTabIndex = selectedTab,
+            edgePadding = 8.dp,
             containerColor = if (PmpThemeModeController.isDarkMode) Color(0xFF0A0A0D) else Color(0xFF0F172A),
             contentColor = Color(0xFF38BDF8)
         ) {
@@ -166,7 +178,8 @@ fun ChemistryLabScreen(
                                 text = pair.first,
                                 color = if (selectedTab == index) Color.White else Color(0xFF94A3B8),
                                 fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = 12.sp
+                                fontSize = 12.sp,
+                                maxLines = 1
                             )
                         }
                     }
@@ -181,8 +194,9 @@ fun ChemistryLabScreen(
         ) { tabIndex ->
             when (tabIndex) {
                 0 -> PvcEngineTab(viewModel = viewModel)
-                1 -> PubChemTab(viewModel = viewModel)
-                2 -> GhsSafetyTab(viewModel = viewModel)
+                1 -> LabExperimentsAndQcTab(viewModel = viewModel)
+                2 -> UnifiedRawMaterialsRegistryTab(viewModel = viewModel)
+                else -> GhsSafetyTab(viewModel = viewModel)
             }
         }
     }
@@ -195,18 +209,39 @@ fun ChemistryLabScreen(
 @Composable
 fun PvcEngineTab(viewModel: PmpViewModel) {
     val context = LocalContext.current
+    val currentUser by viewModel.currentUser.collectAsState()
     val formulations by viewModel.formulations.collectAsState()
+    val formulaVersions by viewModel.formulationVersions.collectAsState()
+    val factoryItems by viewModel.factoryItems.collectAsState()
+    val productionOrders by viewModel.productionOrdersDb.collectAsState(initial = emptyList())
     val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
     val guardLoadingLabels by viewModel.guardLoadingLabels.collectAsState()
     val numberFormat = remember { NumberFormat.getNumberInstance(Locale.US).apply { maximumFractionDigits = 2 } }
 
+    val canViewSecrets = remember(currentUser) { viewModel.canViewSecretFormulas() }
+    val canEditFormulas = remember(currentUser) { viewModel.canEditSecretFormulas() }
+    val canApproveFormulas = remember(currentUser) { viewModel.canApproveFormulas() }
+    val canViewCosts = remember(currentUser) { viewModel.canViewFormulaCosts() }
+    val canExportSecrets = remember(currentUser) { viewModel.canExportSecretFormulas() }
+
     var currentFormulaId by remember { mutableLongStateOf(0L) }
     var formulaNo by remember { mutableStateOf("PMP-LAB-2026-001") }
     var productName by remember { mutableStateOf("دهان PMP معماري مطفي") }
+    var formulaCategory by remember { mutableStateOf("بوهيات") }
     var paintType by remember { mutableStateOf("مطفي معماري (Matt)") }
     var baseKind by remember { mutableStateOf("أبيض") }
     var targetPvcInput by remember { mutableStateOf("45.0") }
     var notesInput by remember { mutableStateOf("") }
+    var changeReasonInput by remember { mutableStateOf("تحديث مواصفات التركيبة") }
+
+    val selectedSavedFormula = remember(formulations, currentFormulaId) {
+        formulations.firstOrNull { it.id == currentFormulaId }
+    }
+    val currentFormulaApproved = remember(selectedSavedFormula) {
+        selectedSavedFormula != null &&
+            (selectedSavedFormula.approvalStatus.equals("APPROVED", ignoreCase = true) ||
+                (selectedSavedFormula.approvedForProduction && selectedSavedFormula.approvalStatus == "DRAFT"))
+    }
 
     var ingredientsList by remember {
         mutableStateOf(
@@ -229,12 +264,51 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
     var showAddIngredientDialog by remember { mutableStateOf(false) }
     var showProductionOrderDialog by remember { mutableStateOf(false) }
     var showBatchModalFromLab by remember { mutableStateOf(false) }
+    var showVersionHistoryDialog by remember { mutableStateOf(false) }
+    var showApprovalDialog by remember { mutableStateOf(false) }
+    var showThreeCostDialog by remember { mutableStateOf(false) }
+    var formulaSearchQuery by remember { mutableStateOf("") }
+    var excelPreviewState by remember { mutableStateOf<Pair<LabExcelAnalyzer.WorkbookAnalysisResult, ByteArray>?>(null) }
+
     val factoryMachines by viewModel.factoryMachines.collectAsState()
-    var batchOrderMultiplierInput by remember { mutableStateOf("5.0") } // e.g. 5x = 500 kg batch
+    var batchOrderMultiplierInput by remember { mutableStateOf("5.0") }
 
     var selectedBatchScaleKg by remember { mutableDoubleStateOf(100.0) }
     var costCurrency by remember { mutableStateOf("EGP") }
     var targetOrderWarehouse by remember { mutableStateOf("مخزن الإنتاج التام داخل المصنع") }
+
+    // Zero-permission Android Storage Access Framework document picker for .xlsx/.xlsm
+    val excelPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            val fileName = runCatching {
+                context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                    val nameIdx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (c.moveToFirst() && nameIdx >= 0) c.getString(nameIdx) else null
+                }
+            }.getOrNull() ?: "formulations.xlsx"
+
+            val rawBytes = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }.getOrNull()
+
+            if (rawBytes == null || rawBytes.isEmpty()) {
+                viewModel.postMessage("تعذر قراءة ملف Excel المحدد.", isError = true)
+            } else {
+                LabExcelAnalyzer.analyzeBytes(
+                    bytes = rawBytes,
+                    fileName = fileName,
+                    existingRawMaterials = factoryItems,
+                    existingFormulations = formulations
+                ).onSuccess { analysis ->
+                    excelPreviewState = analysis to rawBytes
+                }.onFailure { err ->
+                    viewModel.postMessage(err.message ?: "فشل تحليل ملف الإكسل", isError = true)
+                }
+            }
+        }
+    }
 
     // Sync when user selects an existing saved formula
     LaunchedEffect(formulations) {
@@ -243,6 +317,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
             currentFormulaId = first.id
             formulaNo = first.formulaNo
             productName = first.productName
+            formulaCategory = first.category
             paintType = first.paintType
             baseKind = first.baseKind
             targetPvcInput = first.targetPvc.toString()
@@ -252,6 +327,46 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                 ingredientsList = parsed
             }
         }
+    }
+
+    if (!canViewSecrets) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+            contentPadding = PaddingValues(top = 12.dp, bottom = 112.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFEF3C7)),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, Color(0xFFF59E0B))
+                ) {
+                    Row(modifier = Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFFB45309))
+                        Column {
+                            Text("الوصول مقيد لحماية الملكية الفكرية الصناعية", fontWeight = FontWeight.Bold, color = Color(0xFF92400E), fontSize = 13.sp)
+                            Text("حسابك الحالي (${currentUser?.role ?: "غير مصرح"}) مخول بالاطلاع على المواصفات العامة وتكلفة الوحدة المصرّح بها فقط. نسب التركيبات الكيميائية ومكوناتها السرية محجوبة.", color = Color(0xFF78350F), fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+            items(formulations) { f ->
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = PmpWhiteCard), shape = RoundedCornerShape(12.dp)) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("${f.formulaNo} — ${f.productName}", fontWeight = FontWeight.Bold, color = TextDark, fontSize = 13.sp)
+                            FormulaStatusChip(f.approvalStatus, f.approvedForProduction, f.versionNumber)
+                        }
+                        Text("النوع: ${f.paintType} • PVC: ${f.calculatedPvc}% • الكثافة: ${f.calculatedDensity} kg/L", color = TextMuted, fontSize = 11.sp)
+                        if (canViewCosts) {
+                            Text("التكلفة المعتمدة للكيلو: ${f.costPerKg} ${f.currency} (التاريخية: ${f.historicalCostPerKg})", color = PmpBlueLight, fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+        return
     }
 
     LazyColumn(
@@ -293,6 +408,10 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            selectedSavedFormula?.let { sf ->
+                                Spacer(modifier = Modifier.height(4.dp))
+                                FormulaStatusChip(sf.approvalStatus, sf.approvedForProduction, sf.versionNumber)
+                            }
                         }
 
                         Row(
@@ -314,24 +433,72 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                                 Text("التركيبات (${formulations.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
 
-                            Button(
-                                onClick = {
-                                    currentFormulaId = 0L
-                                    formulaNo = "PMP-LAB-${(100..999).random()}"
-                                    productName = "تركيبة جديدة"
-                                    ingredientsList = emptyList()
-                                },
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF1E40AF),
-                                    contentColor = Color.White
-                                )
-                            ) {
-                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("جديدة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            if (canEditFormulas) {
+                                Button(
+                                    onClick = {
+                                        currentFormulaId = 0L
+                                        formulaNo = "PMP-LAB-${(100..999).random()}"
+                                        productName = "تركيبة جديدة"
+                                        ingredientsList = emptyList()
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF1E40AF),
+                                        contentColor = Color.White
+                                    )
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("جديدة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
+                        }
+                    }
+
+                    // Enterprise Lab Toolbar: Versions, 3-Cost Variance, Approval Decision, Staged .xlsx Importer
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (selectedSavedFormula != null) {
+                            AssistChip(
+                                onClick = { showVersionHistoryDialog = true },
+                                label = { Text("سجل الإصدارات", fontSize = 11.sp) },
+                                leadingIcon = { Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(15.dp)) }
+                            )
+                            if (canViewCosts) {
+                                AssistChip(
+                                    onClick = { showThreeCostDialog = true },
+                                    label = { Text("مقارنة التكاليف الـ3", fontSize = 11.sp) },
+                                    leadingIcon = { Icon(Icons.Default.CompareArrows, contentDescription = null, modifier = Modifier.size(15.dp)) }
+                                )
+                            }
+                            if (canApproveFormulas) {
+                                AssistChip(
+                                    onClick = { showApprovalDialog = true },
+                                    label = { Text("اعتماد / مراجعة", fontSize = 11.sp) },
+                                    leadingIcon = { Icon(Icons.Default.Verified, contentDescription = null, modifier = Modifier.size(15.dp), tint = Color(0xFF059669)) },
+                                    modifier = Modifier.testTag("lab_open_approval_btn")
+                                )
+                            }
+                        }
+                        if (canEditFormulas) {
+                            AssistChip(
+                                onClick = {
+                                    excelPickerLauncher.launch(
+                                        arrayOf(
+                                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                            "application/vnd.ms-excel.sheet.macroEnabled.12",
+                                            "*/*"
+                                        )
+                                    )
+                                },
+                                label = { Text("استيراد Excel (.xlsx)", fontSize = 11.sp) },
+                                leadingIcon = { Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(15.dp), tint = PmpBlueLight) },
+                                modifier = Modifier.testTag("lab_import_excel_btn")
+                            )
                         }
                     }
 
@@ -770,22 +937,52 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     )
                 }
 
-                // Secondary Factory Dispatch / Move Order Button
+                // Strict Unapproved Formula Production Gate Notice
+                if (selectedSavedFormula != null && !currentFormulaApproved) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFFFEF3C7),
+                        border = BorderStroke(1.dp, Color(0xFFF59E0B)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "تنبيه الجودة والأمان: هذه التركيبة (${selectedSavedFormula.approvalStatus}) غير معتمدة بعد للإنتاج العادي. يلزم اعتمادها من الإدارة المخولة قبل إصدار أمر تشغيل.",
+                            color = Color(0xFF92400E),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                }
+
+                // Secondary Factory Dispatch / Move Order Button (Strictly requires APPROVED formula!)
                 OutlinedButton(
                     onClick = { showProductionOrderDialog = true },
+                    enabled = currentFormulaApproved,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(44.dp)
                         .testTag("lab_create_factory_order_button"),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Icon(Icons.Default.PrecisionManufacturing, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color(0xFF1E40AF))
+                    Icon(Icons.Default.PrecisionManufacturing, contentDescription = null, modifier = Modifier.size(18.dp), tint = if (currentFormulaApproved) Color(0xFF1E40AF) else TextSubtle)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "أمر تشغيل وتوريد خامات للمصنع",
+                        text = if (currentFormulaApproved) "أمر تشغيل وتوريد خامات للمصنع" else "أمر التشغيل مقيد (بانتظار الاعتماد)",
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF1E40AF)
+                        color = if (currentFormulaApproved) Color(0xFF1E40AF) else TextSubtle
+                    )
+                }
+
+                if (canEditFormulas) {
+                    OutlinedTextField(
+                        value = changeReasonInput,
+                        onValueChange = { changeReasonInput = it },
+                        label = { Text("سبب التعديل / ملاحظة الإصدار") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        textStyle = LocalTextStyle.current.copy(fontSize = 12.sp)
                     )
                 }
 
@@ -795,158 +992,280 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                 ) {
                     val saveFormulaGuard = "save_formulation"
                     val isSavingFormula = activeGuardKeys.contains(saveFormulaGuard)
-                    Button(
-                        onClick = {
-                            if (isSavingFormula) return@Button
-                            val entity = FormulationEntity(
-                                id = currentFormulaId,
-                                formulaNo = formulaNo,
-                                productName = productName,
-                                paintType = paintType,
-                                baseKind = baseKind,
-                                targetPvc = targetPvcInput.toDoubleOrNull() ?: calcResult.calculatedPvc,
-                                calculatedPvc = calcResult.calculatedPvc,
-                                cpvcEstimated = calcResult.cpvcEstimated,
-                                totalSolidsWeight = calcResult.totalSolidsWeight,
-                                totalSolidsVolume = calcResult.totalSolidsVolume,
-                                totalBatchWeight = calcResult.totalBatchWeight,
-                                totalBatchVolume = calcResult.totalBatchVolume,
-                                calculatedDensity = calcResult.calculatedDensity,
-                                totalCost = calcResult.totalCost,
-                                costPerKg = calcResult.costPerKg,
-                                ingredientsJson = PvcEngine.ingredientsToJson(ingredientsList),
-                                technicalAnalysis = calcResult.technicalAnalysisText,
-                                notes = notesInput
-                            )
-                            viewModel.saveFormulation(entity, guardKey = saveFormulaGuard)
-                        },
-                        enabled = !isSavingFormula,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF059669),
-                            contentColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        if (isSavingFormula) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(guardLoadingLabels[saveFormulaGuard] ?: "جاري الحفظ...", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        } else {
-                            Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(17.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("حفظ الصيغة", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                    if (canEditFormulas) {
+                        Button(
+                            onClick = {
+                                if (isSavingFormula) return@Button
+                                val entity = FormulationEntity(
+                                    id = currentFormulaId,
+                                    formulaNo = formulaNo,
+                                    productName = productName,
+                                    category = formulaCategory,
+                                    paintType = paintType,
+                                    baseKind = baseKind,
+                                    targetPvc = targetPvcInput.toDoubleOrNull() ?: calcResult.calculatedPvc,
+                                    calculatedPvc = calcResult.calculatedPvc,
+                                    cpvcEstimated = calcResult.cpvcEstimated,
+                                    totalSolidsWeight = calcResult.totalSolidsWeight,
+                                    totalSolidsVolume = calcResult.totalSolidsVolume,
+                                    totalBatchWeight = calcResult.totalBatchWeight,
+                                    totalBatchVolume = calcResult.totalBatchVolume,
+                                    calculatedDensity = calcResult.calculatedDensity,
+                                    totalCost = calcResult.totalCost,
+                                    costPerKg = calcResult.costPerKg,
+                                    ingredientsJson = PvcEngine.ingredientsToJson(ingredientsList),
+                                    technicalAnalysis = calcResult.technicalAnalysisText,
+                                    notes = notesInput
+                                )
+                                viewModel.saveFormulation(
+                                    formulation = entity,
+                                    changeReason = changeReasonInput.ifBlank { "تحديث مواصفات التركيبة" },
+                                    guardKey = saveFormulaGuard
+                                )
+                            },
+                            enabled = !isSavingFormula,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("lab_save_formula_btn"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF059669),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            if (isSavingFormula) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(guardLoadingLabels[saveFormulaGuard] ?: "جاري تنفيذ العملية", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                            } else {
+                                Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(if (currentFormulaApproved) "حفظ كإصدار جديد" else "حفظ الصيغة", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
 
-                    OutlinedButton(
-                        onClick = {
-                            val entity = FormulationEntity(
-                                id = currentFormulaId,
-                                formulaNo = formulaNo,
-                                productName = productName,
-                                paintType = paintType,
-                                baseKind = baseKind,
-                                targetPvc = targetPvcInput.toDoubleOrNull() ?: calcResult.calculatedPvc,
-                                calculatedPvc = calcResult.calculatedPvc,
-                                cpvcEstimated = calcResult.cpvcEstimated,
-                                totalSolidsWeight = calcResult.totalSolidsWeight,
-                                totalSolidsVolume = calcResult.totalSolidsVolume,
-                                totalBatchWeight = calcResult.totalBatchWeight,
-                                totalBatchVolume = calcResult.totalBatchVolume,
-                                calculatedDensity = calcResult.calculatedDensity,
-                                totalCost = calcResult.totalCost,
-                                costPerKg = calcResult.costPerKg,
-                                ingredientsJson = PvcEngine.ingredientsToJson(ingredientsList),
-                                technicalAnalysis = calcResult.technicalAnalysisText,
-                                notes = notesInput
-                            )
-                            FormulationPdfExporter.exportAndShareFormulation(context, entity, ingredientsList)
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(46.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = PmpDangerSoftSurface,
-                            contentColor = Color(0xFFDC2626)
-                        ),
-                        border = BorderStroke(1.dp, PmpBrandRed.copy(alpha = 0.4f)),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = Color(0xFFDC2626), modifier = Modifier.size(17.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("تصدير PDF", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                    if (canExportSecrets) {
+                        OutlinedButton(
+                            onClick = {
+                                val entity = FormulationEntity(
+                                    id = currentFormulaId,
+                                    formulaNo = formulaNo,
+                                    productName = productName,
+                                    category = formulaCategory,
+                                    paintType = paintType,
+                                    baseKind = baseKind,
+                                    targetPvc = targetPvcInput.toDoubleOrNull() ?: calcResult.calculatedPvc,
+                                    calculatedPvc = calcResult.calculatedPvc,
+                                    cpvcEstimated = calcResult.cpvcEstimated,
+                                    totalSolidsWeight = calcResult.totalSolidsWeight,
+                                    totalSolidsVolume = calcResult.totalSolidsVolume,
+                                    totalBatchWeight = calcResult.totalBatchWeight,
+                                    totalBatchVolume = calcResult.totalBatchVolume,
+                                    calculatedDensity = calcResult.calculatedDensity,
+                                    totalCost = calcResult.totalCost,
+                                    costPerKg = calcResult.costPerKg,
+                                    ingredientsJson = PvcEngine.ingredientsToJson(ingredientsList),
+                                    technicalAnalysis = calcResult.technicalAnalysisText,
+                                    notes = notesInput
+                                )
+                                FormulationPdfExporter.exportAndShareFormulation(
+                                    context = context,
+                                    formulation = entity,
+                                    ingredients = ingredientsList,
+                                    actorAccount = currentUser
+                                ).onFailure { err ->
+                                    viewModel.postMessage(err.message ?: "غير مصرح بالتصدير", isError = true)
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(46.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = PmpDangerSoftSurface,
+                                contentColor = Color(0xFFDC2626)
+                            ),
+                            border = BorderStroke(1.dp, PmpBrandRed.copy(alpha = 0.4f)),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = Color(0xFFDC2626), modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("تصدير PDF", fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
         }
     }
 
-    // Dialog: Load Existing Saved Formulation
+    // Dialog: Version History
+    if (showVersionHistoryDialog && selectedSavedFormula != null) {
+        FormulaVersionHistoryDialog(
+            formulation = selectedSavedFormula,
+            versions = formulaVersions,
+            canViewSecrets = canViewSecrets,
+            onDismiss = { showVersionHistoryDialog = false }
+        )
+    }
+
+    // Dialog: 3-Cost Variance Report
+    if (showThreeCostDialog && selectedSavedFormula != null) {
+        val relatedOrder = productionOrders.firstOrNull { it.formulaId == selectedSavedFormula.id && it.actualGoodCans > 0 }
+        val actualCost = relatedOrder?.let { ord ->
+            val bomArr = runCatching { org.json.JSONArray(ord.bomLinesJson) }.getOrNull()
+            var total = 0.0
+            if (bomArr != null) {
+                for (i in 0 until bomArr.length()) {
+                    val obj = bomArr.getJSONObject(i)
+                    total += obj.optDouble("theoreticalRequiredKg", 0.0) * obj.optDouble("unitCostEgp", 0.0)
+                }
+            }
+            total.takeIf { it > 0.0 }
+        }
+        val actualWeight = relatedOrder?.let {
+            (it.actualGoodCans * it.packageWeightGrams.toDouble()) / 1000.0
+        }
+        val threeCostReport = PvcEngine.compareThreeCosts(
+            formulation = selectedSavedFormula.copy(
+                totalBatchWeight = calcResult.totalBatchWeight,
+                totalCost = calcResult.totalCost,
+                costPerKg = calcResult.costPerKg
+            ),
+            ingredients = ingredientsList,
+            rawMaterials = factoryItems,
+            actualProductionTotalCost = actualCost,
+            actualProducedWeightKg = actualWeight
+        )
+        ThreeCostComparisonDialog(
+            report = threeCostReport,
+            currency = costCurrency,
+            onDismiss = { showThreeCostDialog = false }
+        )
+    }
+
+    // Dialog: Admin Approval / Review Workflow
+    if (showApprovalDialog && selectedSavedFormula != null) {
+        FormulaApprovalDialog(
+            formulation = selectedSavedFormula,
+            isProcessing = activeGuardKeys.contains("decide_formula_approval_${selectedSavedFormula.id}"),
+            onDismiss = { showApprovalDialog = false },
+            onDecide = { status, note ->
+                viewModel.decideFormulationApproval(
+                    formulaId = selectedSavedFormula.id,
+                    decisionStatus = status,
+                    decisionNote = note,
+                    onComplete = { ok -> if (ok) showApprovalDialog = false }
+                )
+            }
+        )
+    }
+
+    // Dialog: Staged Excel (.xlsx) Preview & Confirm Import
+    excelPreviewState?.let { (analysis, rawBytes) ->
+        LabExcelImportPreviewDialog(
+            analysis = analysis,
+            isImporting = activeGuardKeys.contains("commit_lab_excel_import"),
+            onDismiss = { excelPreviewState = null },
+            onConfirmImport = { chosen ->
+                viewModel.commitStagedExcelImport(
+                    analysis = analysis,
+                    selectedDrafts = chosen,
+                    rawBytes = rawBytes,
+                    onComplete = { ok -> if (ok) excelPreviewState = null }
+                )
+            }
+        )
+    }
+
+    // Dialog: Load Existing Saved Formulation (with Search & Status)
     if (showLoadDialog) {
+        val filteredFormulas = remember(formulations, formulaSearchQuery) {
+            val q = formulaSearchQuery.trim().lowercase()
+            if (q.isEmpty()) formulations
+            else formulations.filter {
+                it.formulaNo.lowercase().contains(q) ||
+                    it.productName.lowercase().contains(q) ||
+                    it.category.lowercase().contains(q) ||
+                    it.paintType.lowercase().contains(q)
+            }
+        }
         AlertDialog(
             onDismissRequest = { showLoadDialog = false },
             containerColor = PmpWhiteSurface,
             title = {
-                Text("سجل تركيبات المختبر المعتمدة", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                Text("سجل تركيبات المختبر (${formulations.size})", color = TextDark, fontWeight = FontWeight.Bold, fontSize = 15.sp)
             },
             text = {
-                if (formulations.isEmpty()) {
-                    Text("لا توجد تركيبات محفوظة حتى الآن.", color = TextMuted)
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 350.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(formulations) { form ->
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        currentFormulaId = form.id
-                                        formulaNo = form.formulaNo
-                                        productName = form.productName
-                                        paintType = form.paintType
-                                        baseKind = form.baseKind
-                                        targetPvcInput = form.targetPvc.toString()
-                                        notesInput = form.notes
-                                        val parsed = PvcEngine.jsonToIngredients(form.ingredientsJson)
-                                        ingredientsList = parsed
-                                        showLoadDialog = false
-                                    },
-                                colors = CardDefaults.cardColors(containerColor = PmpSubtleSurface),
-                                shape = RoundedCornerShape(10.dp)
-                            ) {
-                                Row(
+                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = formulaSearchQuery,
+                        onValueChange = { formulaSearchQuery = it },
+                        placeholder = { Text("ابحث بالكود أو الاسم أو التصنيف...", fontSize = 12.sp) },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = LocalTextStyle.current.copy(fontSize = 12.sp)
+                    )
+                    if (filteredFormulas.isEmpty()) {
+                        Text("لا توجد تركيبات مطابقة.", color = TextMuted, fontSize = 12.sp)
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 350.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(filteredFormulas) { form ->
+                                Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(10.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                        .clickable {
+                                            currentFormulaId = form.id
+                                            formulaNo = form.formulaNo
+                                            productName = form.productName
+                                            formulaCategory = form.category
+                                            paintType = form.paintType
+                                            baseKind = form.baseKind
+                                            targetPvcInput = form.targetPvc.toString()
+                                            notesInput = form.notes
+                                            val parsed = PvcEngine.jsonToIngredients(form.ingredientsJson)
+                                            ingredientsList = parsed
+                                            showLoadDialog = false
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = PmpSubtleSurface),
+                                    shape = RoundedCornerShape(10.dp)
                                 ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(text = form.productName, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                        Text(
-                                            text = "${form.formulaNo} • PVC: ${form.calculatedPvc}% • ${form.paintType}",
-                                            color = TextMuted,
-                                            fontSize = 11.sp
-                                        )
-                                    }
-                                    val delFormulaGuard = "delete_formulation_${form.id}"
-                                    val isDeletingFormula = activeGuardKeys.contains(delFormulaGuard)
-                                    IconButton(
-                                        onClick = { viewModel.deleteFormulation(form, guardKey = delFormulaGuard) },
-                                        enabled = !isDeletingFormula,
-                                        modifier = Modifier.size(48.dp)
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        if (isDeletingFormula) {
-                                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.Red)
-                                        } else {
-                                            Icon(Icons.Default.Delete, contentDescription = "حذف", tint = Color.Red, modifier = Modifier.size(18.dp))
+                                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                            Text(text = form.productName, color = TextDark, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            Text(
+                                                text = "${form.formulaNo} • ${form.category} • PVC: ${form.calculatedPvc}%",
+                                                color = TextMuted,
+                                                fontSize = 11.sp
+                                            )
+                                            FormulaStatusChip(form.approvalStatus, form.approvedForProduction, form.versionNumber)
+                                        }
+                                        if (canEditFormulas) {
+                                            val delFormulaGuard = "delete_formulation_${form.id}"
+                                            val isDeletingFormula = activeGuardKeys.contains(delFormulaGuard)
+                                            IconButton(
+                                                onClick = { viewModel.deleteFormulation(form, guardKey = delFormulaGuard) },
+                                                enabled = !isDeletingFormula,
+                                                modifier = Modifier.size(48.dp)
+                                            ) {
+                                                if (isDeletingFormula) {
+                                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.Red)
+                                                } else {
+                                                    Icon(Icons.Default.Delete, contentDescription = "حذف", tint = Color.Red, modifier = Modifier.size(18.dp))
+                                                }
+                                            }
                                         }
                                     }
                                 }

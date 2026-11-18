@@ -25,6 +25,7 @@ import {
   getCansPerCarton,
   receivePurchaseToRawMaterialsInState,
   createProductionOrderModel,
+  isFormulaApprovedForProduction,
   issueRawMaterialsForOrderInState,
   inspectQcAndPostToFinishedGoodsInState,
   validateTransferRoute,
@@ -254,6 +255,18 @@ export const WebProcurementGrnPanel: React.FC<{
             createdAt: receipt.createdAt + 2
           };
           await ErpDataService.saveRecord('factory_moves', `FM-${idempotencyKey}`, fm, userProfile?.username);
+        }
+
+        if (receipt.acceptedQty > 0 && receipt.unitCost > 0) {
+          await ErpDataService.updateRawMaterialRegistryPrice({
+            item,
+            newPrice: receipt.unitCost,
+            supplierName: receipt.supplierName,
+            sourceType: 'PURCHASE_GRN',
+            sourceDocNo: receipt.grnNo,
+            currency: receipt.currency,
+            actor
+          }).catch(() => {});
         }
 
         await ErpDataService.logAudit(
@@ -563,7 +576,8 @@ export const WebProductionOrderQcPanel: React.FC<{
 
   useEffect(() => {
     if (formulations.length > 0 && formulaId === 0) {
-      setFormulaId(Number(formulations[0].id));
+      const firstApproved = formulations.find((f) => isFormulaApprovedForProduction(f));
+      if (firstApproved) setFormulaId(Number(firstApproved.id));
     }
     if (products.length > 0 && productId === 0) {
       setProductId(Number(products[0].id));
@@ -604,6 +618,13 @@ export const WebProductionOrderQcPanel: React.FC<{
       return;
     }
     const formula = formulations.find((f) => Number(f.id) === Number(formulaId)) || null;
+    if (formula && !isFormulaApprovedForProduction(formula)) {
+      onNotice?.(
+        'err',
+        `مرفوض: التركيبة (${formula.formulaNo}) في حالة (${formula.approvalStatus || 'قيد المراجعة'}) ولم تُعتمد للإنتاج الصناعي بعد.`
+      );
+      return;
+    }
     const prod = products.find((p) => Number(p.id) === Number(productId)) || null;
     const actor = userProfile?.fullName || userProfile?.username || 'مهندس الإنتاج';
 
@@ -845,11 +866,14 @@ export const WebProductionOrderQcPanel: React.FC<{
             className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary"
           >
             <option value={0}>-- إنتاج قياسي بدون ربط تركيبة --</option>
-            {formulations.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.formulaNo} — {f.productName}
-              </option>
-            ))}
+            {formulations.map((f) => {
+              const approved = isFormulaApprovedForProduction(f);
+              return (
+                <option key={f.id} value={f.id} disabled={!approved}>
+                  {f.formulaNo} (v{f.versionNumber || 1}) — {f.productName} {approved ? '✓ معتمدة' : `[غير معتمدة - محجوبة]`}
+                </option>
+              );
+            })}
           </select>
         </div>
 

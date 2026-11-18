@@ -24,8 +24,12 @@ object FormulationPdfExporter {
     fun exportAndShareFormulation(
         context: Context,
         formulation: FormulationEntity,
-        ingredients: List<FormulationIngredient>
+        ingredients: List<FormulationIngredient>,
+        actorAccount: com.example.data.local.UserAccountEntity? = null
     ): Result<File> = runCatching {
+        if (actorAccount != null && !LabSecurityManager.canExportSecretFormulas(actorAccount)) {
+            throw SecurityException("غير مصرح لك بتصدير أو طباعة نسب التركيبات الكيميائية السرية.")
+        }
         val document = PdfDocument()
         val pageInfo = PdfDocument.PageInfo.Builder(595, 842, 1).create() // A4 Portrait
         val page = document.startPage(pageInfo)
