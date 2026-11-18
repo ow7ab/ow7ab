@@ -90,6 +90,11 @@ sealed class IdempotencyClaimOutcome {
         val idempotencyKey: String,
         val reason: String
     ) : IdempotencyClaimOutcome()
+
+    data class Rejected(
+        val idempotencyKey: String,
+        val reason: String
+    ) : IdempotencyClaimOutcome()
 }
 
 data class GuardedExecutionResult<T>(
@@ -125,14 +130,16 @@ interface IdempotencyBackendAdapter {
     suspend fun markCompleted(
         clusterCode: String,
         idempotencyKey: String,
-        resultReference: String
+        resultReference: String,
+        operationType: String = IdempotencyOperationType.SAVE.code
     )
 
     suspend fun markPendingOrFailed(
         clusterCode: String,
         idempotencyKey: String,
         status: IdempotencyRequestStatus,
-        errorDetails: String
+        errorDetails: String,
+        operationType: String = IdempotencyOperationType.SAVE.code
     )
 
     suspend fun fetchRequest(
@@ -501,6 +508,25 @@ class TransactionSubmissionGuard(
                             message = IdempotencyStatusMessages.PENDING_DO_NOT_REENTER
                         )
                     }
+                    is IdempotencyClaimOutcome.Rejected -> {
+                        val updatedAt = System.currentTimeMillis()
+                        persistRecord(
+                            initialEntity.copy(
+                                requestStatus = IdempotencyRequestStatus.FAILED.code,
+                                updatedAt = updatedAt,
+                                errorDetails = claim.reason
+                            )
+                        )
+                        _guardStatusMessages.value = _guardStatusMessages.value + (guardKey to claim.reason)
+                        return GuardedExecutionResult(
+                            success = false,
+                            pendingConfirmation = false,
+                            idempotencyKey = idempotencyKey,
+                            status = IdempotencyRequestStatus.FAILED,
+                            message = claim.reason,
+                            error = SecurityException(claim.reason)
+                        )
+                    }
                 }
             }
 
@@ -519,7 +545,7 @@ class TransactionSubmissionGuard(
                     )
                 )
                 if (requiresServerClaim && adapter != null && isOnlineProvider()) {
-                    runCatching { adapter.markCompleted(cluster, idempotencyKey, resultRef) }
+                    runCatching { adapter.markCompleted(cluster, idempotencyKey, resultRef, operationType.code) }
                 }
                 _guardStatusMessages.value = _guardStatusMessages.value + (guardKey to IdempotencyStatusMessages.COMPLETED)
                 GuardedExecutionResult(
@@ -580,7 +606,8 @@ class TransactionSubmissionGuard(
                         clusterCode,
                         initialEntity.idempotencyKey,
                         IdempotencyRequestStatus.PENDING_CONFIRMATION,
-                        err.message ?: msg
+                        err.message ?: msg,
+                        initialEntity.operationType
                     )
                 }
             }
@@ -608,7 +635,8 @@ class TransactionSubmissionGuard(
                         clusterCode,
                         initialEntity.idempotencyKey,
                         IdempotencyRequestStatus.FAILED,
-                        detail
+                        detail,
+                        initialEntity.operationType
                     )
                 }
             }

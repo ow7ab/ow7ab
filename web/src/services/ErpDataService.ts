@@ -764,7 +764,7 @@ class ErpDataServiceImpl {
       return cleanId;
     }
 
-    // Enforce balanced journal entry invariant before touching Firestore
+    // Enforce balanced journal entry invariant and append-only immutability on retries
     if (collectionName === 'journal_entries') {
       const td = Number(dataToWrite.totalDebit ?? 0);
       const tc = Number(dataToWrite.totalCredit ?? 0);
@@ -772,6 +772,21 @@ class ErpDataServiceImpl {
         const err = new Error('القيد المحاسبي غير متوازن: إجمالي المدين لا يساوي إجمالي الدائن.');
         CloudErrorLogger.recordError('UPSERT_JOURNAL_ENTRY', path, err);
         throw err;
+      }
+    }
+
+    if (
+      collectionName === 'journal_lines' ||
+      collectionName === 'journal_entries' ||
+      collectionName === 'inventory_movements'
+    ) {
+      try {
+        const existingSnap = await getDoc(ref);
+        if (existingSnap.exists()) {
+          return cleanId;
+        }
+      } catch {
+        // Proceed to setDoc; Firestore rules will still enforce RBAC and immutability
       }
     }
 

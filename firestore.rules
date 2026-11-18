@@ -60,8 +60,8 @@ service cloud.firestore {
       return (isSignedIn() && exists(memberPath(clusterCode, request.auth.uid)))
         ? get(memberPath(clusterCode, request.auth.uid)).data
         : (hasTokenRoleClaim(clusterCode)
-            ? {'roleKey': request.auth.token.roleKey, 'branch': 'ALL', 'active': true, 'userCode': ''}
-            : {'roleKey': 'NONE', 'branch': '', 'active': false, 'userCode': ''});
+            ? {'roleKey': request.auth.token.roleKey, 'branch': 'ALL', 'active': true, 'userCode': '', 'permissions': ''}
+            : {'roleKey': 'NONE', 'branch': '', 'active': false, 'userCode': '', 'permissions': ''});
     }
 
     function isMemberAdmin(m) {
@@ -117,6 +117,13 @@ service cloud.firestore {
 
     function isValidRoleKey(rk) {
       return rk in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'];
+    }
+
+    function hasTreasuryPermissionGrant(m) {
+      return ('permissions' in m) &&
+        (m.permissions is string) &&
+        m.permissions.matches('.*(الخزن|العمليات المالية|التحويلات|TREASURY|FINANCIAL_OPS|TRANSFERS).*') &&
+        !m.permissions.matches('.*DENY:(الخزن|العمليات المالية).*');
     }
 
     function isAllowedErpCollection(col) {
@@ -372,11 +379,17 @@ service cloud.firestore {
       return isSignedIn() && m.active == true && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
         isMemberAdmin(m) ||
         (col in ['system_metadata', 'system_config', 'app_updates', 'config'] && false) ||
-        (col in ['deleted_records', 'deleted_users', 'permission_audit_logs'] && isMemberManager(m)) ||
+        (col in ['deleted_records', 'permission_audit_logs'] && isMemberManager(m)) ||
+        (col == 'deleted_users' && isMemberManager(m) &&
+          (!('userCode' in d) || d.userCode != 'USR-ADMIN') &&
+          (!('username' in d) || d.username != 'admin')) ||
         (col == 'accounting_accounts' && (isMemberManager(m) || isMemberAccountant(m))) ||
         (col in ['journal_entries', 'journal_lines'] && (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m))) ||
-        (col in ['cashboxes', 'movements', 'transfers', 'daily_closings'] &&
+        (col == 'cashboxes' &&
           (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m)) &&
+          (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
+        (col in ['movements', 'transfers', 'daily_closings'] &&
+          (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || hasTreasuryPermissionGrant(m)) &&
           (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
         (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'permission_audit_logs', 'accounting_accounts', 'journal_entries', 'journal_lines', 'cashboxes', 'movements', 'transfers', 'daily_closings']) &&
           (!('branch' in d) || canMemberAccessBranch(m, d.branch)))
@@ -388,13 +401,21 @@ service cloud.firestore {
       let d = request.resource.data;
       return isSignedIn() && m.active == true && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
         isMemberAdmin(m) ||
-        (col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_users'] && false) ||
+        (col in ['system_metadata', 'system_config', 'app_updates', 'config'] && false) ||
+        (col == 'deleted_users' && isMemberManager(m) &&
+          (!('userCode' in resource.data) || resource.data.userCode != 'USR-ADMIN') &&
+          (!('username' in resource.data) || resource.data.username != 'admin') &&
+          d.userCode == resource.data.userCode) ||
         (col == 'deleted_records' && isMemberManager(m)) ||
         (col == 'journal_entries' && isMemberAccountant(m)) ||
         (col == 'inventory_movements' && (isMemberManager(m) || isMemberAccountant(m))) ||
         (col == 'accounting_accounts' && (isMemberManager(m) || isMemberAccountant(m))) ||
-        (col in ['cashboxes', 'movements', 'transfers', 'daily_closings'] &&
+        (col == 'cashboxes' &&
           (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m)) &&
+          (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
+          (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
+        (col in ['movements', 'transfers', 'daily_closings'] &&
+          (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || hasTreasuryPermissionGrant(m)) &&
           (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
           (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
         (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'journal_entries', 'inventory_movements', 'accounting_accounts', 'cashboxes', 'movements', 'transfers', 'daily_closings']) &&
@@ -544,10 +565,12 @@ service cloud.firestore {
       let d = request.resource.data;
       let isSelf = (resource.data.linkedUid == request.auth.uid || (m.userCode != '' && resource.data.userCode == m.userCode));
       return isSignedIn() && m.active == true && (
-        (isSelf && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] &&
+        (isMemberAdmin(m) && (!isSelf || d.active == true)) ||
+        (isSelf && m.roleKey in ['MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] &&
           d.diff(resource.data).affectedKeys().hasOnly(['fullName', 'phoneOrEmail', 'pinOrPassword', 'serverSyncToken', 'lastLoginAt', 'deviceId', 'updatedAt', 'serverUpdatedAt'])) ||
-        (isMemberAdmin(m) && !isSelf) ||
         (isMemberManager(m) && !isSelf &&
+          resource.data.userCode != 'USR-ADMIN' &&
+          resource.data.username != 'admin' &&
           !isPrivilegedArabicOrEnRole(resource.data.role) &&
           !isPrivilegedArabicOrEnRole(d.role) &&
           canMemberAccessBranch(m, d.branch))

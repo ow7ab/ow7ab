@@ -1217,7 +1217,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 postMessage("تم تسجيل الحركة بنجاح: $autoRef")
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
-                        val m = MovementEntity(
+                        val m = repository.getDao().getMovementByIdDirect(movId) ?: MovementEntity(
                             id = movId,
                             txDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()),
                             cashbox = cashbox,
@@ -1230,13 +1230,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         )
                         val syncRes = cloudErpSyncRepo.syncSingleMovementToCloud(serverClusterCode.value, m, user)
                         syncRes.onFailure { err ->
-                            val msg = err.message.orEmpty()
-                            if (msg.contains("مكررة") || msg.contains("تلاعب") || msg.contains("مسبقاً")) {
-                                postMessage(msg, isError = true)
-                            }
+                            val safeMsg = com.example.data.remote.CloudSyncErrorTracker.sanitizeCloudMessage(err.message)
+                            _cloudSyncState.value = "تعذر إرسال الحركة للسيرفر: $safeMsg"
+                            postMessage("تم الحفظ محلياً، وتعذر الإرسال للسيرفر: $safeMsg", isError = true)
                         }
                     } catch (e: Exception) {
-                        Log.w("PmpViewModel", "Direct movement sync deferred: ${e.message}")
+                        val safeMsg = com.example.data.remote.CloudSyncErrorTracker.sanitizeCloudMessage(e.message)
+                        Log.w("PmpViewModel", "Direct movement sync deferred: $safeMsg")
                     }
                 }
                 "MOV-$movId" to movId
@@ -1328,7 +1328,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
                         val destAmt = if (isInvertedRate && rate > 0) sourceAmount / rate else sourceAmount * rate
-                        val t = TransferEntity(
+                        val t = repository.getDao().getTransferByIdDirect(trfId) ?: TransferEntity(
                             id = trfId,
                             reference = autoRef,
                             txDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()),
@@ -1346,13 +1346,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         )
                         val syncRes = cloudErpSyncRepo.syncSingleTransferToCloud(serverClusterCode.value, t, user)
                         syncRes.onFailure { err ->
-                            val msg = err.message.orEmpty()
-                            if (msg.contains("مكررة") || msg.contains("تلاعب") || msg.contains("مسبقاً")) {
-                                postMessage(msg, isError = true)
-                            }
+                            val safeMsg = com.example.data.remote.CloudSyncErrorTracker.sanitizeCloudMessage(err.message)
+                            _cloudSyncState.value = "تعذر إرسال التحويل للسيرفر: $safeMsg"
+                            postMessage("تم الحفظ محلياً، وتعذر إرسال التحويل للسيرفر: $safeMsg", isError = true)
                         }
                     } catch (e: Exception) {
-                        Log.w("PmpViewModel", "Direct transfer sync deferred: ${e.message}")
+                        val safeMsg = com.example.data.remote.CloudSyncErrorTracker.sanitizeCloudMessage(e.message)
+                        Log.w("PmpViewModel", "Direct transfer sync deferred: $safeMsg")
                     }
                 }
                 "TRF-$trfId" to trfId
@@ -3798,6 +3798,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
+                if (Firebase.auth.currentUser == null) {
+                    _cloudSyncState.value = "محفوظ محلياً (يرجى ربط حساب Google للمزامنة السحابية)"
+                    return@launch
+                }
                 val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
                 val syncRes = cloudErpSyncRepo.syncAllLocalToCloud(
                     serverClusterCode.value,

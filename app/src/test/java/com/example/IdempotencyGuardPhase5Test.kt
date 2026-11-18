@@ -47,11 +47,19 @@ class IdempotencyGuardPhase5Test {
         val claimCalls = AtomicInteger(0)
         var simulateUncertainNetwork = false
 
+        var simulateRejectedReason: String? = null
+
         override suspend fun claimOrGetRequest(
             clusterCode: String,
             request: IdempotencyRequestEntity
         ): IdempotencyClaimOutcome {
             claimCalls.incrementAndGet()
+            simulateRejectedReason?.let { reason ->
+                return IdempotencyClaimOutcome.Rejected(
+                    idempotencyKey = request.idempotencyKey,
+                    reason = reason
+                )
+            }
             if (simulateUncertainNetwork) {
                 return IdempotencyClaimOutcome.NetworkUncertain(
                     idempotencyKey = request.idempotencyKey,
@@ -79,7 +87,8 @@ class IdempotencyGuardPhase5Test {
         override suspend fun markCompleted(
             clusterCode: String,
             idempotencyKey: String,
-            resultReference: String
+            resultReference: String,
+            operationType: String
         ) {
             val mapKey = "$clusterCode::$idempotencyKey"
             val now = System.currentTimeMillis()
@@ -87,6 +96,7 @@ class IdempotencyGuardPhase5Test {
             if (prev != null) {
                 requests[mapKey] = prev.copy(
                     requestStatus = IdempotencyRequestStatus.COMPLETED.code,
+                    operationType = prev.operationType.ifBlank { operationType },
                     updatedAt = now,
                     completionTime = now,
                     resultReference = resultReference
@@ -98,7 +108,8 @@ class IdempotencyGuardPhase5Test {
             clusterCode: String,
             idempotencyKey: String,
             status: IdempotencyRequestStatus,
-            errorDetails: String
+            errorDetails: String,
+            operationType: String
         ) {
             val mapKey = "$clusterCode::$idempotencyKey"
             val now = System.currentTimeMillis()
@@ -106,6 +117,7 @@ class IdempotencyGuardPhase5Test {
             if (prev != null) {
                 requests[mapKey] = prev.copy(
                     requestStatus = status.code,
+                    operationType = prev.operationType.ifBlank { operationType },
                     updatedAt = now,
                     errorDetails = errorDetails
                 )
@@ -454,5 +466,48 @@ class IdempotencyGuardPhase5Test {
         assertTrue(File(rootDir, "web/src/hooks/useTransactionGuard.ts").exists())
         assertTrue(File(rootDir, "web/src/components/modules/OperationTrackingView.tsx").exists())
         assertTrue(File(rootDir, "firestore.rules").readText().contains("idempotency_requests"))
+    }
+
+    @Test
+    fun `server PERMISSION_DENIED rejection fails fast as FAILED and releases document lock instead of trapping PENDING_CONFIRMATION`(): Unit = runBlocking {
+        val backend = FakeBackendAdapter().apply {
+            simulateRejectedReason = "رفض السيرفر التحقق من صلاحيات الحساب (PERMISSION_DENIED)"
+        }
+        val guard = TransactionSubmissionGuard(
+            idempotencyDao = db.idempotencyDao(),
+            backendAdapter = backend
+        )
+        val execCalls = AtomicInteger(0)
+        val rejected = guard.executeGuarded(
+            guardKey = "treasury_movement",
+            operationType = IdempotencyOperationType.RECEIPT_VOUCHER,
+            documentReference = "REC-PERM-1",
+            targetCollection = "movements"
+        ) {
+            execCalls.incrementAndGet()
+            Result.success("MOV-1" to 1L)
+        }
+        assertFalse(rejected.success)
+        assertFalse(rejected.pendingConfirmation)
+        assertFalse(rejected.blockedAsDuplicate)
+        assertEquals(IdempotencyRequestStatus.FAILED, rejected.status)
+        assertTrue(rejected.message.contains("PERMISSION_DENIED"))
+        assertEquals(0, execCalls.get())
+        assertFalse(guard.isProcessing("treasury_movement"))
+        assertFalse(guard.isDocumentLocked("REC-PERM-1"))
+
+        // After permissions are fixed, user can retry cleanly
+        backend.simulateRejectedReason = null
+        val retried = guard.executeGuarded(
+            guardKey = "treasury_movement",
+            operationType = IdempotencyOperationType.RECEIPT_VOUCHER,
+            documentReference = "REC-PERM-1",
+            targetCollection = "movements"
+        ) {
+            execCalls.incrementAndGet()
+            Result.success("MOV-1" to 1L)
+        }
+        assertTrue(retried.success)
+        assertEquals(1, execCalls.get())
     }
 }

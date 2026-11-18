@@ -112,7 +112,12 @@ export interface BackendIdempotencyAdapter {
     record: IdempotencyRecord,
     leaseMs: number
   ): Promise<{ outcome: 'CLAIMED' | 'ALREADY_COMPLETED' | 'IN_PROGRESS_REMOTE'; existing?: IdempotencyRecord }>;
-  markCompleted(idempotencyKey: string, resultReference: string, completionTime: number): Promise<void>;
+  markCompleted(
+    idempotencyKey: string,
+    resultReference: string,
+    completionTime: number,
+    operationType?: IdempotencyOperationType | string
+  ): Promise<void>;
   markFailed(idempotencyKey: string, errorDetails: string): Promise<void>;
   markPendingConfirmation(idempotencyKey: string, errorDetails: string): Promise<void>;
   getServerRecord(idempotencyKey: string): Promise<IdempotencyRecord | null>;
@@ -308,26 +313,38 @@ export function createFirestoreIdempotencyAdapter(clusterCode = DEFAULT_CLUSTER_
       });
     },
 
-    async markCompleted(idempotencyKey: string, resultReference: string, completionTime: number) {
+    async markCompleted(
+      idempotencyKey: string,
+      resultReference: string,
+      completionTime: number,
+      operationType?: IdempotencyOperationType | string
+    ) {
       const ref = recordDocRef(idempotencyKey);
       await runTransaction(firestore, async (tx: Transaction) => {
         const snap = await tx.get(ref);
         if (snap.exists() && snap.data()?.requestStatus === 'COMPLETED') {
           return;
         }
-        tx.set(
-          ref,
-          {
-            idempotencyKey: sanitizeIdempotencyKey(idempotencyKey),
-            requestStatus: 'COMPLETED',
-            resultReference: String(resultReference || '').slice(0, 256),
-            completionTime,
-            updatedAt: completionTime,
-            errorDetails: null,
-            serverUpdatedAt: serverTimestamp()
-          },
-          { merge: true }
-        );
+        const existingData = snap.exists() ? snap.data() : null;
+        const resolvedOpType =
+          (existingData?.operationType && String(existingData.operationType).trim()) ||
+          (operationType ? String(operationType).trim() : '') ||
+          'SAVE';
+        const payload: Record<string, unknown> = {
+          idempotencyKey: sanitizeIdempotencyKey(idempotencyKey),
+          operationType: resolvedOpType,
+          requestStatus: 'COMPLETED',
+          resultReference: String(resultReference || '').slice(0, 256),
+          completionTime,
+          updatedAt: completionTime,
+          errorDetails: null,
+          serverUpdatedAt: serverTimestamp()
+        };
+        if (!snap.exists()) {
+          payload.createdAt = completionTime;
+          payload.platform = 'WEB';
+        }
+        tx.set(ref, payload, { merge: true });
       });
     },
 
@@ -732,7 +749,7 @@ export class TransactionSubmissionGuardEngine {
         }
 
         const completionTime = Date.now();
-        await this.adapter.markCompleted(idempotencyKey, resultReference, completionTime);
+        await this.adapter.markCompleted(idempotencyKey, resultReference, completionTime, operationType);
 
         const completedRecord: IdempotencyRecord = {
           ...processingRecord,
@@ -861,7 +878,7 @@ export class TransactionSubmissionGuardEngine {
           );
           if (exists) {
             const now = Date.now();
-            await this.adapter.markCompleted(idempotencyKey, local.documentReference, now);
+            await this.adapter.markCompleted(idempotencyKey, local.documentReference, now, local.operationType);
             const completed: IdempotencyRecord = {
               ...local,
               requestStatus: 'COMPLETED',

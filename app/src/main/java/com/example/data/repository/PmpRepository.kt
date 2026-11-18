@@ -394,7 +394,9 @@ class PmpRepository(
                 amount = amount,
                 description = "تحصيل وسداد دفعة من العميل: $customerName ${if (note.isNotBlank()) "• $note" else ""}",
                 reference = ref,
-                createdBy = user
+                createdBy = user,
+                syncUuid = java.util.UUID.randomUUID().toString(),
+                updatedAt = System.currentTimeMillis()
             )
         )
         accountingEngine?.postCustomerPaymentJournalInternal(

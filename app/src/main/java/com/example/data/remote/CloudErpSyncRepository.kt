@@ -11,6 +11,7 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -743,6 +744,23 @@ class CloudErpSyncRepository(
         }
     }
 
+    suspend fun resolveClusterMemberRoleKey(
+        clusterCode: String,
+        uid: String
+    ): String? = withContext(Dispatchers.IO) {
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+        val cleanUid = safeId(uid, uid)
+        if (cleanUid.isBlank()) return@withContext null
+        val ref = clusterRef(cleanCluster).collection("cluster_members").document(cleanUid)
+        val snap = runCatching { ref.get(Source.SERVER).await() }
+            .getOrElse { runCatching { ref.get().await() }.getOrNull() }
+        if (snap != null && snap.exists() && snap.getBoolean("active") != false) {
+            snap.safeString("roleKey")?.trim()?.uppercase()?.takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
+    }
+
     /**
      * Immediately pushes a single UserAccountEntity to Google Cloud Firestore so that
      * account creation, Google Sign-In pending requests, and Manager permission updates
@@ -1292,6 +1310,12 @@ class CloudErpSyncRepository(
                     throw SecurityException("تم حظر الكتابة إلى الكلاستر المهجور $DEPRECATED_V16_CLUSTER لحماية الصلاحيات.")
                 }
 
+                // Require active Firebase Auth session before attempting protected Firestore writes
+                val fbCurrentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+                    ?: throw SecurityException(
+                        "جلسة المصادقة السحابية (Google Sign-In) غير نشطة — يرجى تسجيل الدخول بحساب Google المعتمد للمزامنة مع السيرفر."
+                    )
+
                 // Deduplicate local cashboxes, movements, and user accounts before pushing
                 runCatching {
                     dao.removeDuplicateCashboxes()
@@ -1300,787 +1324,1039 @@ class CloudErpSyncRepository(
                 }
 
                 val actor = currentActorId
-                var syncedCount = 0
                 val cRef = clusterRef(cleanCluster)
 
-            // 0. User Accounts & Employee Permissions
-            // Ensure active Firebase session has an authoritative cluster_members/{uid} registration before collection writes
-            val users = dao.getUserAccountsDirect()
-            val activeLocalAccount = users.firstOrNull { it.id == activeUserId } ?: users.firstOrNull { it.isCurrentSession }
-            val fbCurrentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
-            if (fbCurrentUser != null) {
+                // 0. Ensure active Firebase session has an authoritative cluster_members/{uid} registration
+                val users = dao.getUserAccountsDirect()
+                val activeLocalAccount = users.firstOrNull { it.id == activeUserId }
+                    ?: users.firstOrNull { it.isCurrentSession }
+                    ?: fbCurrentUser.email?.let { em ->
+                        users.firstOrNull { it.phoneOrEmail.equals(em, ignoreCase = true) }
+                    }
                 ensureOwnClusterMemberRegistration(cleanCluster, activeLocalAccount, fbCurrentUser.uid, fbCurrentUser.email)
-            }
 
-            // Concurrency protection: non-manager employees only sync their own user profile,
-            // strictly preventing employees from overwriting manager accounts or other colleagues' credentials
-            val usersToSync = (if (isManager) {
-                users
-            } else {
-                users.filter { it.id == activeUserId || (activeUserId == null && it.isCurrentSession) }
-            }).filterNot { DeletedAccountsRegistry.isDeleted(it.userCode, it.username, it.phoneOrEmail) }
-
-            // Sync tombstones to cloud so all connected devices and clusters are aware of permanently deleted users
-            runCatching {
-                val tombstones = DeletedAccountsRegistry.getAllTombstoneRecords()
-                for (t in tombstones) {
-                    val tCode = t["userCode"] as? String ?: ""
-                    val tUname = t["username"] as? String ?: ""
-                    val tDocId = safeId(tCode.ifBlank { tUname }, "DEL")
-                    if (tDocId.isNotBlank()) {
-                        cRef.collection("deleted_users").document(tDocId).set(t, SetOptions.merge())
-                    }
-                }
-            }
-
-            // 0.5 مزامنة شواهد الحذف الشاملة لكافة السجلات (حركات، فواتير، عملاء، تحويلات) وتطهير المحلي
-            runCatching {
-                val epochSnap = cRef.collection("system_metadata").document("cluster_epoch").get().await()
-                val epochTime = epochSnap.getLong("wipeTimestamp") ?: 0L
-                val tombSnap = cRef.collection("deleted_records").get().await()
-                val remoteTombstones = tombSnap.documents.mapNotNull { it.data }
-                DeletedRecordsRegistry.mergeRemoteTombstones(remoteTombstones, epochTime)
-
-                // رفع شواهد الحذف المحلية إلى السحابة ليعلم بها أي جهاز آخر
-                val localTombs = DeletedRecordsRegistry.getAllTombstoneRecords()
-                localTombs.chunked(300).forEach { chunk ->
-                    val tBatch = firestore.batch()
-                    chunk.forEach { t ->
-                        val tDocId = safeId("${t["collection"]}_${t["docId"]}", "${t["docId"]}")
-                        tBatch.set(cRef.collection("deleted_records").document(tDocId), t, SetOptions.merge())
-                    }
-                    tBatch.commit().await()
-                }
-                DeletedRecordsRegistry.syncWithDao(dao)
-                PmpDatabase.purgeTombstonedRecordsLocally(dao)
-            }
-
-            usersToSync.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { u ->
-                    val docId = safeId(u.userCode, "USR-${u.id}")
-                    if (isManager) {
-                        val data = mapOf(
-                            "id" to u.id,
-                            "userCode" to docId,
-                            "fullName" to u.fullName,
-                            "username" to u.username,
-                            "phoneOrEmail" to u.phoneOrEmail,
-                            "pinOrPassword" to u.pinOrPassword,
-                            "role" to u.role,
-                            "branch" to u.branch,
-                            "permissions" to u.permissions,
-                            "serverSyncToken" to u.serverSyncToken,
-                            "remoteServerId" to u.remoteServerId,
-                            "syncStatus" to u.syncStatus,
-                            "serverEndpoint" to u.serverEndpoint,
-                            "active" to u.active,
-                            "createdAt" to u.createdAt,
-                            "serverUpdatedBy" to actor,
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
-                        )
-                        batch.set(cRef.collection("user_accounts").document(docId), data, SetOptions.merge())
-                    } else {
-                        // Strict 8-key self-update whitelist matching firestore.rules functionUpdateUserAccount
-                        val selfData = mapOf(
-                            "fullName" to u.fullName,
-                            "phoneOrEmail" to u.phoneOrEmail,
-                            "pinOrPassword" to u.pinOrPassword,
-                            "serverSyncToken" to u.serverSyncToken,
-                            "deviceId" to deviceId,
-                            "updatedAt" to System.currentTimeMillis(),
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
-                        )
-                        batch.set(cRef.collection("user_accounts").document(docId), selfData, SetOptions.merge())
-                    }
-                    syncedCount++
-                }
-                if (isManager) {
-                    batch.commit().await()
-                } else {
-                    runCatching { batch.commit().await() }
-                }
-            }
-
-            // 1. Invoices & Items & Payments (Batched - excluding deleted)
-            val invoices = dao.getInvoicesDirect().filterNot {
-                DeletedRecordsRegistry.isPreEpoch(it.createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("invoices", it.id) ||
-                    DeletedRecordsRegistry.isDeleted("invoices", it.invoiceNo) ||
-                    DeletedRecordsRegistry.isDeleted("invoices", "INV-${it.id}")
-            }
-            val allItems = dao.getInvoiceItemsDirect()
-            val allPayments = dao.getInvoicePaymentsDirect()
-
-            invoices.chunked(200).forEach { chunk ->
-                val batch = firestore.batch()
-                var chunkWrites = 0
-                for (inv in chunk) {
-                    val invItems = allItems.filter { it.invoiceId == inv.id }.map { item ->
-                        mapOf(
-                            "id" to item.id,
-                            "description" to item.description,
-                            "quantity" to item.quantity,
-                            "unitPrice" to item.unitPrice,
-                            "lineTotal" to item.lineTotal,
-                            "productId" to (item.productId ?: 0L),
-                            "warehouseId" to (item.warehouseId ?: 0L)
-                        )
-                    }
-                    val activeInvPayments = allPayments.filter { it.invoiceId == inv.id && it.status == "active" }
-                    val paidSum = activeInvPayments.sumOf { it.amount }
-                    val invPayments = activeInvPayments.map { p ->
-                        mapOf(
-                            "id" to p.id,
-                            "payDate" to p.payDate,
-                            "cashbox" to p.cashbox,
-                            "amount" to p.amount,
-                            "note" to p.note,
-                            "createdBy" to p.createdBy
-                        )
-                    }
-
-                    val docId = safeId(inv.invoiceNo, "INV-${inv.id}")
-                    val data = mapOf(
-                        "id" to inv.id,
-                        "invoiceNo" to inv.invoiceNo,
-                        "customerId" to inv.customerId,
-                        "customerName" to inv.customerName,
-                        "invoiceDate" to inv.invoiceDate,
-                        "currency" to inv.currency,
-                        "subtotal" to inv.subtotal,
-                        "discount" to inv.discount,
-                        "total" to inv.total,
-                        "paidAmount" to paidSum,
-                        "notes" to inv.notes,
-                        "status" to inv.status,
-                        "cancelReason" to (inv.cancelReason ?: ""),
-                        "createdBy" to inv.createdBy,
-                        "createdAt" to inv.createdAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                val cloudRoleKey = resolveClusterMemberRoleKey(cleanCluster, fbCurrentUser.uid)
+                    ?: throw SecurityException(
+                        "الحساب الحالي (${fbCurrentUser.email ?: fbCurrentUser.uid.take(8)}) غير مربوط بدليل عضوية الكلاستر (cluster_members) على السيرفر — يرجى اعتماد البريد في إدارة المستخدمين."
                     )
-                    val invValidation = validateTransactionCommitPayload("invoices", docId, data)
-                    if (!invValidation.valid) {
-                        recordTamperAttempt("SYNC_INVOICES_VALIDATION", "erp_clusters/$cleanCluster/invoices/$docId", invValidation.reason, actor)
-                        logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "تم حظر مزامنة فاتورة تالفة/مشبوهة [$docId]: ${invValidation.reason}")
-                        continue
-                    }
-                    batch.set(cRef.collection("invoices").document(docId), data + mapOf("items" to invItems, "payments" to invPayments), SetOptions.merge())
-                    chunkWrites++
-                    syncedCount++
-                }
-                if (chunkWrites > 0) batch.commit().await()
-            }
+                val isCloudAdmin = cloudRoleKey == "ADMIN"
+                val isCloudManager = cloudRoleKey == "MANAGER"
+                val isCloudAccountant = cloudRoleKey == "ACCOUNTANT"
+                val isCloudDeputy = cloudRoleKey == "DEPUTY_ACCOUNTANT"
+                val canManageMasterCatalogs = isCloudAdmin || isCloudManager || isCloudAccountant || isCloudDeputy
 
-            // 2. Financial Movements (Batched for high speed and unique document ID - excluding deleted)
-            val movements = dao.getMovementsDirect().filterNot {
-                DeletedRecordsRegistry.isMovementDeleted(it)
-            }
-            RoomTransactionLogger.log(
-                operation = "SYNC_MOVEMENTS_DISPATCH",
-                stage = TransactionStage.SYNC_DISPATCH,
-                status = TraceStatus.IN_PROGRESS,
-                entityType = "movements",
-                details = "إرسال ${movements.size} حركة مالية إلى السحابة"
-            )
-            try {
-                movements.chunked(300).forEach { chunk ->
-                    val batch = firestore.batch()
-                    var chunkWrites = 0
-                    for (m in chunk) {
-                        val docId = m.cloudDocId.trim().ifBlank { "MOV-${m.id}" }
-                        val data = mutableMapOf<String, Any>(
-                            "id" to m.id,
-                            "txDate" to m.txDate,
-                            "cashbox" to m.cashbox,
-                            "currency" to m.currency,
-                            "direction" to m.direction,
-                            "amount" to m.amount,
-                            "description" to m.description,
-                            "reference" to m.reference,
-                            "createdBy" to m.createdBy,
-                            "createdAt" to m.createdAt,
-                            "cloudDocId" to docId,
-                            "serverUpdatedBy" to actor,
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                val stepSummaries = mutableListOf<SyncStepSummary>()
+                var syncedCount = 0
+                var criticalFailure: Throwable? = null
+                var anyFailure: Throwable? = null
+
+                suspend fun runSyncStep(
+                    stepName: String,
+                    collectionName: String,
+                    critical: Boolean = false,
+                    block: suspend () -> Int
+                ) {
+                    val colPath = "erp_clusters/$cleanCluster/$collectionName"
+                    try {
+                        val committed = block()
+                        syncedCount += committed
+                        stepSummaries.add(
+                            SyncStepSummary(
+                                stepName = stepName,
+                                collectionPath = colPath,
+                                syncedCount = committed,
+                                success = true,
+                                message = if (committed > 0) "تم حفظ $committed سجل بنجاح" else "لا توجد سجلات جديدة للرفع"
+                            )
                         )
-                        if (m.syncUuid.isNotBlank()) data["syncUuid"] = m.syncUuid
-                        if (m.updatedAt > 0L) data["updatedAt"] = m.updatedAt
-                        val movValidation = validateTransactionCommitPayload("movements", docId, data)
-                        if (!movValidation.valid) {
-                            recordTamperAttempt("SYNC_MOVEMENTS_VALIDATION", "erp_clusters/$cleanCluster/movements/$docId", movValidation.reason, actor)
-                            logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "تم حظر مزامنة حركة مالية تالفة [$docId]: ${movValidation.reason}")
-                            continue
-                        }
-                        batch.set(cRef.collection("movements").document(docId), data, SetOptions.merge())
-                        chunkWrites++
-                        syncedCount++
+                    } catch (e: Throwable) {
+                        if (anyFailure == null) anyFailure = e
+                        if (critical && criticalFailure == null) criticalFailure = e
+                        val entry = recordStructuredError(
+                            operation = "SYNC_${collectionName.uppercase(java.util.Locale.US)}",
+                            collectionPath = colPath,
+                            throwable = e,
+                            deviceId = deviceId
+                        )
+                        stepSummaries.add(
+                            SyncStepSummary(
+                                stepName = stepName,
+                                collectionPath = colPath,
+                                syncedCount = 0,
+                                success = false,
+                                message = "${entry.category.arabicTitle}: ${entry.sanitizedMessage}"
+                            )
+                        )
                     }
-                    if (chunkWrites > 0) batch.commit().await()
+                }
+
+                // 0a. Sync tombstones for deleted users (Admin/Manager only; never write USR-ADMIN tombstone as non-Admin)
+                if (isCloudAdmin || isCloudManager) {
+                    runSyncStep("مزامنة شواهد حذف الحسابات", "deleted_users", critical = false) {
+                        val tombstones = DeletedAccountsRegistry.getAllTombstoneRecords().filterNot { t ->
+                            val tCode = (t["userCode"] as? String).orEmpty()
+                            val tUname = (t["username"] as? String).orEmpty()
+                            !isCloudAdmin && (tCode.equals("USR-ADMIN", ignoreCase = true) || tUname.equals("admin", ignoreCase = true))
+                        }
+                        var committed = 0
+                        tombstones.chunked(300).forEach { chunk ->
+                            val batch = firestore.batch()
+                            var chunkWrites = 0
+                            for (t in chunk) {
+                                val tCode = t["userCode"] as? String ?: ""
+                                val tUname = t["username"] as? String ?: ""
+                                val tDocId = safeId(tCode.ifBlank { tUname }, "DEL")
+                                if (tDocId.isNotBlank()) {
+                                    batch.set(cRef.collection("deleted_users").document(tDocId), t, SetOptions.merge())
+                                    chunkWrites++
+                                }
+                            }
+                            if (chunkWrites > 0) {
+                                batch.commit().await()
+                                committed += chunkWrites
+                            }
+                        }
+                        committed
+                    }
+                }
+
+                // 0b. مزامنة شواهد الحذف الشاملة لكافة السجلات وتطهير المحلي
+                runCatching {
+                    val epochSnap = cRef.collection("system_metadata").document("cluster_epoch").get().await()
+                    val epochTime = epochSnap.getLong("wipeTimestamp") ?: 0L
+                    val tombSnap = cRef.collection("deleted_records").get().await()
+                    val remoteTombstones = tombSnap.documents.mapNotNull { it.data }
+                    DeletedRecordsRegistry.mergeRemoteTombstones(remoteTombstones, epochTime)
+                    DeletedRecordsRegistry.syncWithDao(dao)
+                    PmpDatabase.purgeTombstonedRecordsLocally(dao)
+                }
+                if (isCloudAdmin || isCloudManager) {
+                    runSyncStep("مزامنة شواهد السجلات المحذوفة", "deleted_records", critical = false) {
+                        val localTombs = DeletedRecordsRegistry.getAllTombstoneRecords().filter { t ->
+                            val col = (t["collection"] as? String).orEmpty()
+                            val docIdVal = (t["docId"] as? String).orEmpty()
+                            val entIdVal = (t["entityId"] as? String).orEmpty()
+                            col.isNotBlank() && (docIdVal.isNotBlank() || entIdVal.isNotBlank())
+                        }
+                        var committed = 0
+                        localTombs.chunked(300).forEach { chunk ->
+                            val tBatch = firestore.batch()
+                            var chunkWrites = 0
+                            chunk.forEach { t ->
+                                val tDocId = safeId("${t["collection"]}_${t["docId"]}", "${t["docId"]}")
+                                if (tDocId.isNotBlank()) {
+                                    tBatch.set(cRef.collection("deleted_records").document(tDocId), t, SetOptions.merge())
+                                    chunkWrites++
+                                }
+                            }
+                            if (chunkWrites > 0) {
+                                tBatch.commit().await()
+                                committed += chunkWrites
+                            }
+                        }
+                        committed
+                    }
+                }
+
+                // 0c. User Accounts & Employee Permissions (strictly aligned with firestore.rules functionUpdateUserAccount)
+                runSyncStep("مزامنة حسابات المستخدمين والصلاحيات", "user_accounts", critical = false) {
+                    val existingCloudUserIds = runCatching {
+                        if (isCloudAdmin || isCloudManager) {
+                            cRef.collection("user_accounts").get().await().documents.map { it.id }.toSet()
+                        } else emptySet()
+                    }.getOrDefault(emptySet())
+
+                    val usersToSync = (if (isCloudAdmin || isCloudManager) {
+                        users
+                    } else {
+                        users.filter {
+                            (activeLocalAccount != null && it.id == activeLocalAccount.id) ||
+                                it.id == activeUserId ||
+                                (activeUserId == null && it.isCurrentSession)
+                        }
+                    }).filterNot { DeletedAccountsRegistry.isDeleted(it.userCode, it.username, it.phoneOrEmail) }
+
+                    var committed = 0
+                    usersToSync.chunked(300).forEach { chunk ->
+                        val batch = firestore.batch()
+                        var chunkWrites = 0
+                        for (u in chunk) {
+                            val docId = safeId(u.userCode, "USR-${u.id}")
+                            val isSelfUser = activeLocalAccount != null && (
+                                u.id == activeLocalAccount.id ||
+                                    u.userCode.equals(activeLocalAccount.userCode, ignoreCase = true)
+                                )
+                            val targetIsPrivileged = u.isSuperAdminAccount() ||
+                                u.isSystemManager() ||
+                                EnterpriseRbacManager.isPrivilegedRole(u.role) ||
+                                docId.equals("USR-ADMIN", ignoreCase = true) ||
+                                u.username.equals("admin", ignoreCase = true)
+
+                            if (isCloudAdmin || (isCloudManager && !isSelfUser && !targetIsPrivileged)) {
+                                val data = mapOf(
+                                    "id" to u.id,
+                                    "userCode" to docId,
+                                    "fullName" to u.fullName.ifBlank { docId },
+                                    "username" to u.username.trim().ifBlank { docId }.take(120),
+                                    "phoneOrEmail" to u.phoneOrEmail,
+                                    "pinOrPassword" to u.pinOrPassword,
+                                    "role" to u.role,
+                                    "branch" to u.branch.ifBlank { "الخرطوم" },
+                                    "permissions" to u.permissions,
+                                    "serverSyncToken" to u.serverSyncToken,
+                                    "remoteServerId" to u.remoteServerId,
+                                    "syncStatus" to u.syncStatus,
+                                    "serverEndpoint" to u.serverEndpoint,
+                                    "active" to (if (isSelfUser) true else u.active),
+                                    "createdAt" to u.createdAt,
+                                    "serverUpdatedBy" to actor,
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                )
+                                batch.set(cRef.collection("user_accounts").document(docId), data, SetOptions.merge())
+                                chunkWrites++
+                            } else if (isSelfUser && (docId in existingCloudUserIds || !isCloudManager)) {
+                                // Non-Admin updating own profile uses strict 8-key whitelist matching firestore.rules
+                                val selfData = mapOf(
+                                    "fullName" to u.fullName.ifBlank { docId },
+                                    "phoneOrEmail" to u.phoneOrEmail,
+                                    "pinOrPassword" to u.pinOrPassword,
+                                    "serverSyncToken" to u.serverSyncToken,
+                                    "deviceId" to deviceId,
+                                    "updatedAt" to System.currentTimeMillis(),
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                )
+                                batch.set(cRef.collection("user_accounts").document(docId), selfData, SetOptions.merge())
+                                chunkWrites++
+                            }
+                        }
+                        if (chunkWrites > 0) {
+                            batch.commit().await()
+                            committed += chunkWrites
+                        }
+                    }
+
+                    // Best-effort sync of email_directory entries so Google SSO users resolve exact roles & permissions
+                    if (isCloudAdmin || isCloudManager) {
+                        for (u in usersToSync) {
+                            val email = u.phoneOrEmail.trim().lowercase()
+                            if (!email.contains("@")) continue
+                            val isPriv = u.isSuperAdminAccount() || u.isSystemManager() || EnterpriseRbacManager.isPrivilegedRole(u.role)
+                            if (isCloudAdmin || !isPriv) {
+                                runCatching {
+                                    val emailKey = buildEmailDirectoryKey(email)
+                                    cRef.collection("email_directory").document(emailKey).set(
+                                        mapOf(
+                                            "email" to email,
+                                            "userCode" to safeId(u.userCode, "USR-${u.id}"),
+                                            "username" to u.username,
+                                            "roleKey" to resolveCanonicalRbacTier(u),
+                                            "branch" to u.branch.ifBlank { "الخرطوم" },
+                                            "permissions" to u.permissions.ifBlank { "صلاحية العرض" },
+                                            "active" to u.active,
+                                            "updatedAt" to System.currentTimeMillis(),
+                                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                        ),
+                                        SetOptions.merge()
+                                    ).await()
+                                }
+                            }
+                        }
+                    }
+                    committed
+                }
+
+                // 1. Invoices & Items & Payments (Batched - excluding deleted)
+                val invoices = dao.getInvoicesDirect().filterNot {
+                    DeletedRecordsRegistry.isPreEpoch(it.createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("invoices", it.id) ||
+                        DeletedRecordsRegistry.isDeleted("invoices", it.invoiceNo) ||
+                        DeletedRecordsRegistry.isDeleted("invoices", "INV-${it.id}")
+                }
+                val allItems = dao.getInvoiceItemsDirect()
+                val allPayments = dao.getInvoicePaymentsDirect()
+                runSyncStep("مزامنة فواتير المبيعات", "invoices", critical = true) {
+                    var committed = 0
+                    invoices.chunked(200).forEach { chunk ->
+                        val batch = firestore.batch()
+                        var chunkWrites = 0
+                        for (inv in chunk) {
+                            val invItems = allItems.filter { it.invoiceId == inv.id }.map { item ->
+                                mapOf(
+                                    "id" to item.id,
+                                    "description" to item.description,
+                                    "quantity" to item.quantity,
+                                    "unitPrice" to item.unitPrice,
+                                    "lineTotal" to item.lineTotal,
+                                    "productId" to (item.productId ?: 0L),
+                                    "warehouseId" to (item.warehouseId ?: 0L)
+                                )
+                            }
+                            val activeInvPayments = allPayments.filter { it.invoiceId == inv.id && it.status == "active" }
+                            val paidSum = activeInvPayments.sumOf { it.amount }.coerceAtLeast(0.0)
+                            val invPayments = activeInvPayments.map { p ->
+                                mapOf(
+                                    "id" to p.id,
+                                    "payDate" to p.payDate,
+                                    "cashbox" to p.cashbox,
+                                    "amount" to p.amount,
+                                    "note" to p.note,
+                                    "createdBy" to p.createdBy
+                                )
+                            }
+
+                            val docId = safeId(inv.invoiceNo, "INV-${inv.id}")
+                            val cleanCustomer = inv.customerName.trim().ifBlank { "عميل نقدي" }.take(200)
+                            val cleanCurrency = inv.currency.trim().uppercase().let { if (it in VALID_CURRENCIES) it else "SDG" }
+                            val data = mapOf(
+                                "id" to inv.id,
+                                "invoiceNo" to inv.invoiceNo,
+                                "customerId" to inv.customerId,
+                                "customerName" to cleanCustomer,
+                                "invoiceDate" to inv.invoiceDate,
+                                "currency" to cleanCurrency,
+                                "subtotal" to inv.subtotal.coerceAtLeast(0.0),
+                                "discount" to inv.discount.coerceAtLeast(0.0),
+                                "total" to inv.total.coerceAtLeast(0.0),
+                                "paidAmount" to paidSum,
+                                "notes" to inv.notes,
+                                "status" to inv.status,
+                                "cancelReason" to (inv.cancelReason ?: ""),
+                                "createdBy" to inv.createdBy,
+                                "createdAt" to inv.createdAt,
+                                "serverUpdatedBy" to actor,
+                                "serverUpdatedAt" to FieldValue.serverTimestamp()
+                            )
+                            val invValidation = validateTransactionCommitPayload("invoices", docId, data)
+                            if (!invValidation.valid) {
+                                recordTamperAttempt("SYNC_INVOICES_VALIDATION", "erp_clusters/$cleanCluster/invoices/$docId", invValidation.reason, actor)
+                                logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "تم حظر مزامنة فاتورة تالفة/مشبوهة [$docId]: ${invValidation.reason}")
+                                continue
+                            }
+                            batch.set(cRef.collection("invoices").document(docId), data + mapOf("items" to invItems, "payments" to invPayments), SetOptions.merge())
+                            chunkWrites++
+                        }
+                        if (chunkWrites > 0) {
+                            batch.commit().await()
+                            committed += chunkWrites
+                        }
+                    }
+                    committed
+                }
+
+                // 2. Financial Movements (Batched - excluding deleted)
+                val movements = dao.getMovementsDirect().filterNot {
+                    DeletedRecordsRegistry.isMovementDeleted(it)
                 }
                 RoomTransactionLogger.log(
-                    operation = "SYNC_MOVEMENTS_ACK",
-                    stage = TransactionStage.SYNC_ACKNOWLEDGED,
-                    status = TraceStatus.SUCCESS,
+                    operation = "SYNC_MOVEMENTS_DISPATCH",
+                    stage = TransactionStage.SYNC_DISPATCH,
+                    status = TraceStatus.IN_PROGRESS,
                     entityType = "movements",
-                    details = "تم تأكيد مزامنة ${movements.size} حركة مالية بنجاح على السيرفر"
+                    details = "إرسال ${movements.size} حركة مالية إلى السحابة"
                 )
-            } catch (e: Exception) {
-                RoomTransactionLogger.recordSyncBreakage(
-                    operation = "SYNC_MOVEMENTS_TO_CLOUD",
-                    entityType = "movements",
-                    recordId = "BATCH",
-                    reason = "فشل إرسال الحركات المالية إلى السيرفر: ${e.message}",
-                    cause = e
-                )
-                throw e
-            }
-
-            // 3. Transfers (Batched - excluding deleted)
-            val transfers = dao.getTransfersDirect().filterNot {
-                DeletedRecordsRegistry.isPreEpoch(it.createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("transfers", it.id) ||
-                    DeletedRecordsRegistry.isDeleted("transfers", "TRF-${it.id}") ||
-                    (it.reference.isNotBlank() && DeletedRecordsRegistry.isDeleted("transfers", it.reference))
-            }
-            transfers.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                var chunkWrites = 0
-                for (t in chunk) {
-                    val docId = safeId("TRF-${t.id}-${t.reference}", "TRF-${t.id}")
-                    val data = mapOf(
-                        "id" to t.id,
-                        "reference" to t.reference,
-                        "txDate" to t.txDate,
-                        "sourceCashbox" to t.sourceCashbox,
-                        "destinationCashbox" to t.destinationCashbox,
-                        "sourceCurrency" to t.sourceCurrency,
-                        "destinationCurrency" to t.destinationCurrency,
-                        "sourceAmount" to t.sourceAmount,
-                        "rate" to t.rate,
-                        "destinationAmount" to t.destinationAmount,
-                        "description" to t.description,
-                        "createdBy" to t.createdBy,
-                        "createdAt" to t.createdAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    )
-                    val trfValidation = validateTransactionCommitPayload("transfers", docId, data)
-                    if (!trfValidation.valid) {
-                        recordTamperAttempt("SYNC_TRANSFERS_VALIDATION", "erp_clusters/$cleanCluster/transfers/$docId", trfValidation.reason, actor)
-                        logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "تم حظر مزامنة تحويل خزينة تالف [$docId]: ${trfValidation.reason}")
-                        continue
-                    }
-                    batch.set(cRef.collection("transfers").document(docId), data, SetOptions.merge())
-                    chunkWrites++
-                    syncedCount++
-                }
-                if (chunkWrites > 0) batch.commit().await()
-            }
-
-            // 4. Customers (Batched - excluding deleted)
-            val customers = dao.getCustomersDirect().filterNot {
-                DeletedRecordsRegistry.isDeleted("customers", it.id) ||
-                    DeletedRecordsRegistry.isDeleted("customers", "CUST-${it.id}")
-            }
-            customers.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { c ->
-                    val docId = "CUST-${c.id}"
-                    val data = mapOf(
-                        "id" to c.id,
-                        "name" to c.name,
-                        "phone" to c.phone,
-                        "address" to c.address,
-                        "notes" to c.notes,
-                        "active" to c.active,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    )
-                    batch.set(cRef.collection("customers").document(docId), data, SetOptions.merge())
-                    syncedCount++
-                }
-                batch.commit().await()
-            }
-
-            // 5. Products & Pricing (Batched - excluding deleted)
-            val products = dao.getProductsDirect().filterNot { p ->
-                DeletedRecordsRegistry.isDeleted("products", p.id) ||
-                    DeletedRecordsRegistry.isDeleted("products", "PROD-${p.id}")
-            }
-            products.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { p ->
-                    val docId = "PROD-${p.id}"
-                    val data = mapOf(
-                        "id" to p.id,
-                        "sku" to p.sku,
-                        "name" to p.name,
-                        "category" to p.category,
-                        "unit" to p.unit,
-                        "purchasePrice" to p.purchasePrice,
-                        "salePrice" to p.salePrice,
-                        "salePriceEgp" to p.salePriceEgp,
-                        "minimumStock" to p.minimumStock,
-                        "paintColor" to p.paintColor,
-                        "packageWeight" to p.packageWeight,
-                        "active" to p.active,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    )
-                    batch.set(cRef.collection("products").document(docId), data, SetOptions.merge())
-                    syncedCount++
-                }
-                batch.commit().await()
-            }
-
-            // 5b. Poster Price List (Separated SDG & EGP Currencies)
-            val posterPrices = dao.getPosterPricesDirect()
-            if (posterPrices.isNotEmpty()) {
-                posterPrices.chunked(300).forEach { chunk ->
-                    val batch = firestore.batch()
-                    chunk.forEach { pp ->
-                        val isEgp = pp.currency.equals("EGP", ignoreCase = true) || pp.id.endsWith("_EGP")
-                        val cleanPrice = if (isEgp && pp.priceEgp > 0L && pp.price == pp.priceEgp * 200L) pp.priceEgp else pp.price
-                        val docId = safeId(pp.id, "${pp.weight}_${pp.kind}_${pp.currency}")
-                        val data = mapOf(
-                            "id" to pp.id,
-                            "weight" to pp.weight,
-                            "kind" to pp.kind,
-                            "price" to cleanPrice,
-                            "priceEgp" to if (isEgp) cleanPrice else 0L,
-                            "currency" to if (isEgp) "EGP" else "SDG",
-                            "serverUpdatedBy" to actor,
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                runSyncStep("مزامنة الحركات المالية والخزن", "movements", critical = true) {
+                    var committed = 0
+                    try {
+                        movements.chunked(300).forEach { chunk ->
+                            val batch = firestore.batch()
+                            var chunkWrites = 0
+                            for (m in chunk) {
+                                val docId = safeId(m.cloudDocId.trim().ifBlank { "MOV-${m.id}" }, "MOV-${m.id}")
+                                val cleanCashbox = m.cashbox.trim().ifBlank { "خزنة السودان" }.take(120)
+                                val cleanCurrency = m.currency.trim().uppercase().let { if (it in VALID_CURRENCIES) it else "SDG" }
+                                val cleanDirection = m.direction.trim().let { if (it in VALID_DIRECTIONS) it else "وارد" }
+                                val data = mutableMapOf<String, Any>(
+                                    "id" to m.id,
+                                    "txDate" to m.txDate,
+                                    "cashbox" to cleanCashbox,
+                                    "currency" to cleanCurrency,
+                                    "direction" to cleanDirection,
+                                    "amount" to m.amount,
+                                    "description" to m.description,
+                                    "reference" to m.reference,
+                                    "createdBy" to m.createdBy,
+                                    "createdAt" to m.createdAt,
+                                    "cloudDocId" to docId,
+                                    "serverUpdatedBy" to actor,
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                )
+                                if (m.syncUuid.isNotBlank()) data["syncUuid"] = m.syncUuid
+                                if (m.updatedAt > 0L) data["updatedAt"] = m.updatedAt
+                                val movValidation = validateTransactionCommitPayload("movements", docId, data)
+                                if (!movValidation.valid) {
+                                    recordTamperAttempt("SYNC_MOVEMENTS_VALIDATION", "erp_clusters/$cleanCluster/movements/$docId", movValidation.reason, actor)
+                                    logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "تم حظر مزامنة حركة مالية تالفة [$docId]: ${movValidation.reason}")
+                                    continue
+                                }
+                                batch.set(cRef.collection("movements").document(docId), data, SetOptions.merge())
+                                chunkWrites++
+                            }
+                            if (chunkWrites > 0) {
+                                batch.commit().await()
+                                committed += chunkWrites
+                            }
+                        }
+                        RoomTransactionLogger.log(
+                            operation = "SYNC_MOVEMENTS_ACK",
+                            stage = TransactionStage.SYNC_ACKNOWLEDGED,
+                            status = TraceStatus.SUCCESS,
+                            entityType = "movements",
+                            details = "تم تأكيد مزامنة $committed حركة مالية بنجاح على السيرفر"
                         )
-                        batch.set(cRef.collection("poster_prices").document(docId), data, SetOptions.merge())
-                        syncedCount++
+                    } catch (e: Exception) {
+                        RoomTransactionLogger.recordSyncBreakage(
+                            operation = "SYNC_MOVEMENTS_TO_CLOUD",
+                            entityType = "movements",
+                            recordId = "BATCH",
+                            reason = "فشل إرسال الحركات المالية إلى السيرفر: ${e.message}",
+                            cause = e
+                        )
+                        throw e
                     }
-                    batch.commit().await()
+                    committed
                 }
-            }
 
-            // 5c. Sync Registered Package Weights (InventoryWeightManager)
-            runCatching {
-                val appCtx = firestore.app.applicationContext
-                val weightMgr = com.example.util.InventoryWeightManager.getInstance(appCtx)
-                val payload = weightMgr.exportForCloudSync().toMutableMap()
-                payload["updatedBy"] = actor
-                payload["serverUpdatedAt"] = FieldValue.serverTimestamp()
-                cRef.collection("config").document("inventory_weights").set(
-                    payload,
-                    SetOptions.merge()
-                ).await()
-                syncedCount++
-            }
-
-            // 6. Cashboxes & Warehouses (Batched)
-            val cashboxes = dao.getCashboxesDirect()
-                .filter { cb ->
-                    val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
-                    !DeletedRecordsRegistry.isDeleted("cashboxes", cb.id) &&
-                        !DeletedRecordsRegistry.isDeleted("cashboxes", "BOX-${cb.id}") &&
-                        !DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) &&
-                        !DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId)
+                // 3. Transfers (Batched - excluding deleted)
+                val transfers = dao.getTransfersDirect().filterNot {
+                    DeletedRecordsRegistry.isPreEpoch(it.createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("transfers", it.id) ||
+                        DeletedRecordsRegistry.isDeleted("transfers", "TRF-${it.id}") ||
+                        (it.reference.isNotBlank() && DeletedRecordsRegistry.isDeleted("transfers", it.reference))
                 }
-                .distinctBy { it.name.trim().lowercase() }
-            if (cashboxes.isNotEmpty()) {
-                val batch = firestore.batch()
-                cashboxes.forEach { cb ->
-                    val docId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
-                    batch.set(
-                        cRef.collection("cashboxes").document(docId),
-                        mapOf(
-                            "id" to cb.id,
-                            "name" to cb.name.trim(),
-                            "docId" to docId,
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                    syncedCount++
-                }
-                batch.commit().await()
-            }
-
-            val warehouses = dao.getWarehousesDirect()
-                .filterNot { wh ->
-                    DeletedRecordsRegistry.isDeleted("warehouses", wh.id) ||
-                        DeletedRecordsRegistry.isDeleted("warehouses", "WH-${wh.id}") ||
-                        DeletedRecordsRegistry.isDeleted("warehouses", wh.name)
-                }
-                .distinctBy { it.name.trim().lowercase() }
-            if (warehouses.isNotEmpty()) {
-                val batch = firestore.batch()
-                warehouses.forEach { wh ->
-                    val docId = "WH-${wh.id}"
-                    val whClass = wh.resolveWarehouseClass()
-                    batch.set(
-                        cRef.collection("warehouses").document(docId),
-                        mapOf(
-                            "id" to wh.id,
-                            "name" to wh.name.trim(),
-                            "active" to wh.active,
-                            "currency" to wh.currency,
-                            "linkedCashbox" to wh.linkedCashbox,
-                            "warehouseType" to wh.warehouseType,
-                            "warehouseClass" to whClass.name,
-                            "code" to wh.code.ifBlank { docId },
-                            "branch" to wh.branch,
-                            "allowDirectSales" to (whClass == WarehouseClass.SALES),
-                            "allowProductionReceipt" to (whClass == WarehouseClass.FINISHED_GOODS),
-                            "syncUuid" to wh.syncUuid.ifBlank { "WH-UUID-${wh.id}" },
-                            "recordVersion" to wh.recordVersion,
-                            "updatedAt" to wh.updatedAt,
-                            "serverUpdatedBy" to actor,
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                    syncedCount++
-                }
-                batch.commit().await()
-            }
-
-            // 7. Factory Items & Raw Materials (Egypt Connected - Batched)
-            val factoryItems = dao.getFactoryItemsDirect().filterNot { fi ->
-                DeletedRecordsRegistry.isDeleted("factory_items", fi.id) ||
-                    DeletedRecordsRegistry.isDeleted("factory_items", "FI-${fi.id}") ||
-                    DeletedRecordsRegistry.isDeleted("factory_items", fi.name)
-            }
-            factoryItems.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { fi ->
-                    val docId = "FI-${fi.id}"
-                    batch.set(
-                        cRef.collection("factory_items").document(docId),
-                        mapOf(
-                            "id" to fi.id,
-                            "name" to fi.name,
-                            "unit" to fi.unit,
-                            "category" to fi.category,
-                            "itemCode" to fi.itemCode.ifBlank { "RAW-${fi.id}" },
-                            "unitCostEgp" to fi.unitCostEgp,
-                            "minStock" to fi.minStock,
-                            "maxStock" to fi.maxStock,
-                            "batchTrackingRequired" to fi.batchTrackingRequired,
-                            "syncUuid" to fi.syncUuid.ifBlank { "FI-UUID-${fi.id}" },
-                            "recordVersion" to fi.recordVersion,
-                            "linkedToEgypt" to true,
-                            "defaultCurrency" to "EGP",
-                            "serverUpdatedBy" to actor,
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                    syncedCount++
-                }
-                batch.commit().await()
-            }
-
-            // 8. Factory Movements (Batched - excluding deleted & pre-epoch)
-            val factoryMoves = dao.getFactoryMovesDirect().filterNot { fm ->
-                DeletedRecordsRegistry.isPreEpoch(fm.createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("factory_moves", fm.id) ||
-                    DeletedRecordsRegistry.isDeleted("factory_moves", "FM-${fm.id}")
-            }
-            factoryMoves.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { fm ->
-                    val docId = "FM-${fm.id}"
-                    batch.set(
-                        cRef.collection("factory_moves").document(docId),
-                        mapOf(
-                            "id" to fm.id,
-                            "moveDate" to fm.moveDate,
-                            "kind" to fm.kind,
-                            "itemId" to fm.itemId,
-                            "itemName" to fm.itemName,
-                            "qty" to fm.qty,
-                            "machineId" to (fm.machineId ?: 0L),
-                            "machineName" to (fm.machineName ?: ""),
-                            "batch" to fm.batch,
-                            "note" to fm.note,
-                            "actor" to fm.actor,
-                            "counterparty" to fm.counterparty,
-                            "linked" to fm.linked,
-                            "createdAt" to fm.createdAt,
-                            "currency" to "EGP",
-                            "serverUpdatedBy" to actor,
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                    syncedCount++
-                }
-                batch.commit().await()
-            }
-
-            // 8b. Chemical Formulations & Paint Batch Formulas (Batched - excluding deleted)
-            val formulations = dao.getFormulationsDirect().filterNot { form ->
-                DeletedRecordsRegistry.isPreEpoch(form.createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("lab_formulations", form.id) ||
-                    DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-${form.id}") ||
-                    (form.formulaNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", form.formulaNo))
-            }
-            formulations.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { form ->
-                    val docId = if (form.formulaNo.isNotBlank()) {
-                        form.formulaNo.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
-                    } else {
-                        "FORM-${form.id}"
+                runSyncStep("مزامنة تحويلات الخزن", "transfers", critical = true) {
+                    var committed = 0
+                    transfers.chunked(300).forEach { chunk ->
+                        val batch = firestore.batch()
+                        var chunkWrites = 0
+                        for (t in chunk) {
+                            val docId = safeId("TRF-${t.id}-${t.reference}", "TRF-${t.id}")
+                            val data = mapOf(
+                                "id" to t.id,
+                                "reference" to t.reference,
+                                "txDate" to t.txDate,
+                                "sourceCashbox" to t.sourceCashbox,
+                                "destinationCashbox" to t.destinationCashbox,
+                                "sourceCurrency" to t.sourceCurrency.trim().uppercase().let { if (it in VALID_CURRENCIES) it else "SDG" },
+                                "destinationCurrency" to t.destinationCurrency.trim().uppercase().let { if (it in VALID_CURRENCIES) it else "EGP" },
+                                "sourceAmount" to t.sourceAmount,
+                                "rate" to t.rate,
+                                "destinationAmount" to t.destinationAmount,
+                                "description" to t.description,
+                                "createdBy" to t.createdBy,
+                                "createdAt" to t.createdAt,
+                                "serverUpdatedBy" to actor,
+                                "serverUpdatedAt" to FieldValue.serverTimestamp()
+                            )
+                            val trfValidation = validateTransactionCommitPayload("transfers", docId, data)
+                            if (!trfValidation.valid) {
+                                recordTamperAttempt("SYNC_TRANSFERS_VALIDATION", "erp_clusters/$cleanCluster/transfers/$docId", trfValidation.reason, actor)
+                                logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "تم حظر مزامنة تحويل خزينة تالف [$docId]: ${trfValidation.reason}")
+                                continue
+                            }
+                            batch.set(cRef.collection("transfers").document(docId), data, SetOptions.merge())
+                            chunkWrites++
+                        }
+                        if (chunkWrites > 0) {
+                            batch.commit().await()
+                            committed += chunkWrites
+                        }
                     }
-                    val payload = mapOf(
-                        "id" to form.id,
-                        "formulaNo" to form.formulaNo,
-                        "productName" to form.productName,
-                        "paintType" to form.paintType,
-                        "baseKind" to form.baseKind,
-                        "targetPvc" to form.targetPvc,
-                        "calculatedPvc" to form.calculatedPvc,
-                        "cpvcEstimated" to form.cpvcEstimated,
-                        "totalSolidsWeight" to form.totalSolidsWeight,
-                        "totalSolidsVolume" to form.totalSolidsVolume,
-                        "totalBatchWeight" to form.totalBatchWeight,
-                        "totalBatchVolume" to form.totalBatchVolume,
-                        "calculatedDensity" to form.calculatedDensity,
-                        "totalCost" to form.totalCost,
-                        "costPerKg" to form.costPerKg,
-                        "ingredientsJson" to form.ingredientsJson,
-                        "technicalAnalysis" to form.technicalAnalysis,
-                        "notes" to form.notes,
-                        "approvedForProduction" to form.approvedForProduction,
-                        "createdBy" to form.createdBy,
-                        "createdAt" to form.createdAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    )
-                    batch.set(cRef.collection("lab_formulations").document(docId), payload, SetOptions.merge())
-                    syncedCount++
+                    committed
                 }
-                batch.commit().await()
-            }
 
-            // 8c. Daily Production Batches (Batched - excluding deleted)
-            val batches = dao.getProductionBatchesDirect().filterNot { b ->
-                DeletedRecordsRegistry.isPreEpoch(b.createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("paint_batches", b.id) ||
-                    DeletedRecordsRegistry.isDeleted("paint_batches", "BATCH-${b.id}") ||
-                    (b.batchNumber.isNotBlank() && DeletedRecordsRegistry.isDeleted("paint_batches", b.batchNumber))
-            }
-            batches.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { b ->
-                    val docId = if (b.batchNumber.isNotBlank()) {
-                        b.batchNumber.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
-                    } else {
-                        "BATCH-${b.id}"
+                // 4. Customers (Batched - excluding deleted)
+                val customers = dao.getCustomersDirect().filterNot {
+                    DeletedRecordsRegistry.isDeleted("customers", it.id) ||
+                        DeletedRecordsRegistry.isDeleted("customers", "CUST-${it.id}")
+                }
+                runSyncStep("مزامنة بيانات العملاء", "customers", critical = true) {
+                    var committed = 0
+                    customers.chunked(300).forEach { chunk ->
+                        val batch = firestore.batch()
+                        chunk.forEach { c ->
+                            val docId = "CUST-${c.id}"
+                            val data = mapOf(
+                                "id" to c.id,
+                                "name" to c.name,
+                                "phone" to c.phone,
+                                "address" to c.address,
+                                "notes" to c.notes,
+                                "active" to c.active,
+                                "serverUpdatedBy" to actor,
+                                "serverUpdatedAt" to FieldValue.serverTimestamp()
+                            )
+                            batch.set(cRef.collection("customers").document(docId), data, SetOptions.merge())
+                        }
+                        batch.commit().await()
+                        committed += chunk.size
                     }
-                    val payload = mapOf(
-                        "id" to b.id,
-                        "batchNumber" to b.batchNumber,
-                        "productionDate" to b.productionDate,
-                        "formulaId" to (b.formulaId ?: 0L),
-                        "formulaNo" to b.formulaNo,
-                        "productName" to b.productName,
-                        "paintType" to b.paintType,
-                        "baseKind" to b.baseKind,
-                        "targetPvc" to b.targetPvc,
-                        "targetWeightKg" to b.targetWeightKg,
-                        "actualWeightKg" to b.actualWeightKg,
-                        "targetVolumeLiters" to b.targetVolumeLiters,
-                        "cartonsCount" to b.cartonsCount,
-                        "packageUnit" to b.packageUnit,
-                        "machineId" to (b.machineId ?: 0L),
-                        "machineName" to b.machineName,
-                        "qualityStatus" to b.qualityStatus,
-                        "measuredDensity" to b.measuredDensity,
-                        "measuredViscosity" to b.measuredViscosity,
-                        "scaledIngredientsJson" to b.scaledIngredientsJson,
-                        "supervisorOrEngineer" to b.supervisorOrEngineer,
-                        "shift" to b.shift,
-                        "notes" to b.notes,
-                        "syncStatus" to "SYNCED",
-                        "createdAt" to b.createdAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    )
-                    batch.set(cRef.collection("paint_batches").document(docId), payload, SetOptions.merge())
-                    syncedCount++
+                    committed
                 }
-                batch.commit().await()
-            }
 
-            // 9. Stock Moves (Batched - excluding tombstoned & orphan moves for deleted products/warehouses)
-            val validProductIds = products.map { it.id }.toSet()
-            val validWarehouseIds = warehouses.map { it.id }.toSet()
-            val stockMoves = dao.getStockMovesDirect().filterNot { sm ->
-                DeletedRecordsRegistry.isPreEpoch(sm.createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("stock_moves", sm.id) ||
-                    DeletedRecordsRegistry.isDeleted("stock_moves", "SM-${sm.id}") ||
-                    (validProductIds.isNotEmpty() && sm.productId !in validProductIds) ||
-                    (validWarehouseIds.isNotEmpty() && sm.warehouseId !in validWarehouseIds)
-            }
-            stockMoves.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { sm ->
-                    val docId = "SM-${sm.id}"
-                    batch.set(
-                        cRef.collection("stock_moves").document(docId),
+                // 5. Products & Pricing (Batched - excluding deleted)
+                val products = dao.getProductsDirect().filterNot { p ->
+                    DeletedRecordsRegistry.isDeleted("products", p.id) ||
+                        DeletedRecordsRegistry.isDeleted("products", "PROD-${p.id}")
+                }
+                runSyncStep("مزامنة المنتجات والأصناف", "products", critical = false) {
+                    val existingProdIds = if (!canManageMasterCatalogs) {
+                        runCatching { cRef.collection("products").get().await().documents.map { it.id }.toSet() }.getOrDefault(emptySet())
+                    } else emptySet()
+                    var committed = 0
+                    products.chunked(300).forEach { chunk ->
+                        val batch = firestore.batch()
+                        var chunkWrites = 0
+                        chunk.forEach { p ->
+                            val docId = "PROD-${p.id}"
+                            if (canManageMasterCatalogs || docId !in existingProdIds) {
+                                val data = mapOf(
+                                    "id" to p.id,
+                                    "sku" to p.sku,
+                                    "name" to p.name,
+                                    "category" to p.category,
+                                    "unit" to p.unit,
+                                    "purchasePrice" to p.purchasePrice,
+                                    "salePrice" to p.salePrice,
+                                    "salePriceEgp" to p.salePriceEgp,
+                                    "minimumStock" to p.minimumStock,
+                                    "paintColor" to p.paintColor,
+                                    "packageWeight" to p.packageWeight,
+                                    "active" to p.active,
+                                    "serverUpdatedBy" to actor,
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                )
+                                batch.set(cRef.collection("products").document(docId), data, SetOptions.merge())
+                                chunkWrites++
+                            }
+                        }
+                        if (chunkWrites > 0) {
+                            batch.commit().await()
+                            committed += chunkWrites
+                        }
+                    }
+                    committed
+                }
+
+                // 5b. Poster Price List (Separated SDG & EGP Currencies)
+                val posterPrices = dao.getPosterPricesDirect()
+                if (posterPrices.isNotEmpty()) {
+                    runSyncStep("مزامنة قائمة الأسعار", "poster_prices", critical = false) {
+                        var committed = 0
+                        posterPrices.chunked(300).forEach { chunk ->
+                            val batch = firestore.batch()
+                            chunk.forEach { pp ->
+                                val isEgp = pp.currency.equals("EGP", ignoreCase = true) || pp.id.endsWith("_EGP")
+                                val cleanPrice = if (isEgp && pp.priceEgp > 0L && pp.price == pp.priceEgp * 200L) pp.priceEgp else pp.price
+                                val docId = safeId(pp.id, "${pp.weight}_${pp.kind}_${pp.currency}")
+                                val data = mapOf(
+                                    "id" to pp.id,
+                                    "weight" to pp.weight,
+                                    "kind" to pp.kind,
+                                    "price" to cleanPrice,
+                                    "priceEgp" to if (isEgp) cleanPrice else 0L,
+                                    "currency" to if (isEgp) "EGP" else "SDG",
+                                    "serverUpdatedBy" to actor,
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                )
+                                batch.set(cRef.collection("poster_prices").document(docId), data, SetOptions.merge())
+                            }
+                            batch.commit().await()
+                            committed += chunk.size
+                        }
+                        committed
+                    }
+                }
+
+                // 5c. Sync Registered Package Weights (Admin-only config collection)
+                if (isCloudAdmin) {
+                    runSyncStep("مزامنة أوزان العبوات", "config", critical = false) {
+                        val appCtx = firestore.app.applicationContext
+                        val weightMgr = com.example.util.InventoryWeightManager.getInstance(appCtx)
+                        val payload = weightMgr.exportForCloudSync().toMutableMap()
+                        payload["updatedBy"] = actor
+                        payload["serverUpdatedAt"] = FieldValue.serverTimestamp()
+                        cRef.collection("config").document("inventory_weights").set(
+                            payload,
+                            SetOptions.merge()
+                        ).await()
+                        1
+                    }
+                }
+
+                // 6. Cashboxes & Warehouses (Batched)
+                val cashboxes = dao.getCashboxesDirect()
+                    .filter { cb ->
+                        val cbDocId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
+                        !DeletedRecordsRegistry.isDeleted("cashboxes", cb.id) &&
+                            !DeletedRecordsRegistry.isDeleted("cashboxes", "BOX-${cb.id}") &&
+                            !DeletedRecordsRegistry.isDeleted("cashboxes", cb.name) &&
+                            !DeletedRecordsRegistry.isDeleted("cashboxes", cbDocId)
+                    }
+                    .distinctBy { it.name.trim().lowercase() }
+                if (cashboxes.isNotEmpty() && canManageMasterCatalogs) {
+                    runSyncStep("مزامنة تعريف الخزن", "cashboxes", critical = false) {
+                        val batch = firestore.batch()
+                        cashboxes.forEach { cb ->
+                            val docId = DeletedRecordsRegistry.cashboxDocId(cb.name, cb.id)
+                            batch.set(
+                                cRef.collection("cashboxes").document(docId),
+                                mapOf(
+                                    "id" to cb.id,
+                                    "name" to cb.name.trim(),
+                                    "docId" to docId,
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                ),
+                                SetOptions.merge()
+                            )
+                        }
+                        batch.commit().await()
+                        cashboxes.size
+                    }
+                }
+
+                val warehouses = dao.getWarehousesDirect()
+                    .filterNot { wh ->
+                        DeletedRecordsRegistry.isDeleted("warehouses", wh.id) ||
+                            DeletedRecordsRegistry.isDeleted("warehouses", "WH-${wh.id}") ||
+                            DeletedRecordsRegistry.isDeleted("warehouses", wh.name)
+                    }
+                    .distinctBy { it.name.trim().lowercase() }
+                if (warehouses.isNotEmpty()) {
+                    runSyncStep("مزامنة المخازن والفروع", "warehouses", critical = false) {
+                        val existingWhIds = if (!canManageMasterCatalogs) {
+                            runCatching { cRef.collection("warehouses").get().await().documents.map { it.id }.toSet() }.getOrDefault(emptySet())
+                        } else emptySet()
+                        val batch = firestore.batch()
+                        var writes = 0
+                        warehouses.forEach { wh ->
+                            val docId = "WH-${wh.id}"
+                            if (canManageMasterCatalogs || docId !in existingWhIds) {
+                                val whClass = wh.resolveWarehouseClass()
+                                batch.set(
+                                    cRef.collection("warehouses").document(docId),
+                                    mapOf(
+                                        "id" to wh.id,
+                                        "name" to wh.name.trim(),
+                                        "active" to wh.active,
+                                        "currency" to wh.currency,
+                                        "linkedCashbox" to wh.linkedCashbox,
+                                        "warehouseType" to wh.warehouseType,
+                                        "warehouseClass" to whClass.name,
+                                        "code" to wh.code.ifBlank { docId },
+                                        "branch" to wh.branch,
+                                        "allowDirectSales" to (whClass == WarehouseClass.SALES),
+                                        "allowProductionReceipt" to (whClass == WarehouseClass.FINISHED_GOODS),
+                                        "syncUuid" to wh.syncUuid.ifBlank { "WH-UUID-${wh.id}" },
+                                        "recordVersion" to wh.recordVersion,
+                                        "updatedAt" to wh.updatedAt,
+                                        "serverUpdatedBy" to actor,
+                                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                    ),
+                                    SetOptions.merge()
+                                )
+                                writes++
+                            }
+                        }
+                        if (writes > 0) batch.commit().await()
+                        writes
+                    }
+                }
+
+                // 7. Factory Items & Raw Materials
+                val factoryItems = dao.getFactoryItemsDirect().filterNot { fi ->
+                    DeletedRecordsRegistry.isDeleted("factory_items", fi.id) ||
+                        DeletedRecordsRegistry.isDeleted("factory_items", "FI-${fi.id}") ||
+                        DeletedRecordsRegistry.isDeleted("factory_items", fi.name)
+                }
+                if (factoryItems.isNotEmpty()) {
+                    runSyncStep("مزامنة أصناف المصنع والمواد الخام", "factory_items", critical = false) {
+                        var committed = 0
+                        factoryItems.chunked(300).forEach { chunk ->
+                            val batch = firestore.batch()
+                            chunk.forEach { fi ->
+                                val docId = "FI-${fi.id}"
+                                batch.set(
+                                    cRef.collection("factory_items").document(docId),
+                                    mapOf(
+                                        "id" to fi.id,
+                                        "name" to fi.name,
+                                        "unit" to fi.unit,
+                                        "category" to fi.category,
+                                        "itemCode" to fi.itemCode.ifBlank { "RAW-${fi.id}" },
+                                        "unitCostEgp" to fi.unitCostEgp,
+                                        "minStock" to fi.minStock,
+                                        "maxStock" to fi.maxStock,
+                                        "batchTrackingRequired" to fi.batchTrackingRequired,
+                                        "syncUuid" to fi.syncUuid.ifBlank { "FI-UUID-${fi.id}" },
+                                        "recordVersion" to fi.recordVersion,
+                                        "linkedToEgypt" to true,
+                                        "defaultCurrency" to "EGP",
+                                        "serverUpdatedBy" to actor,
+                                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                    ),
+                                    SetOptions.merge()
+                                )
+                            }
+                            batch.commit().await()
+                            committed += chunk.size
+                        }
+                        committed
+                    }
+                }
+
+                // 8. Factory Movements
+                val factoryMoves = dao.getFactoryMovesDirect().filterNot { fm ->
+                    DeletedRecordsRegistry.isPreEpoch(fm.createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("factory_moves", fm.id) ||
+                        DeletedRecordsRegistry.isDeleted("factory_moves", "FM-${fm.id}")
+                }
+                if (factoryMoves.isNotEmpty()) {
+                    runSyncStep("مزامنة حركات المصنع", "factory_moves", critical = false) {
+                        var committed = 0
+                        factoryMoves.chunked(300).forEach { chunk ->
+                            val batch = firestore.batch()
+                            chunk.forEach { fm ->
+                                val docId = "FM-${fm.id}"
+                                batch.set(
+                                    cRef.collection("factory_moves").document(docId),
+                                    mapOf(
+                                        "id" to fm.id,
+                                        "moveDate" to fm.moveDate,
+                                        "kind" to fm.kind,
+                                        "itemId" to fm.itemId,
+                                        "itemName" to fm.itemName,
+                                        "qty" to fm.qty,
+                                        "machineId" to (fm.machineId ?: 0L),
+                                        "machineName" to (fm.machineName ?: ""),
+                                        "batch" to fm.batch,
+                                        "note" to fm.note,
+                                        "actor" to fm.actor,
+                                        "counterparty" to fm.counterparty,
+                                        "linked" to fm.linked,
+                                        "createdAt" to fm.createdAt,
+                                        "currency" to "EGP",
+                                        "serverUpdatedBy" to actor,
+                                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                    ),
+                                    SetOptions.merge()
+                                )
+                            }
+                            batch.commit().await()
+                            committed += chunk.size
+                        }
+                        committed
+                    }
+                }
+
+                // 8b. Chemical Formulations
+                val formulations = dao.getFormulationsDirect().filterNot { form ->
+                    DeletedRecordsRegistry.isPreEpoch(form.createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("lab_formulations", form.id) ||
+                        DeletedRecordsRegistry.isDeleted("lab_formulations", "FORM-${form.id}") ||
+                        (form.formulaNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("lab_formulations", form.formulaNo))
+                }
+                if (formulations.isNotEmpty()) {
+                    runSyncStep("مزامنة تركيبات المختبر الكيميائي", "lab_formulations", critical = false) {
+                        var committed = 0
+                        formulations.chunked(300).forEach { chunk ->
+                            val batch = firestore.batch()
+                            chunk.forEach { form ->
+                                val docId = safeId(form.formulaNo, "FORM-${form.id}")
+                                val payload = mapOf(
+                                    "id" to form.id,
+                                    "formulaNo" to form.formulaNo,
+                                    "productName" to form.productName,
+                                    "paintType" to form.paintType,
+                                    "baseKind" to form.baseKind,
+                                    "targetPvc" to form.targetPvc,
+                                    "calculatedPvc" to form.calculatedPvc,
+                                    "cpvcEstimated" to form.cpvcEstimated,
+                                    "totalSolidsWeight" to form.totalSolidsWeight,
+                                    "totalSolidsVolume" to form.totalSolidsVolume,
+                                    "totalBatchWeight" to form.totalBatchWeight,
+                                    "totalBatchVolume" to form.totalBatchVolume,
+                                    "calculatedDensity" to form.calculatedDensity,
+                                    "totalCost" to form.totalCost,
+                                    "costPerKg" to form.costPerKg,
+                                    "ingredientsJson" to form.ingredientsJson,
+                                    "technicalAnalysis" to form.technicalAnalysis,
+                                    "notes" to form.notes,
+                                    "approvedForProduction" to form.approvedForProduction,
+                                    "createdBy" to form.createdBy,
+                                    "createdAt" to form.createdAt,
+                                    "serverUpdatedBy" to actor,
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                )
+                                batch.set(cRef.collection("lab_formulations").document(docId), payload, SetOptions.merge())
+                            }
+                            batch.commit().await()
+                            committed += chunk.size
+                        }
+                        committed
+                    }
+                }
+
+                // 8c. Daily Production Batches
+                val batches = dao.getProductionBatchesDirect().filterNot { b ->
+                    DeletedRecordsRegistry.isPreEpoch(b.createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("paint_batches", b.id) ||
+                        DeletedRecordsRegistry.isDeleted("paint_batches", "BATCH-${b.id}") ||
+                        (b.batchNumber.isNotBlank() && DeletedRecordsRegistry.isDeleted("paint_batches", b.batchNumber))
+                }
+                if (batches.isNotEmpty()) {
+                    runSyncStep("مزامنة تشغيلات الإنتاج", "paint_batches", critical = false) {
+                        var committed = 0
+                        batches.chunked(300).forEach { chunk ->
+                            val batch = firestore.batch()
+                            chunk.forEach { b ->
+                                val docId = safeId(b.batchNumber, "BATCH-${b.id}")
+                                val payload = mapOf(
+                                    "id" to b.id,
+                                    "batchNumber" to b.batchNumber,
+                                    "productionDate" to b.productionDate,
+                                    "formulaId" to (b.formulaId ?: 0L),
+                                    "formulaNo" to b.formulaNo,
+                                    "productName" to b.productName,
+                                    "paintType" to b.paintType,
+                                    "baseKind" to b.baseKind,
+                                    "targetPvc" to b.targetPvc,
+                                    "targetWeightKg" to b.targetWeightKg,
+                                    "actualWeightKg" to b.actualWeightKg,
+                                    "targetVolumeLiters" to b.targetVolumeLiters,
+                                    "cartonsCount" to b.cartonsCount,
+                                    "packageUnit" to b.packageUnit,
+                                    "machineId" to (b.machineId ?: 0L),
+                                    "machineName" to b.machineName,
+                                    "qualityStatus" to b.qualityStatus,
+                                    "measuredDensity" to b.measuredDensity,
+                                    "measuredViscosity" to b.measuredViscosity,
+                                    "scaledIngredientsJson" to b.scaledIngredientsJson,
+                                    "supervisorOrEngineer" to b.supervisorOrEngineer,
+                                    "shift" to b.shift,
+                                    "notes" to b.notes,
+                                    "syncStatus" to "SYNCED",
+                                    "createdAt" to b.createdAt,
+                                    "serverUpdatedBy" to actor,
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                )
+                                batch.set(cRef.collection("paint_batches").document(docId), payload, SetOptions.merge())
+                            }
+                            batch.commit().await()
+                            committed += chunk.size
+                        }
+                        committed
+                    }
+                }
+
+                // 9. Stock Moves (Batched - excluding tombstoned & orphan moves)
+                val validProductIds = products.map { it.id }.toSet()
+                val validWarehouseIds = warehouses.map { it.id }.toSet()
+                val stockMoves = dao.getStockMovesDirect().filterNot { sm ->
+                    DeletedRecordsRegistry.isPreEpoch(sm.createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("stock_moves", sm.id) ||
+                        DeletedRecordsRegistry.isDeleted("stock_moves", "SM-${sm.id}") ||
+                        (validProductIds.isNotEmpty() && sm.productId !in validProductIds) ||
+                        (validWarehouseIds.isNotEmpty() && sm.warehouseId !in validWarehouseIds)
+                }
+                if (stockMoves.isNotEmpty()) {
+                    runSyncStep("مزامنة حركات المخزون", "stock_moves", critical = false) {
+                        var committed = 0
+                        stockMoves.chunked(300).forEach { chunk ->
+                            val batch = firestore.batch()
+                            chunk.forEach { sm ->
+                                val docId = "SM-${sm.id}"
+                                batch.set(
+                                    cRef.collection("stock_moves").document(docId),
+                                    mapOf(
+                                        "id" to sm.id,
+                                        "warehouseId" to sm.warehouseId,
+                                        "productId" to sm.productId,
+                                        "quantity" to sm.quantity.coerceAtLeast(0.0),
+                                        "kind" to sm.kind.ifBlank { "IN" }.take(40),
+                                        "invoiceId" to (sm.invoiceId ?: 0L),
+                                        "note" to sm.note,
+                                        "createdBy" to sm.createdBy,
+                                        "createdAt" to sm.createdAt,
+                                        "serverUpdatedBy" to actor,
+                                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                    ),
+                                    SetOptions.merge()
+                                )
+                            }
+                            batch.commit().await()
+                            committed += chunk.size
+                        }
+                        committed
+                    }
+                }
+
+                // 10. Halfa & Egypt Invoices
+                val halfaInvoices = dao.getHalfaInvoicesDirect().filterNot { hi ->
+                    DeletedRecordsRegistry.isPreEpoch(hi.createdAt) ||
+                        DeletedRecordsRegistry.isDeleted("halfa_invoices", hi.id) ||
+                        DeletedRecordsRegistry.isDeleted("halfa_invoices", "HINV-${hi.id}") ||
+                        (hi.invoiceNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("halfa_invoices", hi.invoiceNo))
+                }
+                if (halfaInvoices.isNotEmpty()) {
+                    runSyncStep("مزامنة فواتير حلفا ومصر", "halfa_invoices", critical = false) {
+                        var committed = 0
+                        halfaInvoices.chunked(300).forEach { chunk ->
+                            val batch = firestore.batch()
+                            chunk.forEach { hi ->
+                                val docId = "HINV-${hi.id}"
+                                batch.set(
+                                    cRef.collection("halfa_invoices").document(docId),
+                                    mapOf(
+                                        "id" to hi.id,
+                                        "invoiceNo" to hi.invoiceNo,
+                                        "invoiceDate" to hi.invoiceDate,
+                                        "cashbox" to hi.cashbox,
+                                        "currency" to hi.currency,
+                                        "warehouseId" to hi.warehouseId,
+                                        "productId" to hi.productId,
+                                        "productName" to hi.productName,
+                                        "quantity" to hi.quantity,
+                                        "unitPrice" to hi.unitPrice,
+                                        "total" to hi.total,
+                                        "factoryMoveId" to (hi.factoryMoveId ?: 0L),
+                                        "note" to hi.note,
+                                        "status" to hi.status,
+                                        "createdBy" to hi.createdBy,
+                                        "createdAt" to hi.createdAt,
+                                        "serverUpdatedBy" to actor,
+                                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                    ),
+                                    SetOptions.merge()
+                                )
+                            }
+                            batch.commit().await()
+                            committed += chunk.size
+                        }
+                        committed
+                    }
+                }
+
+                // 10b. Phase 2 Unified Inventory Engine & Phase 3 Manufacturing
+                val resolvedInvDao = invDao ?: runCatching {
+                    PmpDatabase.getDatabase(firestore.app.applicationContext).erpInventoryDao()
+                }.getOrNull()
+                if (resolvedInvDao != null) {
+                    runSyncStep("مزامنة المخزون الموحد والتصنيع", "inventory_movements", critical = false) {
+                        pushPhase2InventoryToCloud(
+                            cRef = cRef,
+                            invDao = resolvedInvDao,
+                            actor = actor,
+                            allowMasterUpdates = canManageMasterCatalogs,
+                            allowInventoryReversal = isCloudAdmin || isCloudManager || isCloudAccountant
+                        )
+                    }
+                }
+
+                // 10c. Phase 4 Double-Entry General Ledger Sync (Accountant/Manager/Admin)
+                val resolvedAccDao = accDaoOrNull()
+                if (resolvedAccDao != null && (isCloudAdmin || isCloudManager || isCloudAccountant || isCloudDeputy)) {
+                    runSyncStep("مزامنة القيود والمحاسبة العامة", "journal_entries", critical = false) {
+                        pushPhase4AccountingToCloud(
+                            cRef = cRef,
+                            accDao = resolvedAccDao,
+                            actor = actor,
+                            allowChartWrite = isCloudAdmin || isCloudManager || isCloudAccountant,
+                            allowEntryReversal = isCloudAdmin || isCloudAccountant
+                        )
+                    }
+                }
+
+                // 11. Cluster Server Info Metadata (Non-blocking)
+                runCatching {
+                    cRef.collection("server_status").document("cluster_meta").set(
                         mapOf(
-                            "id" to sm.id,
-                            "warehouseId" to sm.warehouseId,
-                            "productId" to sm.productId,
-                            "quantity" to sm.quantity,
-                            "kind" to sm.kind,
-                            "invoiceId" to (sm.invoiceId ?: 0L),
-                            "note" to sm.note,
-                            "createdBy" to sm.createdBy,
-                            "createdAt" to sm.createdAt,
-                            "serverUpdatedBy" to actor,
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                            "clusterCode" to cleanCluster,
+                            "serverPlatform" to "Google Cloud Firestore Enterprise",
+                            "projectId" to (firestore.app.options.projectId ?: "gen-lang-client-0220128746"),
+                            "databaseId" to databaseId,
+                            "status" to "ONLINE_ACTIVE",
+                            "supportedClients" to listOf("Android", "Windows_Desktop", "Web_Portal"),
+                            "egyptBranchLinked" to true,
+                            "primaryGoodsCurrency" to "EGP",
+                            "rawMaterialsSource" to "Egypt_Cairo_Hub",
+                            "networkSyncAccuracy" to "100% Exact Cross-Node Sync",
+                            "networkNodes" to listOf("SUDAN_FACTORY_NODE", "EGYPT_CAIRO_CENTRAL_WAREHOUSE", "HALFA_LOGISTICS_HUB"),
+                            "totalUsers" to users.size,
+                            "totalInvoices" to invoices.size,
+                            "totalMovements" to movements.size,
+                            "totalCustomers" to customers.size,
+                            "totalFactoryItems" to factoryItems.size,
+                            "totalFactoryMoves" to factoryMoves.size,
+                            "totalHalfaInvoices" to halfaInvoices.size,
+                            "lastBackupAt" to FieldValue.serverTimestamp(),
+                            "lastUpdatedBy" to actor
                         ),
                         SetOptions.merge()
-                    )
-                    syncedCount++
+                    ).await()
                 }
-                batch.commit().await()
-            }
 
-            // 10. Halfa & Egypt Invoices (Handled in EGP - Batched - excluding deleted)
-            val halfaInvoices = dao.getHalfaInvoicesDirect().filterNot { hi ->
-                DeletedRecordsRegistry.isPreEpoch(hi.createdAt) ||
-                    DeletedRecordsRegistry.isDeleted("halfa_invoices", hi.id) ||
-                    DeletedRecordsRegistry.isDeleted("halfa_invoices", "HINV-${hi.id}") ||
-                    (hi.invoiceNo.isNotBlank() && DeletedRecordsRegistry.isDeleted("halfa_invoices", hi.invoiceNo))
-            }
-            halfaInvoices.chunked(300).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { hi ->
-                    val docId = "HINV-${hi.id}"
-                    batch.set(
-                        cRef.collection("halfa_invoices").document(docId),
-                        mapOf(
-                            "id" to hi.id,
-                            "invoiceNo" to hi.invoiceNo,
-                            "invoiceDate" to hi.invoiceDate,
-                            "cashbox" to hi.cashbox,
-                            "currency" to hi.currency,
-                            "warehouseId" to hi.warehouseId,
-                            "productId" to hi.productId,
-                            "productName" to hi.productName,
-                            "quantity" to hi.quantity,
-                            "unitPrice" to hi.unitPrice,
-                            "total" to hi.total,
-                            "factoryMoveId" to (hi.factoryMoveId ?: 0L),
-                            "note" to hi.note,
-                            "status" to hi.status,
-                            "createdBy" to hi.createdBy,
-                            "createdAt" to hi.createdAt,
-                            "serverUpdatedBy" to actor,
-                            "serverUpdatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                    syncedCount++
+                _syncStepSummaries.value = stepSummaries
+
+                if (criticalFailure != null) {
+                    throw criticalFailure!!
                 }
-                batch.commit().await()
-            }
+                if (anyFailure != null && syncedCount == 0) {
+                    throw anyFailure!!
+                }
 
-            // 10b. Phase 2 Unified Inventory Engine (Packaging Rules, Inventory Movements, Balances, Transfers)
-            val resolvedInvDao = invDao ?: runCatching {
-                PmpDatabase.getDatabase(firestore.app.applicationContext).erpInventoryDao()
-            }.getOrNull()
-            if (resolvedInvDao != null) {
-                syncedCount += pushPhase2InventoryToCloud(cRef, resolvedInvDao, actor)
-            }
-
-            // 10c. Phase 4 Double-Entry General Ledger Sync
-            val resolvedAccDao = runCatching {
-                PmpDatabase.getDatabase(firestore.app.applicationContext).erpAccountingDao()
-            }.getOrNull()
-            if (resolvedAccDao != null) {
-                syncedCount += pushPhase4AccountingToCloud(cRef, resolvedAccDao, actor)
-            }
-
-            // 11. Cluster Server Info & Cross-Network Egypt-Sudan Linking Metadata (Non-blocking)
-            runCatching {
-                cRef.collection("server_status").document("cluster_meta").set(
-                    mapOf(
-                        "clusterCode" to safeId(clusterCode, DEFAULT_CLUSTER),
-                        "serverPlatform" to "Google Cloud Firestore Enterprise",
-                        "projectId" to (firestore.app.options.projectId ?: "gen-lang-client-0220128746"),
-                        "databaseId" to databaseId,
-                        "status" to "ONLINE_ACTIVE",
-                        "supportedClients" to listOf("Android", "Windows_Desktop", "Web_Portal"),
-                        "egyptBranchLinked" to true,
-                        "primaryGoodsCurrency" to "EGP",
-                        "rawMaterialsSource" to "Egypt_Cairo_Hub",
-                        "networkSyncAccuracy" to "100% Exact Cross-Node Sync",
-                        "networkNodes" to listOf("SUDAN_FACTORY_NODE", "EGYPT_CAIRO_CENTRAL_WAREHOUSE", "HALFA_LOGISTICS_HUB"),
-                        "totalUsers" to users.size,
-                        "totalInvoices" to invoices.size,
-                        "totalMovements" to movements.size,
-                        "totalCustomers" to customers.size,
-                        "totalFactoryItems" to factoryItems.size,
-                        "totalFactoryMoves" to factoryMoves.size,
-                        "totalHalfaInvoices" to halfaInvoices.size,
-                        "lastBackupAt" to FieldValue.serverTimestamp(),
-                        "lastUpdatedBy" to actor
-                    ),
-                    SetOptions.merge()
-                ).await()
-            }
-
-            val summary = listOf(
-                SyncStepSummary(
-                    stepName = "مزامنة الكلاستر السحابي الكاملة",
-                    collectionPath = "erp_clusters/${safeId(clusterCode, DEFAULT_CLUSTER)}",
-                    syncedCount = syncedCount,
-                    success = true,
-                    message = "تم حفظ $syncedCount سجل بنجاح"
-                )
-            )
-            _syncStepSummaries.value = summary
-
-            recordDiagnostic(
-                action = "SYNC_ALL_TO_CLOUD",
-                status = "SUCCESS",
-                count = syncedCount,
-                message = "تم حفظ ومزامنة $syncedCount سجلاً بنجاح على سيرفر Google Cloud دون المساس بالجلسات",
-                deviceId = deviceId
-            )
-            Log.i(TAG, "Successfully synced $syncedCount total ERP entities to cloud cluster $clusterCode")
-            syncedCount
-        }.onFailure { err ->
-            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
-            val entry = recordStructuredError(
-                operation = "SYNC_ALL_TO_CLOUD",
-                collectionPath = "erp_clusters/$cleanCluster",
-                throwable = err,
-                deviceId = deviceId
-            )
-            _syncStepSummaries.value = listOf(
-                SyncStepSummary(
-                    stepName = "مزامنة الكلاستر السحابي الكاملة",
+                val failedStepNames = stepSummaries.filter { !it.success }.joinToString("، ") { it.stepName }
+                if (failedStepNames.isNotBlank()) {
+                    recordDiagnostic(
+                        action = "SYNC_ALL_TO_CLOUD",
+                        status = "WARNING",
+                        count = syncedCount,
+                        message = "تم حفظ $syncedCount سجلاً على السيرفر مع تعذر بعض الخطوات ($failedStepNames)",
+                        deviceId = deviceId
+                    )
+                } else {
+                    recordDiagnostic(
+                        action = "SYNC_ALL_TO_CLOUD",
+                        status = "SUCCESS",
+                        count = syncedCount,
+                        message = "تم حفظ ومزامنة $syncedCount سجلاً بنجاح على سيرفر Google Cloud دون المساس بالجلسات",
+                        deviceId = deviceId
+                    )
+                }
+                Log.i(TAG, "Successfully synced $syncedCount total ERP entities to cloud cluster $cleanCluster")
+                syncedCount
+            }.onFailure { err ->
+                val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+                val entry = recordStructuredError(
+                    operation = "SYNC_ALL_TO_CLOUD",
                     collectionPath = "erp_clusters/$cleanCluster",
-                    syncedCount = 0,
-                    success = false,
-                    message = "${entry.category.arabicTitle}: ${entry.sanitizedMessage}"
+                    throwable = err,
+                    deviceId = deviceId
                 )
-            )
-            recordDiagnostic(
-                action = "SYNC_ALL_TO_CLOUD",
-                status = "FAILED",
-                count = 0,
-                message = "تعذر الحفظ على السيرفر (${entry.code}): ${entry.sanitizedMessage}",
-                deviceId = deviceId
-            )
+                if (_syncStepSummaries.value.isEmpty()) {
+                    _syncStepSummaries.value = listOf(
+                        SyncStepSummary(
+                            stepName = "مزامنة الكلاستر السحابي الكاملة",
+                            collectionPath = "erp_clusters/$cleanCluster",
+                            syncedCount = 0,
+                            success = false,
+                            message = "${entry.category.arabicTitle}: ${entry.sanitizedMessage}"
+                        )
+                    )
+                }
+                recordDiagnostic(
+                    action = "SYNC_ALL_TO_CLOUD",
+                    status = "FAILED",
+                    count = 0,
+                    message = "تعذر الحفظ على السيرفر (${entry.code}): ${entry.sanitizedMessage}",
+                    deviceId = deviceId
+                )
+            }
         }
     }
-}
+
+    private fun accDaoOrNull(): ErpAccountingDao? = runCatching {
+        PmpDatabase.getDatabase(firestore.app.applicationContext).erpAccountingDao()
+    }.getOrNull()
 
     /**
      * Restores all data from Google Cloud Firestore down to the local device database.
@@ -2786,13 +3062,24 @@ class CloudErpSyncRepository(
     private suspend fun pushPhase2InventoryToCloud(
         cRef: com.google.firebase.firestore.DocumentReference,
         invDao: ErpInventoryDao,
-        actor: String
+        actor: String,
+        allowMasterUpdates: Boolean = true,
+        allowInventoryReversal: Boolean = true
     ): Int {
         var count = 0
+        val existingPkgIds = if (!allowMasterUpdates) {
+            runCatching {
+                cRef.collection("packaging_rules").get().await().documents.map { it.id }.toSet()
+            }.getOrDefault(emptySet())
+        } else {
+            emptySet()
+        }
         val pkgRules = invDao.getPackagingRulesDirect()
-        if (pkgRules.isNotEmpty()) {
+            .filter { it.weightGrams > 0 && it.cansPerCarton > 0 }
+            .filter { allowMasterUpdates || safeId(it.syncUuid.ifBlank { "PKG-RULE-${it.weightGrams}" }, "PKG-RULE-${it.weightGrams}") !in existingPkgIds }
+        pkgRules.chunked(250).forEach { chunk ->
             val batch = firestore.batch()
-            pkgRules.forEach { rule ->
+            chunk.forEach { rule ->
                 val docId = safeId(rule.syncUuid.ifBlank { "PKG-RULE-${rule.weightGrams}" }, "PKG-RULE-${rule.weightGrams}")
                 batch.set(
                     cRef.collection("packaging_rules").document(docId),
@@ -2815,64 +3102,100 @@ class CloudErpSyncRepository(
                     ),
                     SetOptions.merge()
                 )
-                count++
             }
             batch.commit().await()
+            count += chunk.size
         }
 
-        val invMovements = invDao.getInventoryMovementsDirect()
-        invMovements.chunked(300).forEach { chunk ->
+        // inventory_movements is append-only in firestore.rules (updates only allowed for POSTED -> REVERSED by Manager/Accountant/Admin)
+        val existingInvMovementStatuses = runCatching {
+            cRef.collection("inventory_movements").get().await().documents.associate {
+                it.id to (it.getString("status") ?: "POSTED").trim().uppercase()
+            }
+        }.getOrDefault(emptyMap())
+        val invMovements = invDao.getInventoryMovementsDirect().filter { it.quantity > 0.0 }
+        val invMovementsToWrite = invMovements.mapNotNull { im ->
+            val docId = safeId(im.syncUuid.ifBlank { "IM-${im.id}" }, "IM-${im.id}")
+            val remoteStatus = existingInvMovementStatuses[docId]
+            if (remoteStatus == null) {
+                Triple(docId, true, im)
+            } else if (allowInventoryReversal &&
+                remoteStatus == "POSTED" &&
+                im.status.trim().equals("REVERSED", ignoreCase = true)
+            ) {
+                Triple(docId, false, im)
+            } else {
+                null
+            }
+        }
+        invMovementsToWrite.chunked(250).forEach { chunk ->
             val batch = firestore.batch()
-            chunk.forEach { im ->
-                val docId = safeId(im.syncUuid.ifBlank { "IM-${im.id}" }, "IM-${im.id}")
-                batch.set(
-                    cRef.collection("inventory_movements").document(docId),
-                    mapOf(
-                        "id" to im.id,
-                        "syncUuid" to im.syncUuid,
-                        "documentNo" to im.documentNo,
-                        "movementType" to im.movementType,
-                        "warehouseId" to im.warehouseId,
-                        "warehouseCode" to im.warehouseCode,
-                        "warehouseClass" to im.warehouseClass,
-                        "itemCategory" to im.itemCategory,
-                        "itemId" to im.itemId,
-                        "itemCode" to im.itemCode,
-                        "itemName" to im.itemName,
-                        "quantity" to im.quantity,
-                        "signedQuantity" to im.signedQuantity,
-                        "unit" to im.unit,
-                        "unitCost" to im.unitCost,
-                        "totalCost" to im.totalCost,
-                        "currency" to im.currency,
-                        "batchNumber" to im.batchNumber,
-                        "expiryDate" to im.expiryDate,
-                        "referenceDocType" to im.referenceDocType,
-                        "referenceDocId" to (im.referenceDocId ?: 0L),
-                        "referenceDocNo" to im.referenceDocNo,
-                        "reversedMovementId" to (im.reversedMovementId ?: 0L),
-                        "reason" to im.reason,
-                        "status" to im.status,
-                        "qcApproved" to im.qcApproved,
-                        "idempotencyKey" to im.idempotencyKey,
-                        "performedBy" to im.performedBy,
-                        "approvedBy" to im.approvedBy,
-                        "deviceId" to im.deviceId,
-                        "recordVersion" to im.recordVersion,
-                        "createdAt" to im.createdAt,
-                        "updatedAt" to im.updatedAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                )
-                count++
+            chunk.forEach { (docId, isCreate, im) ->
+                val docRef = cRef.collection("inventory_movements").document(docId)
+                if (isCreate) {
+                    batch.set(
+                        docRef,
+                        mapOf(
+                            "id" to im.id,
+                            "syncUuid" to im.syncUuid,
+                            "documentNo" to im.documentNo,
+                            "movementType" to im.movementType.ifBlank { "STOCK_ADJUSTMENT" }.take(60),
+                            "warehouseId" to im.warehouseId,
+                            "warehouseCode" to im.warehouseCode,
+                            "warehouseClass" to im.warehouseClass,
+                            "itemCategory" to im.itemCategory,
+                            "itemId" to im.itemId,
+                            "itemCode" to im.itemCode,
+                            "itemName" to im.itemName,
+                            "quantity" to im.quantity,
+                            "signedQuantity" to im.signedQuantity,
+                            "unit" to im.unit,
+                            "unitCost" to im.unitCost,
+                            "totalCost" to im.totalCost,
+                            "currency" to im.currency,
+                            "batchNumber" to im.batchNumber,
+                            "expiryDate" to im.expiryDate,
+                            "referenceDocType" to im.referenceDocType,
+                            "referenceDocId" to (im.referenceDocId ?: 0L),
+                            "referenceDocNo" to im.referenceDocNo,
+                            "reversedMovementId" to (im.reversedMovementId ?: 0L),
+                            "reason" to im.reason,
+                            "status" to im.status,
+                            "qcApproved" to im.qcApproved,
+                            "idempotencyKey" to im.idempotencyKey,
+                            "performedBy" to im.performedBy,
+                            "approvedBy" to im.approvedBy,
+                            "deviceId" to im.deviceId,
+                            "recordVersion" to im.recordVersion,
+                            "createdAt" to im.createdAt,
+                            "updatedAt" to im.updatedAt,
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                } else {
+                    batch.set(
+                        docRef,
+                        mapOf(
+                            "status" to "REVERSED",
+                            "reversedByEntryNo" to im.referenceDocNo.ifBlank { "REV-${im.id}" },
+                            "reversalReason" to im.reason.ifBlank { "عكس حركة مخزنية" },
+                            "recordVersion" to im.recordVersion.coerceAtLeast(2),
+                            "updatedAt" to System.currentTimeMillis(),
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                }
             }
             batch.commit().await()
+            count += chunk.size
         }
 
         val stockBalances = invDao.getStockBalancesDirect()
-        stockBalances.chunked(300).forEach { chunk ->
+        stockBalances.chunked(250).forEach { chunk ->
             val batch = firestore.batch()
             chunk.forEach { bal ->
                 val docId = safeId(bal.syncUuid.ifBlank { "BAL-${bal.warehouseId}-${bal.itemId}" }, "BAL-${bal.id}")
@@ -2890,11 +3213,11 @@ class CloudErpSyncRepository(
                         "unit" to bal.unit,
                         "batchNumber" to bal.batchNumber,
                         "expiryDate" to bal.expiryDate,
-                        "onHandQty" to bal.onHandQty,
-                        "reservedQty" to bal.reservedQty,
-                        "inTransitQty" to bal.inTransitQty,
-                        "quarantineQty" to bal.quarantineQty,
-                        "availableQty" to bal.availableQty,
+                        "onHandQty" to bal.onHandQty.coerceAtLeast(0.0),
+                        "reservedQty" to bal.reservedQty.coerceAtLeast(0.0),
+                        "inTransitQty" to bal.inTransitQty.coerceAtLeast(0.0),
+                        "quarantineQty" to bal.quarantineQty.coerceAtLeast(0.0),
+                        "availableQty" to bal.availableQty.coerceAtLeast(0.0),
                         "avgUnitCost" to bal.avgUnitCost,
                         "currency" to bal.currency,
                         "lastMovementUuid" to bal.lastMovementUuid,
@@ -2904,13 +3227,13 @@ class CloudErpSyncRepository(
                     ),
                     SetOptions.merge()
                 )
-                count++
             }
             batch.commit().await()
+            count += chunk.size
         }
 
         val whTransfers = invDao.getWarehouseTransfersDirect()
-        whTransfers.chunked(300).forEach { chunk ->
+        whTransfers.chunked(250).forEach { chunk ->
             val batch = firestore.batch()
             chunk.forEach { trf ->
                 val docId = safeId(trf.transferNo.ifBlank { "WHTRF-${trf.id}" }, "WHTRF-${trf.id}")
@@ -2950,13 +3273,13 @@ class CloudErpSyncRepository(
                     ),
                     SetOptions.merge()
                 )
-                count++
             }
             batch.commit().await()
+            count += chunk.size
         }
 
         val trfItems = invDao.getAllTransferItemsDirect()
-        trfItems.chunked(300).forEach { chunk ->
+        trfItems.chunked(250).forEach { chunk ->
             val batch = firestore.batch()
             chunk.forEach { item ->
                 val docId = safeId("WHTI-${item.transferId}-${item.id}", "WHTI-${item.id}")
@@ -2986,9 +3309,9 @@ class CloudErpSyncRepository(
                     ),
                     SetOptions.merge()
                 )
-                count++
             }
             batch.commit().await()
+            count += chunk.size
         }
         count += pushPhase3ManufacturingToCloud(cRef, invDao, actor)
         return count
@@ -3001,9 +3324,10 @@ class CloudErpSyncRepository(
     ): Int {
         var count = 0
         val receipts = invDao.getPurchaseReceiptsDirect()
-        if (receipts.isNotEmpty()) {
+            .filter { it.receivedQty > 0.0 && it.acceptedQty >= 0.0 && it.rejectedQty >= 0.0 }
+        receipts.chunked(250).forEach { chunk ->
             val batch = firestore.batch()
-            receipts.forEach { r ->
+            chunk.forEach { r ->
                 val docId = safeId(r.grnNo.ifBlank { r.syncUuid }, r.syncUuid)
                 batch.set(
                     cRef.collection("purchase_receipts").document(docId),
@@ -3043,15 +3367,16 @@ class CloudErpSyncRepository(
                     ),
                     SetOptions.merge()
                 )
-                count++
             }
             batch.commit().await()
+            count += chunk.size
         }
 
         val orders = invDao.getProductionOrdersDirect()
-        if (orders.isNotEmpty()) {
+            .filter { it.targetCartons > 0 && it.packageWeightGrams > 0 }
+        orders.chunked(250).forEach { chunk ->
             val batch = firestore.batch()
-            orders.forEach { o ->
+            chunk.forEach { o ->
                 val docId = safeId(o.orderNo.ifBlank { o.syncUuid }, o.syncUuid)
                 batch.set(
                     cRef.collection("production_orders").document(docId),
@@ -3095,15 +3420,16 @@ class CloudErpSyncRepository(
                     ),
                     SetOptions.merge()
                 )
-                count++
             }
             batch.commit().await()
+            count += chunk.size
         }
 
         val qcList = invDao.getQcInspectionsDirect()
-        if (qcList.isNotEmpty()) {
+            .filter { it.inspectedQty > 0.0 && it.acceptedQty >= 0.0 && it.rejectedQty >= 0.0 }
+        qcList.chunked(250).forEach { chunk ->
             val batch = firestore.batch()
-            qcList.forEach { q ->
+            chunk.forEach { q ->
                 val docId = safeId(q.qcNo.ifBlank { q.syncUuid }, q.syncUuid)
                 batch.set(
                     cRef.collection("qc_inspections").document(docId),
@@ -3140,9 +3466,9 @@ class CloudErpSyncRepository(
                     ),
                     SetOptions.merge()
                 )
-                count++
             }
             batch.commit().await()
+            count += chunk.size
         }
         return count
     }
@@ -3477,85 +3803,136 @@ class CloudErpSyncRepository(
     private suspend fun pushPhase4AccountingToCloud(
         cRef: com.google.firebase.firestore.DocumentReference,
         accDao: ErpAccountingDao,
-        actor: String
+        actor: String,
+        allowChartWrite: Boolean = true,
+        allowEntryReversal: Boolean = true
     ): Int {
         var count = 0
-        val accounts = accDao.getAllAccountsDirect()
-        accounts.chunked(200).forEach { chunk ->
-            val batch = firestore.batch()
-            chunk.forEach { acc ->
-                val docId = safeId(acc.accountCode, acc.syncUuid)
-                batch.set(
-                    cRef.collection("accounting_accounts").document(docId),
-                    mapOf(
-                        "id" to acc.id,
-                        "syncUuid" to acc.syncUuid,
-                        "accountCode" to acc.accountCode,
-                        "nameAr" to acc.nameAr,
-                        "nameEn" to acc.nameEn,
-                        "accountType" to acc.accountType,
-                        "normalSide" to acc.normalSide,
-                        "parentCode" to acc.parentCode,
-                        "currencyHint" to acc.currencyHint,
-                        "isSystemAccount" to acc.isSystemAccount,
-                        "active" to acc.active,
-                        "recordVersion" to acc.recordVersion,
-                        "createdAt" to acc.createdAt,
-                        "updatedAt" to acc.updatedAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                )
-                count++
+        if (allowChartWrite) {
+            val accounts = accDao.getAllAccountsDirect()
+                .filter { it.accountCode.isNotBlank() && it.nameAr.isNotBlank() }
+            accounts.chunked(200).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { acc ->
+                    val docId = safeId(acc.accountCode, acc.syncUuid)
+                    batch.set(
+                        cRef.collection("accounting_accounts").document(docId),
+                        mapOf(
+                            "id" to acc.id,
+                            "syncUuid" to acc.syncUuid,
+                            "accountCode" to acc.accountCode.take(32),
+                            "nameAr" to acc.nameAr.take(160),
+                            "nameEn" to acc.nameEn,
+                            "accountType" to acc.accountType,
+                            "normalSide" to acc.normalSide,
+                            "parentCode" to acc.parentCode,
+                            "currencyHint" to acc.currencyHint,
+                            "isSystemAccount" to acc.isSystemAccount,
+                            "active" to acc.active,
+                            "recordVersion" to acc.recordVersion,
+                            "createdAt" to acc.createdAt,
+                            "updatedAt" to acc.updatedAt,
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                }
+                batch.commit().await()
+                count += chunk.size
             }
-            batch.commit().await()
         }
 
+        // journal_entries are append-only in firestore.rules (only POSTED -> REVERSED by Accountant/Admin)
+        val existingEntryStatusMap = runCatching {
+            cRef.collection("journal_entries").get().await().documents.associate {
+                it.id to (it.getString("status") ?: "POSTED").trim().uppercase()
+            }
+        }.getOrDefault(emptyMap())
         val entries = accDao.getAllJournalEntriesDirect()
-        entries.chunked(200).forEach { chunk ->
+            .filter { it.totalDebit >= 0.0 && it.totalCredit >= 0.0 && kotlin.math.abs(it.totalDebit - it.totalCredit) < 0.001 }
+        val entriesToWrite = entries.mapNotNull { je ->
+            val docId = safeId(je.syncUuid.ifBlank { je.entryNo }, je.entryNo)
+            val remoteStatus = existingEntryStatusMap[docId]
+            if (remoteStatus == null) {
+                Triple(docId, true, je)
+            } else if (allowEntryReversal &&
+                remoteStatus == "POSTED" &&
+                je.status.trim().equals("REVERSED", ignoreCase = true)
+            ) {
+                Triple(docId, false, je)
+            } else {
+                null
+            }
+        }
+        entriesToWrite.chunked(200).forEach { chunk ->
             val batch = firestore.batch()
-            chunk.forEach { je ->
-                val docId = safeId(je.syncUuid.ifBlank { je.entryNo }, je.entryNo)
-                batch.set(
-                    cRef.collection("journal_entries").document(docId),
-                    mapOf(
-                        "id" to je.id,
-                        "syncUuid" to je.syncUuid,
-                        "entryNo" to je.entryNo,
-                        "entryDate" to je.entryDate,
-                        "sourceType" to je.sourceType,
-                        "sourceDocId" to (je.sourceDocId ?: 0L),
-                        "sourceDocNo" to je.sourceDocNo,
-                        "description" to je.description,
-                        "currency" to je.currency,
-                        "fxRateToUsd" to je.fxRateToUsd,
-                        "fxRateToSdg" to je.fxRateToSdg,
-                        "totalDebit" to je.totalDebit,
-                        "totalCredit" to je.totalCredit,
-                        "status" to je.status,
-                        "reversedEntryId" to (je.reversedEntryId ?: 0L),
-                        "reversedByEntryNo" to je.reversedByEntryNo,
-                        "reversalReason" to je.reversalReason,
-                        "idempotencyKey" to je.idempotencyKey,
-                        "createdBy" to je.createdBy,
-                        "approvedBy" to je.approvedBy,
-                        "deviceId" to je.deviceId,
-                        "recordVersion" to je.recordVersion,
-                        "createdAt" to je.createdAt,
-                        "updatedAt" to je.updatedAt,
-                        "serverUpdatedBy" to actor,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                )
-                count++
+            chunk.forEach { (docId, isCreate, je) ->
+                val docRef = cRef.collection("journal_entries").document(docId)
+                if (isCreate) {
+                    batch.set(
+                        docRef,
+                        mapOf(
+                            "id" to je.id,
+                            "syncUuid" to je.syncUuid,
+                            "entryNo" to je.entryNo,
+                            "entryDate" to je.entryDate,
+                            "sourceType" to je.sourceType,
+                            "sourceDocId" to (je.sourceDocId ?: 0L),
+                            "sourceDocNo" to je.sourceDocNo,
+                            "description" to je.description,
+                            "currency" to je.currency,
+                            "fxRateToUsd" to je.fxRateToUsd,
+                            "fxRateToSdg" to je.fxRateToSdg,
+                            "totalDebit" to je.totalDebit,
+                            "totalCredit" to je.totalCredit,
+                            "status" to je.status,
+                            "reversedEntryId" to (je.reversedEntryId ?: 0L),
+                            "reversedByEntryNo" to je.reversedByEntryNo,
+                            "reversalReason" to je.reversalReason,
+                            "idempotencyKey" to je.idempotencyKey,
+                            "createdBy" to je.createdBy,
+                            "approvedBy" to je.approvedBy,
+                            "deviceId" to je.deviceId,
+                            "recordVersion" to je.recordVersion,
+                            "createdAt" to je.createdAt,
+                            "updatedAt" to je.updatedAt,
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                } else {
+                    batch.set(
+                        docRef,
+                        mapOf(
+                            "status" to "REVERSED",
+                            "reversedByEntryNo" to je.reversedByEntryNo,
+                            "reversalReason" to je.reversalReason.ifBlank { "قيد عكسي معتمد" },
+                            "recordVersion" to je.recordVersion.coerceAtLeast(2),
+                            "updatedAt" to System.currentTimeMillis(),
+                            "serverUpdatedBy" to actor,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                }
             }
             batch.commit().await()
+            count += chunk.size
         }
 
-        val lines = accDao.getAllJournalLinesDirect()
-        lines.chunked(250).forEach { chunk ->
+        // journal_lines are strictly immutable once created (allow update: if false)
+        val existingLineIds = runCatching {
+            cRef.collection("journal_lines").get().await().documents.map { it.id }.toSet()
+        }.getOrDefault(emptySet())
+        val linesToCreate = accDao.getAllJournalLinesDirect()
+            .filter { it.debit >= 0.0 && it.credit >= 0.0 }
+            .filter { ln ->
+                val docId = safeId(ln.syncUuid, "JL-${ln.id}")
+                docId !in existingLineIds
+            }
+        linesToCreate.chunked(250).forEach { chunk ->
             val batch = firestore.batch()
             chunk.forEach { ln ->
                 val docId = safeId(ln.syncUuid, "JL-${ln.id}")
@@ -3583,9 +3960,9 @@ class CloudErpSyncRepository(
                     ),
                     SetOptions.merge()
                 )
-                count++
             }
             batch.commit().await()
+            count += chunk.size
         }
         return count
     }
@@ -5580,60 +5957,82 @@ class CloudErpSyncRepository(
         val colRef = cRef.collection(col)
         val docRef = colRef.document(cleanDocId)
         val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
-        if (fbUser != null) {
-            val existingById = linkedMapOf<String, Map<String, Any?>>()
-            runCatching {
-                val direct = runCatching { docRef.get(Source.SERVER).await() }
-                    .getOrElse { docRef.get().await() }
-                if (direct.exists()) {
-                    direct.data?.let { existingById[direct.id] = it }
-                }
-            }
-            val fieldProbes = buildList {
-                if (uuidStr.isNotBlank()) add("syncUuid" to uuidStr)
-                if (refStr.isNotBlank()) add("reference" to refStr)
-                val invNo = (payload["invoiceNo"] ?: "").toString().trim()
-                if (invNo.isNotBlank() && invNo != refStr) add("invoiceNo" to invNo)
-            }
-            for ((field, value) in fieldProbes) {
-                runCatching {
-                    val q = colRef.whereEqualTo(field, value).limit(10)
-                    val snap = runCatching { q.get(Source.SERVER).await() }.getOrElse { q.get().await() }
-                    for (docSnap in snap.documents) {
-                        docSnap.data?.let { existingById[docSnap.id] = it }
-                    }
-                }
-            }
+        if (fbUser == null) {
+            val authMsg = "تم الحفظ محلياً فقط — يرجى تسجيل الدخول بحساب Google لإرسال المعاملة إلى السيرفر."
+            recordStructuredError("COMMIT_${col.uppercase(java.util.Locale.US)}", fullPath, IllegalStateException(authMsg))
+            return@withContext Result.failure(SecurityException(authMsg))
+        }
 
-            val conflict = checkExistingFinancialCommitConflict(
-                collectionName = col,
-                candidateDocId = cleanDocId,
-                candidatePayload = payload,
-                existingDocs = existingById.entries.map { it.key to it.value }
-            )
-            if (!conflict.valid) {
-                val matchedId = conflict.matchedDocId.ifBlank { cleanDocId }
-                val conflictPath = "erp_clusters/$cleanCluster/$col/$matchedId"
-                if (conflict.violationType == TransactionViolationType.TAMPER) {
-                    recordTamperAttempt("HANDLE_TRANSACTION_COMMIT", conflictPath, conflict.reason, actor)
-                    logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "رصد تلاعب ضد سجل [$col/$matchedId]: ${conflict.reason}")
-                    return@withContext Result.failure(SecurityException(conflict.reason))
-                } else {
-                    recordDuplicateAttempt("HANDLE_TRANSACTION_COMMIT", conflictPath, conflict.reason, actor)
-                    logValidationViolationToAudit(cleanCluster, actor, "DUPLICATE_TRANSACTION_BLOCKED", "منع تكرار سجل [$col/$matchedId]: ${conflict.reason}")
-                    return@withContext Result.failure(IllegalStateException(conflict.reason))
+        val existingById = linkedMapOf<String, Map<String, Any?>>()
+        runCatching {
+            val direct = runCatching { docRef.get(Source.SERVER).await() }
+                .getOrElse { docRef.get().await() }
+            if (direct.exists()) {
+                direct.data?.let { existingById[direct.id] = it }
+            }
+        }
+        val fieldProbes = buildList {
+            if (uuidStr.isNotBlank()) add("syncUuid" to uuidStr)
+            if (refStr.isNotBlank()) add("reference" to refStr)
+            val invNo = (payload["invoiceNo"] ?: "").toString().trim()
+            if (invNo.isNotBlank() && invNo != refStr) add("invoiceNo" to invNo)
+        }
+        for ((field, value) in fieldProbes) {
+            runCatching {
+                val q = colRef.whereEqualTo(field, value).limit(10)
+                val snap = runCatching { q.get(Source.SERVER).await() }.getOrElse { q.get().await() }
+                for (docSnap in snap.documents) {
+                    docSnap.data?.let { existingById[docSnap.id] = it }
                 }
             }
         }
 
-        // 5. Commit verified transaction atomically
-        recentFinancialFingerprints[fingerprint] = now
-        return@withContext runCatching {
-            val enriched = HashMap<String, Any>(payload).apply {
-                put("serverUpdatedBy", actor)
-                put("serverUpdatedAt", FieldValue.serverTimestamp())
+        val conflict = checkExistingFinancialCommitConflict(
+            collectionName = col,
+            candidateDocId = cleanDocId,
+            candidatePayload = payload,
+            existingDocs = existingById.entries.map { it.key to it.value }
+        )
+        if (!conflict.valid) {
+            val matchedId = conflict.matchedDocId.ifBlank { cleanDocId }
+            val conflictPath = "erp_clusters/$cleanCluster/$col/$matchedId"
+            if (conflict.violationType == TransactionViolationType.TAMPER) {
+                recordTamperAttempt("HANDLE_TRANSACTION_COMMIT", conflictPath, conflict.reason, actor)
+                logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "رصد تلاعب ضد سجل [$col/$matchedId]: ${conflict.reason}")
+                return@withContext Result.failure(SecurityException(conflict.reason))
+            } else {
+                recordDuplicateAttempt("HANDLE_TRANSACTION_COMMIT", conflictPath, conflict.reason, actor)
+                logValidationViolationToAudit(cleanCluster, actor, "DUPLICATE_TRANSACTION_BLOCKED", "منع تكرار سجل [$col/$matchedId]: ${conflict.reason}")
+                return@withContext Result.failure(IllegalStateException(conflict.reason))
             }
-            docRef.set(enriched, SetOptions.merge()).await()
+        }
+
+        // 5. Commit verified transaction atomically (with single-shot cluster membership repair on transient PERMISSION_DENIED)
+        recentFinancialFingerprints[fingerprint] = now
+        val enriched = HashMap<String, Any>(payload).apply {
+            put("serverUpdatedBy", actor)
+            put("serverUpdatedAt", FieldValue.serverTimestamp())
+        }
+        return@withContext try {
+            try {
+                docRef.set(enriched, SetOptions.merge()).await()
+            } catch (firstErr: FirebaseFirestoreException) {
+                if (firstErr.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                    runCatching {
+                        ensureOwnClusterMemberRegistration(cleanCluster, null, fbUser.uid, fbUser.email)
+                    }
+                    val hasActiveMembership = runCatching {
+                        resolveClusterMemberRoleKey(cleanCluster, fbUser.uid) != null
+                    }.getOrDefault(false)
+                    if (hasActiveMembership) {
+                        docRef.set(enriched, SetOptions.merge()).await()
+                    } else {
+                        throw firstErr
+                    }
+                } else {
+                    throw firstErr
+                }
+            }
             RoomTransactionLogger.log(
                 operation = "HANDLE_TRANSACTION_COMMIT",
                 stage = TransactionStage.SYNC_ACKNOWLEDGED,
@@ -5642,10 +6041,11 @@ class CloudErpSyncRepository(
                 recordId = cleanDocId,
                 details = "تم التحقق من سلامة المعاملة وعدم تكرارها واعتمادها بالسيرفر #$cleanDocId"
             )
-            Unit
-        }.onFailure { err ->
+            Result.success(Unit)
+        } catch (err: Exception) {
             recentFinancialFingerprints.remove(fingerprint)
             recordStructuredError("COMMIT_${col.uppercase(java.util.Locale.US)}", fullPath, err)
+            Result.failure(err)
         }
     }
 
@@ -5898,14 +6298,20 @@ class CloudErpSyncRepository(
         clusterCode: String = DEFAULT_CLUSTER,
         request: IdempotencyRequestEntity
     ): com.example.util.IdempotencyClaimOutcome = withContext(Dispatchers.IO) {
-        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
         val cleanKey = safeId(request.idempotencyKey, "IDEMP-${System.currentTimeMillis()}")
+        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+        if (fbUser == null) {
+            // Allow offline/local Room-guarded recording when Firebase Google Sign-In session isn't active yet
+            return@withContext com.example.util.IdempotencyClaimOutcome.Claimed(request.idempotencyKey)
+        }
+
         val docRef = firestore.collection("erp_clusters")
             .document(cleanCluster)
             .collection("idempotency_requests")
             .document(cleanKey)
 
-        try {
+        suspend fun runClaimTx(): com.example.util.IdempotencyClaimOutcome =
             firestore.runTransaction { tx ->
                 val snap = tx.get(docRef)
                 if (snap.exists()) {
@@ -5925,13 +6331,18 @@ class CloudErpSyncRepository(
                     }
                 }
 
+                val existingOpType = if (snap.exists()) {
+                    snap.getString("operationType")?.takeIf { it.isNotBlank() }
+                } else {
+                    null
+                }
                 val payload = hashMapOf<String, Any?>(
                     "idempotencyKey" to request.idempotencyKey,
                     "userId" to request.userId,
-                    "operationType" to request.operationType,
+                    "operationType" to (existingOpType ?: request.operationType.ifBlank { "SAVE" }),
                     "documentReference" to request.documentReference,
                     "requestStatus" to com.example.util.IdempotencyRequestStatus.PROCESSING.code,
-                    "createdAt" to request.createdAt,
+                    "createdAt" to (if (snap.exists()) (snap.getLong("createdAt") ?: request.createdAt) else request.createdAt),
                     "updatedAt" to System.currentTimeMillis(),
                     "completionTime" to null,
                     "resultReference" to "",
@@ -5945,6 +6356,42 @@ class CloudErpSyncRepository(
                 tx.set(docRef, payload, SetOptions.merge())
                 com.example.util.IdempotencyClaimOutcome.Claimed(request.idempotencyKey)
             }.await()
+
+        try {
+            try {
+                runClaimTx()
+            } catch (firstErr: FirebaseFirestoreException) {
+                if (firstErr.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                    runCatching {
+                        ensureOwnClusterMemberRegistration(cleanCluster, null, fbUser.uid, fbUser.email)
+                    }
+                    val hasActiveMembership = runCatching {
+                        resolveClusterMemberRoleKey(cleanCluster, fbUser.uid) != null
+                    }.getOrDefault(false)
+                    if (hasActiveMembership) {
+                        runClaimTx()
+                    } else {
+                        throw firstErr
+                    }
+                } else {
+                    throw firstErr
+                }
+            }
+        } catch (fse: FirebaseFirestoreException) {
+            recordStructuredError("CLAIM_IDEMPOTENCY", docRef.path, fse)
+            if (fse.code == FirebaseFirestoreException.Code.PERMISSION_DENIED ||
+                fse.code == FirebaseFirestoreException.Code.UNAUTHENTICATED
+            ) {
+                com.example.util.IdempotencyClaimOutcome.Rejected(
+                    idempotencyKey = request.idempotencyKey,
+                    reason = "رفض السيرفر التحقق من صلاحيات الحساب (${fse.code.name}) — تأكد من تسجيل الدخول بحساب Google المعتمد وصلاحية العملية."
+                )
+            } else {
+                com.example.util.IdempotencyClaimOutcome.NetworkUncertain(
+                    idempotencyKey = request.idempotencyKey,
+                    reason = fse.message ?: "تعذر تأكيد القفل على السيرفر"
+                )
+            }
         } catch (e: Exception) {
             Log.w(TAG, "claimOrGetIdempotencyRequest notice ($cleanKey): ${e.message}")
             com.example.util.IdempotencyClaimOutcome.NetworkUncertain(
@@ -5957,29 +6404,47 @@ class CloudErpSyncRepository(
     suspend fun markIdempotencyCompleted(
         clusterCode: String = DEFAULT_CLUSTER,
         idempotencyKey: String,
-        resultReference: String
+        resultReference: String,
+        operationType: String = "SAVE"
     ) = withContext(Dispatchers.IO) {
-        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) return@withContext
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
         val cleanKey = safeId(idempotencyKey, idempotencyKey)
         val now = System.currentTimeMillis()
+        val docRef = firestore.collection("erp_clusters")
+            .document(cleanCluster)
+            .collection("idempotency_requests")
+            .document(cleanKey)
         runCatching {
-            firestore.collection("erp_clusters")
-                .document(cleanCluster)
-                .collection("idempotency_requests")
-                .document(cleanKey)
-                .set(
-                    mapOf(
-                        "idempotencyKey" to idempotencyKey,
-                        "requestStatus" to com.example.util.IdempotencyRequestStatus.COMPLETED.code,
-                        "updatedAt" to now,
-                        "completionTime" to now,
-                        "resultReference" to resultReference,
-                        "errorDetails" to "",
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
+            firestore.runTransaction { tx ->
+                val snap = tx.get(docRef)
+                if (snap.exists() && snap.getString("requestStatus") == "COMPLETED") {
+                    return@runTransaction null
+                }
+                val resolvedOp = if (snap.exists()) {
+                    snap.getString("operationType")?.takeIf { it.isNotBlank() } ?: operationType.ifBlank { "SAVE" }
+                } else {
+                    operationType.ifBlank { "SAVE" }
+                }
+                val payload = hashMapOf<String, Any>(
+                    "idempotencyKey" to idempotencyKey,
+                    "operationType" to resolvedOp,
+                    "requestStatus" to com.example.util.IdempotencyRequestStatus.COMPLETED.code,
+                    "updatedAt" to now,
+                    "completionTime" to now,
+                    "resultReference" to resultReference.take(256),
+                    "errorDetails" to "",
+                    "serverUpdatedAt" to FieldValue.serverTimestamp()
                 )
-                .await()
+                if (!snap.exists()) {
+                    payload["createdAt"] = now
+                    payload["platform"] = "ANDROID"
+                }
+                tx.set(docRef, payload, SetOptions.merge())
+                null
+            }.await()
+        }.onFailure { err ->
+            Log.w(TAG, "markIdempotencyCompleted notice ($cleanKey): ${err.message}")
         }
     }
 
@@ -5987,26 +6452,45 @@ class CloudErpSyncRepository(
         clusterCode: String = DEFAULT_CLUSTER,
         idempotencyKey: String,
         status: com.example.util.IdempotencyRequestStatus,
-        errorDetails: String
+        errorDetails: String,
+        operationType: String = "SAVE"
     ) = withContext(Dispatchers.IO) {
-        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) return@withContext
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
         val cleanKey = safeId(idempotencyKey, idempotencyKey)
+        val now = System.currentTimeMillis()
+        val docRef = firestore.collection("erp_clusters")
+            .document(cleanCluster)
+            .collection("idempotency_requests")
+            .document(cleanKey)
         runCatching {
-            firestore.collection("erp_clusters")
-                .document(cleanCluster)
-                .collection("idempotency_requests")
-                .document(cleanKey)
-                .set(
-                    mapOf(
-                        "idempotencyKey" to idempotencyKey,
-                        "requestStatus" to status.code,
-                        "updatedAt" to System.currentTimeMillis(),
-                        "errorDetails" to errorDetails,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
+            firestore.runTransaction { tx ->
+                val snap = tx.get(docRef)
+                if (snap.exists() && snap.getString("requestStatus") == "COMPLETED") {
+                    return@runTransaction null
+                }
+                val resolvedOp = if (snap.exists()) {
+                    snap.getString("operationType")?.takeIf { it.isNotBlank() } ?: operationType.ifBlank { "SAVE" }
+                } else {
+                    operationType.ifBlank { "SAVE" }
+                }
+                val payload = hashMapOf<String, Any>(
+                    "idempotencyKey" to idempotencyKey,
+                    "operationType" to resolvedOp,
+                    "requestStatus" to status.code,
+                    "updatedAt" to now,
+                    "errorDetails" to errorDetails.take(900),
+                    "serverUpdatedAt" to FieldValue.serverTimestamp()
                 )
-                .await()
+                if (!snap.exists()) {
+                    payload["createdAt"] = now
+                    payload["platform"] = "ANDROID"
+                }
+                tx.set(docRef, payload, SetOptions.merge())
+                null
+            }.await()
+        }.onFailure { err ->
+            Log.w(TAG, "markIdempotencyStatus notice ($cleanKey): ${err.message}")
         }
     }
 
@@ -6014,7 +6498,8 @@ class CloudErpSyncRepository(
         clusterCode: String = DEFAULT_CLUSTER,
         idempotencyKey: String
     ): IdempotencyRequestEntity? = withContext(Dispatchers.IO) {
-        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) return@withContext null
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
         val cleanKey = safeId(idempotencyKey, idempotencyKey)
         runCatching {
             val snap = firestore.collection("erp_clusters")
@@ -6049,7 +6534,8 @@ class CloudErpSyncRepository(
         documentReference: String
     ): Boolean = withContext(Dispatchers.IO) {
         if (targetCollection.isBlank() || documentReference.isBlank()) return@withContext false
-        val cleanCluster = clusterCode.ifBlank { DEFAULT_CLUSTER }
+        if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) return@withContext false
+        val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
         val cleanDocId = safeId(documentReference, documentReference)
         runCatching {
             val docSnap = firestore.collection("erp_clusters")
@@ -6081,18 +6567,20 @@ class CloudErpSyncRepository(
             override suspend fun markCompleted(
                 clusterCode: String,
                 idempotencyKey: String,
-                resultReference: String
+                resultReference: String,
+                operationType: String
             ) {
-                markIdempotencyCompleted(clusterCode, idempotencyKey, resultReference)
+                markIdempotencyCompleted(clusterCode, idempotencyKey, resultReference, operationType)
             }
 
             override suspend fun markPendingOrFailed(
                 clusterCode: String,
                 idempotencyKey: String,
                 status: com.example.util.IdempotencyRequestStatus,
-                errorDetails: String
+                errorDetails: String,
+                operationType: String
             ) {
-                markIdempotencyStatus(clusterCode, idempotencyKey, status, errorDetails)
+                markIdempotencyStatus(clusterCode, idempotencyKey, status, errorDetails, operationType)
             }
 
             override suspend fun fetchRequest(

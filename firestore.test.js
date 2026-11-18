@@ -561,3 +561,175 @@ test("16. Hardened Movements, Transfers & Distributed Tombstone Non-Resurrection
   await assertSucceeds(cAdm.collection("deleted_records").doc("movements_MOV-500").delete());
 });
 
+test("17. Admin Own Account Sync, Manager Boundaries & Idempotent deleted_users Merge", async () => {
+  await seedClusterRbac();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("user_accounts").doc("USR-ADMIN").set({
+      userCode: "USR-ADMIN",
+      username: "admin",
+      fullName: "المدير العام",
+      role: "مدير النظام (Super Admin)",
+      branch: "ALL",
+      linkedUid: ADMIN_UID,
+      active: true,
+    });
+    await cRef.collection("user_accounts").doc("USR-EMP-1").set({
+      userCode: "USR-EMP-1",
+      username: "emp1",
+      fullName: "موظف",
+      role: "موظف مبيعات",
+      branch: "فرع السودان (SD-001)",
+      linkedUid: EMPLOYEE_SD_UID,
+      active: true,
+    });
+  });
+
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const managerDb = testEnv.authenticatedContext(MANAGER_UID).firestore();
+  const cAdm = adminDb.collection("erp_clusters").doc(CLUSTER);
+  const cMgr = managerDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Admin can update own USR-ADMIN doc when active remains true
+  await assertSucceeds(
+    cAdm.collection("user_accounts").doc("USR-ADMIN").set(
+      {
+        userCode: "USR-ADMIN",
+        username: "admin",
+        active: true,
+        serverSyncToken: "SYNC-ADMIN-NEW",
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    )
+  );
+  // Admin cannot deactivate self
+  await assertFails(
+    cAdm.collection("user_accounts").doc("USR-ADMIN").set({ active: false }, { merge: true })
+  );
+
+  // Manager can update employee and create/merge deleted_users for non-admin
+  await assertSucceeds(
+    cMgr.collection("user_accounts").doc("USR-EMP-1").set(
+      {
+        fullName: "موظف مبيعات محدث",
+        branch: "فرع السودان (SD-001)",
+        role: "موظف مبيعات",
+        active: true,
+      },
+      { merge: true }
+    )
+  );
+  await assertFails(
+    cMgr.collection("user_accounts").doc("USR-ADMIN").set(
+      { fullName: "تلاعب", active: false },
+      { merge: true }
+    )
+  );
+
+  await assertSucceeds(
+    cMgr.collection("deleted_users").doc("USR-DEL-99").set({
+      userCode: "USR-DEL-99",
+      username: "old_emp",
+      deletedBy: "mgr",
+      deletedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cMgr.collection("deleted_users").doc("USR-DEL-99").set(
+      { userCode: "USR-DEL-99", reason: "تأكيد" },
+      { merge: true }
+    )
+  );
+  await assertFails(
+    cMgr.collection("deleted_users").doc("USR-ADMIN").set({
+      userCode: "USR-ADMIN",
+      username: "admin",
+    })
+  );
+});
+
+test("18. Treasury Permission Grant for Cashiers & Direct Idempotency Completion", async () => {
+  await seedClusterRbac();
+  const TREASURY_EMP_UID = "treasury_cashier_uid_555";
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("cluster_members").doc(TREASURY_EMP_UID).set({
+      uid: TREASURY_EMP_UID,
+      userCode: "USR-TREAS-1",
+      roleKey: "EMPLOYEE",
+      branch: "فرع السودان (SD-001)",
+      permissions: "الخزن,العمليات المالية,المبيعات",
+      email: "cashier@pmp.sd",
+      active: true,
+    });
+  });
+
+  const cashierDb = testEnv.authenticatedContext(TREASURY_EMP_UID).firestore();
+  const plainEmpDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+  const cCashier = cashierDb.collection("erp_clusters").doc(CLUSTER);
+  const cPlainEmp = plainEmpDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Cashier with treasury permission CAN record movement & transfer in same branch
+  await assertSucceeds(
+    cCashier.collection("movements").doc("MOV-CASHIER-1").set({
+      cashbox: "خزنة السودان",
+      currency: "SDG",
+      direction: "وارد",
+      amount: 15000,
+      branch: "فرع السودان (SD-001)",
+    })
+  );
+  await assertSucceeds(
+    cCashier.collection("transfers").doc("TRF-CASHIER-1").set({
+      sourceAmount: 5000,
+      destinationAmount: 5000,
+      rate: 1,
+      branch: "فرع السودان (SD-001)",
+    })
+  );
+
+  // Cross-branch movement is denied even for treasury employee
+  await assertFails(
+    cCashier.collection("movements").doc("MOV-CAIRO-1").set({
+      cashbox: "خزنة مصر",
+      currency: "EGP",
+      direction: "وارد",
+      amount: 1000,
+      branch: "فرع مصر (EG-001)",
+    })
+  );
+
+  // Plain employee WITHOUT treasury permission cannot create movement or cashbox
+  await assertFails(
+    cPlainEmp.collection("movements").doc("MOV-PLAIN-1").set({
+      cashbox: "خزنة السودان",
+      currency: "SDG",
+      direction: "وارد",
+      amount: 500,
+      branch: "فرع السودان (SD-001)",
+    })
+  );
+  await assertFails(
+    cCashier.collection("cashboxes").doc("BOX-NEW").set({
+      name: "خزنة غير مصرحة",
+      branch: "فرع السودان (SD-001)",
+    })
+  );
+
+  // Direct COMPLETED idempotency write with operationType succeeds, then blocks mutation
+  const directIdemRef = cCashier.collection("idempotency_requests").doc("IDEM-DIRECT-1");
+  await assertSucceeds(
+    directIdemRef.set({
+      idempotencyKey: "IDEM-DIRECT-1",
+      operationType: "RECEIPT_VOUCHER",
+      requestStatus: "COMPLETED",
+      resultReference: "MOV-CASHIER-1",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    })
+  );
+  await assertFails(directIdemRef.set({ requestStatus: "PROCESSING", updatedAt: Date.now() }, { merge: true }));
+});
+
+
