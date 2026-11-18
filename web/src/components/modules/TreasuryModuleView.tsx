@@ -411,6 +411,13 @@ export const TreasuryModuleView: React.FC = () => {
       notify('error', 'الرجاء إدخال مبلغ وسعر صرف صحيحين');
       return;
     }
+    if (
+      trfForm.sourceCashbox.trim().toLowerCase() === trfForm.destinationCashbox.trim().toLowerCase() &&
+      trfForm.sourceCurrency === trfForm.destinationCurrency
+    ) {
+      notify('error', 'لا يمكن التحويل من نفس الخزنة وإليها بنفس العملة');
+      return;
+    }
 
     const refPreview = trfForm.reference.trim() || `TRF-${Date.now().toString().slice(-6)}`;
     const destAmt = calculatedTransferDestAmount;
@@ -471,26 +478,24 @@ export const TreasuryModuleView: React.FC = () => {
           createdAt: now + 2
         };
 
-        await Promise.all([
-          ErpDataService.handleTransactionCommit({
-            collectionName: 'transfers',
-            docId: trfDocId,
-            payload: newTrf,
-            actorUsername: userProfile?.username
-          }),
-          ErpDataService.handleTransactionCommit({
-            collectionName: 'movements',
-            docId: `MOV-${idempotencyKey}-OUT`,
-            payload: outMov,
-            actorUsername: userProfile?.username
-          }),
-          ErpDataService.handleTransactionCommit({
-            collectionName: 'movements',
-            docId: `MOV-${idempotencyKey}-IN`,
-            payload: inMov,
-            actorUsername: userProfile?.username
-          })
-        ]);
+        await ErpDataService.handleTransactionCommit({
+          collectionName: 'transfers',
+          docId: trfDocId,
+          payload: newTrf,
+          actorUsername: userProfile?.username
+        });
+        await ErpDataService.handleTransactionCommit({
+          collectionName: 'movements',
+          docId: `MOV-${idempotencyKey}-OUT`,
+          payload: outMov,
+          actorUsername: userProfile?.username
+        });
+        await ErpDataService.handleTransactionCommit({
+          collectionName: 'movements',
+          docId: `MOV-${idempotencyKey}-IN`,
+          payload: inMov,
+          actorUsername: userProfile?.username
+        });
 
         const trfJournals = buildTreasuryTransferJournalPayloads({
           id: now,

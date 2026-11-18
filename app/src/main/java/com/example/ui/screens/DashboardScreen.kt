@@ -228,6 +228,20 @@ fun DashboardScreen(
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1
                                 )
+                                if (isSecurity && pendingErrors.isNotEmpty()) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = PmpBrandRed
+                                    ) {
+                                        Text(
+                                            text = "${pendingErrors.size}",
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -397,6 +411,20 @@ fun DashboardScreen(
                         accentColor = PmpGold,
                         icon = Icons.Default.Paid,
                         modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            if (kotlin.math.abs(totalUsd) > 0.001) {
+                item(key = "usd_currency_balance_card") {
+                    GlassStatCard(
+                        title = "خزينة الدولار الأمريكي",
+                        value = format.format(totalUsd),
+                        unit = "USD",
+                        subtitle = "الرصيد المتاح بالدولار",
+                        accentColor = PmpCyan,
+                        icon = Icons.Default.CurrencyExchange,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }

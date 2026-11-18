@@ -1,8 +1,11 @@
 package com.example.ui.components
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -40,6 +43,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -447,7 +454,8 @@ fun GlassTabRow(
     tabs: List<String>,
     selectedIndex: Int,
     onTabSelected: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    tabBadges: Map<Int, Int> = emptyMap()
 ) {
     if (tabs.isEmpty()) return
 
@@ -463,11 +471,11 @@ fun GlassTabRow(
             if (bounds != null && viewportWidthPx > 0) {
                 val (leftPx, widthPx) = bounds
                 val targetScroll = (leftPx + widthPx / 2 - viewportWidthPx / 2).coerceIn(0, scrollState.maxValue)
-                scrollState.animateScrollTo(targetScroll)
+                scrollState.animateScrollTo(targetScroll, animationSpec = tween(durationMillis = 240))
             } else {
                 val step = scrollState.maxValue.toFloat() / (tabs.size - 1).coerceAtLeast(1)
                 val targetScroll = (selectedIndex * step).toInt().coerceIn(0, scrollState.maxValue)
-                scrollState.animateScrollTo(targetScroll)
+                scrollState.animateScrollTo(targetScroll, animationSpec = tween(durationMillis = 240))
             }
         }
     }
@@ -485,6 +493,7 @@ fun GlassTabRow(
             GlassTabPill(
                 text = tabName,
                 selected = selectedIndex == index,
+                badgeCount = tabBadges[index] ?: 0,
                 onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     onTabSelected(index)
@@ -504,19 +513,40 @@ fun GlassTabRow(
 private fun GlassTabPill(
     text: String,
     selected: Boolean,
+    badgeCount: Int = 0,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val borderColor by animateColorAsState(
+        targetValue = if (selected) PmpCyan.copy(alpha = 0.78f) else GlassBorder,
+        animationSpec = tween(durationMillis = 180),
+        label = "tabBorderColor"
+    )
+    val textColor by animateColorAsState(
+        targetValue = if (selected) TextPureWhite else TextDark,
+        animationSpec = tween(durationMillis = 180),
+        label = "tabTextColor"
+    )
+    val borderWidth by animateDpAsState(
+        targetValue = if (selected) 1.5.dp else 1.dp,
+        animationSpec = tween(durationMillis = 180),
+        label = "tabBorderWidth"
+    )
+
     Box(
         modifier = modifier
             .defaultMinSize(minWidth = 84.dp, minHeight = 48.dp)
             .clip(SharedTabPillShape)
             .background(if (selected) GlassAccentBlueGradient else GlassCardGradient)
             .border(
-                width = if (selected) 1.5.dp else 1.dp,
-                color = if (selected) PmpCyan.copy(alpha = 0.75f) else GlassBorder,
+                width = borderWidth,
+                color = borderColor,
                 shape = SharedTabPillShape
             )
+            .semantics {
+                role = Role.Tab
+                this.selected = selected
+            }
             .clickable(onClick = onClick)
             .padding(
                 horizontal = 16.dp,
@@ -524,16 +554,39 @@ private fun GlassTabPill(
             ),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = text,
-            color = if (selected) TextPureWhite else TextDark,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
-            fontSize = 13.sp,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Visible,
-            textAlign = TextAlign.Center
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = text,
+                color = textColor,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                fontSize = 13.sp,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Visible,
+                textAlign = TextAlign.Center
+            )
+            if (badgeCount > 0) {
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(if (selected) Color.White.copy(alpha = 0.24f) else PmpBlue.copy(alpha = 0.14f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (badgeCount > 99) "99+" else badgeCount.toString(),
+                        color = if (selected) TextPureWhite else PmpBlue,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+        }
     }
 }
 

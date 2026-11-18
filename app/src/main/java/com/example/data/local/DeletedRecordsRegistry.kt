@@ -69,12 +69,17 @@ object DeletedRecordsRegistry {
      * يفرغ الذاكرة المؤقتة بين اختبارات الوحدات المعزولة مع الحفاظ على التوافق الكامل في التشغيل الفعلي.
      */
     fun resetForTesting() {
-        deletedKeys.clear()
-        allTombstones.clear()
-        clusterEpochTimestamp = 0L
-        boundDao = null
-        appContext = null
-        isInitialized = false
+        synchronized(persistLock) {
+            runCatching {
+                appContext?.let { File(it.filesDir, FILE_NAME).delete() }
+            }
+            deletedKeys.clear()
+            allTombstones.clear()
+            clusterEpochTimestamp = 0L
+            boundDao = null
+            appContext = null
+            isInitialized = false
+        }
     }
 
     /**

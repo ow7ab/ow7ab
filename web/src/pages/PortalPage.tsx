@@ -40,7 +40,7 @@ import {
 } from '../services/SecurityService';
 import { resolveAssetUrl } from '../config/appVersionContract';
 import { AppRoute } from '../utils/routing';
-import { getDesktopBridge } from '../utils/desktopBridge';
+import { getDesktopBridge, DESKTOP_GLOBAL_SHORTCUT_EVENT } from '../utils/desktopBridge';
 import { lazyWithRetry } from '../utils/lazyWithRetry';
 
 const AdminDashboardOverview = lazyWithRetry(
@@ -155,6 +155,9 @@ export const PortalPage: React.FC<PortalPageProps> = ({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [reportsInitialTab, setReportsInitialTab] = useState<ReportTab | undefined>(undefined);
+  const [isNetworkOnline, setIsNetworkOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
   const [pendingOpsCount, setPendingOpsCount] = useState<number>(() =>
     IdempotencyProtectionSystem.getUnresolvedRecords().length
   );
@@ -175,15 +178,19 @@ export const PortalPage: React.FC<PortalPageProps> = ({
     const unsub = IdempotencyProtectionSystem.subscribe(syncCount);
     void IdempotencyProtectionSystem.recoverPendingOperations().then(syncCount);
     const onOnline = () => {
+      setIsNetworkOnline(true);
       void IdempotencyProtectionSystem.recoverPendingOperations().then(syncCount);
     };
+    const onOffline = () => setIsNetworkOnline(false);
     if (typeof window !== 'undefined') {
       window.addEventListener('online', onOnline);
+      window.addEventListener('offline', onOffline);
     }
     return () => {
       unsub();
       if (typeof window !== 'undefined') {
         window.removeEventListener('online', onOnline);
+        window.removeEventListener('offline', onOffline);
       }
     };
   }, [userProfile?.userCode]);
@@ -197,15 +204,28 @@ export const PortalPage: React.FC<PortalPageProps> = ({
   }, [portalRoute, canAccessAdminArea, navigateToTab]);
 
   useEffect(() => {
-    const bridge = getDesktopBridge();
-    if (!bridge) return;
-    return bridge.onShortcutAction((action) => {
+    const handleShortcut = (action: string) => {
       if (action === 'GLOBAL_SEARCH') {
         setIsSearchOpen(true);
       } else if (action === 'PRINT_REPORT' && typeof window !== 'undefined') {
         window.print();
       }
-    });
+    };
+    const onDomShortcut = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      if (detail) handleShortcut(detail);
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener(DESKTOP_GLOBAL_SHORTCUT_EVENT, onDomShortcut);
+    }
+    const bridge = getDesktopBridge();
+    const unsubBridge = bridge ? bridge.onShortcutAction(handleShortcut) : undefined;
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener(DESKTOP_GLOBAL_SHORTCUT_EVENT, onDomShortcut);
+      }
+      if (unsubBridge) unsubBridge();
+    };
   }, []);
 
   const handleSignOut = async () => {
@@ -443,10 +463,14 @@ export const PortalPage: React.FC<PortalPageProps> = ({
 
           {/* Center Status Pill (Desktop only, read-only authentic user context) */}
           <div className="hidden lg:flex items-center gap-2.5 bg-theme-base border border-theme px-3 py-1.5 rounded-xl text-[11px]">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+            <span className={`w-2 h-2 rounded-full shrink-0 ${isNetworkOnline ? 'bg-emerald-500' : 'bg-red-500 animate-pulse'}`} />
             <span className="font-bold text-theme-primary">{userProfile.fullName}</span>
             <span className="text-theme-muted">|</span>
-            <span className="text-emerald-400 font-bold">{language === 'ar' ? 'متصل ومحدث لحظياً' : 'Live Sync'}</span>
+            <span className={`font-bold ${isNetworkOnline ? 'text-emerald-400' : 'text-red-400'}`}>
+              {isNetworkOnline
+                ? language === 'ar' ? 'متصل ومحدث لحظياً' : 'Live Sync'
+                : language === 'ar' ? 'غير متصل — وضع المعاينة' : 'Offline Read-Only'}
+            </span>
           </div>
 
           {/* Right Toolbar */}
@@ -681,7 +705,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
         )}
 
         {/* Main Content Workspace — EXACT 11 MODULE VIEWS */}
-        <main ref={mainScrollRef} className="flex-1 overflow-y-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6">
+        <main ref={mainScrollRef} className="flex-1 overflow-y-auto p-3 sm:p-6 lg:p-8 pb-24 md:pb-8 space-y-4 sm:space-y-6">
           {/* Active Module Breadcrumb + Quick-Switch Recent Tabs + Security Shield Bar */}
           <div className="flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-2xl bg-theme-surface/85 border border-theme backdrop-blur-md">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -780,6 +804,42 @@ export const PortalPage: React.FC<PortalPageProps> = ({
           </ErrorBoundary>
         </main>
       </div>
+
+      {/* Mobile Quick Bottom Navigation Bar (1-tap switching on mobile Web browsers) */}
+      <nav
+        aria-label={language === 'ar' ? 'التنقل السريع' : 'Quick Navigation'}
+        className="md:hidden fixed bottom-2 inset-x-2 z-40 rounded-2xl bg-theme-surface/95 backdrop-blur-lg border border-theme shadow-2xl px-1.5 py-1 flex items-center justify-around gap-1"
+      >
+        {navMenuItems
+          .filter((item) => item.visible && item.id !== 'SETTINGS')
+          .slice(0, 4)
+          .map((item) => {
+            const isActive = activeTab === item.id;
+            return (
+              <button
+                key={`mobile_quick_${item.id}`}
+                type="button"
+                onClick={() => navigateToTab(item.id)}
+                className={`flex-1 min-w-0 py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold transition-all min-h-[48px] ${
+                  isActive
+                    ? 'bg-pmp-primary text-white shadow-sm'
+                    : 'text-theme-secondary hover:text-theme-primary'
+                }`}
+              >
+                {item.icon}
+                <span className="truncate max-w-full">{language === 'ar' ? item.labelAr : item.labelEn}</span>
+              </button>
+            );
+          })}
+        <button
+          type="button"
+          onClick={() => setMobileDrawerOpen(true)}
+          className="flex-1 min-w-0 py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold text-theme-secondary hover:text-theme-primary min-h-[48px]"
+        >
+          <Menu className="w-4 h-4" />
+          <span className="truncate">{language === 'ar' ? 'المزيد' : 'More'}</span>
+        </button>
+      </nav>
 
       {/* Global Search Modal */}
       {isSearchOpen && (

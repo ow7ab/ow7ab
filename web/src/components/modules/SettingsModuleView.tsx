@@ -11,7 +11,9 @@ import {
   Sun,
   Globe,
   Smartphone,
-  Activity
+  Activity,
+  Download,
+  Search
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
@@ -34,6 +36,7 @@ import { APP_VERSION_CONTRACT } from '../../config/appVersionContract';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { fetchReleaseFeed } from '../../services/ReleaseService';
 import { AuditLog } from '../../types/erp';
+import { ReportExporter } from '../../services/ReportExporter';
 import {
   getDesktopBridge,
   DesktopAppInfo,
@@ -67,6 +70,8 @@ export const SettingsModuleView: React.FC = () => {
   const [healthReport, setHealthReport] = useState<ClusterHealthReport | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [apkVersionInfo, setApkVersionInfo] = useState<{ versionName?: string; versionCode?: number } | null>(null);
+  const [auditFilter, setAuditFilter] = useState<'ALL' | 'SECURITY' | 'ADMIN'>('ALL');
+  const [auditSearch, setAuditSearch] = useState('');
 
   const desktopBridge = getDesktopBridge();
   const [desktopInfo, setDesktopInfo] = useState<DesktopAppInfo | null>(null);
@@ -344,7 +349,7 @@ export const SettingsModuleView: React.FC = () => {
             </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
             <label className="p-3.5 rounded-xl bg-theme-base border border-theme flex items-center justify-between gap-2 cursor-pointer">
               <div>
                 <div className="font-bold text-theme-primary">تشغيل تلقائي مع Windows</div>
@@ -372,6 +377,22 @@ export const SettingsModuleView: React.FC = () => {
                 onChange={(e) => {
                   const nextVal = e.target.checked;
                   void desktopBridge.setPreferences({ minimizeToTray: nextVal }).then(setDesktopPrefs);
+                }}
+                className="w-4 h-4 accent-red-600"
+              />
+            </label>
+
+            <label className="p-3.5 rounded-xl bg-theme-base border border-theme flex items-center justify-between gap-2 cursor-pointer">
+              <div>
+                <div className="font-bold text-theme-primary">تأكيد قبل إغلاق النافذة</div>
+                <div className="text-[11px] text-theme-muted mt-0.5">منع الخروج المفاجئ أثناء إدخال الفواتير</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={desktopPrefs.confirmBeforeExit}
+                onChange={(e) => {
+                  const nextVal = e.target.checked;
+                  void desktopBridge.setPreferences({ confirmBeforeExit: nextVal }).then(setDesktopPrefs);
                 }}
                 className="w-4 h-4 accent-red-600"
               />
@@ -521,14 +542,37 @@ export const SettingsModuleView: React.FC = () => {
           {/* Sanitized Cloud Errors Log */}
           {cloudErrors.length > 0 && (
             <GlassCard className="p-6 space-y-3 border-red-500/30">
-              <div className="flex justify-between items-center">
+              <div className="flex flex-wrap justify-between items-center gap-2">
                 <h3 className="text-sm font-bold text-red-400 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4" />
                   <span>سجل أخطاء السيرفر المصنفة ({cloudErrors.length})</span>
                 </h3>
-                <GlassButton variant="secondary" onClick={() => CloudErrorLogger.clear()} className="text-[11px]">
-                  مسح السجل
-                </GlassButton>
+                <div className="flex items-center gap-2">
+                  <GlassButton
+                    variant="secondary"
+                    onClick={() =>
+                      ReportExporter.exportToCsv(
+                        'pmp_cloud_errors_log',
+                        ['التوقيت', 'التصنيف', 'العملية', 'المسار', 'الرسالة', 'التوصية'],
+                        cloudErrors.map((err) => [
+                          new Date(err.timestamp).toLocaleString('ar-EG'),
+                          err.categoryTitleAr,
+                          err.operation,
+                          err.path,
+                          err.sanitizedMessage,
+                          err.remediationHintAr
+                        ])
+                      )
+                    }
+                    className="text-[11px] flex items-center gap-1"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>تصدير CSV</span>
+                  </GlassButton>
+                  <GlassButton variant="secondary" onClick={() => CloudErrorLogger.clear()} className="text-[11px]">
+                    مسح السجل
+                  </GlassButton>
+                </div>
               </div>
               <div className="space-y-2 max-h-60 overflow-y-auto text-xs">
                 {cloudErrors.slice(0, 15).map((err) => {
@@ -592,30 +636,132 @@ export const SettingsModuleView: React.FC = () => {
         <div className="lg:col-span-6">
           <GlassCard className="p-6 h-full flex flex-col justify-between">
             <div>
-              <h3 className="text-sm font-bold text-theme-primary mb-4 flex items-center gap-2">
-                <Shield className="w-4 h-4 text-pmp-primary" />
-                <span>سجل النشاط والعمليات الإدارية ({auditLogs.length})</span>
-              </h3>
-              <div className="space-y-2.5 max-h-[460px] overflow-y-auto pr-1">
-                {auditLogs.length === 0 ? (
-                  <div className="py-10 text-center text-xs text-theme-muted">
-                    لا توجد عمليات مسجلة في سجل النشاط حتى الآن.
-                  </div>
-                ) : (
-                  auditLogs.slice(0, 40).map((log) => (
-                    <div key={log.id} className="p-3 rounded-xl bg-theme-base border border-theme text-xs space-y-1">
-                      <div className="flex justify-between items-center gap-2">
-                        <span className="font-bold text-pmp-primary">{log.action}</span>
-                        <span className="font-mono text-[10px] text-theme-muted">
-                          {log.timestamp ? new Date(log.timestamp).toLocaleString('ar-EG') : ''}
-                        </span>
-                      </div>
-                      <p className="text-theme-secondary text-[11px] leading-relaxed">{log.detail}</p>
-                      <span className="text-[10px] text-theme-muted block">بواسطة: {log.username}</span>
+              {(() => {
+                const isSecurityAction = (action: string) =>
+                  /TAMPER|DUPLICATE|TOMBSTONE|SECURITY|BLOCKED/i.test(String(action || ''));
+                const filteredAuditLogs = auditLogs.filter((log) => {
+                  if (auditFilter === 'SECURITY' && !isSecurityAction(log.action)) return false;
+                  if (auditFilter === 'ADMIN' && isSecurityAction(log.action)) return false;
+                  const q = auditSearch.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    String(log.action || '').toLowerCase().includes(q) ||
+                    String(log.detail || '').toLowerCase().includes(q) ||
+                    String(log.username || '').toLowerCase().includes(q)
+                  );
+                });
+                const securityAlertCount = auditLogs.filter((l) => isSecurityAction(l.action)).length;
+
+                return (
+                  <>
+                    <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
+                      <h3 className="text-sm font-bold text-theme-primary flex items-center gap-2">
+                        <Shield className="w-4 h-4 text-pmp-primary" />
+                        <span>سجل النشاط والعمليات الإدارية ({filteredAuditLogs.length})</span>
+                      </h3>
+                      <GlassButton
+                        variant="secondary"
+                        onClick={() =>
+                          ReportExporter.exportToCsv(
+                            'pmp_audit_logs',
+                            ['التاريخ والوقت', 'الإجراء', 'المستخدم', 'التفاصيل'],
+                            filteredAuditLogs.map((log) => [
+                              log.timestamp ? new Date(log.timestamp).toLocaleString('ar-EG') : '',
+                              log.action,
+                              log.username,
+                              log.detail
+                            ])
+                          )
+                        }
+                        disabled={filteredAuditLogs.length === 0}
+                        className="text-[11px] flex items-center gap-1"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>تصدير CSV</span>
+                      </GlassButton>
                     </div>
-                  ))
-                )}
-              </div>
+
+                    <div className="flex flex-wrap items-center gap-2 mb-3">
+                      <div className="flex gap-1.5">
+                        {(
+                          [
+                            ['ALL', `الكل (${auditLogs.length})`],
+                            ['SECURITY', `تنبيهات الأمان (${securityAlertCount})`],
+                            ['ADMIN', 'العمليات العادية']
+                          ] as const
+                        ).map(([key, label]) => (
+                          <button
+                            key={key}
+                            type="button"
+                            onClick={() => setAuditFilter(key)}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-all min-h-[34px] ${
+                              auditFilter === key
+                                ? key === 'SECURITY'
+                                  ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
+                                  : 'bg-pmp-primary/20 border-pmp-primary text-pmp-primary'
+                                : 'bg-theme-base border-theme text-theme-secondary hover:text-theme-primary'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="relative flex-1 min-w-[160px]">
+                        <Search className="w-3.5 h-3.5 text-theme-muted absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={auditSearch}
+                          onChange={(e) => setAuditSearch(e.target.value)}
+                          placeholder="بحث في السجل أو الموظف..."
+                          className="w-full pr-8 pl-3 py-1.5 rounded-lg bg-theme-base border border-theme text-xs text-theme-primary focus:outline-none focus:border-pmp-primary min-h-[34px]"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2.5 max-h-[420px] overflow-y-auto pr-1">
+                      {filteredAuditLogs.length === 0 ? (
+                        <div className="py-10 text-center text-xs text-theme-muted">
+                          لا توجد عمليات مطابقة في سجل النشاط حتى الآن.
+                        </div>
+                      ) : (
+                        filteredAuditLogs.slice(0, 50).map((log) => {
+                          const isTamper = /TAMPER_ATTEMPT_BLOCKED|TOMBSTONE_REPLAY_BLOCKED/i.test(
+                            String(log.action || '')
+                          );
+                          const isDup = /DUPLICATE_TRANSACTION_BLOCKED/i.test(String(log.action || ''));
+                          return (
+                            <div
+                              key={log.id}
+                              className={`p-3 rounded-xl border text-xs space-y-1 ${
+                                isTamper
+                                  ? 'bg-rose-500/10 border-rose-500/40'
+                                  : isDup
+                                  ? 'bg-amber-500/10 border-amber-500/40'
+                                  : 'bg-theme-base border-theme'
+                              }`}
+                            >
+                              <div className="flex justify-between items-center gap-2">
+                                <span
+                                  className={`font-bold ${
+                                    isTamper ? 'text-rose-400' : isDup ? 'text-amber-400' : 'text-pmp-primary'
+                                  }`}
+                                >
+                                  {log.action}
+                                </span>
+                                <span className="font-mono text-[10px] text-theme-muted">
+                                  {log.timestamp ? new Date(log.timestamp).toLocaleString('ar-EG') : ''}
+                                </span>
+                              </div>
+                              <p className="text-theme-secondary text-[11px] leading-relaxed">{log.detail}</p>
+                              <span className="text-[10px] text-theme-muted block">بواسطة: {log.username}</span>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
             </div>
 
             <div className="pt-4 border-t border-theme mt-4 text-[11px] text-theme-muted">

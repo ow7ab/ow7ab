@@ -202,6 +202,9 @@ export const PurchasesModuleView: React.FC = () => {
 
   const handleDeleteMove = async (move: FactoryMove) => {
     if (!canDelete || deleteGuard.isSubmitting) return;
+    if (!window.confirm(`هل تريد بالتأكيد حذف حركة التوريد (${move.itemName}) نهائياً؟`)) {
+      return;
+    }
     const docId = (move as any)._docId || `FM-${move.id}`;
     const res = await deleteGuard.runGuarded({
       guardKey: `purchases_delete_${docId}`,

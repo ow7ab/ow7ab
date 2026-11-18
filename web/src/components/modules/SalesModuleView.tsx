@@ -557,30 +557,28 @@ export const SalesModuleView: React.FC = () => {
           timestamp: now
         };
 
-        await Promise.all([
-          ErpDataService.handleTransactionCommit({
-            collectionName: 'invoices',
-            docId: invDocId,
-            payload: {
-              ...payingInvoice,
-              paidAmount: newPaid,
-              status: newStatus
-            },
-            actorUsername: userProfile?.username
-          }),
-          ErpDataService.handleTransactionCommit({
-            collectionName: 'invoice_payments',
-            docId: payDocId,
-            payload: payDoc,
-            actorUsername: userProfile?.username
-          }),
-          ErpDataService.handleTransactionCommit({
-            collectionName: 'movements',
-            docId: `MOV-${idempotencyKey}`,
-            payload: tm,
-            actorUsername: userProfile?.username
-          })
-        ]);
+        await ErpDataService.handleTransactionCommit({
+          collectionName: 'invoice_payments',
+          docId: payDocId,
+          payload: payDoc,
+          actorUsername: userProfile?.username
+        });
+        await ErpDataService.handleTransactionCommit({
+          collectionName: 'movements',
+          docId: `MOV-${idempotencyKey}`,
+          payload: tm,
+          actorUsername: userProfile?.username
+        });
+        await ErpDataService.handleTransactionCommit({
+          collectionName: 'invoices',
+          docId: invDocId,
+          payload: {
+            ...payingInvoice,
+            paidAmount: newPaid,
+            status: newStatus
+          },
+          actorUsername: userProfile?.username
+        });
 
         const cashCode = resolveCashAccountCode(targetCashbox, payingInvoice.currency);
         const payJournal = createBalancedJournalPayload({

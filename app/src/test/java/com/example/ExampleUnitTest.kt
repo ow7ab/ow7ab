@@ -86,6 +86,7 @@ class ExampleUnitTest {
     registry.unregisterDeleted("products", "PROD-88")
     assertFalse(registry.isDeleted("products", 88L))
     assertFalse(registry.isDeleted("products", "PROD-88"))
+    registry.resetForTesting()
   }
 
   @Test
@@ -343,6 +344,7 @@ class ExampleUnitTest {
     registry.unregisterDeleted("cashboxes", docIdHalfa)
     assertFalse(registry.isDeleted("cashboxes", "خزنة حلفا"))
     assertFalse(registry.isDeleted("cashboxes", docIdHalfa))
+    registry.resetForTesting()
   }
 
   @Test
@@ -2108,6 +2110,122 @@ class ExampleUnitTest {
     )
     assertEquals(com.example.data.remote.CloudErrorCategory.DUPLICATE_TRANSACTION, dupLog.category)
     assertFalse(dupLog.retryable)
+
+    // 5. Invoices & Invoice Payments anti-tamper and duplicate conflict validation
+    val overpaidInvoice = com.example.data.remote.CloudErpSyncRepository.validateTransactionCommitPayload(
+      collectionName = "invoices",
+      docId = "INV-OVERPAID-1",
+      payload = mapOf(
+        "customerName" to "شركة النيل",
+        "currency" to "SDG",
+        "total" to 10000.0,
+        "paidAmount" to 15000.0
+      )
+    )
+    assertFalse("Overpaid invoice must fail validation as TAMPER", overpaidInvoice.valid)
+    assertEquals(
+      com.example.data.remote.CloudErpSyncRepository.Companion.TransactionViolationType.TAMPER,
+      overpaidInvoice.violationType
+    )
+
+    val existingInvoices = listOf(
+      "INV-2026-01" to mapOf<String, Any?>(
+        "invoiceNo" to "INV-2026-01",
+        "customerName" to "شركة النيل",
+        "currency" to "SDG",
+        "total" to 25000.0
+      )
+    )
+    val dupInvoice = com.example.data.remote.CloudErpSyncRepository.checkExistingFinancialCommitConflict(
+      collectionName = "invoices",
+      candidateDocId = "INV-2026-01-COPY",
+      candidatePayload = mapOf(
+        "invoiceNo" to "INV-2026-01",
+        "customerName" to "شركة النيل",
+        "currency" to "SDG",
+        "total" to 25000.0
+      ),
+      existingDocs = existingInvoices
+    )
+    assertFalse("Duplicate invoice number must be blocked", dupInvoice.valid)
+    assertEquals(
+      com.example.data.remote.CloudErpSyncRepository.Companion.TransactionViolationType.DUPLICATE,
+      dupInvoice.violationType
+    )
+
+    val tamperInvoice = com.example.data.remote.CloudErpSyncRepository.checkExistingFinancialCommitConflict(
+      collectionName = "invoices",
+      candidateDocId = "INV-2026-01",
+      candidatePayload = mapOf(
+        "invoiceNo" to "INV-2026-01",
+        "customerName" to "شركة النيل",
+        "currency" to "SDG",
+        "total" to 12000.0
+      ),
+      existingDocs = existingInvoices
+    )
+    assertFalse("Tampered invoice total must be blocked", tamperInvoice.valid)
+    assertEquals(
+      com.example.data.remote.CloudErpSyncRepository.Companion.TransactionViolationType.TAMPER,
+      tamperInvoice.violationType
+    )
+
+    val existingPayments = listOf(
+      "PAY-55" to mapOf<String, Any?>(
+        "invoiceId" to 10L,
+        "reference" to "REF:55",
+        "cashbox" to "خزنة السودان",
+        "currency" to "SDG",
+        "amount" to 5000.0
+      )
+    )
+    val dupPayment = com.example.data.remote.CloudErpSyncRepository.checkExistingFinancialCommitConflict(
+      collectionName = "invoice_payments",
+      candidateDocId = "PAY-NEW-55",
+      candidatePayload = mapOf(
+        "invoiceId" to 10L,
+        "reference" to "REF:55",
+        "cashbox" to "خزنة السودان",
+        "currency" to "SDG",
+        "amount" to 5000.0
+      ),
+      existingDocs = existingPayments
+    )
+    assertFalse("Duplicate invoice payment reference must be blocked", dupPayment.valid)
+    assertEquals(
+      com.example.data.remote.CloudErpSyncRepository.Companion.TransactionViolationType.DUPLICATE,
+      dupPayment.violationType
+    )
+
+    val tamperPayment = com.example.data.remote.CloudErpSyncRepository.checkExistingFinancialCommitConflict(
+      collectionName = "invoice_payments",
+      candidateDocId = "PAY-55",
+      candidatePayload = mapOf(
+        "invoiceId" to 10L,
+        "reference" to "REF:55",
+        "cashbox" to "خزنة السودان",
+        "currency" to "SDG",
+        "amount" to 9900.0
+      ),
+      existingDocs = existingPayments
+    )
+    assertFalse("Tampered invoice payment amount must be blocked", tamperPayment.valid)
+    assertEquals(
+      com.example.data.remote.CloudErpSyncRepository.Companion.TransactionViolationType.TAMPER,
+      tamperPayment.violationType
+    )
+
+    val payFingerprint = com.example.data.remote.CloudErpSyncRepository.buildFinancialCommitFingerprint(
+      collectionName = "invoice_payments",
+      payload = mapOf(
+        "invoiceId" to 10L,
+        "reference" to "REF:55",
+        "cashbox" to "خزنة السودان",
+        "currency" to "SDG",
+        "amount" to 5000.0
+      )
+    )
+    assertTrue("Invoice payment fingerprint must start with PAY|", payFingerprint.startsWith("PAY|10|"))
   }
 }
 

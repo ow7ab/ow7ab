@@ -74,11 +74,23 @@ test('Desktop Window Bounds: clamps off-screen or undersized windows inside acti
   assert.ok(offscreen.x >= 0 && offscreen.y >= 0);
 });
 
-test('Desktop Print & Update Isolation: strips auto window.print() and rejects Android .apk assets', () => {
-  const rawHtml = '<html><body><h1>Report</h1><script type="text/javascript">window.onload = function() { window.print(); };</script></body></html>';
+test('Desktop Print & Update Isolation: strips scripts/iframes/handlers and rejects Android .apk assets', () => {
+  const rawHtml =
+    '<html><head><meta http-equiv="refresh" content="0;url=https://evil.test"><base href="https://evil.test/"></head><body onload="alert(1)"><iframe src="https://evil.test"></iframe><a href="javascript:alert(2)">x</a><a href="vbscript:msgbox(1)">y</a><h1>Report</h1><script type="text/javascript">window.onload = function() { window.print(); };</script></body></html>';
   const cleaned = security.sanitizePrintHtmlDocument(rawHtml);
   assert.equal(cleaned.includes('window.print()'), false);
+  assert.equal(cleaned.includes('<iframe'), false);
+  assert.equal(cleaned.includes('http-equiv="refresh"'), false);
+  assert.equal(cleaned.includes('<base'), false);
+  assert.equal(cleaned.includes('onload='), false);
+  assert.equal(cleaned.includes('javascript:'), false);
+  assert.equal(cleaned.includes('vbscript:'), false);
   assert.equal(cleaned.includes('<h1>Report</h1>'), true);
+
+  assert.equal(security.isSafeLocalFilePath(path.join(DESKTOP_ROOT, 'renderer-dist', 'index.html')), true);
+  assert.equal(security.isSafeLocalFilePath('\\\\evil-server\\share\\payload.exe'), false);
+  assert.equal(security.isSafeLocalFilePath('smb://evil/share'), false);
+  assert.equal(security.isSafeLocalFilePath('../secret.txt'), false);
 
   assert.equal(security.isValidDesktopReleaseAssetName('pmp-paints-desktop-setup-21.0.0-x64.exe'), true);
   assert.equal(security.isValidDesktopReleaseAssetName('latest.yml'), true);
@@ -103,6 +115,12 @@ test('Desktop Assets & Hardening: verifies official icons and secure BrowserWind
   assert.ok(mainSource.includes("session.on('will-download'"));
   assert.ok(mainSource.includes('AbortController'));
   assert.ok(mainSource.includes("on('did-fail-load'"));
+  assert.ok(mainSource.includes('prefs.confirmBeforeExit'));
+  assert.ok(mainSource.includes('isSafeLocalFilePath('));
+  assert.ok(mainSource.includes('createSandboxedPrintWindow'));
+  assert.ok(mainSource.includes("on('will-navigate'"));
+  assert.ok(mainSource.includes("on('web-contents-created'"));
+  assert.ok(mainSource.includes("on('will-attach-webview'"));
 
   const preloadSource = fs.readFileSync(path.join(DESKTOP_ROOT, 'src', 'preload.cjs'), 'utf8');
   assert.ok(preloadSource.includes("contextBridge.exposeInMainWorld('pmpDesktop'"));

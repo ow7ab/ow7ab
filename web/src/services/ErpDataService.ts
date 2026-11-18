@@ -937,7 +937,7 @@ class ErpDataServiceImpl {
     // Best-effort cleanup of secondary alias Firestore docs (e.g. MOV-123 alongside MOV-IDEM-...)
     const extraDocCandidates = aliasKeys
       .map((a) => (a === undefined || a === null ? '' : safeId(String(a), '')))
-      .filter((d) => d && d !== cleanId && /^(MOV|INV|TRF|CUST|WH|SM|FI|FM|PRD|PROD|BOX|CB)-/i.test(d));
+      .filter((d) => d && d !== cleanId && /^(MOV|INV|TRF|CUST|WH|SM|FI|FM|PRD|PROD|BOX|CB|PAY|II|DC|PR|PO|GRP)-/i.test(d));
     for (const extraDoc of extraDocCandidates) {
       await this.deleteDocument(collectionName, extraDoc).catch(() => {});
     }
@@ -952,11 +952,16 @@ class ErpDataServiceImpl {
     numericId?: number | string,
     actorUsername?: string
   ): Promise<void> {
-    if (numericId !== undefined && numericId !== null) {
-      await this.deleteDocumentWithTombstone(collectionName, docId, numericId, actorUsername || 'المدير');
-    } else {
-      await this.deleteDocument(collectionName, docId);
-    }
+    const resolvedEntityKey =
+      numericId !== undefined && numericId !== null && String(numericId).trim() !== ''
+        ? numericId
+        : docId;
+    await this.deleteDocumentWithTombstone(
+      collectionName,
+      docId,
+      resolvedEntityKey,
+      actorUsername || 'المدير'
+    );
   }
 
   /**

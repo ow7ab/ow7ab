@@ -300,10 +300,20 @@ fun SalesScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
+                    val salesTabBadges = remember(invoices.size, draftItems.size, customers.size) {
+                        buildMap {
+                            val activeInvCount = invoices.count { it.status == "active" }
+                            if (activeInvCount > 0) put(0, activeInvCount)
+                            if (draftItems.isNotEmpty()) put(1, draftItems.size)
+                            if (customers.isNotEmpty()) put(3, customers.size)
+                        }
+                    }
+
                     GlassTabRow(
                         tabs = tabs,
                         selectedIndex = selectedTab,
-                        onTabSelected = { selectedTab = it }
+                        onTabSelected = { selectedTab = it },
+                        tabBadges = salesTabBadges
                     )
                 }
             }

@@ -1270,6 +1270,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             payloadSummary = "$sourceCashbox -> $destinationCashbox ($sourceAmount $sourceCurrency)",
             onComplete = onComplete
         ) { _ ->
+            if (sourceCashbox.trim().equals(destinationCashbox.trim(), ignoreCase = true) &&
+                sourceCurrency.trim().equals(destinationCurrency.trim(), ignoreCase = true)
+            ) {
+                return@launchGuardedTransaction Result.failure(
+                    IllegalArgumentException("لا يمكن التحويل من نفس الخزنة وإليها بنفس العملة")
+                )
+            }
             val destAmtPreview = if (isInvertedRate && rate > 0) sourceAmount / rate else sourceAmount * rate
             val prePayload = mapOf<String, Any?>(
                 "reference" to autoRef,
@@ -1599,15 +1606,38 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         guardKey: String = "create_invoice",
         onComplete: ((Boolean) -> Unit)? = null
     ) {
+        val previewDocRef = "INV-CUST-$customerId-${items.sumOf { it.lineTotal }.toLong()}"
         launchGuardedTransaction(
             guardKey = guardKey,
             operationType = com.example.util.IdempotencyOperationType.APPROVE_INVOICE,
             actionLabel = "إصدار فاتورة مبيعات",
-            documentReference = "INV-CUST-$customerId-${items.sumOf { it.lineTotal }.toLong()}",
+            documentReference = previewDocRef,
             targetCollection = "invoices",
             payloadSummary = "فاتورة مبيعات للعميل $customerName (${items.size} صنف)",
             onComplete = onComplete
         ) { _ ->
+            if (items.any { !it.quantity.isFinite() || it.quantity <= 0.0 || !it.unitPrice.isFinite() || it.unitPrice < 0.0 } ||
+                !discount.isFinite() || discount < 0.0
+            ) {
+                val reason = "قيم بنود أو خصم الفاتورة غير صالحة أو سالبة — تم حظر الإصدار وتسجيل المحاولة."
+                cloudErpSyncRepo.recordTamperAttempt("CREATE_INVOICE_VALIDATION", "invoices/$previewDocRef", reason, user)
+                return@launchGuardedTransaction Result.failure(SecurityException(reason))
+            }
+            val subtotalPreview = items.sumOf { it.quantity * it.unitPrice }
+            val totalPreview = (subtotalPreview - discount.coerceIn(0.0, subtotalPreview)).coerceAtLeast(0.0)
+            val paidPreview = paymentAmount ?: 0.0
+            val prePayload = mapOf<String, Any?>(
+                "customerName" to customerName.trim(),
+                "currency" to currency,
+                "total" to totalPreview,
+                "paidAmount" to paidPreview
+            )
+            val payloadCheck = CloudErpSyncRepository.validateTransactionCommitPayload("invoices", previewDocRef, prePayload)
+            if (!payloadCheck.valid) {
+                cloudErpSyncRepo.recordTamperAttempt("CREATE_INVOICE_VALIDATION", "invoices/$previewDocRef", payloadCheck.reason, user)
+                return@launchGuardedTransaction Result.failure(SecurityException(payloadCheck.reason))
+            }
+
             val res = repository.createInvoice(
                 customerId, customerName, currency, items, discount, notes, user, paymentCashbox, paymentAmount
             )
@@ -1631,15 +1661,79 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         guardKey: String = "pay_invoice_$invoiceId",
         onComplete: ((Boolean) -> Unit)? = null
     ) {
+        val docRef = invoiceNo.ifBlank { "INV-$invoiceId" }
         launchGuardedTransaction(
             guardKey = guardKey,
             operationType = com.example.util.IdempotencyOperationType.PAYMENT,
             actionLabel = "سداد فاتورة مبيعات",
-            documentReference = invoiceNo.ifBlank { "INV-$invoiceId" },
+            documentReference = docRef,
             targetCollection = "invoice_payments",
             payloadSummary = "سداد $amount $currency لفاتورة $invoiceNo",
             onComplete = onComplete
         ) { _ ->
+            val prePayload = mapOf<String, Any?>(
+                "invoiceId" to invoiceId,
+                "invoiceNo" to invoiceNo,
+                "customerName" to customerName.trim(),
+                "cashbox" to cashbox.trim(),
+                "currency" to currency,
+                "amount" to amount
+            )
+            val payloadCheck = CloudErpSyncRepository.validateTransactionCommitPayload("invoice_payments", "PAY-$docRef", prePayload)
+            if (!payloadCheck.valid) {
+                cloudErpSyncRepo.recordTamperAttempt("PAY_INVOICE_VALIDATION", "invoice_payments/$docRef", payloadCheck.reason, user)
+                return@launchGuardedTransaction Result.failure(SecurityException(payloadCheck.reason))
+            }
+            val targetInvoice = invoices.value.firstOrNull { it.id == invoiceId }
+            if (targetInvoice != null) {
+                if (targetInvoice.status.equals("cancelled", ignoreCase = true) || targetInvoice.status == "ملغاة") {
+                    val reason = "محاولة تسجيل دفعة سداد على فاتورة ملغاة ($docRef)."
+                    cloudErpSyncRepo.recordTamperAttempt("PAY_INVOICE_VALIDATION", "invoice_payments/$docRef", reason, user)
+                    return@launchGuardedTransaction Result.failure(SecurityException(reason))
+                }
+                val alreadyPaid = invoicePayments.value
+                    .filter { it.invoiceId == invoiceId && it.status == "active" }
+                    .sumOf { it.amount }
+                val remaining = (targetInvoice.total - alreadyPaid).coerceAtLeast(0.0)
+                if (amount > remaining + 0.01) {
+                    val reason = "مبلغ الدفعة ($amount) يتجاوز المتبقي المستحق (${String.format(Locale.US, "%.2f", remaining)}) على الفاتورة $docRef."
+                    cloudErpSyncRepo.recordTamperAttempt("PAY_INVOICE_VALIDATION", "invoice_payments/$docRef", reason, user)
+                    return@launchGuardedTransaction Result.failure(SecurityException(reason))
+                }
+            }
+            val cleanNoteRef = note.trim()
+            val candidateRefPayload = if (cleanNoteRef.startsWith("REF:", ignoreCase = true)) {
+                prePayload + ("reference" to cleanNoteRef)
+            } else {
+                prePayload
+            }
+            val existingLocalPayments = invoicePayments.value
+                .filter { it.invoiceId == invoiceId && it.status == "active" }
+                .map { p ->
+                    "PAY-${p.id}" to mapOf<String, Any?>(
+                        "invoiceId" to p.invoiceId,
+                        "cashbox" to p.cashbox,
+                        "currency" to currency,
+                        "amount" to p.amount,
+                        "reference" to p.note.trim().takeIf { it.startsWith("REF:", ignoreCase = true) }.orEmpty()
+                    )
+                }
+            val localConflict = CloudErpSyncRepository.checkExistingFinancialCommitConflict(
+                collectionName = "invoice_payments",
+                candidateDocId = "PAY-NEW-$invoiceId-${System.currentTimeMillis()}",
+                candidatePayload = candidateRefPayload,
+                existingDocs = existingLocalPayments
+            )
+            if (!localConflict.valid) {
+                if (localConflict.violationType == CloudErpSyncRepository.Companion.TransactionViolationType.TAMPER) {
+                    cloudErpSyncRepo.recordTamperAttempt("PAY_INVOICE_VALIDATION", "invoice_payments/$docRef", localConflict.reason, user)
+                    return@launchGuardedTransaction Result.failure(SecurityException(localConflict.reason))
+                } else {
+                    cloudErpSyncRepo.recordDuplicateAttempt("PAY_INVOICE_VALIDATION", "invoice_payments/$docRef", localConflict.reason, user)
+                    return@launchGuardedTransaction Result.failure(IllegalStateException(localConflict.reason))
+                }
+            }
+
             val res = repository.recordInvoicePayment(invoiceId, invoiceNo, customerName, currency, cashbox, amount, note, user)
             res.map {
                 postMessage("تم تسجيل سداد مبلغ $amount $currency بنجاح")

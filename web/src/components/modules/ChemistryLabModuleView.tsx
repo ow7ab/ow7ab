@@ -187,6 +187,9 @@ export const ChemistryLabModuleView: React.FC = () => {
 
   const handleDeleteFormula = async (f: LabFormulation) => {
     if (!canDelete || deleteGuard.isSubmitting) return;
+    if (!window.confirm(`هل تريد بالتأكيد حذف التركيبة الكيميائية (${f.formulaNo || `FORM-${f.id}`}) نهائياً؟`)) {
+      return;
+    }
     const docId = (f as any)._docId || safeId(f.formulaNo, `FORM-${f.id}`);
     const res = await deleteGuard.runGuarded({
       guardKey: `lab_delete_formula_${docId}`,

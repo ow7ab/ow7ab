@@ -315,6 +315,9 @@ export const FactoryModuleView: React.FC = () => {
 
   const handleDeleteBatch = async (b: ProductionBatch) => {
     if (!canDelete || deleteGuard.isSubmitting) return;
+    if (!window.confirm(`هل تريد بالتأكيد حذف تشغيلة الإنتاج (${b.batchNumber || b.productName}) نهائياً؟`)) {
+      return;
+    }
     const docId = (b as any)._docId || safeId(b.batchNumber, `BATCH-${b.id}`);
     const res = await deleteGuard.runGuarded({
       guardKey: `factory_delete_batch_${docId}`,

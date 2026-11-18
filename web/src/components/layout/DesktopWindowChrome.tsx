@@ -15,21 +15,31 @@ import {
   FileDown,
   FolderOpen,
   ExternalLink,
-  CheckCircle
+  CheckCircle,
+  Search
 } from 'lucide-react';
 import {
   getDesktopBridge,
   DesktopWindowState,
   DesktopUpdateState,
   DESKTOP_PRINT_EVENT,
-  DESKTOP_EXPORT_NOTICE_EVENT
+  DESKTOP_EXPORT_NOTICE_EVENT,
+  DESKTOP_GLOBAL_SHORTCUT_EVENT
 } from '../../utils/desktopBridge';
 import { resolveAssetUrl } from '../../config/appVersionContract';
 import { useLanguage } from '../../context/LanguageContext';
 import { ErpDataService } from '../../services/ErpDataService';
 
 function stripAutoPrintScript(rawHtml: string): string {
-  return String(rawHtml || '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  let html = String(rawHtml || '');
+  html = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  html = html.replace(/<(iframe|object|embed)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
+  html = html.replace(/<(iframe|object|embed)\b[^>]*\/?>/gi, '');
+  html = html.replace(/<meta\b[^>]*http-equiv\s*=\s*("?refresh"?|'?refresh'?)[^>]*>/gi, '');
+  html = html.replace(/<base\b[^>]*>/gi, '');
+  html = html.replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  html = html.replace(/(javascript|vbscript)\s*:/gi, 'blocked:');
+  return html;
 }
 
 export const DesktopWindowChrome: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -207,6 +217,21 @@ export const DesktopWindowChrome: React.FC<{ children: React.ReactNode }> = ({ c
           className="flex items-center gap-2"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
+          <button
+            type="button"
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent(DESKTOP_GLOBAL_SHORTCUT_EVENT, { detail: 'GLOBAL_SEARCH' }));
+            }}
+            className="hidden sm:flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-theme-base border border-theme text-theme-secondary hover:text-theme-primary hover:border-pmp-primary/50 text-[10.5px] font-bold transition-all"
+            title={language === 'ar' ? 'فتح البحث الشامل (Ctrl+K)' : 'Global Search (Ctrl+K)'}
+          >
+            <Search className="w-3 h-3 text-pmp-primary" />
+            <span>{language === 'ar' ? 'بحث سريع' : 'Quick Search'}</span>
+            <kbd className="text-[9px] font-mono text-theme-muted px-1 rounded bg-theme-surface border border-theme">
+              Ctrl+K
+            </kbd>
+          </button>
+
           <button
             type="button"
             onClick={recheckConnectivity}

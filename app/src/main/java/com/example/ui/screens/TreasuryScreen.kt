@@ -276,10 +276,24 @@ fun TreasuryScreen(
                     if (tabs.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(14.dp))
 
+                        val treasuryTabBadges = remember(tabs, movements.size, transfers.size, dailyClosings.size, cashboxes.size) {
+                            tabs.mapIndexedNotNull { idx, title ->
+                                val count = when (title) {
+                                    "حركة مالية" -> movements.size
+                                    "تحويل خزن" -> transfers.size
+                                    "إقفال اليومية" -> dailyClosings.size
+                                    "إدارة الخزن" -> cashboxes.size
+                                    else -> 0
+                                }
+                                if (count > 0) idx to count else null
+                            }.toMap()
+                        }
+
                         GlassTabRow(
                             tabs = tabs,
                             selectedIndex = selectedTab.coerceIn(0, (tabs.size - 1).coerceAtLeast(0)),
-                            onTabSelected = { selectedTab = it }
+                            onTabSelected = { selectedTab = it },
+                            tabBadges = treasuryTabBadges
                         )
                     }
                 }

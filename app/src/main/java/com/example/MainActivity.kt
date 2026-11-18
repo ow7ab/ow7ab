@@ -716,7 +716,7 @@ fun PmpAppContent(
                                 IconButton(
                                     onClick = { viewModel.toggleDarkModeQuick() },
                                     modifier = Modifier
-                                        .size(38.dp)
+                                        .size(48.dp)
                                         .testTag("top_bar_theme_toggle_button")
                                 ) {
                                     Icon(
@@ -730,7 +730,7 @@ fun PmpAppContent(
                                 IconButton(
                                     onClick = { handleSignOut() },
                                     modifier = Modifier
-                                        .size(38.dp)
+                                        .size(48.dp)
                                         .testTag("top_bar_logout_button")
                                 ) {
                                     Icon(

@@ -128,12 +128,32 @@ function clampWindowBounds(saved, workArea, defaults = { width: 1366, height: 86
 }
 
 /**
- * Validates that incoming HTML for printing/PDF does not exceed reasonable bounds.
+ * Validates that incoming HTML for printing/PDF does not contain scripts, iframes, embeds, or inline JS handlers.
  */
 function sanitizePrintHtmlDocument(rawHtml) {
-  const html = String(rawHtml || '');
-  // Strip all script blocks so silent printToPDF/print cannot execute arbitrary scripts or trigger recursive dialogs
-  return html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  let html = String(rawHtml || '');
+  html = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  html = html.replace(/<(iframe|object|embed)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
+  html = html.replace(/<(iframe|object|embed)\b[^>]*\/?>/gi, '');
+  html = html.replace(/<meta\b[^>]*http-equiv\s*=\s*("?refresh"?|'?refresh'?)[^>]*>/gi, '');
+  html = html.replace(/<base\b[^>]*>/gi, '');
+  html = html.replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  html = html.replace(/(javascript|vbscript)\s*:/gi, 'blocked:');
+  return html;
+}
+
+/**
+ * Validates that a local path for shell.openPath / showItemInFolder is strictly local (no UNC shares, URLs, or traversal).
+ */
+function isSafeLocalFilePath(targetPath) {
+  if (!targetPath || typeof targetPath !== 'string') return false;
+  const trimmed = targetPath.trim();
+  if (!trimmed || trimmed.includes('\0')) return false;
+  if (trimmed.startsWith('\\\\') || trimmed.startsWith('//')) return false;
+  if (/^[a-zA-Z]{2,}:\/\//.test(trimmed)) return false;
+  const normalized = trimmed.replace(/\\/g, '/');
+  if (normalized.split('/').some((seg) => seg === '..')) return false;
+  return path.isAbsolute(trimmed);
 }
 
 /**
@@ -152,5 +172,6 @@ module.exports = {
   isAllowedExternalUrl,
   clampWindowBounds,
   sanitizePrintHtmlDocument,
+  isSafeLocalFilePath,
   isValidDesktopReleaseAssetName
 };

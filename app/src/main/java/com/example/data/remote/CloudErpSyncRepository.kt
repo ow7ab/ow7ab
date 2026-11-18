@@ -147,6 +147,14 @@ class CloudErpSyncRepository(
                     val total = kotlin.math.round((numVal(payload["total"]).takeIf { it.isFinite() } ?: 0.0) * 100.0).toLong()
                     "INV|$invNo|$cust|$cur|$total"
                 }
+                "invoice_payments" -> {
+                    val invId = (payload["invoiceId"] ?: "").toString().trim()
+                    val ref = normKey((payload["reference"] ?: payload["syncUuid"] ?: "").toString())
+                    val box = normKey((payload["cashbox"] ?: "").toString())
+                    val cur = (payload["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US)
+                    val amt = kotlin.math.round((numVal(payload["amount"]).takeIf { it.isFinite() } ?: 0.0) * 100.0).toLong()
+                    "PAY|$invId|$ref|$box|$cur|$amt"
+                }
                 else -> "${col.uppercase(java.util.Locale.US)}|${normKey((payload["reference"] ?: payload["id"] ?: "").toString())}"
             }
         }
@@ -310,6 +318,60 @@ class CloudErpSyncRepository(
                                     violationType = TransactionViolationType.DUPLICATE,
                                     matchedDocId = exDocId,
                                     reason = "عملية التحويل مسجلة مسبقاً في Firestore ($exDocId) — تم منع التكرار."
+                                )
+                            }
+                        }
+                    }
+                    "invoices" -> {
+                        val exInvNo = (existing["invoiceNo"] ?: existing["reference"] ?: "").toString().trim()
+                        val candInvNo = (candidatePayload["invoiceNo"] ?: candRef).toString().trim()
+                        val sameInvNo = candInvNo.isNotBlank() && exInvNo.isNotBlank() && candInvNo.equals(exInvNo, ignoreCase = true)
+                        if (sameDocId || sameUuid || sameInvNo) {
+                            val sameTotal = kotlin.math.abs((numVal(existing["total"]).takeIf { it.isFinite() } ?: 0.0) - (numVal(candidatePayload["total"]).takeIf { it.isFinite() } ?: 0.0)) < 0.01
+                            val sameCur = (existing["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US) ==
+                                (candidatePayload["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US)
+                            val sameCustomer = normKey(existing["customerName"]?.toString()) == normKey(candidatePayload["customerName"]?.toString())
+                            return if (!sameTotal || !sameCur || !sameCustomer) {
+                                TransactionCommitValidationResult(
+                                    valid = false,
+                                    violationType = TransactionViolationType.TAMPER,
+                                    matchedDocId = exDocId,
+                                    reason = "رُصدت محاولة تعديل أو تلاعب في فاتورة مسجلة مسبقاً ($exDocId): الإجمالي أو العملة أو العميل لا يطابق السجل المعتمد في Firestore."
+                                )
+                            } else {
+                                TransactionCommitValidationResult(
+                                    valid = false,
+                                    violationType = TransactionViolationType.DUPLICATE,
+                                    matchedDocId = exDocId,
+                                    reason = "الفاتورة مسجلة مسبقاً في Firestore ($exDocId) — تم منع التكرار."
+                                )
+                            }
+                        }
+                    }
+                    "invoice_payments" -> {
+                        val exRef = (existing["reference"] ?: existing["referenceNo"] ?: "").toString().trim()
+                        val candPayRef = (candidatePayload["reference"] ?: candidatePayload["referenceNo"] ?: "").toString().trim()
+                        val samePayRef = candPayRef.isNotBlank() && exRef.isNotBlank() && candPayRef.equals(exRef, ignoreCase = true)
+                        val exInvId = (existing["invoiceId"] ?: "").toString().trim()
+                        val candInvId = (candidatePayload["invoiceId"] ?: "").toString().trim()
+                        val compatibleInv = exInvId.isBlank() || candInvId.isBlank() || exInvId == candInvId
+                        if (sameDocId || sameUuid || (samePayRef && compatibleInv)) {
+                            val sameAmt = kotlin.math.abs((numVal(existing["amount"]).takeIf { it.isFinite() } ?: 0.0) - (numVal(candidatePayload["amount"]).takeIf { it.isFinite() } ?: 0.0)) < 0.01
+                            val sameCur = (existing["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US) ==
+                                (candidatePayload["currency"] ?: "SDG").toString().trim().uppercase(java.util.Locale.US)
+                            return if (!sameAmt || !sameCur) {
+                                TransactionCommitValidationResult(
+                                    valid = false,
+                                    violationType = TransactionViolationType.TAMPER,
+                                    matchedDocId = exDocId,
+                                    reason = "رُصدت محاولة تعديل أو تلاعب في دفعة سداد فاتورة مسجلة مسبقاً ($exDocId)."
+                                )
+                            } else {
+                                TransactionCommitValidationResult(
+                                    valid = false,
+                                    violationType = TransactionViolationType.DUPLICATE,
+                                    matchedDocId = exDocId,
+                                    reason = "دفعة السداد مسجلة مسبقاً في Firestore ($exDocId) — تم منع التكرار."
                                 )
                             }
                         }
@@ -1352,7 +1414,8 @@ class CloudErpSyncRepository(
 
             invoices.chunked(200).forEach { chunk ->
                 val batch = firestore.batch()
-                chunk.forEach { inv ->
+                var chunkWrites = 0
+                for (inv in chunk) {
                     val invItems = allItems.filter { it.invoiceId == inv.id }.map { item ->
                         mapOf(
                             "id" to item.id,
@@ -1364,7 +1427,9 @@ class CloudErpSyncRepository(
                             "warehouseId" to (item.warehouseId ?: 0L)
                         )
                     }
-                    val invPayments = allPayments.filter { it.invoiceId == inv.id && it.status == "active" }.map { p ->
+                    val activeInvPayments = allPayments.filter { it.invoiceId == inv.id && it.status == "active" }
+                    val paidSum = activeInvPayments.sumOf { it.amount }
+                    val invPayments = activeInvPayments.map { p ->
                         mapOf(
                             "id" to p.id,
                             "payDate" to p.payDate,
@@ -1386,6 +1451,7 @@ class CloudErpSyncRepository(
                         "subtotal" to inv.subtotal,
                         "discount" to inv.discount,
                         "total" to inv.total,
+                        "paidAmount" to paidSum,
                         "notes" to inv.notes,
                         "status" to inv.status,
                         "cancelReason" to (inv.cancelReason ?: ""),
@@ -1394,10 +1460,17 @@ class CloudErpSyncRepository(
                         "serverUpdatedBy" to actor,
                         "serverUpdatedAt" to FieldValue.serverTimestamp()
                     )
+                    val invValidation = validateTransactionCommitPayload("invoices", docId, data)
+                    if (!invValidation.valid) {
+                        recordTamperAttempt("SYNC_INVOICES_VALIDATION", "erp_clusters/$cleanCluster/invoices/$docId", invValidation.reason, actor)
+                        logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "تم حظر مزامنة فاتورة تالفة/مشبوهة [$docId]: ${invValidation.reason}")
+                        continue
+                    }
                     batch.set(cRef.collection("invoices").document(docId), data + mapOf("items" to invItems, "payments" to invPayments), SetOptions.merge())
+                    chunkWrites++
                     syncedCount++
                 }
-                batch.commit().await()
+                if (chunkWrites > 0) batch.commit().await()
             }
 
             // 2. Financial Movements (Batched for high speed and unique document ID - excluding deleted)
@@ -1414,7 +1487,8 @@ class CloudErpSyncRepository(
             try {
                 movements.chunked(300).forEach { chunk ->
                     val batch = firestore.batch()
-                    chunk.forEach { m ->
+                    var chunkWrites = 0
+                    for (m in chunk) {
                         val docId = m.cloudDocId.trim().ifBlank { "MOV-${m.id}" }
                         val data = mutableMapOf<String, Any>(
                             "id" to m.id,
@@ -1433,10 +1507,17 @@ class CloudErpSyncRepository(
                         )
                         if (m.syncUuid.isNotBlank()) data["syncUuid"] = m.syncUuid
                         if (m.updatedAt > 0L) data["updatedAt"] = m.updatedAt
+                        val movValidation = validateTransactionCommitPayload("movements", docId, data)
+                        if (!movValidation.valid) {
+                            recordTamperAttempt("SYNC_MOVEMENTS_VALIDATION", "erp_clusters/$cleanCluster/movements/$docId", movValidation.reason, actor)
+                            logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "تم حظر مزامنة حركة مالية تالفة [$docId]: ${movValidation.reason}")
+                            continue
+                        }
                         batch.set(cRef.collection("movements").document(docId), data, SetOptions.merge())
+                        chunkWrites++
                         syncedCount++
                     }
-                    batch.commit().await()
+                    if (chunkWrites > 0) batch.commit().await()
                 }
                 RoomTransactionLogger.log(
                     operation = "SYNC_MOVEMENTS_ACK",
@@ -1465,7 +1546,8 @@ class CloudErpSyncRepository(
             }
             transfers.chunked(300).forEach { chunk ->
                 val batch = firestore.batch()
-                chunk.forEach { t ->
+                var chunkWrites = 0
+                for (t in chunk) {
                     val docId = safeId("TRF-${t.id}-${t.reference}", "TRF-${t.id}")
                     val data = mapOf(
                         "id" to t.id,
@@ -1484,10 +1566,17 @@ class CloudErpSyncRepository(
                         "serverUpdatedBy" to actor,
                         "serverUpdatedAt" to FieldValue.serverTimestamp()
                     )
+                    val trfValidation = validateTransactionCommitPayload("transfers", docId, data)
+                    if (!trfValidation.valid) {
+                        recordTamperAttempt("SYNC_TRANSFERS_VALIDATION", "erp_clusters/$cleanCluster/transfers/$docId", trfValidation.reason, actor)
+                        logValidationViolationToAudit(cleanCluster, actor, "TAMPER_ATTEMPT_BLOCKED", "تم حظر مزامنة تحويل خزينة تالف [$docId]: ${trfValidation.reason}")
+                        continue
+                    }
                     batch.set(cRef.collection("transfers").document(docId), data, SetOptions.merge())
+                    chunkWrites++
                     syncedCount++
                 }
-                batch.commit().await()
+                if (chunkWrites > 0) batch.commit().await()
             }
 
             // 4. Customers (Batched - excluding deleted)
@@ -4740,19 +4829,53 @@ class CloudErpSyncRepository(
         batchNumber: String
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            val cRef = clusterRef(clusterCode)
-            val docId = if (batchNumber.isNotBlank()) {
-                batchNumber.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            val actor = currentActorId
+            val cleanBatch = batchNumber.trim()
+            val primaryDocId = if (cleanBatch.isNotBlank()) {
+                safeId(cleanBatch, "BATCH-$id")
             } else {
                 "BATCH-$id"
             }
-            runCatching { cRef.collection("paint_batches").document(docId).delete().await() }
-            runCatching { firestore.collection("paint_batches").document(docId).delete().await() }
+            val candidateIds = linkedSetOf(primaryDocId, "BATCH-$id")
+            if (id > 0L) candidateIds.add(id.toString())
+
+            DeletedRecordsRegistry.registerDeletedWithAliases(
+                collection = "paint_batches",
+                aliases = (candidateIds + listOfNotNull(cleanBatch.takeIf { it.isNotBlank() })).toList(),
+                primaryEntityId = if (id > 0L) id.toString() else primaryDocId,
+                primaryDocId = primaryDocId,
+                actor = actor
+            )
+
+            for (docCandidate in listOf(primaryDocId, "BATCH-$id").distinct()) {
+                val tombDocId = safeId("paint_batches_$docCandidate", "paint_batches_${id}_$docCandidate")
+                val tombData = mutableMapOf<String, Any>(
+                    "collection" to "paint_batches",
+                    "entityId" to (if (id > 0L) id.toString() else docCandidate),
+                    "docId" to docCandidate,
+                    "aliases" to candidateIds.toList(),
+                    "deletedAt" to FieldValue.serverTimestamp(),
+                    "deletedBy" to actor,
+                    "clusterCode" to cleanCluster
+                )
+                if (cleanBatch.isNotBlank()) tombData["batchNumber"] = cleanBatch
+                runCatching {
+                    cRef.collection("deleted_records").document(tombDocId).set(tombData, SetOptions.merge()).await()
+                }
+                runCatching {
+                    firestore.collection("deleted_records").document(tombDocId).set(tombData, SetOptions.merge()).await()
+                }
+                runCatching { cRef.collection("paint_batches").document(docCandidate).delete().await() }
+                runCatching { firestore.collection("paint_batches").document(docCandidate).delete().await() }
+            }
+
             recordDiagnostic(
                 action = "DELETE_BATCH_CLOUD",
                 status = "SUCCESS",
                 count = 1,
-                message = "تم حذف تشغيلة الإنتاج ($docId) بنجاح من السيرفر"
+                message = "تم تسجيل شاهد الحذف وحذف تشغيلة الإنتاج ($primaryDocId) نهائياً من السيرفر"
             )
             Unit
         }

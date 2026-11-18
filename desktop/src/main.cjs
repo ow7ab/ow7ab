@@ -22,6 +22,7 @@ const {
   isAllowedExternalUrl,
   clampWindowBounds,
   sanitizePrintHtmlDocument,
+  isSafeLocalFilePath,
   isValidDesktopReleaseAssetName
 } = require('./security.cjs');
 
@@ -149,6 +150,17 @@ function createSystemTray() {
             if (mainWindow.isMinimized()) mainWindow.restore();
             mainWindow.show();
             mainWindow.focus();
+          }
+        }
+      },
+      {
+        label: 'البحث الشامل (Ctrl+K)',
+        click: () => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
+            mainWindow.webContents.send('desktop:shortcut', 'GLOBAL_SEARCH');
           }
         }
       },
@@ -373,6 +385,24 @@ function createMainWindow() {
     if (!isQuitting && prefs.minimizeToTray && tray) {
       event.preventDefault();
       mainWindow.hide();
+      return;
+    }
+    if (!isQuitting && prefs.confirmBeforeExit) {
+      const choice = dialog.showMessageBoxSync(mainWindow, {
+        type: 'question',
+        buttons: ['إلغاء والبقاء في التطبيق', 'نعم، إغلاق التطبيق'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        title: 'تأكيد إغلاق PMP PAINTS ERP',
+        message: 'هل تريد بالتأكيد إغلاق تطبيق سطح المكتب الآن؟',
+        detail: 'تأكد من حفظ ومزامنة الفواتير والحركات المالية المفتوحة قبل المغادرة.'
+      });
+      if (choice === 0) {
+        event.preventDefault();
+      } else {
+        isQuitting = true;
+      }
     }
   });
 
@@ -567,6 +597,13 @@ function registerIpcHandlers() {
     assertTrustedIpcSender(event);
     const defaultName = String(options?.defaultFilename || `pmp_export_${Date.now()}.csv`).replace(/[<>:"/\\|?*]+/g, '_');
     const encoding = options?.encoding === 'base64' ? 'base64' : 'utf8';
+    const rawContent = String(options?.content || '');
+    const content = encoding === 'base64' ? Buffer.from(rawContent, 'base64') : rawContent;
+    const byteLength = typeof content === 'string' ? Buffer.byteLength(content, 'utf8') : content.byteLength;
+    if (byteLength > 25 * 1024 * 1024) {
+      throw new Error('حجم الملف المطلوب حفظه يتجاوز الحد الأقصى المسموح (25 ميجابايت).');
+    }
+
     const filters = Array.isArray(options?.filters) && options.filters.length > 0
       ? options.filters
       : [{ name: 'CSV / Excel', extensions: ['csv'] }, { name: 'All Files', extensions: ['*'] }];
@@ -580,10 +617,6 @@ function registerIpcHandlers() {
     if (result.canceled || !result.filePath) {
       return { canceled: true };
     }
-
-    const content = encoding === 'base64'
-      ? Buffer.from(String(options?.content || ''), 'base64')
-      : String(options?.content || '');
 
     fs.writeFileSync(result.filePath, content, encoding === 'base64' ? undefined : 'utf8');
     return { canceled: false, filePath: result.filePath };
@@ -614,8 +647,33 @@ function registerIpcHandlers() {
     };
   });
 
+  const createSandboxedPrintWindow = () => {
+    const win = new BrowserWindow({
+      show: false,
+      width: 1080,
+      height: 850,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true
+      }
+    });
+    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    win.webContents.on('will-navigate', (navEvent, navUrl) => {
+      if (!String(navUrl || '').startsWith('data:text/html')) {
+        navEvent.preventDefault();
+      }
+    });
+    return win;
+  };
+
   ipcMain.handle('desktop:export-pdf', async (event, options) => {
     assertTrustedIpcSender(event);
+    const cleanHtml = sanitizePrintHtmlDocument(options?.html || '').trim();
+    if (!cleanHtml) {
+      throw new Error('لا يوجد محتوى صالح للتصدير إلى PDF.');
+    }
+
     const defaultName = String(options?.defaultFilename || `pmp_report_${Date.now()}.pdf`)
       .replace(/[<>:"/\\|?*]+/g, '_')
       .replace(/(\.pdf)?$/i, '.pdf');
@@ -630,17 +688,7 @@ function registerIpcHandlers() {
       return { canceled: true };
     }
 
-    const cleanHtml = sanitizePrintHtmlDocument(options?.html || '');
-    const printWin = new BrowserWindow({
-      show: false,
-      width: 1080,
-      height: 850,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true
-      }
-    });
+    const printWin = createSandboxedPrintWindow();
 
     try {
       await printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(cleanHtml)}`);
@@ -659,17 +707,11 @@ function registerIpcHandlers() {
 
   ipcMain.handle('desktop:print-html', async (event, options) => {
     assertTrustedIpcSender(event);
-    const cleanHtml = sanitizePrintHtmlDocument(options?.html || '');
-    const printWin = new BrowserWindow({
-      show: false,
-      width: 1080,
-      height: 850,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true
-      }
-    });
+    const cleanHtml = sanitizePrintHtmlDocument(options?.html || '').trim();
+    if (!cleanHtml) {
+      throw new Error('لا يوجد محتوى صالح للطباعة.');
+    }
+    const printWin = createSandboxedPrintWindow();
 
     try {
       await printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(cleanHtml)}`);
@@ -691,15 +733,19 @@ function registerIpcHandlers() {
 
   ipcMain.handle('desktop:open-path', async (event, filePath) => {
     assertTrustedIpcSender(event);
-    if (!filePath || typeof filePath !== 'string') return '';
+    if (!isSafeLocalFilePath(filePath) || !fs.existsSync(filePath)) {
+      throw new Error('Blocked unsafe or missing local file path');
+    }
     return shell.openPath(filePath);
   });
 
   ipcMain.handle('desktop:reveal-file', (event, filePath) => {
     assertTrustedIpcSender(event);
-    if (filePath && typeof filePath === 'string') {
-      shell.showItemInFolder(filePath);
+    if (!isSafeLocalFilePath(filePath) || !fs.existsSync(filePath)) {
+      return false;
     }
+    shell.showItemInFolder(filePath);
+    return true;
   });
 
   ipcMain.handle('desktop:open-external', async (event, targetUrl) => {
@@ -724,16 +770,21 @@ function registerIpcHandlers() {
 
   ipcMain.handle('desktop:clipboard-write', (event, text) => {
     assertTrustedIpcSender(event);
-    clipboard.writeText(String(text ?? ''));
+    const str = String(text ?? '');
+    if (str.length > 512 * 1024) {
+      throw new Error('النص المطلوب نسخه يتجاوز الحد الأقصى المسموح (512 كيلوبايت).');
+    }
+    clipboard.writeText(str);
     return true;
   });
 
   ipcMain.handle('desktop:secure-storage-set', (event, { key, value }) => {
     assertTrustedIpcSender(event);
     const cleanKey = String(key || '').replace(/[^a-zA-Z0-9_-]/g, '');
-    if (!cleanKey || !safeStorage.isEncryptionAvailable()) return false;
+    const strVal = String(value ?? '');
+    if (!cleanKey || !safeStorage.isEncryptionAvailable() || strVal.length > 64 * 1024) return false;
     const vault = readJsonFile(getSecureVaultPath(), {});
-    vault[cleanKey] = safeStorage.encryptString(String(value ?? '')).toString('base64');
+    vault[cleanKey] = safeStorage.encryptString(strVal).toString('base64');
     writeJsonFile(getSecureVaultPath(), vault);
     return true;
   });
@@ -810,6 +861,25 @@ if (!gotSingleInstanceLock) {
   });
 
   app.setAppUserModelId('com.aistudio.pmppaints.erp.desktop');
+
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('will-attach-webview', (webviewEvent) => {
+      webviewEvent.preventDefault();
+    });
+    contents.on('will-navigate', (navEvent, targetUrl) => {
+      if (mainWindow && !mainWindow.isDestroyed() && contents === mainWindow.webContents) {
+        return;
+      }
+      const urlStr = String(targetUrl || '');
+      const allowedChild =
+        urlStr.startsWith('data:text/html') ||
+        isTrustedLoopbackOrigin(urlStr, trustedOrigin) ||
+        isAllowedAuthPopupUrl(urlStr);
+      if (!allowedChild) {
+        navEvent.preventDefault();
+      }
+    });
+  });
 
   app.whenReady().then(async () => {
     const started = await startLoopbackRendererServer({
