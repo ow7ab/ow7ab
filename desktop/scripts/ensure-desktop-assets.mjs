@@ -59,7 +59,8 @@ export function ensureDesktopBuildAssets() {
 
   if (!fs.existsSync(iconIco) || fs.statSync(iconIco).size === 0) {
     let generatedWithMagick = false;
-    for (const cmd of ['magick', 'convert']) {
+    const magickCandidates = process.platform === 'win32' ? ['magick'] : ['magick', 'convert'];
+    for (const cmd of magickCandidates) {
       try {
         execFileSync(
           cmd,

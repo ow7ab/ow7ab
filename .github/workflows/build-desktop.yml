@@ -125,7 +125,15 @@ jobs:
           npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify Web ERP Tests
+      - name: Build Shared Renderer & Sync Brand Assets
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          node scripts/sync-renderer.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify All Web ERP & Server Tests
         working-directory: web
         shell: pwsh
         run: |
@@ -133,13 +141,11 @@ jobs:
           npm test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build Shared Renderer & Verify Desktop Security Tests
+      - name: Verify Desktop Security & Loopback Tests
         working-directory: desktop
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          node scripts/sync-renderer.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

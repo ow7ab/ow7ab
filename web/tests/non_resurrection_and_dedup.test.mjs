@@ -136,8 +136,10 @@ test('Web modules use tombstone-backed deletions for movements/cashboxes/warehou
 
   assert.equal(treasurySrc.includes("ErpDataService.deleteDocument('movements'"), false);
   assert.equal(treasurySrc.includes("ErpDataService.deleteDocument('cashboxes'"), false);
-  assert.equal(treasurySrc.includes("ErpDataService.deleteDocumentWithTombstone(\n          'movements'"), true);
+  assert.match(treasurySrc, /ErpDataService\.deleteDocumentWithTombstone\(\s*'movements'/);
+  assert.match(treasurySrc, /ErpDataService\.deleteDocumentWithTombstone\(\s*'cashboxes'/);
   assert.equal(warehouseSrc.includes("ErpDataService.deleteDocument('warehouses'"), false);
+  assert.match(warehouseSrc, /ErpDataService\.deleteDocumentWithTombstone\(\s*'warehouses'/);
   assert.equal(erpDataSrc.includes('cluster_epoch'), true);
   assert.equal(erpDataSrc.includes('activeCollectionRefreshers'), true);
   assert.equal(erpDataSrc.includes('refilterAndEmit'), true);
