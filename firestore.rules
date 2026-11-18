@@ -285,7 +285,7 @@ service cloud.firestore {
           data.updatedAt is timestamp;
       }
 
-      allow get: if isAccountOwner() || isLinkedEmployee();
+      allow get: if isSignedIn() && (resource == null || isAccountOwner() || isLinkedEmployee());
       allow list: if isAccountOwner() || isLinkedEmployee();
       allow create: if isValidId(accountCode) && isValidLinkedAccountCreate(accountCode);
       allow update: if isValidId(accountCode) && (isValidManagerUpdate() || isValidEmployeeSyncUpdate());
@@ -453,7 +453,7 @@ service cloud.firestore {
       let m = resolveMember(clusterCode);
       return isSignedIn() && m.active == true && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
         isMemberAdmin(m) ||
-        (col in ['system_config', 'system_metadata', 'config'] && (isMemberManager(m) || isMemberAccountant(m))) ||
+        (col in ['system_config', 'system_metadata', 'config']) ||
         (!(col in ['system_config', 'system_metadata', 'config']) && (
           !('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)
         ))
@@ -547,7 +547,8 @@ service cloud.firestore {
             request.resource.data.uid == request.auth.uid &&
             request.resource.data.roleKey == 'ADMIN' &&
             request.resource.data.active == true &&
-            !exists(ownerLockPath(clusterCode))) ||
+            (!exists(ownerLockPath(clusterCode)) ||
+              get(ownerLockPath(clusterCode)).data.ownerUid == request.auth.uid)) ||
           (request.auth.uid == memberUid &&
             request.auth.token.email_verified == true &&
             isNonEmptyString(request.resource.data.emailKey, 128) &&
@@ -583,7 +584,7 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(clusterCode) && isValidId(emailKey) && (
         isClusterAdmin(clusterCode) ||
         isClusterManager(clusterCode) ||
-        (request.auth.token.email_verified == true && resource != null && resource.data.email == request.auth.token.email)
+        (request.auth.token.email_verified == true && (resource == null || resource.data.email == request.auth.token.email))
       );
       allow list: if isValidId(clusterCode) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
       allow create, update: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(emailKey) &&

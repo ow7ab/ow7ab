@@ -688,6 +688,57 @@ class CloudErpSyncRepository(
                 ?: currentUser.email?.takeIf { it.isNotBlank() }
                 ?: account?.phoneOrEmail.orEmpty()).trim().lowercase()
 
+            val ownerRef = cRef.collection("system_metadata").document("cluster_owner")
+            val ownerSnap = runCatching { ownerRef.get(Source.SERVER).await() }.getOrNull()
+            val ownerExists = ownerSnap != null && ownerSnap.exists()
+            val existingOwnerUid = if (ownerExists) ownerSnap?.safeString("ownerUid").orEmpty() else ""
+
+            val canBootstrapAdmin = account?.isSuperAdminAccount() == true ||
+                account?.isSystemManager() == true ||
+                resolvedEmail == "oaw7ab@gmail.com" ||
+                resolvedEmail == "admin@pmp-paints.com"
+
+            if (ownerExists && existingOwnerUid == cleanUid) {
+                val adminCode = account?.let { safeId(it.userCode, "USR-ADMIN") } ?: "USR-ADMIN"
+                memberRef.set(
+                    mapOf(
+                        "uid" to cleanUid,
+                        "userCode" to adminCode,
+                        "roleKey" to "ADMIN",
+                        "branch" to "ALL",
+                        "permissions" to (account?.permissions ?: ""),
+                        "active" to true,
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+                ).await()
+                return@withContext
+            }
+
+            if (ownerSnap != null && !ownerExists && canBootstrapAdmin) {
+                // CRITICAL: Write cluster_members/{uid} BEFORE system_metadata/cluster_owner
+                // so Firestore security rule checks pass on first-time cluster bootstrap.
+                val adminCode = account?.let { safeId(it.userCode, "USR-ADMIN") } ?: "USR-ADMIN"
+                memberRef.set(
+                    mapOf(
+                        "uid" to cleanUid,
+                        "userCode" to adminCode,
+                        "roleKey" to "ADMIN",
+                        "branch" to "ALL",
+                        "permissions" to (account?.permissions ?: ""),
+                        "active" to true,
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+                ).await()
+                ownerRef.set(
+                    mapOf(
+                        "ownerUid" to cleanUid,
+                        "userCode" to adminCode,
+                        "createdAt" to System.currentTimeMillis()
+                    )
+                ).await()
+                return@withContext
+            }
+
             if (resolvedEmail.contains("@")) {
                 val emailKey = buildEmailDirectoryKey(resolvedEmail)
                 val dirSnap = runCatching {
@@ -711,32 +762,6 @@ class CloudErpSyncRepository(
                         memberRef.set(payload).await()
                         return@withContext
                     }
-                }
-            }
-
-            if (account?.isSuperAdminAccount() == true) {
-                val ownerRef = cRef.collection("system_metadata").document("cluster_owner")
-                val ownerSnap = runCatching { ownerRef.get(Source.SERVER).await() }.getOrNull()
-                if (ownerSnap == null || !ownerSnap.exists()) {
-                    val adminCode = safeId(account.userCode, "USR-ADMIN")
-                    ownerRef.set(
-                        mapOf(
-                            "ownerUid" to cleanUid,
-                            "userCode" to adminCode,
-                            "createdAt" to System.currentTimeMillis()
-                        )
-                    ).await()
-                    memberRef.set(
-                        mapOf(
-                            "uid" to cleanUid,
-                            "userCode" to adminCode,
-                            "roleKey" to "ADMIN",
-                            "branch" to "ALL",
-                            "permissions" to account.permissions,
-                            "active" to true,
-                            "updatedAt" to System.currentTimeMillis()
-                        )
-                    ).await()
                 }
             }
         } catch (e: Exception) {
@@ -771,7 +796,13 @@ class CloudErpSyncRepository(
         user: UserAccountEntity
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val cRef = clusterRef(clusterCode)
+            val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+                ?: throw SecurityException("جلسة المصادقة السحابية غير نشطة — يرجى تسجيل الدخول عبر Google")
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            ensureOwnClusterMemberRegistration(cleanCluster, user, fbUser.uid, fbUser.email)
+            val roleKey = resolveClusterMemberRoleKey(cleanCluster, fbUser.uid)
+
+            val cRef = clusterRef(cleanCluster)
             val docId = safeId(user.userCode, "USR-${user.id}")
             val data = mapOf(
                 "id" to user.id,
@@ -792,12 +823,37 @@ class CloudErpSyncRepository(
                 "serverUpdatedBy" to currentActorId,
                 "serverUpdatedAt" to FieldValue.serverTimestamp()
             )
-            cRef.collection("user_accounts").document(docId).set(data, SetOptions.merge()).await()
+            val isPrivilegedTarget = user.isSuperAdminAccount() ||
+                user.isSystemManager() ||
+                EnterpriseRbacManager.isPrivilegedRole(user.role) ||
+                docId.equals("USR-ADMIN", ignoreCase = true) ||
+                user.username.equals("admin", ignoreCase = true)
+
             if (user.syncStatus == "PENDING_MANAGER_APPROVAL") {
                 cRef.collection("pending_requests").document(docId).set(data, SetOptions.merge()).await()
+                if (roleKey == "ADMIN" || (roleKey == "MANAGER" && !isPrivilegedTarget)) {
+                    cRef.collection("user_accounts").document(docId).set(data, SetOptions.merge()).await()
+                }
             } else {
-                runCatching { cRef.collection("pending_requests").document(docId).delete().await() }
-                syncRbacDirectoryForAccount(clusterCode, user)
+                if (roleKey == "ADMIN" || (roleKey == "MANAGER" && !isPrivilegedTarget)) {
+                    cRef.collection("user_accounts").document(docId).set(data, SetOptions.merge()).await()
+                    runCatching { cRef.collection("pending_requests").document(docId).delete().await() }
+                    syncRbacDirectoryForAccount(cleanCluster, user)
+                } else if (roleKey != null) {
+                    val userDocRef = cRef.collection("user_accounts").document(docId)
+                    val exists = runCatching { userDocRef.get().await().exists() }.getOrDefault(false)
+                    if (exists) {
+                        val selfData = mapOf(
+                            "fullName" to user.fullName.ifBlank { docId },
+                            "phoneOrEmail" to user.phoneOrEmail,
+                            "pinOrPassword" to user.pinOrPassword,
+                            "serverSyncToken" to user.serverSyncToken,
+                            "updatedAt" to System.currentTimeMillis(),
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        )
+                        userDocRef.set(selfData, SetOptions.merge()).await()
+                    }
+                }
             }
             docId
         }
@@ -976,30 +1032,46 @@ class CloudErpSyncRepository(
             // Clean local duplicate user accounts first
             runCatching { dao.removeDuplicateUserAccounts() }
 
+            val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+            if (fbUser == null) {
+                return@runCatching 0
+            }
+
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
             val primaryClusters = linkedSetOf(
-                safeId(clusterCode, DEFAULT_CLUSTER),
+                cleanCluster,
                 DEFAULT_CLUSTER
             )
-
-            // 0. Pull tombstones with safe timeout
-            for (code in primaryClusters) {
-                runCatching {
-                    val delSnap = kotlinx.coroutines.withTimeoutOrNull(2000L) {
-                        clusterRef(code).collection("deleted_users").get().await()
-                    }
-                    val delList = delSnap?.documents?.mapNotNull { it.data }
-                    if (!delList.isNullOrEmpty()) {
-                        DeletedAccountsRegistry.mergeRemoteTombstones(delList)
-                    }
-                }
+            val currentLocalUsersSnapshot = dao.getUserAccountsDirect()
+            val activeLocalAcc = currentLocalUsersSnapshot.firstOrNull {
+                (currentActiveUserId != null && it.id == currentActiveUserId) || it.isCurrentSession
+            } ?: fbUser.email?.let { em ->
+                currentLocalUsersSnapshot.firstOrNull { it.phoneOrEmail.equals(em, ignoreCase = true) }
             }
-            runCatching {
-                val rootDelSnap = kotlinx.coroutines.withTimeoutOrNull(1500L) {
-                    firestore.collection("deleted_accounts").get().await()
+            ensureOwnClusterMemberRegistration(cleanCluster, activeLocalAcc, fbUser.uid, fbUser.email)
+            val cloudRoleKey = resolveClusterMemberRoleKey(cleanCluster, fbUser.uid)
+
+            // 0. Pull tombstones with safe timeout (only when active cluster member)
+            if (cloudRoleKey != null) {
+                for (code in primaryClusters) {
+                    runCatching {
+                        val delSnap = kotlinx.coroutines.withTimeoutOrNull(2000L) {
+                            clusterRef(code).collection("deleted_users").get().await()
+                        }
+                        val delList = delSnap?.documents?.mapNotNull { it.data }
+                        if (!delList.isNullOrEmpty()) {
+                            DeletedAccountsRegistry.mergeRemoteTombstones(delList)
+                        }
+                    }
                 }
-                val rootDelList = rootDelSnap?.documents?.mapNotNull { it.data }
-                if (!rootDelList.isNullOrEmpty()) {
-                    DeletedAccountsRegistry.mergeRemoteTombstones(rootDelList)
+                runCatching {
+                    val rootDelSnap = kotlinx.coroutines.withTimeoutOrNull(1500L) {
+                        firestore.collection("deleted_accounts").get().await()
+                    }
+                    val rootDelList = rootDelSnap?.documents?.mapNotNull { it.data }
+                    if (!rootDelList.isNullOrEmpty()) {
+                        DeletedAccountsRegistry.mergeRemoteTombstones(rootDelList)
+                    }
                 }
             }
 
@@ -1020,26 +1092,47 @@ class CloudErpSyncRepository(
             val seenKeys = mutableSetOf<String>()
             var mergedCount = 0
 
-            // Collect user documents from primary clusters with timeout
+            // Collect user documents from primary clusters only for Admin / Manager (aligned with firestore.rules list rule)
             val allCloudDocs = mutableListOf<com.google.firebase.firestore.DocumentSnapshot>()
-            for (code in primaryClusters) {
-                runCatching {
-                    val snap = kotlinx.coroutines.withTimeoutOrNull(2500L) {
-                        clusterRef(code).collection("user_accounts").get().await()
+            if (cloudRoleKey == "ADMIN" || cloudRoleKey == "MANAGER") {
+                for (code in primaryClusters) {
+                    runCatching {
+                        val snap = kotlinx.coroutines.withTimeoutOrNull(2500L) {
+                            clusterRef(code).collection("user_accounts").get().await()
+                        }
+                        if (snap != null) {
+                            allCloudDocs.addAll(snap.documents)
+                        }
                     }
-                    if (snap != null) {
-                        allCloudDocs.addAll(snap.documents)
+                }
+            } else if (cloudRoleKey != null && activeLocalAcc?.userCode?.isNotBlank() == true) {
+                // Non-Admin active members only fetch their own single user_accounts document via allow get
+                val ownDocId = safeId(activeLocalAcc.userCode, "USR-${activeLocalAcc.id}")
+                runCatching {
+                    val ownSnap = kotlinx.coroutines.withTimeoutOrNull(2000L) {
+                        clusterRef(cleanCluster).collection("user_accounts").document(ownDocId).get().await()
+                    }
+                    if (ownSnap != null && ownSnap.exists()) {
+                        allCloudDocs.add(ownSnap)
                     }
                 }
             }
 
-            // Also check linked_accounts collection if available
+            // Query linked_accounts strictly filtered by ownerId / linkedUid (rules are not filters)
             runCatching {
-                val linkedSnap = kotlinx.coroutines.withTimeoutOrNull(1500L) {
-                    firestore.collection("linked_accounts").get().await()
+                val ownedSnap = kotlinx.coroutines.withTimeoutOrNull(1500L) {
+                    firestore.collection("linked_accounts").whereEqualTo("ownerId", fbUser.uid).get().await()
                 }
-                if (linkedSnap != null) {
-                    allCloudDocs.addAll(linkedSnap.documents)
+                if (ownedSnap != null) {
+                    allCloudDocs.addAll(ownedSnap.documents)
+                }
+            }
+            runCatching {
+                val assignedSnap = kotlinx.coroutines.withTimeoutOrNull(1500L) {
+                    firestore.collection("linked_accounts").whereEqualTo("linkedUid", fbUser.uid).get().await()
+                }
+                if (assignedSnap != null) {
+                    allCloudDocs.addAll(assignedSnap.documents)
                 }
             }
 
@@ -1112,27 +1205,29 @@ class CloudErpSyncRepository(
                     localUsers.add(entity.copy(id = newId))
                 }
 
-                // Propagate unified account to default primary cluster so all new/future versions find it immediately
-                runCatching {
-                    val userMap = mapOf(
-                        "id" to entity.id,
-                        "userCode" to entity.userCode,
-                        "fullName" to entity.fullName,
-                        "username" to entity.username,
-                        "phoneOrEmail" to entity.phoneOrEmail,
-                        "pinOrPassword" to entity.pinOrPassword,
-                        "role" to entity.role,
-                        "branch" to entity.branch,
-                        "permissions" to entity.permissions,
-                        "serverSyncToken" to entity.serverSyncToken,
-                        "remoteServerId" to entity.remoteServerId,
-                        "syncStatus" to entity.syncStatus,
-                        "serverEndpoint" to entity.serverEndpoint,
-                        "active" to entity.active,
-                        "createdAt" to entity.createdAt,
-                        "serverUpdatedAt" to FieldValue.serverTimestamp()
-                    )
-                    clusterRef(DEFAULT_CLUSTER).collection("user_accounts").document(safeId(entity.userCode, "USR-${entity.id}")).set(userMap, SetOptions.merge())
+                // Propagate unified account only when signed in as Admin for cross-cluster consolidation
+                if (cloudRoleKey == "ADMIN" && cleanCluster != DEFAULT_CLUSTER) {
+                    runCatching {
+                        val userMap = mapOf(
+                            "id" to entity.id,
+                            "userCode" to entity.userCode,
+                            "fullName" to entity.fullName,
+                            "username" to entity.username,
+                            "phoneOrEmail" to entity.phoneOrEmail,
+                            "pinOrPassword" to entity.pinOrPassword,
+                            "role" to entity.role,
+                            "branch" to entity.branch,
+                            "permissions" to entity.permissions,
+                            "serverSyncToken" to entity.serverSyncToken,
+                            "remoteServerId" to entity.remoteServerId,
+                            "syncStatus" to entity.syncStatus,
+                            "serverEndpoint" to entity.serverEndpoint,
+                            "active" to entity.active,
+                            "createdAt" to entity.createdAt,
+                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                        )
+                        clusterRef(DEFAULT_CLUSTER).collection("user_accounts").document(safeId(entity.userCode, "USR-${entity.id}")).set(userMap, SetOptions.merge()).await()
+                    }
                 }
 
                 mergedCount++
@@ -1185,33 +1280,41 @@ class CloudErpSyncRepository(
         dao: PmpDao
     ): Result<UserAccountEntity> = withContext(Dispatchers.IO) {
         runCatching {
+            val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+                ?: throw Exception("يتطلب البحث السحابي تسجيل الدخول بحساب Google أولاً")
             val cleanIdentity = identity.trim().lowercase()
             val cleanSecret = passwordOrPin.trim()
 
             val clustersToQuery = listOf(DEFAULT_CLUSTER)
             var matchedDoc: com.google.firebase.firestore.DocumentSnapshot? = null
 
-            for (cluster in clustersToQuery) {
-                runCatching {
-                    val snap = clusterRef(cluster).collection("user_accounts").get().await()
-                    for (doc in snap.documents) {
-                        val uname = doc.getString("username")?.trim()?.lowercase() ?: ""
-                        val email = doc.getString("phoneOrEmail")?.trim()?.lowercase() ?: ""
-                        val code = doc.getString("userCode")?.trim()?.lowercase() ?: doc.id.lowercase()
-                        if (uname == cleanIdentity || email == cleanIdentity || code == cleanIdentity || (cleanIdentity.contains("@") && email.startsWith(cleanIdentity))) {
-                            matchedDoc = doc
-                            break
+            val roleKey = resolveClusterMemberRoleKey(DEFAULT_CLUSTER, fbUser.uid)
+            if (roleKey == "ADMIN" || roleKey == "MANAGER") {
+                for (cluster in clustersToQuery) {
+                    runCatching {
+                        val snap = clusterRef(cluster).collection("user_accounts").get().await()
+                        for (doc in snap.documents) {
+                            val uname = doc.getString("username")?.trim()?.lowercase() ?: ""
+                            val email = doc.getString("phoneOrEmail")?.trim()?.lowercase() ?: ""
+                            val code = doc.getString("userCode")?.trim()?.lowercase() ?: doc.id.lowercase()
+                            if (uname == cleanIdentity || email == cleanIdentity || code == cleanIdentity || (cleanIdentity.contains("@") && email.startsWith(cleanIdentity))) {
+                                matchedDoc = doc
+                                break
+                            }
                         }
                     }
+                    if (matchedDoc != null) break
                 }
-                if (matchedDoc != null) break
             }
 
             if (matchedDoc == null) {
-                // Also check linked_accounts if available
+                // Check strictly scoped linked_accounts queries matching security rules
                 runCatching {
-                    val linkedSnap = firestore.collection("linked_accounts").get().await()
-                    for (doc in linkedSnap.documents) {
+                    val assignedSnap = firestore.collection("linked_accounts")
+                        .whereEqualTo("linkedUid", fbUser.uid).get().await()
+                    val ownedSnap = firestore.collection("linked_accounts")
+                        .whereEqualTo("ownerId", fbUser.uid).get().await()
+                    for (doc in (assignedSnap.documents + ownedSnap.documents)) {
                         val uname = doc.getString("username")?.trim()?.lowercase() ?: ""
                         val email = doc.getString("phoneOrEmail")?.trim()?.lowercase() ?: ""
                         val code = doc.getString("userCode")?.trim()?.lowercase() ?: doc.id.lowercase()
@@ -1514,19 +1617,28 @@ class CloudErpSyncRepository(
                                 )
                                 batch.set(cRef.collection("user_accounts").document(docId), data, SetOptions.merge())
                                 chunkWrites++
-                            } else if (isSelfUser && (docId in existingCloudUserIds || !isCloudManager)) {
-                                // Non-Admin updating own profile uses strict 8-key whitelist matching firestore.rules
-                                val selfData = mapOf(
-                                    "fullName" to u.fullName.ifBlank { docId },
-                                    "phoneOrEmail" to u.phoneOrEmail,
-                                    "pinOrPassword" to u.pinOrPassword,
-                                    "serverSyncToken" to u.serverSyncToken,
-                                    "deviceId" to deviceId,
-                                    "updatedAt" to System.currentTimeMillis(),
-                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
-                                )
-                                batch.set(cRef.collection("user_accounts").document(docId), selfData, SetOptions.merge())
-                                chunkWrites++
+                            } else if (isSelfUser) {
+                                val selfExistsOnServer = if (isCloudAdmin || isCloudManager) {
+                                    docId in existingCloudUserIds
+                                } else {
+                                    runCatching {
+                                        cRef.collection("user_accounts").document(docId).get().await().exists()
+                                    }.getOrDefault(false)
+                                }
+                                if (selfExistsOnServer) {
+                                    // Non-Admin updating own profile uses strict whitelist matching firestore.rules
+                                    val selfData = mapOf(
+                                        "fullName" to u.fullName.ifBlank { docId },
+                                        "phoneOrEmail" to u.phoneOrEmail,
+                                        "pinOrPassword" to u.pinOrPassword,
+                                        "serverSyncToken" to u.serverSyncToken,
+                                        "deviceId" to deviceId,
+                                        "updatedAt" to System.currentTimeMillis(),
+                                        "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                    )
+                                    batch.set(cRef.collection("user_accounts").document(docId), selfData, SetOptions.merge())
+                                    chunkWrites++
+                                }
                             }
                         }
                         if (chunkWrites > 0) {
@@ -1643,10 +1755,20 @@ class CloudErpSyncRepository(
                     committed
                 }
 
-                // 2. Financial Movements (Batched - excluding deleted)
+                // 2. Financial Movements (Batched - excluding deleted; requires treasury authorization in rules)
+                val canPushTreasury = isCloudAdmin ||
+                    isCloudManager ||
+                    isCloudAccountant ||
+                    isCloudDeputy ||
+                    (activeLocalAccount != null && (
+                        EnterpriseRbacManager.hasModuleAccess(activeLocalAccount, "الخزن") ||
+                            EnterpriseRbacManager.hasModuleAccess(activeLocalAccount, "التحويلات") ||
+                            EnterpriseRbacManager.hasModuleAccess(activeLocalAccount, "العمليات المالية")
+                        ))
                 val movements = dao.getMovementsDirect().filterNot {
                     DeletedRecordsRegistry.isMovementDeleted(it)
                 }
+                if (canPushTreasury) {
                 RoomTransactionLogger.log(
                     operation = "SYNC_MOVEMENTS_DISPATCH",
                     stage = TransactionStage.SYNC_DISPATCH,
@@ -1715,14 +1837,16 @@ class CloudErpSyncRepository(
                     }
                     committed
                 }
+                } // end if (canPushTreasury) for movements
 
-                // 3. Transfers (Batched - excluding deleted)
+                // 3. Transfers (Batched - excluding deleted; requires treasury authorization in rules)
                 val transfers = dao.getTransfersDirect().filterNot {
                     DeletedRecordsRegistry.isPreEpoch(it.createdAt) ||
                         DeletedRecordsRegistry.isDeleted("transfers", it.id) ||
                         DeletedRecordsRegistry.isDeleted("transfers", "TRF-${it.id}") ||
                         (it.reference.isNotBlank() && DeletedRecordsRegistry.isDeleted("transfers", it.reference))
                 }
+                if (canPushTreasury) {
                 runSyncStep("مزامنة تحويلات الخزن", "transfers", critical = true) {
                     var committed = 0
                     transfers.chunked(300).forEach { chunk ->
@@ -1763,6 +1887,7 @@ class CloudErpSyncRepository(
                     }
                     committed
                 }
+                } // end if (canPushTreasury) for transfers
 
                 // 4. Customers (Batched - excluding deleted)
                 val customers = dao.getCustomersDirect().filterNot {
@@ -2417,11 +2542,28 @@ class CloudErpSyncRepository(
     ): Result<Int> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
             runCatching {
+                val fbCurrentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+                    ?: throw SecurityException(
+                        "جلسة المصادقة السحابية (Google Sign-In) غير نشطة — يرجى تسجيل الدخول بحساب Google المعتمد لاستعادة البيانات."
+                    )
+                val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+                val localUsers = dao.getUserAccountsDirect()
+                val activeLocalAcc = localUsers.firstOrNull {
+                    (currentActiveUserId != null && it.id == currentActiveUserId) || it.isCurrentSession
+                } ?: fbCurrentUser.email?.let { em ->
+                    localUsers.firstOrNull { it.phoneOrEmail.equals(em, ignoreCase = true) }
+                }
+                ensureOwnClusterMemberRegistration(cleanCluster, activeLocalAcc, fbCurrentUser.uid, fbCurrentUser.email)
+                resolveClusterMemberRoleKey(cleanCluster, fbCurrentUser.uid)
+                    ?: throw SecurityException(
+                        "الحساب الحالي (${fbCurrentUser.email ?: fbCurrentUser.uid.take(8)}) غير مربوط بدليل عضوية الكلاستر (cluster_members) على السيرفر."
+                    )
+
                 var restoredCount = 0
-                val cRef = clusterRef(clusterCode)
+                val cRef = clusterRef(cleanCluster)
 
                 // 0. Restore User Accounts preserving active local session
-                val mergedUsersCount = internalPullAndMergeCloudUsers(clusterCode, dao, currentActiveUserId, deviceId).getOrDefault(0)
+                val mergedUsersCount = internalPullAndMergeCloudUsers(cleanCluster, dao, currentActiveUserId, deviceId).getOrDefault(0)
                 restoredCount += mergedUsersCount
 
                 // 0.5 Fetch Tombstones and Cluster Epoch to prevent resurrecting deleted or pre-epoch records

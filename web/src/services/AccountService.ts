@@ -358,7 +358,50 @@ export const AccountService = {
       const existing = await getDocFromServer(memberRef);
       if (existing.exists()) return;
 
+      const ownerRef = doc(firestore, `erp_clusters/${cluster}/system_metadata`, 'cluster_owner');
+      const ownerSnap = await getDocFromServer(ownerRef).catch(() => null);
+      const ownerExists = Boolean(ownerSnap && ownerSnap.exists());
+      const existingOwnerUid = ownerExists ? String(ownerSnap?.data()?.ownerUid || '') : '';
       const email = (fbEmail || account.phoneOrEmail || '').trim().toLowerCase();
+      const canBootstrapAdmin =
+        isSuperAdminAccount(account) ||
+        isSystemManager(account) ||
+        email === 'oaw7ab@gmail.com' ||
+        email === 'admin@pmp-paints.com';
+
+      if (ownerExists && existingOwnerUid === cleanUid) {
+        await setDoc(memberRef, {
+          uid: cleanUid,
+          userCode: account.userCode || 'USR-ADMIN',
+          roleKey: 'ADMIN',
+          branch: 'ALL',
+          permissions: account.permissions || '',
+          active: true,
+          updatedAt: Date.now()
+        });
+        return;
+      }
+
+      if (!ownerExists && canBootstrapAdmin) {
+        // CRITICAL: Write cluster_members/{uid} BEFORE system_metadata/cluster_owner
+        // because cluster_members creation verifies !exists(cluster_owner) or ownerUid == uid.
+        await setDoc(memberRef, {
+          uid: cleanUid,
+          userCode: account.userCode || 'USR-ADMIN',
+          roleKey: 'ADMIN',
+          branch: 'ALL',
+          permissions: account.permissions || '',
+          active: true,
+          updatedAt: Date.now()
+        });
+        await setDoc(ownerRef, {
+          ownerUid: cleanUid,
+          userCode: account.userCode || 'USR-ADMIN',
+          createdAt: Date.now()
+        });
+        return;
+      }
+
       if (email.includes('@')) {
         const emailKey = buildEmailDirectoryKey(email);
         const dirSnap = await getDoc(doc(firestore, `erp_clusters/${cluster}/email_directory`, emailKey)).catch(() => null);
@@ -375,27 +418,6 @@ export const AccountService = {
             updatedAt: Date.now()
           });
           return;
-        }
-      }
-
-      if (isSuperAdminAccount(account)) {
-        const ownerRef = doc(firestore, `erp_clusters/${cluster}/system_metadata`, 'cluster_owner');
-        const ownerSnap = await getDocFromServer(ownerRef).catch(() => null);
-        if (!ownerSnap || !ownerSnap.exists()) {
-          await setDoc(ownerRef, {
-            ownerUid: cleanUid,
-            userCode: account.userCode,
-            createdAt: Date.now()
-          });
-          await setDoc(memberRef, {
-            uid: cleanUid,
-            userCode: account.userCode,
-            roleKey: 'ADMIN',
-            branch: 'ALL',
-            permissions: account.permissions || '',
-            active: true,
-            updatedAt: Date.now()
-          });
         }
       }
     } catch (err) {

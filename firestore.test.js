@@ -1001,5 +1001,68 @@ test("21. Chemical Lab QC Gate, Price History & Staged Excel Imports Isolation",
   );
 });
 
+test("22. Cluster Owner Self-Recovery when cluster_owner exists without cluster_members doc", async () => {
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("system_metadata").doc("cluster_owner").set({
+      ownerUid: ADMIN_UID,
+      userCode: "USR-ADMIN",
+    });
+  });
+
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID, { email: "admin@pmp.sd", email_verified: true }).firestore();
+  const intruderDb = testEnv.authenticatedContext(INTRUDER_UID, { email: "hacker@evil.com", email_verified: true }).firestore();
+
+  // Intruder still cannot claim ADMIN when cluster_owner belongs to ADMIN_UID
+  await assertFails(
+    intruderDb.collection("erp_clusters").doc(CLUSTER).collection("cluster_members").doc(INTRUDER_UID).set({
+      uid: INTRUDER_UID,
+      userCode: "USR-HACK",
+      roleKey: "ADMIN",
+      branch: "ALL",
+      active: true,
+    })
+  );
+
+  // Legitimate owner CAN recover/create cluster_members/{ADMIN_UID}
+  await assertSucceeds(
+    adminDb.collection("erp_clusters").doc(CLUSTER).collection("cluster_members").doc(ADMIN_UID).set({
+      uid: ADMIN_UID,
+      userCode: "USR-ADMIN",
+      roleKey: "ADMIN",
+      branch: "ALL",
+      active: true,
+    })
+  );
+});
+
+test("23. Non-Admin Active Members read system_metadata/config safely while writes & user_accounts list remain restricted", async () => {
+  await seedClusterRbac();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("system_metadata").doc("cluster_epoch").set({ wipeTimestamp: 1700000000000, wipedBy: "admin" });
+    await cRef.collection("config").doc("inventory_weights").set({ defaultWeight: "900", weightsJson: "[]" });
+    await cRef.collection("user_accounts").doc("USR-SD-1001").set({
+      userCode: "USR-SD-1001",
+      username: "sudan_emp",
+      linkedUid: EMPLOYEE_SD_UID,
+      active: true,
+    });
+  });
+
+  const empDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID, { email: "emp@pmp.sd", email_verified: true }).firestore();
+  const depDb = testEnv.authenticatedContext(DEPUTY_UID, { email: "dep@pmp.sd", email_verified: true }).firestore();
+  const cEmp = empDb.collection("erp_clusters").doc(CLUSTER);
+  const cDep = depDb.collection("erp_clusters").doc(CLUSTER);
+
+  await assertSucceeds(cEmp.collection("system_metadata").doc("cluster_epoch").get());
+  await assertSucceeds(cDep.collection("config").doc("inventory_weights").get());
+  await assertFails(cEmp.collection("system_metadata").doc("cluster_epoch").set({ wipeTimestamp: 1 }));
+  await assertFails(cDep.collection("config").doc("inventory_weights").set({ defaultWeight: "500" }));
+  await assertFails(cEmp.collection("user_accounts").get());
+  await assertSucceeds(cEmp.collection("user_accounts").doc("USR-SD-1001").get());
+});
+
+
 
 
