@@ -40,14 +40,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const { language, toggleLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
   const {
-    currentUser,
     loginWithEmail,
     loginWithUsernamePin,
     loginWithGoogle,
     requestPasswordReset,
+    sessionExpiredNotice,
+    clearSessionExpiredNotice,
     isAuthenticating
   } = useAuth();
-  const { latestRelease, apkAvailable, unavailableReason, isLoading: isReleaseLoading } = useLatestRelease();
+  const { latestRelease, isLoading: isReleaseLoading } = useLatestRelease();
 
   const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('pin');
   const [username, setUsername] = useState('');
@@ -311,41 +312,27 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             </div>
           </div>
 
-          {/* Primary Zero-Trust Google SSO CTA (Matches Android App Sign-In) */}
-          {tab !== 'reset' && (
-            <div className="space-y-3">
+          {/* Session Expiry Notice (if previous session expired or was revoked) */}
+          {sessionExpiredNotice && (
+            <div
+              data-testid="login-session-expired-banner"
+              className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/35 flex items-start justify-between gap-2 text-xs text-amber-400 leading-relaxed"
+            >
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{sessionExpiredNotice}</span>
+              </div>
               <button
                 type="button"
-                onClick={handleGoogleSubmit}
-                disabled={isAuthenticating || !domainCheck.canStartFirebaseAuth}
-                data-testid="login-google-btn"
-                className="w-full py-3 rounded-xl bg-white hover:bg-slate-50 text-slate-900 border border-slate-300/80 font-extrabold text-sm shadow-lg transition-all flex items-center justify-center gap-2.5 disabled:opacity-50 min-h-[48px]"
+                onClick={clearSessionExpiredNotice}
+                className="text-[10px] font-bold underline shrink-0"
               >
-                <img
-                  src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
-                  alt="Google"
-                  className="w-5 h-5"
-                />
-                <span>
-                  {language === 'ar'
-                    ? 'تسجيل الدخول السريع عبر Google'
-                    : 'Sign in with Google Workspace'}
-                </span>
+                {language === 'ar' ? 'إغلاق' : 'Dismiss'}
               </button>
-
-              <div className="relative flex items-center justify-center">
-                <div className="w-full border-t border-theme" />
-                <span className="px-3 bg-theme-surface text-[11px] text-theme-muted font-semibold whitespace-nowrap">
-                  {language === 'ar'
-                    ? 'أو الدخول باسم المستخدم فقط / البريد الإلكتروني'
-                    : 'Or sign in with username only / email'}
-                </span>
-                <div className="w-full border-t border-theme" />
-              </div>
             </div>
           )}
 
-          {/* Tab Selector (Always visible: Username Only without email + Corporate Email) */}
+          {/* Primary Tab Selector (Original Order First: Username + PIN/Password, Email + Password) */}
           {tab !== 'reset' && (
             <div className="grid grid-cols-2 p-1 rounded-xl bg-theme-base border border-theme gap-1">
               <button
@@ -356,7 +343,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   setErrorMsg(null);
                   setSuccessMsg(null);
                 }}
-                className={`py-2 text-xs font-bold rounded-lg transition-all ${
+                className={`py-2.5 text-xs font-bold rounded-lg transition-all ${
                   tab === 'pin'
                     ? 'bg-pmp-primary text-white shadow-md'
                     : 'text-theme-secondary hover:text-theme-primary'
@@ -372,7 +359,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   setErrorMsg(null);
                   setSuccessMsg(null);
                 }}
-                className={`py-2 text-xs font-bold rounded-lg transition-all ${
+                className={`py-2.5 text-xs font-bold rounded-lg transition-all ${
                   tab === 'email'
                     ? 'bg-pmp-primary text-white shadow-md'
                     : 'text-theme-secondary hover:text-theme-primary'
@@ -459,8 +446,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 </div>
                 <p className="text-[11px] text-theme-muted mt-1">
                   {language === 'ar'
-                    ? 'بديل سريع عن Google — أدخل اسم المستخدم أو الكود الوظيفي مباشرة دون الحاجة لكتابة بريد إلكتروني.'
-                    : 'Alternative to Google Sign-In — enter only your username or employee code without an email address.'}
+                    ? 'أدخل اسم المستخدم أو الكود الوظيفي مع الرمز السري أو كلمة المرور مباشرة.'
+                    : 'Enter your username or employee code with your PIN or password directly.'}
                 </p>
               </div>
 
@@ -559,7 +546,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
               <button
                 type="submit"
-                disabled={isAuthenticating}
+                disabled={isAuthenticating || !domainCheck.canStartFirebaseAuth}
+                data-testid="login-email-submit-btn"
                 className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm shadow-lg shadow-red-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-50 min-h-[48px]"
               >
                 <LogIn className="w-4 h-4" />
@@ -618,7 +606,37 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             </form>
           )}
 
-          {/* Reset button spacer */}
+          {/* Optional Secondary Google Sign-In (Strictly Optional — Below Primary Login Methods) */}
+          {tab !== 'reset' && (
+            <div className="space-y-3 pt-1">
+              <div className="relative flex items-center justify-center">
+                <div className="w-full border-t border-theme" />
+                <span className="px-3 bg-theme-surface text-[11px] text-theme-muted font-semibold whitespace-nowrap">
+                  {language === 'ar' ? 'أو خيار بديل اختياري' : 'Or optional alternative'}
+                </span>
+                <div className="w-full border-t border-theme" />
+              </div>
+
+              <button
+                type="button"
+                onClick={handleGoogleSubmit}
+                disabled={isAuthenticating || !domainCheck.canStartFirebaseAuth}
+                data-testid="login-google-optional-btn"
+                className="w-full py-2.5 rounded-xl bg-theme-base hover:bg-theme-surface text-theme-primary border border-theme font-bold text-xs transition-all flex items-center justify-center gap-2 disabled:opacity-50 min-h-[44px]"
+              >
+                <img
+                  src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
+                  alt="Google"
+                  className="w-4 h-4"
+                />
+                <span>
+                  {language === 'ar'
+                    ? 'الدخول الاختياري عبر Google'
+                    : 'Optional: Sign in with Google'}
+                </span>
+              </button>
+            </div>
+          )}
 
           {/* Mandatory Official Android & Windows App Download Buttons on Login Screen */}
           <div className="pt-4 border-t border-theme space-y-3" data-testid="login-android-download-box">

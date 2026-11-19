@@ -7,8 +7,10 @@ import {
   FactoryItem,
   FormulationIngredient,
   IngredientCostBreakdown,
+  LabExperiment,
   LabFormulation,
-  ThreeCostComparisonReport
+  ThreeCostComparisonReport,
+  WarehouseStockBalance
 } from '../types/erp';
 
 export interface PvcCalculationResult {
@@ -402,4 +404,192 @@ export function jsonToIngredients(json?: string | null): FormulationIngredient[]
 
 export function ingredientsToJson(list: FormulationIngredient[]): string {
   return JSON.stringify(list);
+}
+
+export interface FormulaMaterialAvailabilityLine {
+  materialId: number | null;
+  itemCode: string;
+  materialName: string;
+  requiredKg: number;
+  availableKg: number;
+  shortageKg: number;
+  isSufficient: boolean;
+}
+
+export interface FormulaProductionReadinessReport {
+  formulaNo: string;
+  versionNumber: number;
+  productName: string;
+  targetWeightKg: number;
+  approvalStatus: string;
+  isApprovedForProduction: boolean;
+  passedQcCount: number;
+  failedQcCount: number;
+  pendingQcCount: number;
+  hasPassedQcExperiment: boolean;
+  totalMaterialsChecked: number;
+  shortageCount: number;
+  isStockSufficient: boolean;
+  canReleaseToProduction: boolean;
+  blockingReasons: string[];
+  warnings: string[];
+  materialLines: FormulaMaterialAvailabilityLine[];
+}
+
+/**
+ * Evaluates end-to-end Lab-to-Production readiness against:
+ * 1) Formula Approval Gate (APPROVED + approvedForProduction === true)
+ * 2) Linked Lab QC Experiments for this formula version
+ * 3) Raw Material Warehouse Stock Balances scaled to targetWeightKg
+ *
+ * Confidentiality invariant: when `includeSecretBreakdown` is false, `materialLines` is empty
+ * so exact confidential recipe weights are NEVER leaked to unauthorized roles.
+ */
+export function evaluateFormulaProductionReadiness(params: {
+  formula: LabFormulation;
+  ingredients: FormulationIngredient[];
+  targetWeightKg: number;
+  factoryItems: FactoryItem[];
+  stockBalances: WarehouseStockBalance[];
+  experiments: LabExperiment[];
+  includeSecretBreakdown: boolean;
+}): FormulaProductionReadinessReport {
+  const {
+    formula,
+    ingredients,
+    targetWeightKg,
+    factoryItems,
+    stockBalances,
+    experiments,
+    includeSecretBreakdown
+  } = params;
+
+  const versionNumber = Number(formula.versionNumber || 1);
+  const normStatus = String(
+    formula.approvalStatus || (formula.approvedForProduction ? 'APPROVED' : 'NEEDS_REVIEW')
+  )
+    .trim()
+    .toUpperCase();
+  const isApprovedForProduction =
+    normStatus === 'APPROVED' && formula.approvedForProduction !== false;
+
+  const blockingReasons: string[] = [];
+  const warnings: string[] = [];
+
+  if (!isApprovedForProduction) {
+    blockingReasons.push(
+      `التركيبة (${formula.formulaNo} v${versionNumber}) بحالة «${normStatus}» ولم تُعتمد للإنتاج بعد.`
+    );
+  }
+  if (!Number.isFinite(targetWeightKg) || targetWeightKg <= 0) {
+    blockingReasons.push('وزن التشغيلة المستهدف يجب أن يكون أكبر من صفر.');
+  }
+
+  const versionExps = experiments.filter(
+    (ex) =>
+      (ex.formulaNo && ex.formulaNo === formula.formulaNo) ||
+      Number(ex.formulaId) === Number(formula.id)
+  );
+  const currentVerExps = versionExps.filter(
+    (ex) => Number(ex.versionNumber || 1) === versionNumber
+  );
+  const relevantExps = currentVerExps.length > 0 ? currentVerExps : versionExps;
+
+  const passedQcCount = relevantExps.filter(
+    (e) => e.decision === 'APPROVED' || e.status === 'PASSED'
+  ).length;
+  const failedQcCount = relevantExps.filter(
+    (e) => e.decision === 'REJECTED' || e.status === 'FAILED'
+  ).length;
+  const pendingQcCount = relevantExps.filter(
+    (e) => e.decision === 'PENDING' || e.status === 'PENDING' || e.status === 'RETEST_REQUIRED'
+  ).length;
+  const hasPassedQcExperiment = passedQcCount > 0;
+
+  if (!hasPassedQcExperiment) {
+    warnings.push(
+      `لا توجد تجربة مخبرية معتمدة (QC PASS) مسجلة للإصدار v${versionNumber} حتى الآن.`
+    );
+  }
+  if (failedQcCount > 0) {
+    warnings.push(`توجد ${failedQcCount} تجربة مرفوضة مرتبطة بهذه التركيبة — يرجى مراجعة تقرير الجودة.`);
+  }
+
+  const scaled =
+    ingredients.length > 0 && targetWeightKg > 0
+      ? scaleFormulation(ingredients, targetWeightKg).scaledIngredients
+      : [];
+
+  const itemById = new Map<number, FactoryItem>();
+  const itemByName = new Map<string, FactoryItem>();
+  for (const fi of factoryItems) {
+    itemById.set(Number(fi.id), fi);
+    itemByName.set(String(fi.name || '').trim().toLowerCase(), fi);
+  }
+
+  const availableByItemId = new Map<number, number>();
+  const availableByName = new Map<string, number>();
+  for (const bal of stockBalances) {
+    if (bal.itemCategory !== 'RAW_MATERIAL' && bal.warehouseClass !== 'RAW_MATERIALS') continue;
+    const avail = Math.max(0, Number(bal.availableQty ?? bal.onHandQty ?? 0));
+    const itemId = Number(bal.itemId || 0);
+    if (itemId > 0) {
+      availableByItemId.set(itemId, round3((availableByItemId.get(itemId) || 0) + avail));
+    }
+    const nm = String(bal.itemName || '').trim().toLowerCase();
+    if (nm) {
+      availableByName.set(nm, round3((availableByName.get(nm) || 0) + avail));
+    }
+  }
+
+  const lines: FormulaMaterialAvailabilityLine[] = scaled.map((ing) => {
+    const matchedItem =
+      (ing.materialId ? itemById.get(Number(ing.materialId)) : undefined) ||
+      itemByName.get(ing.name.trim().toLowerCase());
+    const resolvedId = matchedItem ? Number(matchedItem.id) : ing.materialId ?? null;
+    const availFromLedger =
+      (resolvedId !== null ? availableByItemId.get(resolvedId) : undefined) ??
+      availableByName.get(ing.name.trim().toLowerCase()) ??
+      0;
+    const requiredKg = round3(Math.max(0, Number(ing.weight) || 0));
+    const availableKg = round3(Math.max(0, availFromLedger));
+    const shortageKg = round3(Math.max(0, requiredKg - availableKg));
+    return {
+      materialId: resolvedId,
+      itemCode: matchedItem?.itemCode || ing.itemCode || '',
+      materialName: ing.name,
+      requiredKg,
+      availableKg,
+      shortageKg,
+      isSufficient: shortageKg <= 0.001
+    };
+  });
+
+  const shortageCount = lines.filter((l) => !l.isSufficient).length;
+  const isStockSufficient = lines.length > 0 ? shortageCount === 0 : true;
+  if (lines.length === 0) {
+    warnings.push('تعذر حساب رصيد الخامات لأن المكونات مقفولة بالتشفير أو غير مكشوفة لدورك الحالي.');
+  } else if (shortageCount > 0) {
+    warnings.push(`يوجد عجز في مخزن المواد الخام لعدد ${shortageCount} مادة خام مقارنة بوزن التشغيلة.`);
+  }
+
+  return {
+    formulaNo: formula.formulaNo,
+    versionNumber,
+    productName: formula.productName,
+    targetWeightKg: round2(Math.max(0, targetWeightKg)),
+    approvalStatus: normStatus,
+    isApprovedForProduction,
+    passedQcCount,
+    failedQcCount,
+    pendingQcCount,
+    hasPassedQcExperiment,
+    totalMaterialsChecked: lines.length,
+    shortageCount,
+    isStockSufficient,
+    canReleaseToProduction: isApprovedForProduction && blockingReasons.length === 0,
+    blockingReasons,
+    warnings,
+    materialLines: includeSecretBreakdown ? lines : []
+  };
 }

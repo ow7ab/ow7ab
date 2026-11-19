@@ -5,6 +5,7 @@ import {
   Coins,
   Database,
   Edit3,
+  Factory,
   FileSpreadsheet,
   FlaskConical,
   GitBranch,
@@ -33,14 +34,18 @@ import {
   LabExcelImportBatch,
   LabExperiment,
   LabFormulation,
+  ProductionBatch,
   RawMaterialPriceHistory,
-  ThreeCostComparisonReport
+  ThreeCostComparisonReport,
+  WarehouseStockBalance
 } from '../../types/erp';
 import { ErpDataService, safeId } from '../../services/ErpDataService';
 import {
   PRESET_MATERIALS,
   calculatePvc,
   compareThreeCosts,
+  evaluateFormulaProductionReadiness,
+  FormulaProductionReadinessReport,
   jsonToIngredients,
   scaleFormulation
 } from '../../services/PvcEngine';
@@ -60,6 +65,7 @@ import {
   redactFormulationForUser,
   redactVersionForUser,
   resolveLabActorRole,
+  sanitizeLabLog,
   sealFormulaWithPassphrase,
   unsealFormulaWithPassphrase
 } from '../../services/LabSecurityService';
@@ -101,6 +107,8 @@ export const ChemistryLabModuleView: React.FC = () => {
   const [priceHistory, setPriceHistory] = useState<RawMaterialPriceHistory[]>([]);
   const [excelBatches, setExcelBatches] = useState<LabExcelImportBatch[]>([]);
   const [safetySheets, setSafetySheets] = useState<ChemicalSafety[]>([]);
+  const [stockBalances, setStockBalances] = useState<WarehouseStockBalance[]>([]);
+  const [productionBatches, setProductionBatches] = useState<ProductionBatch[]>([]);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'APPROVED' | 'NEEDS_REVIEW' | 'REJECTED'>('ALL');
@@ -178,6 +186,9 @@ export const ChemistryLabModuleView: React.FC = () => {
   const [unsealTarget, setUnsealTarget] = useState<LabFormulation | null>(null);
   const [unsealPassphrase, setUnsealPassphrase] = useState('');
   const [unsealedIngredientsMap, setUnsealedIngredientsMap] = useState<Record<string, FormulationIngredient[]>>({});
+  const [readinessFormula, setReadinessFormula] = useState<LabFormulation | null>(null);
+  const [readinessWeightKg, setReadinessWeightKg] = useState<string>('500');
+  const [readinessCartons, setReadinessCartons] = useState<string>('50');
 
   // Excel Analyzer & Preview Importer
   const [isExcelModalOpen, setIsExcelModalOpen] = useState(false);
@@ -217,7 +228,9 @@ export const ChemistryLabModuleView: React.FC = () => {
       ErpDataService.subscribeToCollection<ChemicalSafety>('chemical_safety', setSafetySheets),
       ErpDataService.subscribeToCollection<FactoryItem>('factory_items', setFactoryItems),
       ErpDataService.subscribeToCollection<LabExperiment>('lab_experiments', setExperiments),
-      ErpDataService.subscribeToCollection<RawMaterialPriceHistory>('raw_material_price_history', setPriceHistory)
+      ErpDataService.subscribeToCollection<RawMaterialPriceHistory>('raw_material_price_history', setPriceHistory),
+      ErpDataService.subscribeToCollection<WarehouseStockBalance>('warehouse_stock_balances', setStockBalances),
+      ErpDataService.subscribeToCollection<ProductionBatch>('paint_batches', setProductionBatches)
     ];
     if (allowSecretRead) {
       unsubs.push(ErpDataService.subscribeToCollection<FormulationVersion>('lab_formula_versions', setVersions));
@@ -242,6 +255,7 @@ export const ChemistryLabModuleView: React.FC = () => {
   const excelGuard = useTransactionGuard('lab_import_excel', 'CREATE');
   const sdsGuard = useTransactionGuard('lab_save_sds', 'SAVE');
   const deleteGuard = useTransactionGuard('lab_delete_formula', 'DELETE');
+  const releaseGuard = useTransactionGuard('lab_release_production', 'CREATE');
 
   const showNotice = (type: 'ok' | 'err', text: string) => {
     setNotice({ type, text });
@@ -753,6 +767,101 @@ export const ChemistryLabModuleView: React.FC = () => {
       .sort((a, b) => b.versionNumber - a.versionNumber || b.createdAt - a.createdAt);
   }, [historyFormula, versions, userProfile]);
 
+  const readinessReport: FormulaProductionReadinessReport | null = useMemo(() => {
+    if (!readinessFormula) return null;
+    const unsealedList = unsealedIngredientsMap[readinessFormula.formulaNo];
+    const parsedIngredients = unsealedList || jsonToIngredients(readinessFormula.ingredientsJson);
+    const targetKg = Math.max(0, Number(readinessWeightKg) || readinessFormula.totalBatchWeight || 500);
+    return evaluateFormulaProductionReadiness({
+      formula: readinessFormula,
+      ingredients: parsedIngredients,
+      targetWeightKg: targetKg,
+      factoryItems,
+      stockBalances,
+      experiments,
+      includeSecretBreakdown: allowSecretRead
+    });
+  }, [readinessFormula, readinessWeightKg, unsealedIngredientsMap, factoryItems, stockBalances, experiments, allowSecretRead]);
+
+  const handleReleaseToProduction = async () => {
+    if (!readinessFormula || !readinessReport || !readinessReport.canReleaseToProduction || releaseGuard.isSubmitting) {
+      return;
+    }
+    const targetKg = Math.max(1, Number(readinessWeightKg) || readinessFormula.totalBatchWeight || 500);
+    const targetCartons = Math.max(1, Number(readinessCartons) || 50);
+    const batchNo = `LAB-BAT-${String(Date.now()).slice(-6)}`;
+
+    const res = await releaseGuard.runGuarded({
+      guardKey: `lab_release_production_${readinessFormula.formulaNo}_${targetKg}`,
+      operationType: 'CREATE',
+      userId: userProfile?.username || actorName,
+      documentReference: batchNo,
+      targetCollection: 'paint_batches',
+      payloadSummary: sanitizeLabLog(`إصدار دفعة إنتاج من التركيبة ${readinessFormula.formulaNo} v${readinessFormula.versionNumber || 1}`),
+      execute: async () => {
+        const now = Date.now();
+        const unsealed = unsealedIngredientsMap[readinessFormula.formulaNo];
+        const canAttachScaled = allowSecretRead && !readinessFormula.isConfidentialSealed;
+        const scaledJson = canAttachScaled
+          ? JSON.stringify(
+              scaleFormulation(unsealed || jsonToIngredients(readinessFormula.ingredientsJson), targetKg)
+                .scaledIngredients
+            )
+          : '[]';
+
+        const density = Number(readinessFormula.calculatedDensity || 1.35);
+        const batchRecord: ProductionBatch = {
+          id: now,
+          batchNumber: batchNo,
+          productionDate: new Date(now).toISOString().split('T')[0],
+          formulaId: readinessFormula.id,
+          formulaNo: readinessFormula.formulaNo,
+          productName: readinessFormula.productName,
+          paintType: readinessFormula.paintType,
+          baseKind: readinessFormula.baseKind,
+          targetPvc: readinessFormula.calculatedPvc,
+          targetWeightKg: targetKg,
+          actualWeightKg: targetKg,
+          targetVolumeLiters: Math.round((targetKg / Math.max(0.5, density)) * 100) / 100,
+          cartonsCount: targetCartons,
+          packageUnit: 'كرتونة',
+          machineId: null,
+          machineName: 'خلاط الإنتاج الرئيسي',
+          qualityStatus: readinessReport.hasPassedQcExperiment ? 'معتمد ومطابق' : 'تحت الفحص المخبري',
+          measuredDensity: density,
+          measuredViscosity: '100 KU',
+          scaledIngredientsJson: scaledJson,
+          supervisorOrEngineer: actorName,
+          shift: 'الوردية الصباحية',
+          notes: `أُصدرت من المختبر — ${readinessFormula.formulaNo} v${readinessFormula.versionNumber || 1} | اعتماد: ${readinessFormula.approvedBy || 'الإدارة'}${
+            readinessReport.shortageCount > 0 ? ` | تنبيه عجز خامات (${readinessReport.shortageCount})` : ''
+          }`,
+          syncStatus: 'SYNCED',
+          createdAt: now
+        };
+
+        await ErpDataService.saveRecord('paint_batches', batchNo, batchRecord, userProfile?.username);
+        await ErpDataService.logAudit(
+          actorName,
+          'LAB_RELEASE_TO_PRODUCTION',
+          sanitizeLabLog(
+            `إصدار دفعة الإنتاج ${batchNo} للتركيبة ${readinessFormula.formulaNo} v${readinessFormula.versionNumber || 1} بوزن ${targetKg} كجم (حالة المخزون: ${
+              readinessReport.isStockSufficient ? 'متوفر' : `عجز ${readinessReport.shortageCount}`
+            })`
+          )
+        );
+        return { resultReference: batchNo };
+      }
+    });
+
+    if (res.ok) {
+      setReadinessFormula(null);
+      showNotice('ok', `تم إصدار دفعة الإنتاج المعتمدة (${batchNo}) وربطها بقسم المصنع وسجل التدقيق.`);
+    } else {
+      showNotice('err', res.message);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <GlassCard className="p-5 sm:p-6">
@@ -900,6 +1009,33 @@ export const ChemistryLabModuleView: React.FC = () => {
                       <span className="font-mono text-[11px] text-pmp-primary font-bold">
                         {f.formulaNo} • {f.baseKind} • {f.paintType}
                       </span>
+                      <div className="flex flex-wrap items-center gap-2 mt-1 text-[10px] text-theme-muted">
+                        <span>المُنشئ/المُعدّل: {f.updatedBy || f.createdBy || 'المختبر'}</span>
+                        {f.approvedBy && (
+                          <span className="text-emerald-400">
+                            • اعتماد: {f.approvedBy}
+                            {f.approvedAt ? ` (${new Date(f.approvedAt).toLocaleDateString('ar-EG')})` : ''}
+                          </span>
+                        )}
+                        <span>
+                          • تجارب QC ناجحة:{' '}
+                          {
+                            experiments.filter(
+                              (e) =>
+                                (e.formulaNo === f.formulaNo || Number(e.formulaId) === Number(f.id)) &&
+                                String(e.status || '').toUpperCase() === 'PASSED'
+                            ).length
+                          }
+                        </span>
+                        <span>
+                          • دفعات الإنتاج:{' '}
+                          {
+                            productionBatches.filter(
+                              (b) => b.formulaNo === f.formulaNo || Number(b.formulaId) === Number(f.id)
+                            ).length
+                          }
+                        </span>
+                      </div>
                     </div>
                     <div className="flex items-center gap-1">
                       <GlassBadge variant={badge.variant}>{badge.label}</GlassBadge>
@@ -977,6 +1113,17 @@ export const ChemistryLabModuleView: React.FC = () => {
                           مقارنة 3 تكاليف
                         </GlassButton>
                       )}
+                      <GlassButton
+                        size="sm"
+                        variant="secondary"
+                        icon={<Factory className="w-3 h-3" />}
+                        onClick={() => {
+                          setReadinessFormula(f);
+                          setReadinessWeightKg(String(f.totalBatchWeight || 500));
+                        }}
+                      >
+                        جاهزية الإنتاج والمخازن
+                      </GlassButton>
                     </div>
 
                     {allowFormulaApprove && (
@@ -1749,6 +1896,148 @@ export const ChemistryLabModuleView: React.FC = () => {
             </div>
           )}
         </div>
+      </Modal>
+
+      {/* Lab-to-Production Readiness & Raw Material Stock Availability Modal */}
+      <Modal
+        isOpen={Boolean(readinessFormula)}
+        onClose={() => setReadinessFormula(null)}
+        title={`جاهزية الإنتاج وتوفر مخزون الخامات — ${readinessFormula?.formulaNo || ''} (v${readinessFormula?.versionNumber || 1})`}
+        maxWidth="max-w-3xl"
+      >
+        {readinessFormula && readinessReport && (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="text-[11px] font-bold text-theme-secondary block mb-1">
+                  وزن التشغيلة المستهدف (كجم)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="10"
+                  value={readinessWeightKg}
+                  onChange={(e) => setReadinessWeightKg(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-theme-base border border-theme text-theme-primary font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-theme-secondary block mb-1">
+                  عدد الكراتين المتوقع
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={readinessCartons}
+                  onChange={(e) => setReadinessCartons(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-theme-base border border-theme text-theme-primary font-mono"
+                />
+              </div>
+              <div className="p-2.5 rounded-xl bg-theme-base border border-theme flex flex-col justify-center">
+                <span className="text-[10px] text-theme-muted">حالة بوابة الاعتماد</span>
+                <span className={`font-bold mt-0.5 ${readinessReport.isApprovedForProduction ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {readinessReport.isApprovedForProduction ? 'معتمدة للإنتاج (APPROVED)' : `مغلقة (${readinessReport.approvalStatus})`}
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              <div className="p-2.5 rounded-lg bg-theme-base border border-theme">
+                <span className="text-[10px] text-theme-muted block">تجارب QC ناجحة</span>
+                <span className="font-mono font-bold text-emerald-400">{readinessReport.passedQcCount}</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-theme-base border border-theme">
+                <span className="text-[10px] text-theme-muted block">خامات تم فحصها</span>
+                <span className="font-mono font-bold">{readinessReport.totalMaterialsChecked}</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-theme-base border border-theme">
+                <span className="text-[10px] text-theme-muted block">عجز مخزن الخامات</span>
+                <span className={`font-mono font-bold ${readinessReport.shortageCount > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                  {readinessReport.shortageCount === 0 ? 'متوفر بالكامل' : `${readinessReport.shortageCount} مادة ناقصة`}
+                </span>
+              </div>
+            </div>
+
+            {readinessReport.blockingReasons.length > 0 && (
+              <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 space-y-1">
+                <div className="font-bold flex items-center gap-1.5">
+                  <ShieldAlert className="w-4 h-4" />
+                  <span>موانع إصدار التشغيلة:</span>
+                </div>
+                {readinessReport.blockingReasons.map((r, i) => (
+                  <p key={i}>• {r}</p>
+                ))}
+              </div>
+            )}
+
+            {readinessReport.warnings.length > 0 && (
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 space-y-1">
+                {readinessReport.warnings.map((w, i) => (
+                  <p key={i}>• {w}</p>
+                ))}
+              </div>
+            )}
+
+            {allowSecretRead ? (
+              readinessReport.materialLines.length > 0 && (
+                <div className="overflow-x-auto max-h-60 border border-theme rounded-xl">
+                  <table className="w-full text-right text-[11px]">
+                    <thead className="bg-theme-base text-theme-muted border-b border-theme">
+                      <tr>
+                        <th className="p-2">المادة الخام</th>
+                        <th className="p-2">المطلوب (كجم)</th>
+                        <th className="p-2">المتاح بالمخزن (كجم)</th>
+                        <th className="p-2">الحالة</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {readinessReport.materialLines.map((line, idx) => (
+                        <tr key={idx}>
+                          <td className="p-2 font-bold text-theme-primary">{line.materialName}</td>
+                          <td className="p-2 font-mono">{line.requiredKg}</td>
+                          <td className="p-2 font-mono">{line.availableKg}</td>
+                          <td className="p-2">
+                            {line.isSufficient ? (
+                              <GlassBadge variant="green">كافٍ</GlassBadge>
+                            ) : (
+                              <GlassBadge variant="red">عجز {line.shortageKg} كجم</GlassBadge>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            ) : (
+              <div className="p-3 rounded-xl bg-theme-base border border-theme text-theme-muted flex items-center gap-2">
+                <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>
+                  تفاصيل أوزان المواد الخام الفردية محجوبة لحماية سرية التركيبة؛ يظهر فقط ملخص الجاهزية وحالة العجز الإجمالية.
+                </span>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-theme">
+              <GlassButton type="button" variant="secondary" onClick={() => setReadinessFormula(null)}>
+                إغلاق
+              </GlassButton>
+              {canPerformAction(GRANULAR_ACTIONS.CREATE) && (
+                <GlassButton
+                  type="button"
+                  variant="primary"
+                  icon={<Factory className="w-3.5 h-3.5" />}
+                  disabled={!readinessReport.canReleaseToProduction || releaseGuard.isSubmitting}
+                  isLoading={releaseGuard.isSubmitting}
+                  loadingText={OPERATION_LOADING_LABELS.CREATE}
+                  onClick={handleReleaseToProduction}
+                >
+                  إصدار دفعة إنتاج معتمدة
+                </GlassButton>
+              )}
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

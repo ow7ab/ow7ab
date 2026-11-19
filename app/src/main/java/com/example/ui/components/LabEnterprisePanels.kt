@@ -761,3 +761,172 @@ fun UnifiedRawMaterialsRegistryTab(viewModel: PmpViewModel) {
         )
     }
 }
+
+@Composable
+fun FormulaProductionReadinessDialog(
+    formulation: FormulationEntity,
+    ingredients: List<FormulationIngredient>,
+    factoryItems: List<FactoryItemEntity>,
+    stockBalances: List<WarehouseStockBalanceEntity>,
+    experiments: List<LabExperimentEntity>,
+    canViewSecrets: Boolean,
+    defaultTargetWeightKg: Double,
+    onDismiss: () -> Unit,
+    onProceedToProductionOrder: (() -> Unit)? = null
+) {
+    var weightInput by remember(formulation.id) {
+        mutableStateOf(
+            (if (defaultTargetWeightKg > 0.0) defaultTargetWeightKg else formulation.totalBatchWeight.takeIf { it > 0.0 } ?: 500.0)
+                .toInt()
+                .toString()
+        )
+    }
+    val targetWeight = weightInput.toDoubleOrNull() ?: 0.0
+    val report = remember(formulation, ingredients, targetWeight, factoryItems, stockBalances, experiments, canViewSecrets) {
+        PvcEngine.evaluateProductionReadiness(
+            formula = formulation,
+            ingredients = ingredients,
+            targetWeightKg = targetWeight,
+            factoryItems = factoryItems,
+            stockBalances = stockBalances,
+            experiments = experiments,
+            includeSecretBreakdown = canViewSecrets
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PmpWhiteSurface,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.FactCheck, contentDescription = null, tint = PmpBlueLight)
+                Text(
+                    "جاهزية الإنتاج والمخازن (${report.formulaNo} v${report.versionNumber})",
+                    color = TextDark,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp
+                )
+            }
+        },
+        text = {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item {
+                    OutlinedTextField(
+                        value = weightInput,
+                        onValueChange = { weightInput = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                        label = { Text("وزن التشغيلة المطلوب فحصه (كجم)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("lab_readiness_weight_input")
+                    )
+                }
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (report.isApprovedForProduction) Color(0xFFDCFCE7) else Color(0xFFFEE2E2),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(
+                                text = if (report.isApprovedForProduction) "بوابة الاعتماد: معتمدة للإنتاج (APPROVED)" else "بوابة الاعتماد: غير معتمدة (${report.approvalStatus})",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = if (report.isApprovedForProduction) Color(0xFF166534) else Color(0xFF991B1B)
+                            )
+                            Text(
+                                text = "تجارب QC ناجحة: ${report.passedQcCount} • قيد الفحص: ${report.pendingQcCount} • مرفوضة: ${report.failedQcCount}",
+                                fontSize = 11.sp,
+                                color = TextDark
+                            )
+                            Text(
+                                text = if (report.shortageCount == 0 && report.totalMaterialsChecked > 0)
+                                    "مخزون الخامات: متوفر بالكامل (${report.totalMaterialsChecked} مواد)"
+                                else
+                                    "مخزون الخامات: يوجد عجز في ${report.shortageCount} من أصل ${report.totalMaterialsChecked} مواد",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (report.shortageCount == 0) Color(0xFF166534) else Color(0xFF92400E)
+                            )
+                        }
+                    }
+                }
+                if (report.blockingReasons.isNotEmpty()) {
+                    item {
+                        Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFFFEE2E2), modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                report.blockingReasons.forEach { reason ->
+                                    Text("• $reason", color = Color(0xFF991B1B), fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+                if (report.warnings.isNotEmpty()) {
+                    item {
+                        Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFFFEF3C7), modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                report.warnings.forEach { warn ->
+                                    Text("• $warn", color = Color(0xFF92400E), fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+                if (canViewSecrets && report.materialLines.isNotEmpty()) {
+                    items(report.materialLines) { line ->
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = PmpSubtleSurface,
+                            border = BorderStroke(1.dp, if (line.isSufficient) Color(0xFF86EFAC) else Color(0xFFFCA5A5)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(line.materialName, fontWeight = FontWeight.Bold, fontSize = 11.5.sp, color = TextDark)
+                                    Text("مطلوب: ${line.requiredKg} كجم • متاح: ${line.availableKg} كجم", fontSize = 10.5.sp, color = TextMuted)
+                                }
+                                Text(
+                                    text = if (line.isSufficient) "كافٍ" else "عجز ${line.shortageKg}",
+                                    color = if (line.isSufficient) Color(0xFF166534) else Color(0xFF991B1B),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                } else if (!canViewSecrets) {
+                    item {
+                        Text(
+                            "حماية الملكية الفكرية: تفاصيل الأوزان الفردية للخامات محجوبة عن دورك الوظيفي ويظهر الملخص الإجمالي فقط.",
+                            color = TextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (onProceedToProductionOrder != null) {
+                Button(
+                    onClick = onProceedToProductionOrder,
+                    enabled = report.canReleaseToProduction,
+                    modifier = Modifier.testTag("lab_readiness_release_btn"),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669))
+                ) {
+                    Text("إصدار أمر تشغيل", fontSize = 11.sp)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("إغلاق") }
+        }
+    )
+}
+

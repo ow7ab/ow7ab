@@ -3,6 +3,9 @@ package com.example.util
 import com.example.data.local.FactoryItemEntity
 import com.example.data.local.FormulationEntity
 import com.example.data.local.FormulationIngredient
+import com.example.data.local.InventoryItemCategory
+import com.example.data.local.LabExperimentEntity
+import com.example.data.local.WarehouseStockBalanceEntity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.math.BigDecimal
@@ -529,6 +532,158 @@ object PvcEngine {
             }
         } catch (_: Exception) {}
         return list
+    }
+
+    data class FormulaMaterialAvailabilityLine(
+        val materialId: Long?,
+        val itemCode: String,
+        val materialName: String,
+        val requiredKg: Double,
+        val availableKg: Double,
+        val shortageKg: Double,
+        val isSufficient: Boolean
+    )
+
+    data class FormulaProductionReadinessReport(
+        val formulaNo: String,
+        val versionNumber: Int,
+        val productName: String,
+        val targetWeightKg: Double,
+        val approvalStatus: String,
+        val isApprovedForProduction: Boolean,
+        val passedQcCount: Int,
+        val failedQcCount: Int,
+        val pendingQcCount: Int,
+        val hasPassedQcExperiment: Boolean,
+        val totalMaterialsChecked: Int,
+        val shortageCount: Int,
+        val isStockSufficient: Boolean,
+        val canReleaseToProduction: Boolean,
+        val blockingReasons: List<String>,
+        val warnings: List<String>,
+        val materialLines: List<FormulaMaterialAvailabilityLine>
+    )
+
+    /**
+     * Evaluates end-to-end Lab-to-Production readiness:
+     * 1) Formula Approval Gate
+     * 2) Linked Lab QC Experiments
+     * 3) Raw Material Warehouse Stock Balances scaled to targetWeightKg
+     *
+     * Confidentiality invariant: when includeSecretBreakdown == false, materialLines is empty
+     * so secret ingredient ratios/weights are never exposed to unauthorized roles.
+     */
+    fun evaluateProductionReadiness(
+        formula: FormulationEntity,
+        ingredients: List<FormulationIngredient>,
+        targetWeightKg: Double,
+        factoryItems: List<FactoryItemEntity>,
+        stockBalances: List<WarehouseStockBalanceEntity>,
+        experiments: List<LabExperimentEntity>,
+        includeSecretBreakdown: Boolean
+    ): FormulaProductionReadinessReport {
+        val versionNumber = formula.versionNumber.coerceAtLeast(1)
+        val normStatus = formula.approvalStatus.trim().uppercase(Locale.US).ifBlank {
+            if (formula.approvedForProduction) "APPROVED" else "NEEDS_REVIEW"
+        }
+        val isApproved = normStatus == "APPROVED" || (formula.approvedForProduction && normStatus == "DRAFT")
+
+        val linkedExperiments = experiments.filter { exp ->
+            (exp.formulaId > 0L && exp.formulaId == formula.id) ||
+                (exp.formulaNo.isNotBlank() && exp.formulaNo.equals(formula.formulaNo, ignoreCase = true))
+        }
+        val passedQcCount = linkedExperiments.count { it.status.equals("PASSED", ignoreCase = true) }
+        val failedQcCount = linkedExperiments.count {
+            it.status.equals("REJECTED", ignoreCase = true) || it.status.equals("FAILED", ignoreCase = true)
+        }
+        val pendingQcCount = linkedExperiments.count {
+            it.status.equals("PENDING", ignoreCase = true) || it.status.equals("RETEST_REQUIRED", ignoreCase = true)
+        }
+        val hasPassedQcExperiment = passedQcCount > 0
+
+        val blockingReasons = mutableListOf<String>()
+        val warnings = mutableListOf<String>()
+
+        if (!isApproved) {
+            blockingReasons.add("التركيبة بحالة ($normStatus) وغير معتمدة للإنتاج بعد.")
+        }
+        if (targetWeightKg <= 0.0) {
+            blockingReasons.add("وزن التشغيلة المستهدف يجب أن يكون أكبر من صفر.")
+        }
+        if (ingredients.isEmpty()) {
+            blockingReasons.add("لا توجد مكونات قابلة للفحص لهذه التركيبة (أو التركيبة مقفلة سرياً).")
+        }
+        if (failedQcCount > 0 && !hasPassedQcExperiment) {
+            warnings.add("توجد تجارب مخبرية مرفوضة ($failedQcCount) بدون تجربة QC ناجحة بديلة.")
+        } else if (!hasPassedQcExperiment) {
+            warnings.add("لم تُسجل تجربة فحص جودة (QC PASSED) لهذا الإصدار بعد — يُنصح بتوثيق تجربة قبل التشغيل.")
+        }
+
+        val scaled = if (ingredients.isNotEmpty() && targetWeightKg > 0.0) {
+            scaleFormulation(ingredients, targetWeightKg).scaledIngredients
+        } else {
+            emptyList()
+        }
+
+        val rawBalances = stockBalances.filter {
+            it.itemCategory.equals(InventoryItemCategory.RAW_MATERIAL.name, ignoreCase = true)
+        }
+
+        val fullLines = scaled.map { ing ->
+            val normName = ing.name.trim().lowercase(Locale.US)
+            val normCode = ing.itemCode.trim().lowercase(Locale.US)
+            val matchedItem = factoryItems.firstOrNull { item ->
+                (ing.materialId != null && item.id == ing.materialId) ||
+                    (normCode.isNotBlank() && item.itemCode.trim().lowercase(Locale.US) == normCode) ||
+                    (normName.isNotBlank() && item.name.trim().lowercase(Locale.US) == normName)
+            }
+            val matchedBalances = rawBalances.filter { bal ->
+                (matchedItem != null && bal.itemId == matchedItem.id) ||
+                    (ing.materialId != null && bal.itemId == ing.materialId) ||
+                    (normCode.isNotBlank() && bal.itemCode.trim().lowercase(Locale.US) == normCode) ||
+                    (normName.isNotBlank() && bal.itemName.trim().lowercase(Locale.US) == normName)
+            }
+            val availableKg = round3(
+                matchedBalances.sumOf { it.availableQty.coerceAtLeast(0.0) }
+            )
+            val requiredKg = round3(ing.weight.coerceAtLeast(0.0))
+            val shortageKg = round3((requiredKg - availableKg).coerceAtLeast(0.0))
+            FormulaMaterialAvailabilityLine(
+                materialId = matchedItem?.id ?: ing.materialId,
+                itemCode = matchedItem?.itemCode?.ifBlank { ing.itemCode } ?: ing.itemCode,
+                materialName = matchedItem?.name ?: ing.name,
+                requiredKg = requiredKg,
+                availableKg = availableKg,
+                shortageKg = shortageKg,
+                isSufficient = shortageKg <= 0.0001
+            )
+        }
+
+        val shortageCount = fullLines.count { !it.isSufficient }
+        val isStockSufficient = fullLines.isNotEmpty() && shortageCount == 0
+        if (shortageCount > 0) {
+            warnings.add("يوجد عجز مخزني في $shortageCount من أصل ${fullLines.size} مواد خام مطلوبة لوزن ${round2(targetWeightKg)} كجم.")
+        }
+
+        return FormulaProductionReadinessReport(
+            formulaNo = formula.formulaNo,
+            versionNumber = versionNumber,
+            productName = formula.productName,
+            targetWeightKg = round2(targetWeightKg),
+            approvalStatus = normStatus,
+            isApprovedForProduction = isApproved,
+            passedQcCount = passedQcCount,
+            failedQcCount = failedQcCount,
+            pendingQcCount = pendingQcCount,
+            hasPassedQcExperiment = hasPassedQcExperiment,
+            totalMaterialsChecked = fullLines.size,
+            shortageCount = shortageCount,
+            isStockSufficient = isStockSufficient,
+            canReleaseToProduction = isApproved && targetWeightKg > 0.0 && ingredients.isNotEmpty(),
+            blockingReasons = blockingReasons,
+            warnings = warnings,
+            materialLines = if (includeSecretBreakdown) fullLines else emptyList()
+        )
     }
 
     private fun round2(v: Double): Double = Math.round(v * 100.0) / 100.0

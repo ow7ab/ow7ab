@@ -24,10 +24,13 @@ import {
   Download,
   AlertTriangle,
   ShieldCheck,
-  History
+  History,
+  ArrowLeftRight,
+  MonitorSmartphone
 } from 'lucide-react';
 import { GlassCard } from '../components/ui/GlassCard';
 import { GlassButton } from '../components/ui/GlassButton';
+import { Modal } from '../components/ui/Modal';
 import { ErrorBoundary } from '../components/ui/ErrorBoundary';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -134,7 +137,17 @@ export const PortalPage: React.FC<PortalPageProps> = ({
 }) => {
   const { language, toggleLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
-  const { userProfile, isSuperAdmin, canAccessModule, signOut } = useAuth();
+  const {
+    userProfile,
+    isSuperAdmin,
+    canAccessModule,
+    signOut,
+    switchAccount,
+    currentDeviceId,
+    deviceSessions,
+    revokeDeviceSession,
+    isAuthenticating
+  } = useAuth();
 
   const hasSystemManagerAccess = isSystemManager(userProfile);
   const canAccessAdminArea =
@@ -154,6 +167,11 @@ export const PortalPage: React.FC<PortalPageProps> = ({
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isAccountSwitchOpen, setIsAccountSwitchOpen] = useState(false);
+  const [switchIdentifier, setSwitchIdentifier] = useState('');
+  const [switchSecret, setSwitchSecret] = useState('');
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const [switchSuccess, setSwitchSuccess] = useState<string | null>(null);
   const [reportsInitialTab, setReportsInitialTab] = useState<ReportTab | undefined>(undefined);
   const [isNetworkOnline, setIsNetworkOnline] = useState<boolean>(() =>
     typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -234,6 +252,32 @@ export const PortalPage: React.FC<PortalPageProps> = ({
       onLogoutToLogin();
     } else {
       onBackToWebsite();
+    }
+  };
+
+  const handleAccountSwitchSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSwitchError(null);
+    setSwitchSuccess(null);
+    try {
+      const nextAcc = await switchAccount(switchIdentifier, switchSecret);
+      setSwitchSuccess(
+        language === 'ar'
+          ? `تم التبديل بنجاح إلى الحساب: ${nextAcc.fullName} (${nextAcc.role})`
+          : `Switched successfully to: ${nextAcc.fullName} (${nextAcc.role})`
+      );
+      setSwitchIdentifier('');
+      setSwitchSecret('');
+      setActiveTab('DASHBOARD');
+      setTimeout(() => {
+        setIsAccountSwitchOpen(false);
+        setSwitchSuccess(null);
+      }, 700);
+    } catch (err: any) {
+      setSwitchError(
+        err?.message ||
+          (language === 'ar' ? 'تعذر تبديل الحساب. تأكد من البيانات.' : 'Account switch failed.')
+      );
     }
   };
 
@@ -540,7 +584,23 @@ export const PortalPage: React.FC<PortalPageProps> = ({
 
             <button
               type="button"
+              onClick={() => {
+                setSwitchError(null);
+                setSwitchSuccess(null);
+                setIsAccountSwitchOpen(true);
+              }}
+              data-testid="portal-switch-account-btn"
+              className="p-2 sm:px-2.5 sm:py-1.5 rounded-xl bg-theme-base border border-theme text-theme-secondary hover:text-theme-primary hover:border-pmp-primary/50 text-xs flex items-center gap-1.5 min-h-[38px]"
+              title={language === 'ar' ? 'تبديل الحساب وإدارة الجلسات' : 'Switch Account & Sessions'}
+            >
+              <ArrowLeftRight className="w-4 h-4 text-pmp-primary" />
+              <span className="hidden lg:inline font-bold">{language === 'ar' ? 'تبديل الحساب' : 'Switch'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={handleSignOut}
+              data-testid="portal-signout-btn"
               className="p-2 sm:px-3 sm:py-1.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-500 hover:bg-red-500/20 text-xs flex items-center gap-1.5 min-h-[38px]"
               title={language === 'ar' ? 'تسجيل الخروج' : 'Sign Out'}
             >
@@ -693,6 +753,20 @@ export const PortalPage: React.FC<PortalPageProps> = ({
 
                 <button
                   type="button"
+                  onClick={() => {
+                    setMobileDrawerOpen(false);
+                    setSwitchError(null);
+                    setSwitchSuccess(null);
+                    setIsAccountSwitchOpen(true);
+                  }}
+                  className="w-full py-2.5 px-3 rounded-xl bg-theme-base border border-theme text-xs font-bold text-theme-primary flex items-center justify-center gap-2"
+                >
+                  <ArrowLeftRight className="w-4 h-4 text-pmp-primary" />
+                  <span>{language === 'ar' ? 'تبديل الحساب والجلسات' : 'Switch Account & Sessions'}</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={handleSignOut}
                   className="w-full py-2.5 px-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs font-bold text-red-500 flex items-center justify-center gap-2"
                 >
@@ -840,6 +914,155 @@ export const PortalPage: React.FC<PortalPageProps> = ({
           <span className="truncate">{language === 'ar' ? 'المزيد' : 'More'}</span>
         </button>
       </nav>
+
+      {/* Switch Account & Device Session Management Modal */}
+      <Modal
+        isOpen={isAccountSwitchOpen}
+        onClose={() => setIsAccountSwitchOpen(false)}
+        title={language === 'ar' ? 'تبديل الحساب وإدارة جلسات الجهاز' : 'Switch Account & Device Sessions'}
+        maxWidth="max-w-md"
+      >
+        <div className="space-y-5 text-xs">
+          <div className="p-3 rounded-xl bg-theme-base border border-theme flex items-center justify-between gap-2">
+            <div>
+              <span className="text-[10px] text-theme-muted block">
+                {language === 'ar' ? 'الحساب النشط حالياً' : 'Currently Active Account'}
+              </span>
+              <span className="font-bold text-theme-primary text-sm block">{userProfile.fullName}</span>
+              <span className="text-[11px] text-pmp-primary font-semibold">
+                {userProfile.username} • {userProfile.role} • {userProfile.branch}
+              </span>
+            </div>
+            <span className="px-2 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 font-mono text-[10px] font-bold">
+              {currentDeviceId}
+            </span>
+          </div>
+
+          <form onSubmit={handleAccountSwitchSubmit} className="space-y-3" data-testid="switch-account-form">
+            <h4 className="font-bold text-theme-primary flex items-center gap-1.5">
+              <ArrowLeftRight className="w-4 h-4 text-pmp-primary" />
+              <span>{language === 'ar' ? 'التبديل السريع إلى حساب آخر' : 'Quick Switch to Another Account'}</span>
+            </h4>
+
+            {switchError && (
+              <div className="p-2.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400">
+                {switchError}
+              </div>
+            )}
+            {switchSuccess && (
+              <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+                {switchSuccess}
+              </div>
+            )}
+
+            <div>
+              <label className="block font-bold text-theme-secondary mb-1">
+                {language === 'ar' ? 'اسم المستخدم أو الكود أو البريد' : 'Username, Code, or Email'}
+              </label>
+              <input
+                type="text"
+                required
+                value={switchIdentifier}
+                onChange={(e) => setSwitchIdentifier(e.target.value)}
+                placeholder={language === 'ar' ? 'مثال: admin أو ahmed_acc' : 'e.g. admin or ahmed_acc'}
+                className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary font-mono"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-theme-secondary mb-1">
+                {language === 'ar' ? 'الرمز السري / كلمة المرور' : 'PIN / Password'}
+              </label>
+              <input
+                type="password"
+                required
+                value={switchSecret}
+                onChange={(e) => setSwitchSecret(e.target.value)}
+                placeholder="••••••"
+                className="w-full px-3 py-2 rounded-xl bg-theme-base border border-theme text-theme-primary font-mono tracking-widest"
+              />
+            </div>
+
+            <GlassButton
+              type="submit"
+              variant="primary"
+              disabled={isAuthenticating}
+              className="w-full justify-center"
+              icon={<ArrowLeftRight className="w-4 h-4" />}
+            >
+              {isAuthenticating
+                ? language === 'ar'
+                  ? 'جاري التحقق والتبديل...'
+                  : 'Switching...'
+                : language === 'ar'
+                ? 'تبديل الحساب الآن'
+                : 'Switch Account Now'}
+            </GlassButton>
+          </form>
+
+          <div className="pt-3 border-t border-theme space-y-2">
+            <h4 className="font-bold text-theme-primary flex items-center gap-1.5">
+              <MonitorSmartphone className="w-4 h-4 text-pmp-cyan" />
+              <span>
+                {language === 'ar'
+                  ? `سجل جلسات هذا الجهاز (${deviceSessions.length})`
+                  : `Device Sessions (${deviceSessions.length})`}
+              </span>
+            </h4>
+            <div className="space-y-1.5 max-h-40 overflow-y-auto">
+              {deviceSessions.map((sess) => {
+                const isThisDevice = sess.deviceId === currentDeviceId;
+                return (
+                  <div
+                    key={`${sess.deviceId}_${sess.startedAt}`}
+                    className="p-2.5 rounded-xl bg-theme-base border border-theme flex items-center justify-between gap-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-bold text-theme-primary truncate">
+                        {sess.fullName} ({sess.username})
+                      </div>
+                      <div className="text-[10px] text-theme-muted">
+                        {sess.deviceLabel} • {sess.loginMethod} •{' '}
+                        {new Date(sess.lastActiveAt).toLocaleString(language === 'ar' ? 'ar-EG' : 'en-US')}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          sess.active
+                            ? 'bg-emerald-500/15 text-emerald-400'
+                            : 'bg-slate-500/15 text-theme-muted'
+                        }`}
+                      >
+                        {isThisDevice && sess.active
+                          ? language === 'ar'
+                            ? 'الحالي'
+                            : 'Current'
+                          : sess.active
+                          ? language === 'ar'
+                            ? 'نشط'
+                            : 'Active'
+                          : language === 'ar'
+                          ? 'مغلق'
+                          : 'Closed'}
+                      </span>
+                      {sess.active && (
+                        <button
+                          type="button"
+                          onClick={() => void revokeDeviceSession(sess.deviceId)}
+                          className="text-[10px] text-red-400 hover:underline font-bold"
+                        >
+                          {language === 'ar' ? 'إنهاء' : 'End'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </Modal>
 
       {/* Global Search Modal */}
       {isSearchOpen && (

@@ -410,3 +410,92 @@ test('ExcelFormulaAnalyzer: parses OOXML xlsx, filters reference price sheets, f
   assert.equal(report.candidates[0].calculatedTotalCost, 950);
   assert.equal(report.materialsMatchedCount, 1);
 });
+
+test('PvcEngine.evaluateFormulaProductionReadiness: approval gate, raw material warehouse shortages, QC links & confidentiality redaction', () => {
+  const baseIngredients = [
+    { id: '1', materialId: 101, itemCode: 'RM-TIO2', name: 'تيتانيوم', type: 'صبغة / ملون', weight: 100, density: 4.2, solidsPercent: 100, unitCost: 4.5, notes: '' },
+    { id: '2', materialId: 102, itemCode: 'RM-ACR', name: 'راتنج أكريليك', type: 'راتنج / بوليمر رابط', weight: 300, density: 1.06, solidsPercent: 50, unitCost: 2.8, notes: '' }
+  ];
+  const factoryItems = [
+    { id: 101, itemCode: 'RM-TIO2', name: 'تيتانيوم', unit: 'كجم', category: 'raw', unitCostEgp: 4.5 },
+    { id: 102, itemCode: 'RM-ACR', name: 'راتنج أكريليك', unit: 'كجم', category: 'raw', unitCostEgp: 2.8 }
+  ];
+  const stockBalances = [
+    { warehouseId: 1, warehouseClass: 'RAW_MATERIALS', itemCategory: 'RAW_MATERIAL', itemId: 101, itemCode: 'RM-TIO2', itemName: 'تيتانيوم', availableQty: 300, onHandQty: 300 },
+    { warehouseId: 1, warehouseClass: 'RAW_MATERIALS', itemCategory: 'RAW_MATERIAL', itemId: 102, itemCode: 'RM-ACR', itemName: 'راتنج أكريليك', availableQty: 200, onHandQty: 200 }
+  ];
+  const experiments = [
+    { id: 1, formulaId: 55, formulaNo: 'FORM-READY', status: 'PASSED' },
+    { id: 2, formulaId: 55, formulaNo: 'FORM-READY', status: 'PENDING' }
+  ];
+
+  // 1) Unapproved formula is strictly blocked from release
+  const unapprovedFormula = {
+    id: 55,
+    formulaNo: 'FORM-READY',
+    productName: 'طلاء اختبار',
+    approvedForProduction: false,
+    approvalStatus: 'NEEDS_REVIEW',
+    versionNumber: 2
+  };
+  const blocked = PvcEngine.evaluateFormulaProductionReadiness({
+    formula: unapprovedFormula,
+    ingredients: baseIngredients,
+    targetWeightKg: 800,
+    factoryItems,
+    stockBalances,
+    experiments,
+    includeSecretBreakdown: true
+  });
+  assert.equal(blocked.isApprovedForProduction, false);
+  assert.equal(blocked.canReleaseToProduction, false);
+  assert.ok(blocked.blockingReasons.length >= 1);
+
+  // 2) Approved formula scaled to 800kg needs 200kg TiO2 (OK: 300 avail) & 600kg Acrylic (SHORTAGE: 200 avail -> 400kg shortage)
+  const approvedFormula = { ...unapprovedFormula, approvedForProduction: true, approvalStatus: 'APPROVED' };
+  const readyWithShortage = PvcEngine.evaluateFormulaProductionReadiness({
+    formula: approvedFormula,
+    ingredients: baseIngredients,
+    targetWeightKg: 800,
+    factoryItems,
+    stockBalances,
+    experiments,
+    includeSecretBreakdown: true
+  });
+  assert.equal(readyWithShortage.isApprovedForProduction, true);
+  assert.equal(readyWithShortage.canReleaseToProduction, true);
+  assert.equal(readyWithShortage.passedQcCount, 1);
+  assert.equal(readyWithShortage.pendingQcCount, 1);
+  assert.equal(readyWithShortage.shortageCount, 1);
+  assert.equal(readyWithShortage.isStockSufficient, false);
+  assert.equal(readyWithShortage.materialLines.length, 2);
+  assert.equal(readyWithShortage.materialLines[1].shortageKg, 400);
+
+  // 3) Unauthorized role MUST NOT receive individual secret materialLines
+  const redactedReport = PvcEngine.evaluateFormulaProductionReadiness({
+    formula: approvedFormula,
+    ingredients: baseIngredients,
+    targetWeightKg: 800,
+    factoryItems,
+    stockBalances,
+    experiments,
+    includeSecretBreakdown: false
+  });
+  assert.equal(redactedReport.materialLines.length, 0);
+  assert.equal(redactedReport.shortageCount, 1);
+});
+
+test('Cross-module Lab Confidentiality: Factory enforces approval & redacts secrets; ReportsCenter uses non-secret summaries', () => {
+  const factorySrc = fs.readFileSync(path.join(SRC_DIR, 'components/modules/FactoryModuleView.tsx'), 'utf8');
+  const reportsSrc = fs.readFileSync(path.join(SRC_DIR, 'components/reports/ReportsCenterView.tsx'), 'utf8');
+  const labSrc = fs.readFileSync(path.join(SRC_DIR, 'components/modules/ChemistryLabModuleView.tsx'), 'utf8');
+
+  assert.ok(factorySrc.includes('isFormulaApprovedForProduction'), 'FactoryModuleView must enforce formula approval gate');
+  assert.ok(factorySrc.includes('canViewSecretFormulas'), 'FactoryModuleView must check secret-read permission before attaching scaledIngredientsJson');
+  assert.ok(reportsSrc.includes("'lab_formula_summaries'"), 'ReportsCenterView must read non-secret lab_formula_summaries');
+  assert.equal(reportsSrc.includes("'lab_formulations'"), false, 'ReportsCenterView must NEVER subscribe to secret lab_formulations directly');
+  assert.equal(reportsSrc.includes('.ingredientsJson'), false, 'ReportsCenterView must NEVER read or expose .ingredientsJson');
+  assert.ok(labSrc.includes('evaluateFormulaProductionReadiness'), 'ChemistryLabModuleView must integrate production readiness check');
+  assert.ok(labSrc.includes('LAB_RELEASE_TO_PRODUCTION'), 'ChemistryLabModuleView must log sanitized release audit trail');
+});
+

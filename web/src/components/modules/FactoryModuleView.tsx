@@ -26,7 +26,8 @@ import {
   StockMove,
   Warehouse
 } from '../../types/erp';
-import { ErpDataService, safeId } from '../../services/ErpDataService';
+import { ErpDataService, safeId, isFormulaApprovedForProduction } from '../../services/ErpDataService';
+import { canViewSecretFormulas } from '../../services/LabSecurityService';
 import { ReportExporter } from '../../services/ReportExporter';
 import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { useLanguage } from '../../context/LanguageContext';
@@ -139,9 +140,17 @@ export const FactoryModuleView: React.FC = () => {
     e.preventDefault();
     if (!canCreate || batchGuard.isSubmitting) return;
     const formula = formulations.find((f) => Number(f.id) === Number(batchForm.formulaId));
+    if (formula && !isFormulaApprovedForProduction(formula)) {
+      showNotice(
+        'err',
+        `ممنوع إصدار تشغيلة إنتاج من التركيبة (${formula.formulaNo} v${formula.versionNumber || 1}) لأنها غير معتمدة للإنتاج (${formula.approvalStatus || 'NEEDS_REVIEW'}).`
+      );
+      return;
+    }
     const weight = Number(batchForm.targetWeightKg) || 1000;
     const cartons = Number(batchForm.cartonsCount) || 0;
     const actor = userProfile?.fullName || userProfile?.username || 'مهندس الإنتاج';
+    const allowSecretFormulaCopy = canViewSecretFormulas(userProfile);
 
     const res = await batchGuard.runGuarded({
       guardKey: `factory_create_batch_${batchForm.productName || 'default'}_${weight}_${cartons}`,
@@ -173,10 +182,14 @@ export const FactoryModuleView: React.FC = () => {
           qualityStatus: batchForm.qualityStatus,
           measuredDensity: formula?.calculatedDensity || 1.35,
           measuredViscosity: '110 KU',
-          scaledIngredientsJson: formula?.ingredientsJson || '[]',
+          // SECURITY: Never leak confidential recipe percentages into paint_batches for non-secret roles or sealed formulas
+          scaledIngredientsJson:
+            allowSecretFormulaCopy && formula && !formula.isConfidentialSealed
+              ? formula.ingredientsJson || '[]'
+              : '[]',
           supervisorOrEngineer: actor,
           shift: batchForm.shift,
-          notes: '',
+          notes: formula ? `إصدار التركيبة: v${formula.versionNumber || 1} • اعتماد: ${formula.approvedBy || 'معتمد'}` : '',
           syncStatus: 'SYNCED',
           createdAt: now
         };

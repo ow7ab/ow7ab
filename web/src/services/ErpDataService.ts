@@ -1075,7 +1075,7 @@ class ErpDataServiceImpl {
         ok: false,
         latencyMs: 0,
         counts,
-        error: 'يرجى تسجيل الدخول عبر Google أو البريد المعتمد أولاً للاتصال بالسيرفر.'
+        error: 'يرجى تسجيل الدخول بحسابك المعتمد (اسم المستخدم أو البريد الإلكتروني وكلمة المرور، أو Google الاختياري) للاتصال بالسيرفر.'
       };
     }
     try {
@@ -1165,7 +1165,7 @@ class ErpDataServiceImpl {
           measured: true,
           latencyMs: Math.round(performance.now() - start),
           summaryAr: 'لا توجد جلسة Firebase Auth نشطة حالياً (request.auth == null)',
-          remediationHintAr: 'سجّل الدخول عبر Google SSO أو البريد المعتمد لتمكين الكتابة والمزامنة السحابية.',
+          remediationHintAr: 'سجّل الدخول بحسابك (البريد الإلكتروني وكلمة المرور أو اسم المستخدم، أو عبر Google اختيارياً) لتمكين المزامنة السحابية.',
           checkedAtMillis: now
         };
       }
@@ -1236,7 +1236,7 @@ class ErpDataServiceImpl {
           measured: true,
           latencyMs: Math.round(performance.now() - start),
           summaryAr: `جلسة محلية (${tier}) بدون ربط Firebase Auth — السيرفر يرفض الكتابة المحمية`,
-          remediationHintAr: 'اربط الحساب بمستند cluster_members/{uid} عبر Google Sign-In المعتمد.',
+          remediationHintAr: 'فعّل جلسة المصادقة السحابية (بالبريد الإلكتروني وكلمة المرور أو عبر Google اختيارياً) لربط مستند cluster_members/{uid}.',
           checkedAtMillis: now
         };
       }

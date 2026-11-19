@@ -843,7 +843,7 @@ class CloudErpSyncRepository(
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
-                ?: throw SecurityException("جلسة المصادقة السحابية غير نشطة — يرجى تسجيل الدخول عبر Google")
+                ?: throw SecurityException("جلسة المصادقة السحابية غير نشطة — يرجى تفعيل جلسة المصادقة السحابية (بالبريد الإلكتروني أو الدخول الاختياري عبر Google)")
             val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
             ensureOwnClusterMemberRegistration(cleanCluster, user, fbUser.uid, fbUser.email)
             val roleKey = resolveClusterMemberRoleKey(cleanCluster, fbUser.uid)
@@ -1499,7 +1499,7 @@ class CloudErpSyncRepository(
     ): Result<UserAccountEntity> = withContext(Dispatchers.IO) {
         runCatching {
             val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
-                ?: throw Exception("يتطلب البحث السحابي تسجيل الدخول بحساب Google أولاً")
+                ?: throw Exception("جلسة المصادقة السحابية غير نشطة حالياً — يتم التحقق عبر الحساب المحلي، ويمكن تفعيل المزامنة السحابية لاحقاً بالبريد الإلكتروني أو Google اختيارياً")
             val cleanIdentity = identity.trim().lowercase()
             val cleanSecret = passwordOrPin.trim()
 
@@ -1688,7 +1688,7 @@ class CloudErpSyncRepository(
                 // Require active Firebase Auth session before attempting protected Firestore writes
                 val fbCurrentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
                     ?: throw SecurityException(
-                        "جلسة المصادقة السحابية (Google Sign-In) غير نشطة — يرجى تسجيل الدخول بحساب Google المعتمد للمزامنة مع السيرفر."
+                        "جلسة المصادقة السحابية غير نشطة — يعمل النظام محلياً بأمان، ولتفعيل المزامنة السحابية سجّل الدخول بالبريد الإلكتروني أو عبر Google اختيارياً."
                     )
 
                 // Deduplicate local cashboxes, movements, and user accounts before pushing
@@ -2816,7 +2816,7 @@ class CloudErpSyncRepository(
             runCatching {
                 val fbCurrentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
                     ?: throw SecurityException(
-                        "جلسة المصادقة السحابية (Google Sign-In) غير نشطة — يرجى تسجيل الدخول بحساب Google المعتمد لاستعادة البيانات."
+                        "جلسة المصادقة السحابية غير نشطة — يرجى تفعيل الجلسة السحابية (بالبريد الإلكتروني أو عبر Google اختيارياً) لاستعادة البيانات."
                     )
                 val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
                 val localUsers = dao.getUserAccountsDirect()

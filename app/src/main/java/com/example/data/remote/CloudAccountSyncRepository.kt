@@ -145,7 +145,7 @@ class CloudAccountSyncRepository(
         clusterCode: String = "PMP-ERP-MAIN-CLUSTER",
         active: Boolean = true
     ): Result<String> {
-        val uid = currentUid ?: return Result.failure(IllegalStateException("يرجى تسجيل الدخول السحابي عبر Google أولاً لتفعيل المزامنة"))
+        val uid = currentUid ?: return Result.failure(IllegalStateException("يتطلب هذا الإجراء جلسة مصادقة سحابية نشطة (بالبريد الإلكتروني أو عبر Google اختيارياً)"))
         val cleanCode = userCode.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
         val targetLinkedUid = linkedUid.trim().ifBlank { uid }
         val path = "$COLLECTION_LINKED_ACCOUNTS/$cleanCode"
@@ -227,7 +227,7 @@ class CloudAccountSyncRepository(
         targetLinkedUid: String = "",
         clusterCode: String = "PMP-ERP-MAIN-CLUSTER"
     ): Result<String> {
-        val uid = currentUid ?: return Result.failure(IllegalStateException("يرجى تسجيل الدخول السحابي عبر Google أولاً"))
+        val uid = currentUid ?: return Result.failure(IllegalStateException("يتطلب مزامنة الحساب جلسة مصادقة سحابية نشطة (بالبريد الإلكتروني أو عبر Google اختيارياً)"))
         val cleanCode = account.userCode.trim().replace(Regex("[^a-zA-Z0-9_\\-]"), "-")
         val resolvedLinkedUid = targetLinkedUid.trim().ifBlank {
             if (account.remoteServerId.isNotBlank() && !account.remoteServerId.startsWith("SRV-NODE")) {

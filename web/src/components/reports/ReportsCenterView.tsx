@@ -9,7 +9,8 @@ import {
   Users,
   ShieldCheck,
   Filter,
-  Activity
+  Activity,
+  FlaskConical
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { GlassBadge } from '../ui/GlassBadge';
@@ -19,7 +20,10 @@ import {
   Cashbox,
   Customer,
   InvoicePayment,
+  LabExperiment,
+  LabFormulation,
   Product,
+  ProductionBatch,
   SalesInvoice,
   StockMove,
   TreasuryMovement,
@@ -36,6 +40,7 @@ export type ReportTab =
   | 'الخزنة'
   | 'المخزون'
   | 'المديونيات'
+  | 'المختبر والجودة'
   | 'دفتر الأستاذ'
   | 'القوائم المالية'
   | 'سجل الرقابة'
@@ -59,6 +64,9 @@ export const ReportsCenterView: React.FC<{ initialTab?: ReportTab }> = ({ initia
   const [stockMoves, setStockMoves] = useState<StockMove[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [labSummaries, setLabSummaries] = useState<LabFormulation[]>([]);
+  const [labExperiments, setLabExperiments] = useState<LabExperiment[]>([]);
+  const [productionBatches, setProductionBatches] = useState<ProductionBatch[]>([]);
 
   useEffect(() => {
     const unsubs = [
@@ -70,7 +78,11 @@ export const ReportsCenterView: React.FC<{ initialTab?: ReportTab }> = ({ initia
       ErpDataService.subscribeToCollection<Product>('products', setProducts),
       ErpDataService.subscribeToCollection<StockMove>('stock_moves', setStockMoves),
       ErpDataService.subscribeToCollection<Customer>('customers', setCustomers),
-      ErpDataService.subscribeToCollection<AuditLog>('audit_logs', setAuditLogs)
+      ErpDataService.subscribeToCollection<AuditLog>('audit_logs', setAuditLogs),
+      // Non-secret operational summary collection ONLY — never exposes secret ingredientsJson or costs
+      ErpDataService.subscribeToCollection<LabFormulation>('lab_formula_summaries', setLabSummaries),
+      ErpDataService.subscribeToCollection<LabExperiment>('lab_experiments', setLabExperiments),
+      ErpDataService.subscribeToCollection<ProductionBatch>('paint_batches', setProductionBatches)
     ];
     return () => unsubs.forEach((u) => u());
   }, []);
@@ -226,6 +238,53 @@ export const ReportsCenterView: React.FC<{ initialTab?: ReportTab }> = ({ initia
           ])
         };
       }
+      case 'المختبر والجودة': {
+        const approvedCount = labSummaries.filter(
+          (f) => String(f.approvalStatus || '').toUpperCase() === 'APPROVED' || Boolean(f.approvedForProduction)
+        ).length;
+        const passedQcTotal = labExperiments.filter((e) => String(e.status || '').toUpperCase() === 'PASSED').length;
+        return {
+          title: 'التقرير التشغيلي للمختبر الكيميائي وبوابة الجودة (ملخص غير سري)',
+          subtitle: `إجمالي التركيبات: ${labSummaries.length} | المعتمدة للإنتاج: ${approvedCount} | تجارب QC ناجحة: ${passedQcTotal} | دفعات الإنتاج المرتبطة: ${productionBatches.length} (النسب والتكاليف السرية محجوبة)`,
+          headers: [
+            'كود التركيبة',
+            'الإصدار',
+            'المنتج',
+            'حالة الاعتماد',
+            'PVC %',
+            'الكثافة',
+            'تجارب QC ناجحة',
+            'دفعات الإنتاج',
+            'جهة الاعتماد والتاريخ'
+          ],
+          rows: [...labSummaries]
+            .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))
+            .map((f) => {
+              const qcPassed = labExperiments.filter(
+                (e) =>
+                  (e.formulaNo === f.formulaNo || Number(e.formulaId) === Number(f.id)) &&
+                  String(e.status || '').toUpperCase() === 'PASSED'
+              ).length;
+              const batchesCount = productionBatches.filter(
+                (b) => b.formulaNo === f.formulaNo || Number(b.formulaId) === Number(f.id)
+              ).length;
+              const approver = f.approvedBy
+                ? `${f.approvedBy}${f.approvedAt ? ` (${new Date(f.approvedAt).toLocaleDateString('ar-EG')})` : ''}`
+                : 'بانتظار الاعتماد';
+              return [
+                f.formulaNo,
+                `v${f.versionNumber || 1}`,
+                f.productName,
+                f.approvalStatus || (f.approvedForProduction ? 'APPROVED' : 'NEEDS_REVIEW'),
+                `${Number(f.calculatedPvc || 0)}%`,
+                Number(f.calculatedDensity || 0).toFixed(2),
+                qcPassed,
+                batchesCount,
+                approver
+              ];
+            })
+        };
+      }
       case 'سجل الرقابة':
       default:
         return {
@@ -249,6 +308,9 @@ export const ReportsCenterView: React.FC<{ initialTab?: ReportTab }> = ({ initia
     computedProducts,
     customerDebts,
     auditLogs,
+    labSummaries,
+    labExperiments,
+    productionBatches,
     totalSalesSdg,
     totalSalesEgp,
     cashboxBalances,
@@ -362,6 +424,7 @@ export const ReportsCenterView: React.FC<{ initialTab?: ReportTab }> = ({ initia
           { id: 'الخزنة' as const, label: 'تقرير الخزنة والسيولة', icon: <Wallet className="w-4 h-4" /> },
           { id: 'المخزون' as const, label: 'تقرير جرد المخزون', icon: <Package className="w-4 h-4" /> },
           { id: 'المديونيات' as const, label: 'كشف حساب عميل / المديونيات', icon: <Users className="w-4 h-4" /> },
+          { id: 'المختبر والجودة' as const, label: 'المختبر والجودة (ملخص تشغيلي)', icon: <FlaskConical className="w-4 h-4" /> },
           { id: 'دفتر الأستاذ' as const, label: 'دفتر الأستاذ والقيود المزدوجة', icon: <FileText className="w-4 h-4" /> },
           { id: 'القوائم المالية' as const, label: 'القوائم المالية والتسوية', icon: <FileText className="w-4 h-4" /> },
           { id: 'سجل الرقابة' as const, label: 'سجل الرقابة والعمليات', icon: <ShieldCheck className="w-4 h-4" /> },

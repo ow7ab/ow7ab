@@ -7,9 +7,12 @@ import com.example.data.local.DeletedRecordsRegistry
 import com.example.data.local.FactoryItemEntity
 import com.example.data.local.FormulationEntity
 import com.example.data.local.FormulationIngredient
+import com.example.data.local.InventoryItemCategory
 import com.example.data.local.LabExperimentEntity
 import com.example.data.local.PmpDatabase
 import com.example.data.local.UserAccountEntity
+import com.example.data.local.WarehouseClass
+import com.example.data.local.WarehouseStockBalanceEntity
 import com.example.data.repository.PmpRepository
 import com.example.domain.inventory.InventoryMovementEngine
 import com.example.domain.inventory.ProductionAndProcurementEngine
@@ -576,4 +579,102 @@ class ChemicalLabEnterpriseTest {
         }
         return out.toByteArray()
     }
+
+    @Test
+    fun `PvcEngine evaluateProductionReadiness enforces approval gate, stock shortage detection, and secret redaction`() {
+        val ingredients = listOf(
+            FormulationIngredient(materialId = 101L, itemCode = "RM-TIO2", name = "تيتانيوم", type = "صبغة / ملون", weight = 100.0, density = 4.2, solidsPercent = 100.0, unitCost = 4.5),
+            FormulationIngredient(materialId = 102L, itemCode = "RM-ACR", name = "راتنج أكريليك", type = "راتنج / بوليمر رابط", weight = 300.0, density = 1.06, solidsPercent = 50.0, unitCost = 2.8)
+        )
+        val factoryItems = listOf(
+            FactoryItemEntity(id = 101L, itemCode = "RM-TIO2", name = "تيتانيوم", unit = "كجم", category = "raw", unitCostEgp = 4.5),
+            FactoryItemEntity(id = 102L, itemCode = "RM-ACR", name = "راتنج أكريليك", unit = "كجم", category = "raw", unitCostEgp = 2.8)
+        )
+        val stockBalances = listOf(
+            WarehouseStockBalanceEntity(
+                warehouseId = 1L,
+                warehouseClass = WarehouseClass.RAW_MATERIALS.name,
+                itemCategory = InventoryItemCategory.RAW_MATERIAL.name,
+                itemId = 101L,
+                itemCode = "RM-TIO2",
+                itemName = "تيتانيوم",
+                availableQty = 300.0,
+                onHandQty = 300.0
+            ),
+            WarehouseStockBalanceEntity(
+                warehouseId = 1L,
+                warehouseClass = WarehouseClass.RAW_MATERIALS.name,
+                itemCategory = InventoryItemCategory.RAW_MATERIAL.name,
+                itemId = 102L,
+                itemCode = "RM-ACR",
+                itemName = "راتنج أكريليك",
+                availableQty = 200.0,
+                onHandQty = 200.0
+            )
+        )
+        val experiments = listOf(
+            LabExperimentEntity(
+                syncUuid = "exp-1",
+                experimentNo = "EXP-001",
+                formulaId = 77L,
+                formulaNo = "FORM-RDY-1",
+                productName = "طلاء اختبار",
+                experimentDate = "2026-11-19",
+                technicianName = "فني المختبر",
+                status = "PASSED"
+            )
+        )
+
+        val unapproved = FormulationEntity(
+            id = 77L,
+            formulaNo = "FORM-RDY-1",
+            productName = "طلاء اختبار",
+            approvalStatus = "NEEDS_REVIEW",
+            approvedForProduction = false,
+            versionNumber = 2
+        )
+        val blocked = PvcEngine.evaluateProductionReadiness(
+            formula = unapproved,
+            ingredients = ingredients,
+            targetWeightKg = 800.0,
+            factoryItems = factoryItems,
+            stockBalances = stockBalances,
+            experiments = experiments,
+            includeSecretBreakdown = true
+        )
+        assertFalse(blocked.isApprovedForProduction)
+        assertFalse(blocked.canReleaseToProduction)
+        assertTrue(blocked.blockingReasons.isNotEmpty())
+
+        val approved = unapproved.copy(approvalStatus = "APPROVED", approvedForProduction = true)
+        val ready = PvcEngine.evaluateProductionReadiness(
+            formula = approved,
+            ingredients = ingredients,
+            targetWeightKg = 800.0,
+            factoryItems = factoryItems,
+            stockBalances = stockBalances,
+            experiments = experiments,
+            includeSecretBreakdown = true
+        )
+        assertTrue(ready.isApprovedForProduction)
+        assertTrue(ready.canReleaseToProduction)
+        assertEquals(1, ready.passedQcCount)
+        assertEquals(1, ready.shortageCount)
+        assertFalse(ready.isStockSufficient)
+        assertEquals(2, ready.materialLines.size)
+        assertEquals(400.0, ready.materialLines[1].shortageKg, 0.01)
+
+        val redacted = PvcEngine.evaluateProductionReadiness(
+            formula = approved,
+            ingredients = ingredients,
+            targetWeightKg = 800.0,
+            factoryItems = factoryItems,
+            stockBalances = stockBalances,
+            experiments = experiments,
+            includeSecretBreakdown = false
+        )
+        assertTrue(redacted.materialLines.isEmpty())
+        assertEquals(1, redacted.shortageCount)
+    }
 }
+

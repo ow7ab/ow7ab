@@ -36,8 +36,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onNavigateRoute
 }) => {
   const { language } = useLanguage();
-  const { currentUser, loginWithEmail, loginWithUsernamePin, loginWithGoogle, requestPasswordReset, isAuthenticating } = useAuth();
-  const { latestRelease, apkAvailable } = useLatestRelease();
+  const {
+    loginWithEmail,
+    loginWithUsernamePin,
+    loginWithGoogle,
+    requestPasswordReset,
+    sessionExpiredNotice,
+    clearSessionExpiredNotice,
+    isAuthenticating
+  } = useAuth();
+  const { latestRelease } = useLatestRelease();
 
   const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('pin');
   const [email, setEmail] = useState('');
@@ -199,34 +207,24 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </div>
         </div>
 
-        {tab !== 'reset' && (
-          <div className="space-y-3">
+        {sessionExpiredNotice && (
+          <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/35 flex items-start justify-between gap-2 text-xs text-amber-400">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{sessionExpiredNotice}</span>
+            </div>
             <button
               type="button"
-              onClick={handleGoogleLogin}
-              disabled={isAuthenticating || !domainCheck.canStartFirebaseAuth}
-              className="w-full py-2.5 rounded-xl bg-white hover:bg-slate-50 text-slate-900 border border-slate-300/80 font-extrabold text-xs shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 min-h-[44px]"
+              onClick={clearSessionExpiredNotice}
+              className="text-[10px] font-bold underline shrink-0"
             >
-              <img
-                src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
-                alt="Google"
-                className="w-4 h-4"
-              />
-              <span>{language === 'ar' ? 'الدخول السريع بحساب Google المعتمد' : 'Sign in with Google Workspace'}</span>
+              {language === 'ar' ? 'إغلاق' : 'Dismiss'}
             </button>
-
-            <div className="relative flex items-center justify-center">
-              <div className="w-full border-t border-theme" />
-              <span className="px-3 bg-theme-surface text-[11px] text-theme-muted font-medium whitespace-nowrap">
-                {language === 'ar' ? 'أو باسم المستخدم فقط / البريد' : 'Or with Username Only / Email'}
-              </span>
-              <div className="w-full border-t border-theme" />
-            </div>
           </div>
         )}
 
         {tab !== 'reset' && (
-          /* Tab switch (Always visible: Username Only + Corporate Email) */
+          /* Primary Tab switch FIRST: Username Only + Corporate Email */
           <div className="grid grid-cols-2 p-1 rounded-xl bg-theme-surface border border-theme">
             <button
               type="button"
@@ -445,7 +443,32 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </form>
         )}
 
-        {/* Google SSO moved to primary CTA above */}
+        {/* Optional Secondary Google Sign-In (Bottom Alternative Only) */}
+        {tab !== 'reset' && (
+          <div className="space-y-2.5 pt-1">
+            <div className="relative flex items-center justify-center">
+              <div className="w-full border-t border-theme" />
+              <span className="px-3 bg-theme-surface text-[11px] text-theme-muted font-medium whitespace-nowrap">
+                {language === 'ar' ? 'أو خيار بديل اختياري' : 'Or optional alternative'}
+              </span>
+              <div className="w-full border-t border-theme" />
+            </div>
+            <button
+              type="button"
+              onClick={handleGoogleLogin}
+              disabled={isAuthenticating || !domainCheck.canStartFirebaseAuth}
+              data-testid="modal-google-optional-btn"
+              className="w-full py-2.5 rounded-xl bg-theme-base hover:bg-theme-surface text-theme-primary border border-theme font-bold text-xs transition-all flex items-center justify-center gap-2 disabled:opacity-50 min-h-[44px]"
+            >
+              <img
+                src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
+                alt="Google"
+                className="w-4 h-4"
+              />
+              <span>{language === 'ar' ? 'الدخول الاختياري عبر Google' : 'Optional: Sign in with Google'}</span>
+            </button>
+          </div>
+        )}
 
         {/* Official Android App Download CTA */}
         <div className="pt-3 border-t border-theme space-y-2.5">

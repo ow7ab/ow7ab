@@ -46,6 +46,7 @@ import com.example.data.local.FormulationIngredient
 import com.example.data.local.ProductionBatchEntity
 import com.example.ui.components.DailyProductionBatchModal
 import com.example.ui.components.FormulaApprovalDialog
+import com.example.ui.components.FormulaProductionReadinessDialog
 import com.example.ui.components.FormulaStatusChip
 import com.example.ui.components.FormulaVersionHistoryDialog
 import com.example.ui.components.GlassButton
@@ -212,6 +213,8 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
     val currentUser by viewModel.currentUser.collectAsState()
     val formulations by viewModel.formulations.collectAsState()
     val formulaVersions by viewModel.formulationVersions.collectAsState()
+    val labExperiments by viewModel.labExperiments.collectAsState()
+    val erpStockBalances by viewModel.erpStockBalances.collectAsState()
     val factoryItems by viewModel.factoryItems.collectAsState()
     val productionOrders by viewModel.productionOrdersDb.collectAsState(initial = emptyList())
     val activeGuardKeys by viewModel.activeGuardKeys.collectAsState()
@@ -267,6 +270,7 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
     var showVersionHistoryDialog by remember { mutableStateOf(false) }
     var showApprovalDialog by remember { mutableStateOf(false) }
     var showThreeCostDialog by remember { mutableStateOf(false) }
+    var showReadinessDialog by remember { mutableStateOf(false) }
     var formulaSearchQuery by remember { mutableStateOf("") }
     var excelPreviewState by remember { mutableStateOf<Pair<LabExcelAnalyzer.WorkbookAnalysisResult, ByteArray>?>(null) }
 
@@ -483,6 +487,12 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                                     modifier = Modifier.testTag("lab_open_approval_btn")
                                 )
                             }
+                            AssistChip(
+                                onClick = { showReadinessDialog = true },
+                                label = { Text("جاهزية الإنتاج والمخازن", fontSize = 11.sp) },
+                                leadingIcon = { Icon(Icons.Default.FactCheck, contentDescription = null, modifier = Modifier.size(15.dp), tint = Color(0xFF0D9488)) },
+                                modifier = Modifier.testTag("lab_open_readiness_btn")
+                            )
                         }
                         if (canEditFormulas) {
                             AssistChip(
@@ -1157,6 +1167,24 @@ fun PvcEngineTab(viewModel: PmpViewModel) {
                     decisionNote = note,
                     onComplete = { ok -> if (ok) showApprovalDialog = false }
                 )
+            }
+        )
+    }
+
+    // Dialog: Production Readiness & Raw Material Stock Availability Check
+    if (showReadinessDialog && selectedSavedFormula != null) {
+        FormulaProductionReadinessDialog(
+            formulation = selectedSavedFormula,
+            ingredients = ingredientsList,
+            factoryItems = factoryItems,
+            stockBalances = erpStockBalances,
+            experiments = labExperiments,
+            canViewSecrets = canViewSecrets,
+            defaultTargetWeightKg = selectedBatchScaleKg,
+            onDismiss = { showReadinessDialog = false },
+            onProceedToProductionOrder = {
+                showReadinessDialog = false
+                showProductionOrderDialog = true
             }
         )
     }

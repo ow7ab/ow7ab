@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import {
   User,
   onAuthStateChanged,
@@ -9,9 +9,9 @@ import {
   getRedirectResult,
   sendPasswordResetEmail
 } from 'firebase/auth';
-import { doc, getDoc, onSnapshot } from 'firebase/firestore';
+import { doc, onSnapshot } from 'firebase/firestore';
 import { auth, firestore, googleAuthProvider } from '../config/firebaseConfig';
-import { UserAccount, LinkedAccountDoc, UserRoleType } from '../types/erp';
+import { UserAccount, UserRoleType } from '../types/erp';
 import {
   resolveUserRoleType,
   checkActionPermission,
@@ -22,15 +22,24 @@ import { ErpDataService, safeId } from '../services/ErpDataService';
 import {
   verifyPassword,
   needsUpgradeToPbkdf2,
-  computeSessionIntegritySeal,
-  verifySessionIntegritySeal,
   LoginRateLimiter
 } from '../services/PasswordSecurity';
 import { getDesktopBridge } from '../utils/desktopBridge';
 import { safeStorageGet, safeStorageRemove, safeStorageSet } from '../utils/safeStorage';
 import { assertTrustedAuthDomain } from '../utils/authDomainGuard';
-
-const SESSION_STORAGE_KEY = 'pmp_web_portal_user';
+import {
+  SESSION_STORAGE_KEY,
+  AuthLoginMethod,
+  DeviceSessionRecord,
+  buildUsernameAuthEmailCandidates,
+  createSealedSessionJson,
+  deactivateDeviceSession,
+  getOrCreateDeviceId,
+  readDeviceSessions,
+  registerOrUpdateDeviceSession,
+  sanitizeAccountForSession,
+  verifyAndParseStoredSession
+} from '../utils/authSessionManager';
 
 function formatLockDurationAr(seconds: number): string {
   const mins = Math.max(1, Math.ceil(seconds / 60));
@@ -47,11 +56,17 @@ interface AuthContextType {
   isSuperAdmin: boolean;
   isManager: boolean;
   isEmployee: boolean;
+  currentDeviceId: string;
+  deviceSessions: DeviceSessionRecord[];
+  sessionExpiredNotice: string | null;
+  clearSessionExpiredNotice: () => void;
   canAccessModule: (moduleName: string) => boolean;
   canPerformAction: (actionToken: string) => boolean;
   loginWithEmail: (email: string, pass: string) => Promise<void>;
   loginWithUsernamePin: (username: string, pin: string) => Promise<void>;
   loginWithGoogle: () => Promise<void>;
+  switchAccount: (identifier: string, secret: string) => Promise<UserAccount>;
+  revokeDeviceSession: (deviceId: string) => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
   updateCurrentUserProfile: (data: Partial<UserAccount>) => Promise<void>;
@@ -67,11 +82,19 @@ const AuthContext = createContext<AuthContextType>({
   isSuperAdmin: false,
   isManager: false,
   isEmployee: true,
+  currentDeviceId: '',
+  deviceSessions: [],
+  sessionExpiredNotice: null,
+  clearSessionExpiredNotice: () => {},
   canAccessModule: () => false,
   canPerformAction: () => false,
   loginWithEmail: async () => {},
   loginWithUsernamePin: async () => {},
   loginWithGoogle: async () => {},
+  switchAccount: async () => {
+    throw new Error('AuthProvider not initialized');
+  },
+  revokeDeviceSession: async () => {},
   requestPasswordReset: async () => {},
   signOut: async () => {},
   updateCurrentUserProfile: async () => {}
@@ -80,94 +103,138 @@ const AuthContext = createContext<AuthContextType>({
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [linkedAccount, setLinkedAccount] = useState<UserAccount | null>(null);
-
   const [isLoading, setIsLoading] = useState(true);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [currentDeviceId] = useState<string>(() => getOrCreateDeviceId());
+  const [deviceSessions, setDeviceSessions] = useState<DeviceSessionRecord[]>(() => readDeviceSessions());
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState<string | null>(null);
 
-  const persistSession = (account: UserAccount | null) => {
-    if (account) {
-      const issuedAt = Date.now();
-      const sanitized: UserAccount = {
-        ...account,
-        pinOrPassword: undefined, // Never persist secret hashes into localStorage
-        roleType: resolveUserRoleType(account)
-      };
-      setLinkedAccount(sanitized);
-      void computeSessionIntegritySeal({
-        userCode: sanitized.userCode,
-        username: sanitized.username,
-        role: sanitized.role,
-        roleType: sanitized.roleType,
-        branch: sanitized.branch,
-        permissions: sanitized.permissions,
-        active: sanitized.active,
-        syncStatus: sanitized.syncStatus,
-        serverSyncToken: sanitized.serverSyncToken,
-        issuedAt
-      })
-        .then((seal) => {
-          const payloadStr = JSON.stringify({
-            ...sanitized,
-            _issuedAt: issuedAt,
-            _integritySeal: seal
+  // Refs eliminate stale closures in onAuthStateChanged & prevent race conditions on switch/logout/double-submit
+  const linkedAccountRef = useRef<UserAccount | null>(null);
+  const explicitSignOutRef = useRef<boolean>(false);
+  const isSubmittingRef = useRef<boolean>(false);
+
+  const clearSessionExpiredNotice = useCallback(() => {
+    setSessionExpiredNotice(null);
+  }, []);
+
+  const persistSession = useCallback(
+    (account: UserAccount | null, loginMethod: AuthLoginMethod = 'USERNAME_PIN') => {
+      if (account) {
+        explicitSignOutRef.current = false;
+        const issuedAt = Date.now();
+        const sanitized = sanitizeAccountForSession(account);
+        linkedAccountRef.current = sanitized;
+        setLinkedAccount(sanitized);
+        setSessionExpiredNotice(null);
+        setDeviceSessions(registerOrUpdateDeviceSession(sanitized, loginMethod, currentDeviceId, issuedAt));
+
+        void createSealedSessionJson(sanitized, issuedAt, loginMethod, currentDeviceId)
+          .then((payloadStr) => {
+            safeStorageSet(SESSION_STORAGE_KEY, payloadStr);
+            const desktopBridge = getDesktopBridge();
+            if (desktopBridge) {
+              void desktopBridge.secureStorageSet(SESSION_STORAGE_KEY, payloadStr).catch(() => {});
+            }
+          })
+          .catch(() => {
+            safeStorageRemove(SESSION_STORAGE_KEY);
+            const desktopBridge = getDesktopBridge();
+            if (desktopBridge) {
+              void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
+            }
           });
-          safeStorageSet(SESSION_STORAGE_KEY, payloadStr);
-          const desktopBridge = getDesktopBridge();
-          if (desktopBridge) {
-            void desktopBridge.secureStorageSet(SESSION_STORAGE_KEY, payloadStr).catch(() => {});
-          }
-        })
-        .catch(() => {
-          safeStorageRemove(SESSION_STORAGE_KEY);
-          const desktopBridge = getDesktopBridge();
-          if (desktopBridge) {
-            void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
-          }
-        });
-    } else {
-      setLinkedAccount(null);
-      safeStorageRemove(SESSION_STORAGE_KEY);
-      const desktopBridge = getDesktopBridge();
-      if (desktopBridge) {
-        void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
+      } else {
+        linkedAccountRef.current = null;
+        setLinkedAccount(null);
+        safeStorageRemove(SESSION_STORAGE_KEY);
+        const desktopBridge = getDesktopBridge();
+        if (desktopBridge) {
+          void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
+        }
       }
-    }
-  };
+    },
+    [currentDeviceId]
+  );
 
-  // Restore cached session ONLY if its cryptographic integrity seal is valid
+  // Restore cached session ONLY if its cryptographic integrity seal & TTL are valid
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const validateStoredSession = async () => {
       try {
         let saved = safeStorageGet(SESSION_STORAGE_KEY);
         const desktopBridge = getDesktopBridge();
         if (!saved && desktopBridge) {
           saved = await desktopBridge.secureStorageGet(SESSION_STORAGE_KEY).catch(() => null);
         }
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          const sealOk = await verifySessionIntegritySeal(parsed);
-          if (sealOk && parsed?.userCode && parsed.active !== false && !cancelled) {
-            const cleanAccount: UserAccount = { ...parsed };
-            delete (cleanAccount as any)._integritySeal;
-            delete (cleanAccount as any)._issuedAt;
-            cleanAccount.roleType = resolveUserRoleType(cleanAccount);
-            setLinkedAccount(cleanAccount);
-          } else {
-            safeStorageRemove(SESSION_STORAGE_KEY);
-            if (desktopBridge) {
-              void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
-            }
+        const restored = await verifyAndParseStoredSession(saved);
+        if (cancelled) return;
+
+        if (restored.status === 'VALID' && restored.account) {
+          linkedAccountRef.current = restored.account;
+          setLinkedAccount(restored.account);
+          setDeviceSessions(
+            registerOrUpdateDeviceSession(
+              restored.account,
+              restored.loginMethod || 'USERNAME_PIN',
+              restored.deviceId || currentDeviceId
+            )
+          );
+        } else if (restored.status === 'EXPIRED') {
+          safeStorageRemove(SESSION_STORAGE_KEY);
+          if (desktopBridge) {
+            void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
+          }
+          if (linkedAccountRef.current) {
+            linkedAccountRef.current = null;
+            setLinkedAccount(null);
+          }
+          setDeviceSessions(deactivateDeviceSession(currentDeviceId));
+          setSessionExpiredNotice('انتهت صلاحية جلسة العمل الحالية لأسباب أمنية. يرجى تسجيل الدخول مجدداً.');
+        } else if (restored.status === 'INVALID') {
+          safeStorageRemove(SESSION_STORAGE_KEY);
+          if (desktopBridge) {
+            void desktopBridge.secureStorageRemove(SESSION_STORAGE_KEY).catch(() => {});
+          }
+          if (linkedAccountRef.current) {
+            linkedAccountRef.current = null;
+            setLinkedAccount(null);
           }
         }
       } catch {
         safeStorageRemove(SESSION_STORAGE_KEY);
       }
-    })();
+    };
+
+    void validateStoredSession();
+
+    // Re-check session expiry when tab regains focus or visibility
+    const onVisibilityOrFocus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (linkedAccountRef.current) {
+        void validateStoredSession();
+      }
+    };
+    const intervalId = setInterval(() => {
+      if (linkedAccountRef.current) {
+        void validateStoredSession();
+      }
+    }, 5 * 60 * 1000);
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', onVisibilityOrFocus);
+      document.addEventListener('visibilitychange', onVisibilityOrFocus);
+    }
+
     return () => {
       cancelled = true;
+      clearInterval(intervalId);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', onVisibilityOrFocus);
+        document.removeEventListener('visibilitychange', onVisibilityOrFocus);
+      }
     };
-  }, []);
+  }, [currentDeviceId]);
 
   // Start global tombstone & epoch sync ONLY when Firebase Auth session is active
   useEffect(() => {
@@ -176,17 +243,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsubTomb();
   }, [currentUser?.uid]);
 
-  // Firebase Auth listener + Google redirect completion + live verification via zero-trust self-lookup
+  // Firebase Auth listener + optional Google redirect completion + zero-trust session sync
+  // Uses linkedAccountRef & explicitSignOutRef so switching accounts or signing out NEVER bounces back
   useEffect(() => {
     void getRedirectResult(auth).catch(() => null);
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
-      if (user && !linkedAccount) {
+      if (user && !linkedAccountRef.current && !explicitSignOutRef.current) {
         try {
           const matched = await AccountService.findSignedInUserAccount(user);
-          if (matched && matched.active && matched.syncStatus !== 'PENDING_MANAGER_APPROVAL') {
+          if (
+            matched &&
+            matched.active &&
+            matched.syncStatus !== 'PENDING_MANAGER_APPROVAL' &&
+            !linkedAccountRef.current &&
+            !explicitSignOutRef.current
+          ) {
             await AccountService.ensureOwnClusterMemberRegistration(matched, user.uid, user.email).catch(() => {});
-            persistSession(matched);
+            persistSession(matched, 'EMAIL_PASSWORD');
             setIsLoading(false);
             return;
           }
@@ -198,7 +272,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [persistSession]);
 
   // Live session security listener: watches Firestore user_accounts & deleted_users so suspended/deleted/spoofed sessions terminate immediately
   useEffect(() => {
@@ -212,6 +286,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       deletedRef,
       (snap) => {
         if (snap.exists()) {
+          setSessionExpiredNotice('تم إلغاء هذا الحساب من قبل مدير النظام. تم إنهاء الجلسة.');
           persistSession(null);
         }
       },
@@ -221,7 +296,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const unsub = onSnapshot(
       userRef,
       (snap) => {
-        // Authoritative server check: if the user doc does not exist on Firestore (except cached latency, check fromCache), terminate spoofed/deleted sessions
         if (!snap.exists()) {
           if (!snap.metadata.fromCache) {
             persistSession(null);
@@ -230,30 +304,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         const d = snap.data() || {};
         if (d.active === false || d.syncStatus === 'PENDING_MANAGER_APPROVAL') {
+          setSessionExpiredNotice('تم تجميد الحساب أو تعليق صلاحياته من قبل الإدارة.');
           persistSession(null);
           return;
         }
+        const currentAcc = linkedAccountRef.current;
+        if (!currentAcc || currentAcc.userCode !== linkedAccount.userCode) return;
+
         const refreshed: UserAccount = {
-          ...linkedAccount,
-          fullName: d.fullName || linkedAccount.fullName,
-          username: d.username || linkedAccount.username,
-          phoneOrEmail: d.phoneOrEmail ?? linkedAccount.phoneOrEmail,
-          role: d.role || linkedAccount.role,
-          branch: d.branch || linkedAccount.branch,
-          permissions: d.permissions ?? linkedAccount.permissions,
+          ...currentAcc,
+          fullName: d.fullName || currentAcc.fullName,
+          username: d.username || currentAcc.username,
+          phoneOrEmail: d.phoneOrEmail ?? currentAcc.phoneOrEmail,
+          role: d.role || currentAcc.role,
+          branch: d.branch || currentAcc.branch,
+          permissions: d.permissions ?? currentAcc.permissions,
           syncStatus: d.syncStatus || 'APPROVED_BY_MANAGER',
           active: d.active !== false
         };
         refreshed.roleType = resolveUserRoleType(refreshed);
-        // Always sync authoritative role/permissions/branch/name from server
         if (
-          refreshed.permissions !== linkedAccount.permissions ||
-          refreshed.role !== linkedAccount.role ||
-          refreshed.branch !== linkedAccount.branch ||
-          refreshed.fullName !== linkedAccount.fullName ||
-          refreshed.username !== linkedAccount.username
+          refreshed.permissions !== currentAcc.permissions ||
+          refreshed.role !== currentAcc.role ||
+          refreshed.branch !== currentAcc.branch ||
+          refreshed.fullName !== currentAcc.fullName ||
+          refreshed.username !== currentAcc.username
         ) {
-          persistSession(refreshed);
+          persistSession(refreshed, 'USERNAME_PIN');
         }
       },
       () => {}
@@ -263,7 +340,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       unsub();
       unsubDeleted();
     };
-  }, [linkedAccount?.userCode, currentUser?.uid]);
+  }, [linkedAccount?.userCode, currentUser?.uid, persistSession]);
 
   const userRoleType: UserRoleType = resolveUserRoleType(linkedAccount);
   const isSuperAdmin = userRoleType === 'SUPER_ADMIN';
@@ -287,7 +364,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  /**
+   * Primary original login flow: Username / Employee Code + Password or PIN.
+   * Works independently without forcing Google Sign-In first.
+   */
   const loginWithUsernamePin = async (userVal: string, pinVal: string) => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setIsAuthenticating(true);
     try {
       const cleanUser = (userVal || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 64);
@@ -308,18 +391,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
-      // If no active Firebase Auth session exists yet, verify trusted origin first
-      // and try Firebase Email/Password auth automatically for username-only or email inputs.
+      // If no active Firebase Auth session exists yet, establish one directly via corporate email/password alias
+      // without ever forcing Google Sign-In as a prerequisite.
       if (!auth.currentUser) {
         assertTrustedAuthDomain();
-        const lowerUser = cleanUser.toLowerCase();
-        const candidateEmails: string[] = lowerUser.includes('@')
-          ? [lowerUser]
-          : lowerUser === 'admin' || lowerUser === 'usr-admin' || lowerUser === 'usr-hq-001'
-          ? ['admin@pmp-paints.com', 'oaw7ab@gmail.com']
-          : /^[a-z0-9._-]+$/.test(lowerUser)
-          ? [`${lowerUser}@pmp-paints.com`]
-          : [];
+        const candidateEmails = buildUsernameAuthEmailCandidates(cleanUser);
 
         let signedInFbUser: User | null = null;
         let lastFbErr: any = null;
@@ -330,7 +406,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             break;
           } catch (err: any) {
             lastFbErr = err;
-            // Try next candidate or fall through to clear guidance
           }
         }
         if (!signedInFbUser && lastFbErr?.code === 'auth/unauthorized-domain') {
@@ -358,16 +433,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             await ErpDataService.logAudit(
               matchedViaFb.username,
               'WEB_LOGIN_SUCCESS',
-              `دخول ناجح للويب (${matchedViaFb.role} - ${matchedViaFb.branch})`
+              `دخول ناجح باسم المستخدم (${matchedViaFb.role} - ${matchedViaFb.branch})`
             );
-            persistSession(matchedViaFb);
+            persistSession(matchedViaFb, 'USERNAME_PIN');
             return;
           }
+          // If Firebase signed in but profile wasn't resolved by email, fall through to direct Firestore user lookup below
+        } else {
+          const rl = LoginRateLimiter.recordFailure(cleanUser);
+          if (rl.locked) {
+            throw new Error(
+              `تم تجاوز الحد المسموح للمحاولات. تم إيقاف الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
+            );
+          }
+          if (lastFbErr?.code === 'auth/network-request-failed') {
+            throw new Error('تعذر الاتصال بخادم المصادقة. تأكد من اتصال الإنترنت ثم أعد المحاولة.');
+          }
+          throw new Error(
+            'تعذر التحقق من اسم المستخدم والرمز السري. تأكد من صحة البيانات، أو استخدم تبويب البريد الإلكتروني وكلمة المرور.'
+          );
         }
-
-        throw new Error(
-          'للدخول الآمن إلى السحابة، اضغط على زر «تسجيل الدخول عبر Google» أعلاه (نفس حسابك في تطبيق الأندرويد)، أو استخدم بريدك الإلكتروني وكلمة مرور Firebase.'
-        );
       }
 
       const matched = await AccountService.findAccountForLogin(cleanUser);
@@ -385,7 +470,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const storedSecret = (matched.pinOrPassword || '').trim();
       if (!storedSecret) {
-        throw new Error('لم يتم تعيين رمز سري لهذا الحساب. يرجى ضبط كلمة المرور من إدارة المستخدمين أو الدخول عبر Google.');
+        throw new Error('لم يتم تعيين رمز سري أو كلمة مرور لهذا الحساب. يرجى ضبطها من إدارة المستخدمين.');
       }
 
       const verified = await verifyPassword(cleanPin, storedSecret);
@@ -418,13 +503,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         'WEB_LOGIN_SUCCESS',
         `دخول ناجح للويب (${matched.role} - ${matched.branch})`
       );
-      persistSession(matched);
+      persistSession(matched, 'USERNAME_PIN');
     } finally {
+      isSubmittingRef.current = false;
       setIsAuthenticating(false);
     }
   };
 
+  /**
+   * Standard Email + Password login flow (completely independent of Google Sign-In).
+   */
   const loginWithEmail = async (emailVal: string, passVal: string) => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setIsAuthenticating(true);
     try {
       const cleanEmail = (emailVal || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().toLowerCase().slice(0, 120);
@@ -445,20 +536,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
-      // 1. Check Firebase Auth (supports direct corporate email OR primary admin alias)
       let fbCredUser: User | null = null;
       let fbAuthError: any = null;
-      const emailCandidates = cleanEmail.includes('@')
-        ? [cleanEmail]
-        : cleanEmail === 'admin' || cleanEmail === 'usr-admin' || cleanEmail === 'usr-hq-001'
-        ? ['admin@pmp-paints.com', 'oaw7ab@gmail.com']
-        : [];
+      const emailCandidates = buildUsernameAuthEmailCandidates(cleanEmail);
 
       if (emailCandidates.length === 0) {
-        throw new Error('يرجى إدخال بريد إلكتروني صحيح أو استخدام زر «تسجيل الدخول عبر Google» أعلاه.');
+        throw new Error('يرجى إدخال بريد إلكتروني صحيح أو استخدام تبويب اسم المستخدم والرمز السري.');
       }
 
-      // Pre-flight trusted domain check before invoking Firebase Auth
       assertTrustedAuthDomain();
 
       for (const candidate of emailCandidates) {
@@ -471,7 +556,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // 2. Resolve employee profile via zero-trust self-lookup when Firebase Auth succeeded
       if (fbCredUser) {
         await AccountService.ensureOwnClusterMemberRegistration(null, fbCredUser.uid, fbCredUser.email || cleanEmail).catch(() => {});
         const matched = await AccountService.findSignedInUserAccount(fbCredUser);
@@ -480,34 +564,137 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           await AccountService.ensureOwnClusterMemberRegistration(matched, fbCredUser.uid, fbCredUser.email || cleanEmail).catch(() => {});
           LoginRateLimiter.recordSuccess(cleanEmail);
           await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${fbCredUser.email || cleanEmail}`);
-          persistSession(matched);
+          persistSession(matched, 'EMAIL_PASSWORD');
           return;
         }
         throw new Error('تم التحقق من البريد ولكن الحساب غير مرتبط بسجل موظف معتمد في المنظومة.');
       }
 
-      // If Firebase Auth did not sign in, surface clear auth error without unauthenticated Firestore list
-      LoginRateLimiter.recordFailure(cleanEmail);
+      const rl = LoginRateLimiter.recordFailure(cleanEmail);
+      if (rl.locked) {
+        throw new Error(
+          `تم تجاوز الحد المسموح للمحاولات. تم إيقاف الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
+        );
+      }
       throw new Error(
         fbAuthError?.code === 'auth/wrong-password' || fbAuthError?.code === 'auth/invalid-credential'
-          ? 'بيانات البريد أو كلمة المرور غير مطابقة في Firebase Auth. إذا كان حسابك مرتبطاً بـ Google، استخدم زر «تسجيل الدخول عبر Google» أعلاه.'
+          ? 'بيانات البريد الإلكتروني أو كلمة المرور غير صحيحة. يرجى التحقق والمحاولة مرة أخرى.'
           : fbAuthError?.code === 'auth/user-not-found'
-          ? 'هذا البريد غير مفعّل بكلمة مرور — اضغط على زر «تسجيل الدخول عبر Google» أعلاه للدخول مباشرة.'
+          ? 'لا يوجد حساب مفعّل بكلمة مرور لهذا البريد الإلكتروني. تحقق من العنوان أو راجع مدير النظام.'
           : fbAuthError?.code === 'auth/operation-not-allowed'
-          ? 'الدخول بالبريد وكلمة المرور غير مفعّل في إعدادات المشروع — استخدم زر «تسجيل الدخول عبر Google» أعلاه.'
+          ? 'تسجيل الدخول بالبريد وكلمة المرور غير مفعّل حالياً في إعدادات المشروع.'
           : fbAuthError?.code === 'auth/network-request-failed'
           ? 'تعذر الاتصال بخادم المصادقة. تأكد من اتصال الإنترنت ثم أعد المحاولة.'
-          : 'تعذر التحقق من البريد الإلكتروني وكلمة المرور. يرجى استخدام زر «تسجيل الدخول عبر Google» أعلاه.'
+          : 'تعذر التحقق من البريد الإلكتروني وكلمة المرور. يرجى التحقق من البيانات والمحاولة مجدداً.'
       );
     } finally {
+      isSubmittingRef.current = false;
       setIsAuthenticating(false);
     }
   };
 
-  const loginWithGoogle = async () => {
+  /**
+   * Safe account switching for shared workstations / managers switching roles
+   * without bouncing back to the previous account on reload or auth callbacks.
+   */
+  const switchAccount = async (identifier: string, secret: string): Promise<UserAccount> => {
+    if (isSubmittingRef.current) {
+      throw new Error('جاري تنفيذ عملية مصادقة حالياً، يرجى الانتظار.');
+    }
+    isSubmittingRef.current = true;
     setIsAuthenticating(true);
     try {
-      // Pre-flight trusted domain & HTTPS verification before starting Firebase Auth flow
+      const cleanId = (identifier || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 120);
+      const cleanSecret = (secret || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 128);
+      if (!cleanId || !cleanSecret) {
+        throw new Error('يرجى إدخال اسم المستخدم أو الكود والرمز السري للتبديل.');
+      }
+
+      const lockStatus = LoginRateLimiter.checkLockStatus(cleanId);
+      if (lockStatus.locked) {
+        throw new Error(
+          `تم تعليق محاولات الدخول مؤقتاً لهذا الحساب لمدة ${formatLockDurationAr(lockStatus.remainingSeconds)}.`
+        );
+      }
+
+      const previousActor = linkedAccountRef.current?.username || 'UNKNOWN';
+      let targetAccount: UserAccount | null = null;
+
+      if (auth.currentUser) {
+        targetAccount = await AccountService.findAccountForLogin(cleanId);
+        if (targetAccount) {
+          validateAccountAccessState(targetAccount);
+          const storedSecret = (targetAccount.pinOrPassword || '').trim();
+          if (!storedSecret) {
+            throw new Error('لم يتم تعيين رمز سري أو كلمة مرور لهذا الحساب.');
+          }
+          const ok = await verifyPassword(cleanSecret, storedSecret);
+          if (!ok) {
+            const rl = LoginRateLimiter.recordFailure(cleanId);
+            throw new Error(
+              rl.locked
+                ? `تم قفل المحاولات مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
+                : `الرمز السري غير صحيح (متبقي ${rl.attemptsRemaining} محاولات).`
+            );
+          }
+          if (needsUpgradeToPbkdf2(storedSecret)) {
+            AccountService.updateOwnProfile(targetAccount, { rawNewPassword: cleanSecret }).catch(() => {});
+          }
+        }
+      }
+
+      // If not found in active workstation context (or no Firebase user), attempt direct Email/Password auth
+      if (!targetAccount) {
+        assertTrustedAuthDomain();
+        const candidates = buildUsernameAuthEmailCandidates(cleanId);
+        let switchedFbUser: User | null = null;
+        for (const emailCand of candidates) {
+          try {
+            const cred = await signInWithEmailAndPassword(auth, emailCand, cleanSecret);
+            switchedFbUser = cred.user;
+            break;
+          } catch {
+            // Try next candidate
+          }
+        }
+        if (!switchedFbUser) {
+          const rl = LoginRateLimiter.recordFailure(cleanId);
+          throw new Error(
+            rl.locked
+              ? `تم قفل المحاولات مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
+              : 'تعذر التحقق من بيانات الحساب المستهدف. تأكد من اسم المستخدم والرمز السري.'
+          );
+        }
+        await AccountService.ensureOwnClusterMemberRegistration(null, switchedFbUser.uid, switchedFbUser.email).catch(() => {});
+        targetAccount = await AccountService.findSignedInUserAccount(switchedFbUser);
+        if (!targetAccount) {
+          throw new Error('الحساب غير مرتبط بسجل موظف معتمد في المنظومة.');
+        }
+        validateAccountAccessState(targetAccount);
+      }
+
+      LoginRateLimiter.recordSuccess(cleanId);
+      persistSession(targetAccount, 'ACCOUNT_SWITCH');
+      await ErpDataService.logAudit(
+        targetAccount.username,
+        'WEB_ACCOUNT_SWITCH',
+        `تبديل الجلسة من (${previousActor}) إلى (${targetAccount.username} - ${targetAccount.role})`
+      );
+      return sanitizeAccountForSession(targetAccount);
+    } finally {
+      isSubmittingRef.current = false;
+      setIsAuthenticating(false);
+    }
+  };
+
+  /**
+   * Optional secondary Google Sign-In flow (never required before Username/Email login).
+   */
+  const loginWithGoogle = async () => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setIsAuthenticating(true);
+    try {
       assertTrustedAuthDomain();
       googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
       let res;
@@ -520,12 +707,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return;
         }
         if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-          throw new Error('تم إلغاء نافذة تسجيل الدخول عبر Google. يمكنك المحاولة مرة أخرى.');
+          throw new Error('تم إلغاء نافذة تسجيل الدخول عبر Google. يمكنك الدخول باسم المستخدم أو البريد الإلكتروني.');
         }
         if (code === 'auth/unauthorized-domain') {
           const host = typeof window !== 'undefined' ? window.location.hostname : '';
           throw new Error(
-            `النطاق الحالي (${host}) غير مضاف في النطاقات المصرح بها في Firebase Auth (Authorized Domains). يرجى إضافته من لوحة Firebase أو استخدام النطاق الرسمي المعتمد.`
+            `النطاق الحالي (${host}) غير مضاف في النطاقات المصرح بها في Firebase Auth (Authorized Domains). يمكنك الدخول بالبريد الإلكتروني أو إضافة النطاق من لوحة Firebase.`
           );
         }
         throw popupErr;
@@ -537,7 +724,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error('لم يتم استلام البريد الإلكتروني من حساب Google.');
       }
 
-      // CRITICAL: Bootstrap/recover cluster_members/{uid} BEFORE reading user_accounts
       await AccountService.ensureOwnClusterMemberRegistration(null, fbUser.uid, email).catch(() => {});
       const matched = await AccountService.findSignedInUserAccount(fbUser);
       if (matched) {
@@ -546,18 +732,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           await AccountService.ensureOwnClusterMemberRegistration(matched, fbUser.uid, email).catch(() => {});
         }
         LoginRateLimiter.recordSuccess(email);
-        await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_GOOGLE', `تسجيل دخول عبر Google (${email})`);
-        persistSession(matched);
+        await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_GOOGLE', `تسجيل دخول اختياري عبر Google (${email})`);
+        persistSession(matched, 'GOOGLE_OPTIONAL');
         return;
       }
 
-      // Not yet approved in user_accounts -> submit pending request matching Android Google Sign-In flow
       await AccountService.submitPendingGoogleRequest(email, fbUser.displayName || email.split('@')[0]);
       await fbSignOut(auth).catch(() => {});
       throw new Error(
         'تم تسجيل طلب ربط حساب Google بنجاح. الحساب حالياً بانتظار موافقة مدير النظام وتحديد الصلاحيات.'
       );
     } finally {
+      isSubmittingRef.current = false;
       setIsAuthenticating(false);
     }
   };
@@ -570,8 +756,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const signOut = async () => {
-    await fbSignOut(auth).catch(() => {});
+    explicitSignOutRef.current = true;
+    const prevUser = linkedAccountRef.current?.username;
+    if (prevUser) {
+      await ErpDataService.logAudit(prevUser, 'WEB_LOGOUT', `تسجيل خروج من الجهاز ${currentDeviceId}`).catch(() => {});
+    }
+    setDeviceSessions(deactivateDeviceSession(currentDeviceId));
     persistSession(null);
+    await fbSignOut(auth).catch(() => {});
+  };
+
+  const revokeDeviceSession = async (deviceId: string) => {
+    setDeviceSessions(deactivateDeviceSession(deviceId));
+    if (deviceId === currentDeviceId) {
+      await signOut();
+    }
   };
 
   const updateCurrentUserProfile = async (data: Partial<UserAccount>) => {
@@ -584,7 +783,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lastLoginAt: data.lastLoginAt ?? linkedAccount.lastLoginAt
     };
     updated.roleType = resolveUserRoleType(updated);
-    persistSession(updated);
+    persistSession(updated, 'USERNAME_PIN');
     await AccountService.updateOwnProfile(updated, {
       fullName: updated.fullName,
       phoneOrEmail: updated.phoneOrEmail,
@@ -604,11 +803,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isSuperAdmin,
         isManager,
         isEmployee,
+        currentDeviceId,
+        deviceSessions,
+        sessionExpiredNotice,
+        clearSessionExpiredNotice,
         canAccessModule,
         canPerformAction,
         loginWithEmail,
         loginWithUsernamePin,
         loginWithGoogle,
+        switchAccount,
+        revokeDeviceSession,
         requestPasswordReset,
         signOut,
         updateCurrentUserProfile
