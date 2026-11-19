@@ -254,6 +254,9 @@ class PmpRepository(
         val safeRef = reference.trim().ifBlank { "REC-${System.currentTimeMillis() % 1000000}" }
         val safeDesc = description.trim().ifBlank { "حركة $direction نقدية في $cashbox" }
 
+        val nowMs = System.currentTimeMillis()
+        val freshUuid = java.util.UUID.randomUUID().toString()
+        val uniqueDocId = "MOV-${nowMs}-${freshUuid.take(8)}"
         val movementEntity = MovementEntity(
             txDate = date,
             cashbox = cashbox,
@@ -263,10 +266,15 @@ class PmpRepository(
             description = safeDesc,
             reference = safeRef,
             createdBy = user,
-            syncUuid = java.util.UUID.randomUUID().toString(),
-            updatedAt = System.currentTimeMillis()
+            createdAt = nowMs,
+            cloudDocId = uniqueDocId,
+            syncUuid = freshUuid,
+            updatedAt = nowMs
         )
         val id = dao.insertMovement(movementEntity)
+        DeletedRecordsRegistry.unregisterDeleted("movements", uniqueDocId)
+        DeletedRecordsRegistry.unregisterDeleted("movements", safeRef)
+        DeletedRecordsRegistry.unregisterDeleted("movements", freshUuid)
         accountingEngine?.postTreasuryMovementJournalInternal(movementEntity.copy(id = id))
         dao.insertAuditLog(
             AuditLogEntity(
@@ -387,7 +395,10 @@ class PmpRepository(
             lastPaymentId = payId
         }
 
-        val ref = "PAY-CUST-$customerId-${System.currentTimeMillis() % 100000}"
+        val nowMs = System.currentTimeMillis()
+        val ref = "PAY-CUST-$customerId-${nowMs % 100000}"
+        val freshUuid = java.util.UUID.randomUUID().toString()
+        val uniqueDocId = "MOV-${nowMs}-${freshUuid.take(8)}"
         val movId = dao.insertMovement(
             MovementEntity(
                 txDate = date,
@@ -398,10 +409,15 @@ class PmpRepository(
                 description = "تحصيل وسداد دفعة من العميل: $customerName ${if (note.isNotBlank()) "• $note" else ""}",
                 reference = ref,
                 createdBy = user,
-                syncUuid = java.util.UUID.randomUUID().toString(),
-                updatedAt = System.currentTimeMillis()
+                createdAt = nowMs,
+                cloudDocId = uniqueDocId,
+                syncUuid = freshUuid,
+                updatedAt = nowMs
             )
         )
+        DeletedRecordsRegistry.unregisterDeleted("movements", uniqueDocId)
+        DeletedRecordsRegistry.unregisterDeleted("movements", ref)
+        DeletedRecordsRegistry.unregisterDeleted("movements", freshUuid)
         accountingEngine?.postCustomerPaymentJournalInternal(
             paymentId = if (lastPaymentId > 0L) lastPaymentId else movId,
             referenceDocNo = ref,
@@ -458,6 +474,9 @@ class PmpRepository(
         val fullDescription = if (description.isNotBlank()) "$description [اتجاه الصرف: $rateDirectionText]" else "[اتجاه الصرف: $rateDirectionText]"
 
         // 1. Record Outgoing Movement on Source
+        val nowMs = System.currentTimeMillis()
+        val outUuid = java.util.UUID.randomUUID().toString()
+        val outDocId = "MOV-${nowMs}-${outUuid.take(8)}"
         dao.insertMovement(
             MovementEntity(
                 txDate = date,
@@ -467,11 +486,17 @@ class PmpRepository(
                 amount = sourceAmount,
                 description = "تحويل صادر $reference إلى $destinationCashbox: $fullDescription",
                 reference = "TRF:$reference:OUT",
-                createdBy = user
+                createdBy = user,
+                createdAt = nowMs,
+                cloudDocId = outDocId,
+                syncUuid = outUuid,
+                updatedAt = nowMs
             )
         )
 
         // 2. Record Incoming Movement on Destination
+        val inUuid = java.util.UUID.randomUUID().toString()
+        val inDocId = "MOV-${nowMs + 1}-${inUuid.take(8)}"
         dao.insertMovement(
             MovementEntity(
                 txDate = date,
@@ -481,7 +506,11 @@ class PmpRepository(
                 amount = destinationAmount,
                 description = "تحويل وارد $reference من $sourceCashbox: $fullDescription",
                 reference = "TRF:$reference:IN",
-                createdBy = user
+                createdBy = user,
+                createdAt = nowMs + 1,
+                cloudDocId = inDocId,
+                syncUuid = inUuid,
+                updatedAt = nowMs + 1
             )
         )
 
@@ -790,6 +819,8 @@ class PmpRepository(
                     createdBy = user
                 )
             )
+            val payMovNow = System.currentTimeMillis()
+            val payMovUuid = java.util.UUID.randomUUID().toString()
             dao.insertMovement(
                 MovementEntity(
                     txDate = date,
@@ -799,7 +830,11 @@ class PmpRepository(
                     amount = actualPay,
                     description = "دفعة فاتورة $invoiceNumber - $customerName",
                     reference = "INV:$invoiceNumber:P$payId",
-                    createdBy = user
+                    createdBy = user,
+                    createdAt = payMovNow,
+                    cloudDocId = "MOV-${payMovNow}-${payMovUuid.take(8)}",
+                    syncUuid = payMovUuid,
+                    updatedAt = payMovNow
                 )
             )
             accountingEngine?.postCustomerPaymentJournalInternal(
@@ -869,6 +904,8 @@ class PmpRepository(
             )
         )
 
+        val payMovNow = System.currentTimeMillis()
+        val payMovUuid = java.util.UUID.randomUUID().toString()
         dao.insertMovement(
             MovementEntity(
                 txDate = date,
@@ -878,7 +915,11 @@ class PmpRepository(
                 amount = amount,
                 description = "دفعة فاتورة $invoiceNo - $customerName: $note",
                 reference = "INV:$invoiceNo:P$payId",
-                createdBy = user
+                createdBy = user,
+                createdAt = payMovNow,
+                cloudDocId = "MOV-${payMovNow}-${payMovUuid.take(8)}",
+                syncUuid = payMovUuid,
+                updatedAt = payMovNow
             )
         )
         accountingEngine?.postCustomerPaymentJournalInternal(
@@ -958,6 +999,8 @@ class PmpRepository(
                     )
                 )
                 if (payment.cashbox.isNotBlank() && !payment.cashbox.contains("تسوية إدارية")) {
+                    val revNow = System.currentTimeMillis()
+                    val revUuid = java.util.UUID.randomUUID().toString()
                     dao.insertMovement(
                         MovementEntity(
                             txDate = reversalDate,
@@ -967,7 +1010,11 @@ class PmpRepository(
                             amount = payment.amount,
                             description = "قيد عكسي لاسترداد دفعة فاتورة ملغاة ${invoice.invoiceNo} - ${invoice.customerName}: $cleanReason",
                             reference = "REV:${invoice.invoiceNo}:P${payment.id}",
-                            createdBy = user
+                            createdBy = user,
+                            createdAt = revNow,
+                            cloudDocId = "MOV-${revNow}-${revUuid.take(8)}",
+                            syncUuid = revUuid,
+                            updatedAt = revNow
                         )
                     )
                 }

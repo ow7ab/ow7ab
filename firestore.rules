@@ -285,7 +285,7 @@ service cloud.firestore {
           data.updatedAt is timestamp;
       }
 
-      allow get: if isSignedIn() && (resource == null || isAccountOwner() || isLinkedEmployee());
+      allow get: if isAccountOwner() || isLinkedEmployee();
       allow list: if isAccountOwner() || isLinkedEmployee();
       allow create: if isValidId(accountCode) && isValidLinkedAccountCreate(accountCode);
       allow update: if isValidId(accountCode) && (isValidManagerUpdate() || isValidEmployeeSyncUpdate());
@@ -617,9 +617,13 @@ service cloud.firestore {
         isClusterAdmin(clusterCode) ||
         isClusterManager(clusterCode) ||
         (isActiveClusterMember(clusterCode) && (
-          resource.data.linkedUid == request.auth.uid ||
-          resource.data.userCode == resolveMember(clusterCode).userCode ||
-          (request.auth.token.email != null && resource.data.phoneOrEmail == request.auth.token.email)
+          (resource == null && docId == resolveMember(clusterCode).userCode) ||
+          (resource != null && (
+            resource.data.linkedUid == request.auth.uid ||
+            resource.data.remoteServerId == request.auth.uid ||
+            resource.data.userCode == resolveMember(clusterCode).userCode ||
+            (request.auth.token.email != null && resource.data.phoneOrEmail == request.auth.token.email)
+          ))
         ))
       );
       allow list: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (

@@ -166,49 +166,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
-  // Start global tombstone & epoch sync for the active cluster
+  // Start global tombstone & epoch sync ONLY when Firebase Auth session is active
   useEffect(() => {
+    if (!currentUser) return;
     const unsubTomb = ErpDataService.subscribeTombstonesAndEpoch();
     return () => unsubTomb();
-  }, []);
+  }, [currentUser?.uid]);
 
-  // Firebase Auth listener + live verification against linked_accounts when Firebase Auth is present
+  // Firebase Auth listener + live verification via zero-trust self-lookup when Firebase Auth is present
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
       if (user && !linkedAccount) {
         try {
-          if (user.email) {
-            const matched = await AccountService.findAccountForLogin(user.email);
-            if (matched && matched.active && matched.syncStatus !== 'PENDING_MANAGER_APPROVAL') {
-              await AccountService.ensureOwnClusterMemberRegistration(matched, user.uid, user.email).catch(() => {});
-              persistSession(matched);
-              setIsLoading(false);
-              return;
-            }
-          }
-          const docRef = doc(firestore, 'linked_accounts', user.uid);
-          const docSnap = await getDoc(docRef);
-          if (docSnap.exists()) {
-            const data = docSnap.data() as LinkedAccountDoc;
-            const mapped: UserAccount = {
-              id: 1,
-              userCode: data.userCode,
-              fullName: data.fullName,
-              username: data.username,
-              phoneOrEmail: user.email || '',
-              role: data.role,
-              roleType: 'EMPLOYEE',
-              branch: data.branch,
-              permissions: data.permissions,
-              serverSyncToken: data.serverSyncToken,
-              syncStatus: 'APPROVED_BY_MANAGER',
-              active: data.active !== false
-            };
-            mapped.roleType = resolveUserRoleType(mapped);
-            if (mapped.active) {
-              persistSession(mapped);
-            }
+          const matched = await AccountService.findSignedInUserAccount(user);
+          if (matched && matched.active && matched.syncStatus !== 'PENDING_MANAGER_APPROVAL') {
+            await AccountService.ensureOwnClusterMemberRegistration(matched, user.uid, user.email).catch(() => {});
+            persistSession(matched);
+            setIsLoading(false);
+            return;
           }
         } catch (err) {
           console.warn('Linked account sync note:', err);
@@ -222,7 +198,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Live session security listener: watches Firestore user_accounts & deleted_users so suspended/deleted/spoofed sessions terminate immediately
   useEffect(() => {
-    if (!linkedAccount?.userCode) return;
+    if (!linkedAccount?.userCode || !currentUser) return;
     const cluster = ErpDataService.activeCluster;
     const docId = safeId(linkedAccount.userCode, `USR-${linkedAccount.id}`);
     const userRef = doc(firestore, `erp_clusters/${cluster}/user_accounts`, docId);
@@ -283,7 +259,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       unsub();
       unsubDeleted();
     };
-  }, [linkedAccount?.userCode]);
+  }, [linkedAccount?.userCode, currentUser?.uid]);
 
   const userRoleType: UserRoleType = resolveUserRoleType(linkedAccount);
   const isSuperAdmin = userRoleType === 'SUPER_ADMIN';
@@ -325,6 +301,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
         throw new Error(
           `تم تعليق محاولات الدخول مؤقتاً بسبب تكرار الخطأ. يرجى المحاولة بعد ${formatLockDurationAr(lockStatus.remainingSeconds)}.`
+        );
+      }
+
+      if (!auth.currentUser) {
+        throw new Error(
+          'لأغراض الحماية السحابية (Zero-Trust)، يرجى تسجيل الدخول عبر زر Google المعتمد أو تبويب البريد الإلكتروني وكلمة المرور أولاً.'
         );
       }
 
@@ -413,74 +395,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         fbAuthError = err;
       }
 
-      // 2. Look up matching employee profile in Firestore `user_accounts`
-      const matched = await AccountService.findAccountForLogin(cleanEmail);
-      if (matched) {
-        validateAccountAccessState(matched);
-        // If Firebase Auth already verified the password, allow login; otherwise verify against Firestore PBKDF2 hash
-        if (!fbCredUser) {
-          const storedSecret = (matched.pinOrPassword || '').trim();
-          const ok = storedSecret ? await verifyPassword(cleanPass, storedSecret) : false;
-          if (!ok) {
-            const rl = LoginRateLimiter.recordFailure(cleanEmail);
-            await ErpDataService.logAudit(
-              cleanEmail,
-              rl.locked ? 'WEB_LOGIN_LOCKED_OUT' : 'WEB_EMAIL_LOGIN_FAILED',
-              'كلمة مرور غير صحيحة'
-            );
-            if (rl.locked) {
-              throw new Error(
-                `تم تجاوز الحد المسموح للمحاولات. تم قفل الدخول لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
-              );
-            }
-            throw new Error(`البريد الإلكتروني أو كلمة المرور غير صحيحة (متبقي ${rl.attemptsRemaining} محاولات).`);
-          }
-          if (needsUpgradeToPbkdf2(storedSecret)) {
-            AccountService.updateOwnProfile(matched, { rawNewPassword: cleanPass }).catch(() => {});
-          }
-        }
-
-        if (fbCredUser) {
-          await AccountService.ensureOwnClusterMemberRegistration(matched, fbCredUser.uid, fbCredUser.email || cleanEmail).catch(() => {});
-        }
-        LoginRateLimiter.recordSuccess(cleanEmail);
-        await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${cleanEmail}`);
-        persistSession(matched);
-        return;
-      }
-
-      // 3. If Firebase Auth signed in and `/linked_accounts/{uid}` exists, map it
+      // 2. Resolve employee profile via zero-trust self-lookup when Firebase Auth succeeded
       if (fbCredUser) {
-        const snap = await getDoc(doc(firestore, 'linked_accounts', fbCredUser.uid));
-        if (snap.exists()) {
-          const data = snap.data() as LinkedAccountDoc;
-          const mapped: UserAccount = {
-            id: 1,
-            userCode: data.userCode,
-            fullName: data.fullName,
-            username: data.username,
-            phoneOrEmail: fbCredUser.email || cleanEmail,
-            role: data.role,
-            roleType: 'EMPLOYEE',
-            branch: data.branch,
-            permissions: data.permissions,
-            serverSyncToken: data.serverSyncToken,
-            syncStatus: 'APPROVED_BY_MANAGER',
-            active: data.active !== false
-          };
-          validateAccountAccessState(mapped);
+        await AccountService.ensureOwnClusterMemberRegistration(null, fbCredUser.uid, fbCredUser.email || cleanEmail).catch(() => {});
+        const matched = await AccountService.findSignedInUserAccount(fbCredUser);
+        if (matched) {
+          validateAccountAccessState(matched);
+          await AccountService.ensureOwnClusterMemberRegistration(matched, fbCredUser.uid, fbCredUser.email || cleanEmail).catch(() => {});
           LoginRateLimiter.recordSuccess(cleanEmail);
-          persistSession(mapped);
+          await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${cleanEmail}`);
+          persistSession(matched);
           return;
         }
         throw new Error('تم التحقق من البريد ولكن الحساب غير مرتبط بسجل موظف معتمد في المنظومة.');
       }
 
+      // If Firebase Auth did not sign in, surface clear auth error without unauthenticated Firestore list
       LoginRateLimiter.recordFailure(cleanEmail);
       throw new Error(
         fbAuthError?.code === 'auth/wrong-password' || fbAuthError?.code === 'auth/invalid-credential'
-          ? 'بيانات الدخول غير صحيحة.'
-          : 'بيانات الدخول غير مطابقة لأي حساب معتمد.'
+          ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة. يمكنك أيضاً تسجيل الدخول مباشرة عبر Google.'
+          : fbAuthError?.code === 'auth/user-not-found'
+          ? 'هذا البريد غير مسجل في Firebase Auth — يرجى استخدام زر تسجيل الدخول عبر Google المعتمد.'
+          : 'تعذر التحقق من البريد الإلكتروني وكلمة المرور. يرجى استخدام زر تسجيل الدخول عبر Google.'
       );
     } finally {
       setIsAuthenticating(false);
@@ -497,7 +434,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error('لم يتم استلام البريد الإلكتروني من حساب Google.');
       }
 
-      const matched = await AccountService.findAccountForLogin(email);
+      // CRITICAL: Bootstrap/recover cluster_members/{uid} BEFORE reading user_accounts
+      await AccountService.ensureOwnClusterMemberRegistration(null, fbUser.uid, email).catch(() => {});
+      const matched = await AccountService.findSignedInUserAccount(fbUser);
       if (matched) {
         validateAccountAccessState(matched);
         if (fbUser?.uid) {

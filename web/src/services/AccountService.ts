@@ -30,6 +30,7 @@ import {
   canModifyEmployeeTarget,
   isSameAccount,
   isSuperAdminAccount,
+  isSystemManager,
   resolveCanonicalRbacTier,
   resolveUserRoleType,
   validatePermissionChange
@@ -211,13 +212,249 @@ export const AccountService = {
   },
 
   /**
+   * Resolves the authenticated Firebase user's ERP employee profile strictly through zero-trust paths:
+   * 1) Bootstrap/recover `cluster_members/{uid}` FIRST (owner recovery or `email_directory/{emailKey}`).
+   * 2) Direct document lookups (`email_directory/{emailKey}` -> `user_accounts/{userCode}`, `cluster_members/{uid}` -> `user_accounts/{userCode}`, `linked_accounts/{uid}`).
+   * 3) Collection-wide `user_accounts` scan ONLY when the signed-in member holds ADMIN or MANAGER role.
+   */
+  async findSignedInUserAccount(fbUser: { uid: string; email?: string | null }): Promise<UserAccount | null> {
+    if (!fbUser?.uid || !auth.currentUser) return null;
+    const cluster = ErpDataService.activeCluster || PRIMARY_CLUSTER;
+    const cleanUid = safeId(fbUser.uid, fbUser.uid);
+    const cleanEmail = (fbUser.email || '').trim().toLowerCase();
+
+    // Step 1: Ensure cluster_members/{uid} exists BEFORE reading user_accounts
+    await this.ensureOwnClusterMemberRegistration(null, fbUser.uid, cleanEmail).catch(() => {});
+
+    // Read current member role & userCode if present
+    const memberSnap = await getDocFromServer(
+      doc(firestore, `erp_clusters/${cluster}/cluster_members`, cleanUid)
+    )
+      .catch(() => getDoc(doc(firestore, `erp_clusters/${cluster}/cluster_members`, cleanUid)))
+      .catch(() => null);
+    const memberData = memberSnap && memberSnap.exists() ? memberSnap.data() || {} : null;
+    const memberRoleKey = String(memberData?.roleKey || '').toUpperCase();
+    const memberUserCode = String(memberData?.userCode || '').trim();
+
+    const tryDirectUserDoc = async (docId: string): Promise<UserAccount | null> => {
+      const cleanDocId = safeId(docId, '');
+      if (!cleanDocId) return null;
+      const snap = await getDocFromServer(doc(firestore, `erp_clusters/${cluster}/user_accounts`, cleanDocId))
+        .catch(() => getDoc(doc(firestore, `erp_clusters/${cluster}/user_accounts`, cleanDocId)))
+        .catch(() => null);
+      if (snap && snap.exists()) {
+        return mapFirestoreDocToUserAccount(snap.id, snap.data() || {}, 1);
+      }
+      return null;
+    };
+
+    // Step 2: Direct lookup via email_directory/{emailKey} -> user_accounts/{userCode} (works for ALL roles)
+    if (cleanEmail.includes('@')) {
+      const emailKey = buildEmailDirectoryKey(cleanEmail);
+      const dirSnap = await getDocFromServer(doc(firestore, `erp_clusters/${cluster}/email_directory`, emailKey))
+        .catch(() => getDoc(doc(firestore, `erp_clusters/${cluster}/email_directory`, emailKey)))
+        .catch(() => null);
+      if (dirSnap && dirSnap.exists()) {
+        const d = dirSnap.data() || {};
+        const dirCode = String(d.userCode || '').trim();
+        if (dirCode) {
+          const direct = await tryDirectUserDoc(dirCode);
+          if (direct) return direct;
+        }
+        // If user_accounts doc was not yet written separately, synthesize from authoritative email_directory record
+        if (d.active !== false && dirCode) {
+          const roleLabel =
+            d.roleKey === 'ADMIN'
+              ? 'مدير النظام'
+              : d.roleKey === 'MANAGER'
+              ? 'المدير'
+              : d.roleKey === 'ACCOUNTANT'
+              ? 'المحاسب'
+              : d.roleKey === 'DEPUTY_ACCOUNTANT'
+              ? 'نائب محاسب'
+              : 'موظف';
+          return mapFirestoreDocToUserAccount(
+            dirCode,
+            {
+              id: 1,
+              userCode: dirCode,
+              fullName: String(d.fullName || d.username || cleanEmail.split('@')[0]),
+              username: String(d.username || cleanEmail.split('@')[0]),
+              phoneOrEmail: cleanEmail,
+              role: roleLabel,
+              branch: String(d.branch || 'الخرطوم'),
+              permissions: String(d.permissions || 'صلاحية العرض'),
+              syncStatus: 'APPROVED_BY_MANAGER',
+              active: d.active !== false
+            },
+            1
+          );
+        }
+      }
+    }
+
+    // Step 3: Direct lookup via cluster_members/{uid}.userCode -> user_accounts/{userCode}
+    if (memberUserCode) {
+      const byMemberCode = await tryDirectUserDoc(memberUserCode);
+      if (byMemberCode) return byMemberCode;
+    }
+
+    // Step 4: Admin/Manager collection scan (strictly permitted by firestore.rules for ADMIN/MANAGER only)
+    if (memberRoleKey === 'ADMIN' || memberRoleKey === 'MANAGER') {
+      const deletedSet = await this.fetchDeletedUserTokens(cluster);
+      const snap = await getDocs(collection(firestore, `erp_clusters/${cluster}/user_accounts`)).catch(() => null);
+      if (snap) {
+        let idx = 1;
+        const allAccounts: UserAccount[] = [];
+        for (const docSnap of snap.docs) {
+          const acc = mapFirestoreDocToUserAccount(docSnap.id, docSnap.data() || {}, idx++);
+          if (this.isUserDeleted(acc, deletedSet)) continue;
+          allAccounts.push(acc);
+          if (
+            (cleanEmail && acc.phoneOrEmail.trim().toLowerCase() === cleanEmail) ||
+            (memberUserCode && acc.userCode.trim().toLowerCase() === memberUserCode.toLowerCase()) ||
+            (acc.remoteServerId && acc.remoteServerId === fbUser.uid)
+          ) {
+            return acc;
+          }
+        }
+        // Primary cluster admin email fallback (USR-HQ-001 / USR-ADMIN / super admin)
+        if (cleanEmail === 'oaw7ab@gmail.com' || cleanEmail === 'admin@pmp-paints.com' || memberRoleKey === 'ADMIN') {
+          const primaryAdmin =
+            allAccounts.find((a) => a.userCode === 'USR-HQ-001' || a.userCode === 'USR-ADMIN' || isSuperAdminAccount(a)) ||
+            null;
+          if (primaryAdmin) return primaryAdmin;
+        }
+      }
+    }
+
+    // Step 5: Fallback to top-level /linked_accounts/{uid}
+    const linkedSnap = await getDoc(doc(firestore, 'linked_accounts', cleanUid)).catch(() => null);
+    if (linkedSnap && linkedSnap.exists()) {
+      const data = linkedSnap.data() || {};
+      return mapFirestoreDocToUserAccount(
+        String(data.userCode || cleanUid),
+        {
+          id: 1,
+          userCode: data.userCode || cleanUid,
+          fullName: data.fullName || cleanEmail.split('@')[0],
+          username: data.username || cleanEmail.split('@')[0],
+          phoneOrEmail: cleanEmail,
+          role: data.role || 'موظف',
+          branch: data.branch || 'الخرطوم',
+          permissions: data.permissions || 'صلاحية العرض',
+          serverSyncToken: data.serverSyncToken || '',
+          syncStatus: 'APPROVED_BY_MANAGER',
+          active: data.active !== false
+        },
+        1
+      );
+    }
+
+    // Step 6: If active cluster_members/{uid} exists (e.g. primary owner before user_accounts seeded)
+    if (memberData && memberData.active === true) {
+      const code = memberUserCode || (memberRoleKey === 'ADMIN' ? 'USR-ADMIN' : `USR-${cleanUid.slice(0, 6).toUpperCase()}`);
+      const roleLabel =
+        memberRoleKey === 'ADMIN'
+          ? 'مدير النظام'
+          : memberRoleKey === 'MANAGER'
+          ? 'المدير'
+          : memberRoleKey === 'ACCOUNTANT'
+          ? 'المحاسب'
+          : memberRoleKey === 'DEPUTY_ACCOUNTANT'
+          ? 'نائب محاسب'
+          : 'موظف';
+      return mapFirestoreDocToUserAccount(
+        code,
+        {
+          id: 1,
+          userCode: code,
+          fullName: String(memberData.fullName || (memberRoleKey === 'ADMIN' ? 'مدير النظام' : cleanEmail.split('@')[0])),
+          username: String(memberData.username || (memberRoleKey === 'ADMIN' ? 'admin' : cleanEmail.split('@')[0])),
+          phoneOrEmail: cleanEmail,
+          role: roleLabel,
+          branch: String(memberData.branch || 'الخرطوم'),
+          permissions: String(memberData.permissions || (memberRoleKey === 'ADMIN' ? 'الكل' : 'صلاحية العرض')),
+          syncStatus: 'APPROVED_BY_MANAGER',
+          active: true
+        },
+        1
+      );
+    }
+
+    return null;
+  },
+
+  /**
    * Looks up a user account in Firestore by username, userCode, or phoneOrEmail for authentication.
+   * Respects zero-trust Firestore rules: never fires an unauthenticated collection list on `user_accounts`.
    */
   async findAccountForLogin(identifier: string): Promise<UserAccount | null> {
     const clean = (identifier || '').trim().toLowerCase();
     if (!clean) return null;
 
+    const fbUser = auth.currentUser;
+    if (!fbUser) {
+      throw new Error(
+        'لأغراض الحماية السحابية (Zero-Trust)، يرجى تسجيل الدخول أولاً عبر حساب Google المعتمد أو البريد الإلكتروني وكلمة المرور.'
+      );
+    }
+
     const cluster = PRIMARY_CLUSTER;
+    await this.ensureOwnClusterMemberRegistration(null, fbUser.uid, fbUser.email || (clean.includes('@') ? clean : null)).catch(() => {});
+
+    // 1. Direct lookup via email_directory if identifier is an email
+    if (clean.includes('@')) {
+      const emailKey = buildEmailDirectoryKey(clean);
+      const dirSnap = await getDoc(doc(firestore, `erp_clusters/${cluster}/email_directory`, emailKey)).catch(() => null);
+      if (dirSnap && dirSnap.exists()) {
+        const d = dirSnap.data() || {};
+        const dirCode = String(d.userCode || '').trim();
+        if (dirCode) {
+          const directSnap = await getDoc(doc(firestore, `erp_clusters/${cluster}/user_accounts`, safeId(dirCode, dirCode))).catch(() => null);
+          if (directSnap && directSnap.exists()) {
+            return mapFirestoreDocToUserAccount(directSnap.id, directSnap.data() || {}, 1);
+          }
+        }
+      }
+    }
+
+    // 2. Direct lookup by userCode document ID if authorized
+    const candidateDocId = safeId(identifier.trim().toUpperCase(), '');
+    const directCandidate = candidateDocId
+      ? await getDoc(doc(firestore, `erp_clusters/${cluster}/user_accounts`, candidateDocId)).catch(() => null)
+      : null;
+    if (directCandidate && directCandidate.exists()) {
+      const acc = mapFirestoreDocToUserAccount(directCandidate.id, directCandidate.data() || {}, 1);
+      if (
+        acc.username.trim().toLowerCase() === clean ||
+        acc.userCode.trim().toLowerCase() === clean ||
+        acc.phoneOrEmail.trim().toLowerCase() === clean
+      ) {
+        return acc;
+      }
+    }
+
+    // 3. Check caller's own signed-in profile
+    const selfAcc = await this.findSignedInUserAccount(fbUser);
+    if (
+      selfAcc &&
+      (selfAcc.username.trim().toLowerCase() === clean ||
+        selfAcc.userCode.trim().toLowerCase() === clean ||
+        selfAcc.phoneOrEmail.trim().toLowerCase() === clean)
+    ) {
+      return selfAcc;
+    }
+
+    // 4. Collection list ONLY when signed-in member is ADMIN or MANAGER
+    const memberSnap = await getDoc(
+      doc(firestore, `erp_clusters/${cluster}/cluster_members`, safeId(fbUser.uid, fbUser.uid))
+    ).catch(() => null);
+    const roleKey = String(memberSnap?.data()?.roleKey || '').toUpperCase();
+    if (roleKey !== 'ADMIN' && roleKey !== 'MANAGER') {
+      return null;
+    }
+
     const deletedSet = await this.fetchDeletedUserTokens(cluster);
     const snap = await getDocs(collection(firestore, `erp_clusters/${cluster}/user_accounts`));
     let idx = 1;
@@ -345,7 +582,7 @@ export const AccountService = {
    * (either via first-owner bootstrap or pre-provisioned `email_directory/{emailKey}`).
    */
   async ensureOwnClusterMemberRegistration(
-    account: UserAccount,
+    account: UserAccount | null,
     fbUid: string,
     fbEmail?: string | null
   ): Promise<void> {
@@ -355,27 +592,26 @@ export const AccountService = {
     const memberRef = doc(firestore, `erp_clusters/${cluster}/cluster_members`, cleanUid);
 
     try {
-      const existing = await getDocFromServer(memberRef);
+      const existing = await getDocFromServer(memberRef).catch(() => getDoc(memberRef));
       if (existing.exists()) return;
 
       const ownerRef = doc(firestore, `erp_clusters/${cluster}/system_metadata`, 'cluster_owner');
       const ownerSnap = await getDocFromServer(ownerRef).catch(() => null);
       const ownerExists = Boolean(ownerSnap && ownerSnap.exists());
       const existingOwnerUid = ownerExists ? String(ownerSnap?.data()?.ownerUid || '') : '';
-      const email = (fbEmail || account.phoneOrEmail || '').trim().toLowerCase();
+      const email = (fbEmail || account?.phoneOrEmail || '').trim().toLowerCase();
       const canBootstrapAdmin =
-        isSuperAdminAccount(account) ||
-        isSystemManager(account) ||
+        (account != null && (isSuperAdminAccount(account) || isSystemManager(account))) ||
         email === 'oaw7ab@gmail.com' ||
         email === 'admin@pmp-paints.com';
 
       if (ownerExists && existingOwnerUid === cleanUid) {
         await setDoc(memberRef, {
           uid: cleanUid,
-          userCode: account.userCode || 'USR-ADMIN',
+          userCode: account?.userCode || 'USR-ADMIN',
           roleKey: 'ADMIN',
           branch: 'ALL',
-          permissions: account.permissions || '',
+          permissions: account?.permissions || '',
           active: true,
           updatedAt: Date.now()
         });
@@ -387,16 +623,16 @@ export const AccountService = {
         // because cluster_members creation verifies !exists(cluster_owner) or ownerUid == uid.
         await setDoc(memberRef, {
           uid: cleanUid,
-          userCode: account.userCode || 'USR-ADMIN',
+          userCode: account?.userCode || 'USR-ADMIN',
           roleKey: 'ADMIN',
           branch: 'ALL',
-          permissions: account.permissions || '',
+          permissions: account?.permissions || '',
           active: true,
           updatedAt: Date.now()
         });
         await setDoc(ownerRef, {
           ownerUid: cleanUid,
-          userCode: account.userCode || 'USR-ADMIN',
+          userCode: account?.userCode || 'USR-ADMIN',
           createdAt: Date.now()
         });
         return;
@@ -410,10 +646,10 @@ export const AccountService = {
           await setDoc(memberRef, {
             uid: cleanUid,
             emailKey,
-            userCode: d.userCode || account.userCode,
-            roleKey: d.roleKey || resolveCanonicalRbacTier(account),
-            branch: d.branch || account.branch || 'الخرطوم',
-            permissions: d.permissions ?? account.permissions ?? 'صلاحية العرض',
+            userCode: d.userCode || account?.userCode || `USR-${cleanUid.slice(0, 6).toUpperCase()}`,
+            roleKey: d.roleKey || (account ? resolveCanonicalRbacTier(account) : 'EMPLOYEE'),
+            branch: d.branch || account?.branch || 'الخرطوم',
+            permissions: d.permissions ?? account?.permissions ?? 'صلاحية العرض',
             active: d.active !== false,
             updatedAt: Date.now()
           });

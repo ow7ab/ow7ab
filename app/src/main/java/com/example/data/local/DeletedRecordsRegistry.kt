@@ -331,15 +331,29 @@ object DeletedRecordsRegistry {
 
     /**
      * فحص شامل للحركة المالية بكافة معرفاتها (id, MOV-id, reference, cloudDocId, syncUuid, epoch).
+     * يحمي الحركات الجديدة ذات المعرف الفريد (syncUuid/cloudDocId) من الاختفاء بسبب تدوير أرقام Room القديمة بعد الحذف.
      */
     fun isMovementDeleted(movement: MovementEntity): Boolean {
         if (isPreEpoch(movement.createdAt)) return true
-        if (movement.id > 0L && (isDeleted("movements", movement.id) || isDeleted("movements", "MOV-${movement.id}"))) {
-            return true
-        }
+        if (movement.syncUuid.isNotBlank() && isDeleted("movements", movement.syncUuid)) return true
         if (movement.cloudDocId.isNotBlank() && isDeleted("movements", movement.cloudDocId)) return true
         if (movement.reference.isNotBlank() && isDeleted("movements", movement.reference)) return true
-        if (movement.syncUuid.isNotBlank() && isDeleted("movements", movement.syncUuid)) return true
+        if (movement.id > 0L) {
+            val idKey = makeKey("movements", movement.id.toString())
+            val movIdKey = makeKey("movements", "MOV-${movement.id}")
+            val tomb = allTombstones[idKey] ?: allTombstones[movIdKey]
+            val numericFlagged = deletedKeys.contains(idKey) || deletedKeys.contains(movIdKey)
+            if (numericFlagged) {
+                val hasDistinctFreshIdentity =
+                    movement.syncUuid.isNotBlank() ||
+                        (movement.cloudDocId.isNotBlank() && !movement.cloudDocId.equals("MOV-${movement.id}", ignoreCase = true))
+                val createdStrictlyAfterTombstone =
+                    tomb != null && tomb.deletedAt > 0L && movement.createdAt > (tomb.deletedAt + 2_000L)
+                if (!(hasDistinctFreshIdentity && createdStrictlyAfterTombstone)) {
+                    return true
+                }
+            }
+        }
         return false
     }
 

@@ -45,7 +45,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   } = useAuth();
   const { latestRelease, apkAvailable, unavailableReason, isLoading: isReleaseLoading } = useLatestRelease();
 
-  const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('pin');
+  const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('email');
   const [username, setUsername] = useState('');
   const [pin, setPin] = useState('');
   const [email, setEmail] = useState('');

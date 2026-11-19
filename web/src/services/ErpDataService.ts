@@ -25,6 +25,7 @@ import {
   where,
   Unsubscribe
 } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
 import {
   auth,
   firestore,
@@ -419,6 +420,7 @@ class ErpDataServiceImpl {
   }
 
   private ensureTombstoneSubscription(): void {
+    if (!auth.currentUser) return;
     if (!this.tombstoneUnsub) {
       try {
         const colRef = collection(firestore, this.collectionPath('deleted_records', PRIMARY_CLUSTER));
@@ -474,6 +476,8 @@ class ErpDataServiceImpl {
 
   /**
    * Subscribes in real-time to `/erp_clusters/PMP-ERP-MAIN-CLUSTER/{collectionName}`.
+   * Waits for / re-attaches on active Firebase Auth so collections (including `movements`)
+   * never get permanently stuck empty from a pre-auth PERMISSION_DENIED snapshot error.
    * Automatically filters out records present in `deleted_records` tombstones or pre-epoch wiped data,
    * re-emits when tombstones update, and deduplicates records on read.
    */
@@ -482,14 +486,17 @@ class ErpDataServiceImpl {
     onData: (items: T[]) => void,
     onError?: (err: Error) => void
   ): Unsubscribe {
-    this.ensureTombstoneSubscription();
     const primaryColRef = collection(firestore, this.collectionPath(collectionName, PRIMARY_CLUSTER));
 
     let latestRawItems: T[] = [];
     let hasReceivedSnapshot = false;
+    let disposed = false;
+    let unsubPrimary: Unsubscribe | null = null;
+    let fallbackUnsub: Unsubscribe | null = null;
+    let attachedUid: string | null = null;
 
     const refilterAndEmit = () => {
-      if (!hasReceivedSnapshot) return;
+      if (!hasReceivedSnapshot || disposed) return;
       const filtered = latestRawItems.filter(
         (item) => !this.isRecordTombstoned(String(collectionName), item as Record<string, any>)
       );
@@ -498,37 +505,68 @@ class ErpDataServiceImpl {
 
     this.activeCollectionRefreshers.add(refilterAndEmit);
 
-    let fallbackUnsub: Unsubscribe | null = null;
-    const unsubPrimary = onSnapshot(
-      primaryColRef,
-      (snap) => {
-        const rawList: T[] = [];
-        snap.forEach((docSnap) => {
-          rawList.push(normalizeDocData<T>(docSnap.id, docSnap.data()));
-        });
-        latestRawItems = rawList;
-        hasReceivedSnapshot = true;
-        refilterAndEmit();
-      },
-      (err) => {
-        const path = this.collectionPath(collectionName, PRIMARY_CLUSTER);
-        const msg = String((err as any)?.code || (err as any)?.message || '');
-        if (collectionName === 'lab_formulations' && msg.toLowerCase().includes('permission')) {
-          if (!fallbackUnsub) {
-            fallbackUnsub = this.subscribeToCollection<T>('lab_formula_summaries', onData, onError);
-          }
-          return;
-        }
-        CloudErrorLogger.recordError(`SUBSCRIBE_${String(collectionName).toUpperCase()}`, path, err);
-        console.error(`Firestore subscription error on [${collectionName}]:`, sanitizeCloudMessage(err));
-        if (onError) onError(err);
+    const detachSnapshot = () => {
+      if (unsubPrimary) {
+        unsubPrimary();
+        unsubPrimary = null;
       }
-    );
+      if (fallbackUnsub) {
+        fallbackUnsub();
+        fallbackUnsub = null;
+      }
+      attachedUid = null;
+    };
+
+    const attachSnapshot = (uid: string) => {
+      if (disposed || attachedUid === uid) return;
+      detachSnapshot();
+      attachedUid = uid;
+      this.ensureTombstoneSubscription();
+      unsubPrimary = onSnapshot(
+        primaryColRef,
+        (snap) => {
+          const rawList: T[] = [];
+          snap.forEach((docSnap) => {
+            rawList.push(normalizeDocData<T>(docSnap.id, docSnap.data()));
+          });
+          latestRawItems = rawList;
+          hasReceivedSnapshot = true;
+          refilterAndEmit();
+        },
+        (err) => {
+          const path = this.collectionPath(collectionName, PRIMARY_CLUSTER);
+          const msg = String((err as any)?.code || (err as any)?.message || '');
+          if (collectionName === 'lab_formulations' && msg.toLowerCase().includes('permission')) {
+            if (!fallbackUnsub && !disposed) {
+              fallbackUnsub = this.subscribeToCollection<T>('lab_formula_summaries', onData, onError);
+            }
+            return;
+          }
+          CloudErrorLogger.recordError(`SUBSCRIBE_${String(collectionName).toUpperCase()}`, path, err);
+          console.error(`Firestore subscription error on [${collectionName}]:`, sanitizeCloudMessage(err));
+          if (onError) onError(err);
+        }
+      );
+    };
+
+    if (auth.currentUser?.uid) {
+      attachSnapshot(auth.currentUser.uid);
+    }
+
+    const unsubAuth = onAuthStateChanged(auth, (fbUser) => {
+      if (disposed) return;
+      if (fbUser?.uid) {
+        attachSnapshot(fbUser.uid);
+      } else {
+        detachSnapshot();
+      }
+    });
 
     return () => {
+      disposed = true;
+      unsubAuth();
       this.activeCollectionRefreshers.delete(refilterAndEmit);
-      unsubPrimary();
-      if (fallbackUnsub) fallbackUnsub();
+      detachSnapshot();
     };
   }
 
@@ -1031,9 +1069,17 @@ class ErpDataServiceImpl {
     const cluster = clusterOverride || PRIMARY_CLUSTER;
     const start = performance.now();
     const counts: Record<string, number> = {};
+    if (!auth.currentUser) {
+      return {
+        clusterCode: cluster,
+        ok: false,
+        latencyMs: 0,
+        counts,
+        error: 'يرجى تسجيل الدخول عبر Google أو البريد المعتمد أولاً للاتصال بالسيرفر.'
+      };
+    }
     try {
-      const collectionsToProbe: ErpCollectionName[] = [
-        'user_accounts',
+      const coreCollections: ErpCollectionName[] = [
         'cashboxes',
         'movements',
         'warehouses',
@@ -1042,11 +1088,18 @@ class ErpDataServiceImpl {
         'invoices'
       ];
       await Promise.all(
-        collectionsToProbe.map(async (col) => {
+        coreCollections.map(async (col) => {
           const items = await this.fetchCollectionOnce(col, cluster);
           counts[col] = items.length;
         })
       );
+      // Optional count for user_accounts (restricted to ADMIN/MANAGER under zero-trust rules)
+      try {
+        const users = await this.fetchCollectionOnce('user_accounts', cluster);
+        counts['user_accounts'] = users.length;
+      } catch {
+        counts['user_accounts'] = 0;
+      }
       const latencyMs = Math.round(performance.now() - start);
       return {
         clusterCode: cluster,

@@ -1063,6 +1063,59 @@ test("23. Non-Admin Active Members read system_metadata/config safely while writ
   await assertSucceeds(cEmp.collection("user_accounts").doc("USR-SD-1001").get());
 });
 
+test("24. Active Accountant/Employee self-get via remoteServerId, health probes, and financial movement commits", async () => {
+  await seedClusterRbac();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("user_accounts").doc("USR-ACC-2001").set({
+      userCode: "USR-ACC-2001",
+      username: "acc_user",
+      phoneOrEmail: "acc@pmp.sd",
+      remoteServerId: ACCOUNTANT_UID,
+      active: true,
+    });
+    await cRef.collection("warehouses").doc("WH-1").set({
+      id: 1,
+      name: "مخزن الخرطوم",
+      branch: "فرع السودان (SD-001)",
+    });
+  });
+
+  const accDb = testEnv.authenticatedContext(ACCOUNTANT_UID, { email: "acc@pmp.sd", email_verified: true }).firestore();
+  const cAcc = accDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Accountant can self-get via remoteServerId & probe warehouses/movements without listing user_accounts
+  await assertSucceeds(cAcc.collection("user_accounts").doc("USR-ACC-2001").get());
+  await assertFails(cAcc.collection("user_accounts").get());
+  await assertSucceeds(cAcc.collection("warehouses").get());
+  await assertSucceeds(cAcc.collection("movements").get());
+
+  // Accountant can claim idempotency request and commit valid financial movement
+  await assertSucceeds(
+    cAcc.collection("idempotency_requests").doc("IDEM-MOV-24").set({
+      idempotencyKey: "IDEM-MOV-24",
+      operationType: "RECEIPT_VOUCHER",
+      requestStatus: "PROCESSING",
+      resultReference: "",
+      errorDetails: "",
+    })
+  );
+  await assertSucceeds(
+    cAcc.collection("movements").doc("MOV-24-UNIQUE").set({
+      id: 1763544000000,
+      txDate: "2026-11-19",
+      cashbox: "خزنة السودان",
+      currency: "SDG",
+      direction: "وارد",
+      amount: 12500,
+      description: "سند قبض معتمد",
+      reference: "REC-24",
+      branch: "فرع السودان (SD-001)",
+      createdBy: "acc_user",
+    })
+  );
+});
+
 
 
 

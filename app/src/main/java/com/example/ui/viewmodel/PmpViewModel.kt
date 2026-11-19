@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 import com.example.data.remote.CloudErpSyncRepository
@@ -44,6 +45,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     private val cloudSyncRepo: CloudAccountSyncRepository = CloudAccountSyncRepository.create(application)
     private val cloudErpSyncRepo: CloudErpSyncRepository = CloudErpSyncRepository.create(application)
     private var cloudObserverJob: Job? = null
+    private var cloudObserverUid: String? = null
 
     private val _cloudLinkedAccounts = MutableStateFlow<List<LinkedAccountModel>>(emptyList())
     val cloudLinkedAccounts: StateFlow<List<LinkedAccountModel>> = _cloudLinkedAccounts.asStateFlow()
@@ -1022,16 +1024,20 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
             // Defer network sync slightly so initial screen displays instantly without any freeze
             kotlinx.coroutines.delay(1500)
-            try {
-                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(application)
-                val activeId = activeSessionUserId.value
-                val isMgr = currentUser.value.isSystemManager()
-                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeId, devId)
-                cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao(), isMgr, activeId, devId)
-                DatabaseBackupManager.saveLocalSnapshot(application, repository.getDao())
-                checkServerHealth()
-            } catch (e: Exception) {
-                Log.w("PmpViewModel", "Deferred cloud cluster sync: ${e.message}")
+            val initFbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+            if (initFbUser != null) {
+                try {
+                    val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(application)
+                    val activeId = activeSessionUserId.value
+                    val isMgr = currentUser.value.isSystemManager()
+                    cloudErpSyncRepo.ensureOwnClusterMemberRegistration(serverClusterCode.value, currentUser.value, initFbUser.uid, initFbUser.email)
+                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeId, devId)
+                    cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao(), isMgr, activeId, devId)
+                    DatabaseBackupManager.saveLocalSnapshot(application, repository.getDao())
+                    checkServerHealth()
+                } catch (e: Exception) {
+                    Log.w("PmpViewModel", "Deferred cloud cluster sync: ${e.message}")
+                }
             }
 
             viewModelScope.launch(Dispatchers.IO) {
@@ -1052,7 +1058,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-        startCloudRealtimeSyncIfAuthenticated()
+        if (runCatching { Firebase.auth.currentUser }.getOrNull() != null) {
+            startCloudRealtimeSyncIfAuthenticated()
+        }
     }
 
     fun retryDataLoadAndSync() {
@@ -1381,6 +1389,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                             val safeMsg = com.example.data.remote.CloudSyncErrorTracker.sanitizeCloudMessage(err.message)
                             _cloudSyncState.value = "تعذر إرسال التحويل للسيرفر: $safeMsg"
                             postMessage("تم الحفظ محلياً، وتعذر إرسال التحويل للسيرفر: $safeMsg", isError = true)
+                        }
+                        // Also push the two generated transfer movements (OUT & IN) immediately so Web/Android ledgers stay 1:1
+                        val transferRefs = setOf("TRF:$autoRef:OUT", "TRF:$autoRef:IN")
+                        val generatedMovs = repository.getDao().getMovementsDirect()
+                            .filter { it.reference in transferRefs }
+                        for (mov in generatedMovs) {
+                            cloudErpSyncRepo.syncSingleMovementToCloud(serverClusterCode.value, mov, user)
                         }
                     } catch (e: Exception) {
                         val safeMsg = com.example.data.remote.CloudSyncErrorTracker.sanitizeCloudMessage(e.message)
@@ -3545,20 +3560,39 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startCloudRealtimeSyncIfAuthenticated() {
-        if (cloudObserverJob?.isActive == true) return
+        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+        if (fbUser == null) {
+            _cloudSyncState.value = "بانتظار تسجيل الدخول بحساب Google للاتصال بالسيرفر"
+            return
+        }
+        if (cloudObserverJob?.isActive == true && cloudObserverUid == fbUser.uid) return
+        cloudObserverJob?.cancel()
+        cloudObserverUid = fbUser.uid
 
         cloudObserverJob = viewModelScope.launch {
-            val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
-            val identityLabel = fbUser?.email ?: currentUser.value?.username ?: "متصل"
+            val identityLabel = fbUser.email ?: currentUser.value?.username ?: "متصل"
             _cloudSyncState.value = "متصل بسيرفر Google Cloud ($identityLabel)"
 
             val deviceId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
             val isMgr = currentUser.value.isSystemManager()
             val activeId = activeSessionUserId.value
 
+            // Ensure cluster_members/{uid} exists BEFORE attaching any Firestore realtime listeners
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    cloudErpSyncRepo.ensureOwnClusterMemberRegistration(
+                        clusterCode = serverClusterCode.value,
+                        account = currentUser.value,
+                        fbUid = fbUser.uid,
+                        fbEmail = fbUser.email
+                    )
+                }
+            }
+
             // 1. Initial bidirectional sync with Google Cloud Server Cluster
             launch(Dispatchers.IO) {
                 try {
+                    cloudErpSyncRepo.pullSingleUserAccountFromCloud(serverClusterCode.value, repository.getDao(), fbUser.uid, fbUser.email)
                     cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeId, deviceId)
                     val localInvoices = repository.getDao().getInvoicesDirect()
                     if (localInvoices.isEmpty()) {
@@ -3857,6 +3891,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun stopCloudRealtimeSync() {
         cloudObserverJob?.cancel()
         cloudObserverJob = null
+        cloudObserverUid = null
         _cloudSyncState.value = "تم تسجيل الخروج من الجلسة"
     }
 
@@ -4555,7 +4590,20 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             try {
-                withTimeoutOrNull(3000L) {
+                withTimeoutOrNull(4500L) {
+                    // CRITICAL: Bootstrap/recover cluster_members/{uid} and hydrate this user's own account BEFORE local binding
+                    cloudErpSyncRepo.ensureOwnClusterMemberRegistration(
+                        clusterCode = serverClusterCode.value,
+                        account = null,
+                        fbUid = uid,
+                        fbEmail = email
+                    )
+                    cloudErpSyncRepo.pullSingleUserAccountFromCloud(
+                        clusterCode = serverClusterCode.value,
+                        dao = repository.getDao(),
+                        fbUid = uid,
+                        fbEmail = email
+                    )
                     val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
                     cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeSessionUserId.value, devId)
                 }
