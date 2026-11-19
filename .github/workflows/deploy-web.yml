@@ -1,4 +1,4 @@
-name: PMP Paints - Cloudflare Pages & GitHub Pages Web Deployment
+name: PMP Paints - Unified Web CI, Cloudflare Worker & GitHub Pages
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
       - "web/**"
       - "public/**"
       - "wrangler.toml"
+      - "package.json"
       - ".github/workflows/deploy-web.yml"
   workflow_dispatch:
 
@@ -35,65 +36,48 @@ jobs:
         with:
           node-version: 22
           cache: 'npm'
-          cache-dependency-path: 'web/package.json'
+          cache-dependency-path: 'web/package-lock.json'
 
-      - name: Sync Official Release Metadata & Brand Assets into Web Public
+      - name: Install Web Dependencies (Clean Lockfile)
         run: |
-          python3 - << 'PYEOF'
-          import os
-          import shutil
+          npm ci --prefix web --no-audit --no-fund
 
-          os.makedirs(os.path.join("web", "public", "assets"), exist_ok=True)
-          pub_assets = os.path.join("public", "assets")
-          if os.path.isdir(pub_assets):
-              for name in os.listdir(pub_assets):
-                  src = os.path.join(pub_assets, name)
-                  dst = os.path.join("web", "public", "assets", name)
-                  if os.path.isfile(src):
-                      shutil.copy2(src, dst)
-
-          hist_src = os.path.join("public", "releases-history.json")
-          if os.path.isfile(hist_src):
-              shutil.copy2(hist_src, os.path.join("web", "public", "releases-history.json"))
-          PYEOF
-
-      - name: Install Web Dependencies
+      - name: Run TypeScript Type Verification
         run: |
-          npm ci --prefix web
+          npm run typecheck --prefix web
 
-      - name: Run All Web Automated Unit Tests
+      - name: Run All Web Automated Unit, RBAC & ERP Tests
         run: |
           npm test --prefix web
 
-      - name: Build Production Bundle for Cloudflare Pages (Root Base /)
+      - name: Build Production Bundle for Cloudflare Worker ow7ab (Root Base /)
         env:
           VITE_BASE_PATH: /
+          SKIP_WEB_INSTALL: "true"
         run: |
-          npm run build --prefix web
+          node web/scripts/build-production.mjs
           test -f web/dist/index.html
           test -f web/dist/_redirects
           test -f web/dist/_headers
           test -f web/dist/releases-history.json
 
-      - name: Deploy Unified Web App to Cloudflare Pages (pmp-paints-erp.pages.dev)
+      - name: Deploy to Cloudflare Worker ow7ab (Only when GitHub-managed deploy is explicitly enabled)
+        if: vars.ENABLE_GITHUB_WORKER_DEPLOY == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
         run: |
-          PROJECT_NAME="${CLOUDFLARE_PROJECT_NAME:-pmp-paints-erp}"
-          if [ -n "${CLOUDFLARE_API_TOKEN}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID}" ]; then
-            echo "Deploying web/dist to Cloudflare Pages project: ${PROJECT_NAME}.pages.dev (branch: main)..."
-            (cd web && npx --yes wrangler@3 pages project create "${PROJECT_NAME}" --production-branch=main 2>/dev/null || echo "Project ${PROJECT_NAME} already exists or managed in Cloudflare.")
-            (cd web && npx --yes wrangler@3 pages deploy dist --project-name="${PROJECT_NAME}" --branch=main --commit-dirty=true)
-          else
-            echo "Note: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID secrets not set in GitHub Actions; skipping CLI push (use Cloudflare Pages native Git integration or add secrets)."
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            echo "::error::ENABLE_GITHUB_WORKER_DEPLOY is true, but CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID secret is missing."
+            exit 1
           fi
+          npx --yes wrangler@4 deploy
 
       - name: Build Production Bundle for GitHub Pages (/ow7ab/)
         env:
           VITE_BASE_PATH: /ow7ab/
         run: |
+          rm -rf web/dist-ghpages
           npm run build --prefix web -- --outDir dist-ghpages
           test -f web/dist-ghpages/index.html
           test -f web/dist-ghpages/404.html

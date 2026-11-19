@@ -35,28 +35,29 @@ Automatically deployed via `.github/workflows/deploy-web.yml` and `.github/workf
 - Includes `web/dist/404.html` which transparently restores clean deep routes (`/login`, `/download`, `/dashboard`, `/admin`, `/employee`) without 404 errors.
 - Ensure **Settings -> Pages -> Source** is set to **GitHub Actions** in the `ow7ab/ow7ab` repository.
 
-### Option B — Cloudflare Pages (`*.pages.dev`)
-1. Connect repository `ow7ab/ow7ab` in Cloudflare Dashboard -> **Workers & Pages** -> **Pages**.
-2. Configure Build Settings:
-   - **Build command**: `npm run build --prefix web`
-   - **Build output directory**: `web/dist`
-   - **Environment variable**: `NODE_VERSION = 22`
-3. SPA deep-linking (`_redirects`: `/* /index.html 200`) and security headers (`_headers`) are pre-bundled inside `web/public/`.
-4. Optional automated deploy from GitHub Actions: add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` to GitHub Repository Secrets.
+### Option B — Cloudflare Workers Static Assets (`ow7ab`)
+The root `wrangler.toml` is configured for Cloudflare Workers Static Assets targeting Worker **`ow7ab`**:
+1. Connect repository `ow7ab/ow7ab` in Cloudflare Dashboard → **Workers & Pages** → Worker **`ow7ab`** → **Settings** → **Build**.
+2. Configure Build & Deploy Settings:
+   - **Root directory**: `/` (repository root)
+   - **Build command**: `npm run build`
+   - **Deploy command**: `npx wrangler deploy`
+   - **Environment variables**: `NODE_VERSION = 22`, `VITE_BASE_PATH = /`
+3. `wrangler.toml` also declares `[build] command = "npm run build"` and `[assets] directory = "./web/dist"` with `not_found_handling = "single-page-application"`, ensuring `web/dist` is cleanly generated before upload.
 
 ### Option C — Firebase Hosting
 `firebase.json` is preconfigured with `"public": "web/dist"` and SPA rewrite `"** -> /index.html"`.
 ```bash
-npm run build --prefix web
+npm run build
 firebase deploy --only hosting
 ```
 
 ---
 
-## 4. Required Firebase Console Checklist for New Public Domains
+## 4. Required Firebase Console Checklist for Public Domains
 
-When opening the website on GitHub Pages (`https://ow7ab.github.io`), Cloudflare Pages (`https://<project>.pages.dev`), or a custom domain, add each domain to:
-**Firebase Console -> Authentication -> Settings -> Authorized domains**:
+When opening the website on Cloudflare Workers, GitHub Pages, or a custom domain, add each hostname to:
+**Firebase Console → Authentication → Settings → Authorized domains**:
+- `ow7ab.<your-workers-subdomain>.workers.dev`
 - `ow7ab.github.io`
-- `<your-project>.pages.dev`
-- Any custom domain connected to Cloudflare / Firebase Hosting.
+- Any custom domain connected to Cloudflare Worker `ow7ab` or Firebase Hosting.

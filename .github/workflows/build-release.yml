@@ -911,19 +911,15 @@ jobs:
           PYEOF
 
       - name: Set up Node.js for Unified Web Build
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && env.WEBSITE_ONLY != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: 'npm'
-          cache-dependency-path: 'web/package.json'
+          cache-dependency-path: 'web/package-lock.json'
 
       - name: Build Unified ERP & Official APK Download Website
-        if: github.event_name != 'pull_request'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_PROJECT_NAME: ${{ vars.CLOUDFLARE_PROJECT_NAME }}
+        if: github.event_name != 'pull_request' && env.WEBSITE_ONLY != 'true'
         run: |
           set -euo pipefail
           python3 - << 'PYEOF'
@@ -945,17 +941,12 @@ jobs:
                   shutil.copy2(src, os.path.join("web", "public", json_name))
           PYEOF
 
-          npm ci --prefix web
+          npm ci --prefix web --no-audit --no-fund
           npm test --prefix web
 
-          # 1. Build root bundle (/) and deploy to Cloudflare Pages if credentials are set
-          if [ -n "${CLOUDFLARE_API_TOKEN}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID}" ]; then
-            VITE_BASE_PATH=/ npm run build --prefix web
-            CF_PROJ="${CLOUDFLARE_PROJECT_NAME:-pmp-paints-erp}"
-            npx --yes wrangler@3 pages deploy web/dist --project-name="${CF_PROJ}" --branch=main --commit-dirty=true
-          fi
-
-          # 2. Build GitHub Pages bundle (/ow7ab/) into dist-ghpages and copy APK + version manifests
+          # Build GitHub Pages bundle (/ow7ab/) into dist-ghpages and copy newly built APK + version manifests
+          # (Cloudflare Worker ow7ab is deployed separately via Cloudflare Workers Builds / deploy-web.yml)
+          rm -rf web/dist-ghpages
           VITE_BASE_PATH=/ow7ab/ npm run build --prefix web -- --outDir dist-ghpages
           python3 - << 'PYEOF'
           import glob
@@ -974,15 +965,16 @@ jobs:
           PYEOF
 
       - name: Upload Unified Web Artifacts for GitHub Pages Hosting
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && env.WEBSITE_ONLY != 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: web/dist-ghpages
 
       - name: Deploy Official Website & Release Portal to GitHub Pages
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && env.WEBSITE_ONLY != 'true'
         id: deployment
         continue-on-error: true
         uses: actions/deploy-pages@v4
+
 
 
