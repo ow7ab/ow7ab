@@ -4,7 +4,7 @@
   "version": "21.0.0",
   "description": "PMP PAINTS Enterprise Cloud ERP — Unified Web, Cloudflare Worker & Windows Desktop Orchestrator",
   "engines": {
-    "node": ">=20 <23"
+    "node": ">=20"
   },
   "scripts": {
     "install:web": "npm ci --prefix web --no-audit --no-fund",
@@ -17,5 +17,8 @@
     "deploy:worker": "npm run build && npx wrangler deploy",
     "desktop:sync": "node desktop/scripts/sync-renderer.mjs",
     "desktop:dist:win": "node desktop/scripts/sync-renderer.mjs && npm run dist:win --prefix desktop"
+  },
+  "devDependencies": {
+    "wrangler": "^4.165.0"
   }
 }

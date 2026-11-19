@@ -1,4 +1,5 @@
 import { execFileSync, execSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,16 +51,30 @@ for (const manifestName of ['version.json', 'releases-history.json']) {
   }
 }
 
-// 2. Deterministic dependency installation (skip only when caller already ran npm ci)
+// 2. Deterministic dependency installation (skip redundant reinstall when lockfile hash already matches)
 const tscBin = path.join(WEB_DIR, 'node_modules', 'typescript', 'bin', 'tsc');
 const viteBin = path.join(WEB_DIR, 'node_modules', 'vite', 'bin', 'vite.js');
-if (!skipInstall || !fs.existsSync(tscBin) || !fs.existsSync(viteBin)) {
+const lockfilePath = path.join(WEB_DIR, 'package-lock.json');
+const lockHashFile = path.join(WEB_DIR, 'node_modules', '.pmp-lock-hash');
+const currentLockHash = fs.existsSync(lockfilePath)
+  ? crypto.createHash('sha256').update(fs.readFileSync(lockfilePath)).digest('hex')
+  : '';
+const cachedLockHash = fs.existsSync(lockHashFile) ? fs.readFileSync(lockHashFile, 'utf8').trim() : '';
+const depsReady = fs.existsSync(tscBin) && fs.existsSync(viteBin);
+const lockMatches = currentLockHash.length > 0 && cachedLockHash === currentLockHash;
+
+if ((!skipInstall && !lockMatches) || !depsReady) {
   console.log('[PMP Build] Installing web dependencies via npm ci...');
   execSync('npm ci --no-audit --no-fund', {
     cwd: WEB_DIR,
     stdio: 'inherit',
     env: { ...process.env }
   });
+  if (currentLockHash) {
+    fs.writeFileSync(lockHashFile, `${currentLockHash}\n`, 'utf8');
+  }
+} else {
+  console.log('[PMP Build] Web dependencies already installed and lockfile matches; skipping redundant npm ci.');
 }
 
 // 3. Remove stale production output to prevent cached artifact leakage
@@ -84,11 +99,11 @@ execFileSync(process.execPath, [viteBin, 'build'], {
   }
 });
 
-// 5. Verify required production artifacts exist before deployment
+// 5. Verify required production artifacts exist and guard against Cloudflare code 10021 (_redirects loop)
 const requiredOutputs = [
   path.join(WEB_DIST_DIR, 'index.html'),
   path.join(WEB_DIST_DIR, '_headers'),
-  path.join(WEB_DIST_DIR, '_redirects'),
+  path.join(WEB_DIST_DIR, '.assetsignore'),
   path.join(WEB_DIST_DIR, 'assets')
 ];
 
@@ -96,6 +111,13 @@ for (const artifactPath of requiredOutputs) {
   if (!fs.existsSync(artifactPath)) {
     throw new Error(`[PMP Build] Verification failed: required build output missing at ${artifactPath}`);
   }
+}
+
+const forbiddenRedirects = path.join(WEB_DIST_DIR, '_redirects');
+if (fs.existsSync(forbiddenRedirects)) {
+  throw new Error(
+    '[PMP Build] Verification failed: web/dist/_redirects must not exist (Cloudflare Workers Static Assets rejects catch-all 200 rules with code 10021; SPA fallback is configured via wrangler.toml not_found_handling).'
+  );
 }
 
 const indexSize = fs.statSync(path.join(WEB_DIST_DIR, 'index.html')).size;

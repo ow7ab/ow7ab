@@ -8,7 +8,9 @@ on:
       - "web/**"
       - "public/**"
       - "wrangler.toml"
+      - ".node-version"
       - "package.json"
+      - "package-lock.json"
       - ".github/workflows/deploy-web.yml"
   workflow_dispatch:
 
@@ -57,8 +59,9 @@ jobs:
         run: |
           node web/scripts/build-production.mjs
           test -f web/dist/index.html
-          test -f web/dist/_redirects
           test -f web/dist/_headers
+          test -f web/dist/.assetsignore
+          test ! -f web/dist/_redirects
           test -f web/dist/releases-history.json
 
       - name: Deploy to Cloudflare Worker ow7ab (Only when GitHub-managed deploy is explicitly enabled)

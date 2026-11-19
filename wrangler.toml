@@ -8,7 +8,3 @@ command = "npm run build"
 [assets]
 directory = "./web/dist"
 not_found_handling = "single-page-application"
-
-[vars]
-NODE_VERSION = "22"
-VITE_BASE_PATH = "/"

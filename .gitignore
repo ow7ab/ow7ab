@@ -29,8 +29,11 @@ debug.keystore.base64
 .aistudio/
 public/assets/aistudio/
 *-debug.log
+node_modules/
+.wrangler/
 web/node_modules/
 web/dist/
+web/dist-ghpages/
 !desktop/build/
 !desktop/build/**
 desktop/node_modules/

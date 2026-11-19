@@ -36,14 +36,14 @@ Automatically deployed via `.github/workflows/deploy-web.yml` and `.github/workf
 - Ensure **Settings -> Pages -> Source** is set to **GitHub Actions** in the `ow7ab/ow7ab` repository.
 
 ### Option B — Cloudflare Workers Static Assets (`ow7ab`)
-The root `wrangler.toml` is configured for Cloudflare Workers Static Assets targeting Worker **`ow7ab`**:
+The root `wrangler.toml` is configured as a pure **Cloudflare Workers Static Assets** deployment targeting Worker **`ow7ab`** (pinned to `wrangler` v4 in root `devDependencies` and Node.js 22 via `.node-version`):
 1. Connect repository `ow7ab/ow7ab` in Cloudflare Dashboard → **Workers & Pages** → Worker **`ow7ab`** → **Settings** → **Build**.
 2. Configure Build & Deploy Settings:
    - **Root directory**: `/` (repository root)
    - **Build command**: `npm run build`
    - **Deploy command**: `npx wrangler deploy`
-   - **Environment variables**: `NODE_VERSION = 22`, `VITE_BASE_PATH = /`
-3. `wrangler.toml` also declares `[build] command = "npm run build"` and `[assets] directory = "./web/dist"` with `not_found_handling = "single-page-application"`, ensuring `web/dist` is cleanly generated before upload.
+   - **Build Environment variables** *(optional — `.node-version` already pins Node 22 and `VITE_BASE_PATH` defaults to `/`)*: `NODE_VERSION = 22`, `VITE_BASE_PATH = /`
+3. `wrangler.toml` declares `[build] command = "npm run build"` and `[assets] directory = "./web/dist"` with `not_found_handling = "single-page-application"`, and intentionally omits `[vars]` (Cloudflare rejects runtime `[vars]` on assets-only Workers without a `main` script) and `web/public/_redirects` (Cloudflare rejects `/* /index.html 200` with `code 10021`). `web/public/.assetsignore` excludes source maps (`*.map`) and GitHub Pages' `404.html` from Cloudflare uploads.
 
 ### Option C — Firebase Hosting
 `firebase.json` is preconfigured with `"public": "web/dist"` and SPA rewrite `"** -> /index.html"`.
