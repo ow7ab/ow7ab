@@ -84,8 +84,8 @@ jobs:
           PROJECT_NAME="${CLOUDFLARE_PROJECT_NAME:-pmp-paints-erp}"
           if [ -n "${CLOUDFLARE_API_TOKEN}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID}" ]; then
             echo "Deploying web/dist to Cloudflare Pages project: ${PROJECT_NAME}.pages.dev (branch: main)..."
-            npx --yes wrangler@3 pages project create "${PROJECT_NAME}" --production-branch=main 2>/dev/null || echo "Project ${PROJECT_NAME} already exists or managed in Cloudflare."
-            npx --yes wrangler@3 pages deploy web/dist --project-name="${PROJECT_NAME}" --branch=main --commit-dirty=true
+            (cd web && npx --yes wrangler@3 pages project create "${PROJECT_NAME}" --production-branch=main 2>/dev/null || echo "Project ${PROJECT_NAME} already exists or managed in Cloudflare.")
+            (cd web && npx --yes wrangler@3 pages deploy dist --project-name="${PROJECT_NAME}" --branch=main --commit-dirty=true)
           else
             echo "Note: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID secrets not set in GitHub Actions; skipping CLI push (use Cloudflare Pages native Git integration or add secrets)."
           fi

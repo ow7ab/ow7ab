@@ -5,6 +5,8 @@ import {
   signOut as fbSignOut,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   sendPasswordResetEmail
 } from 'firebase/auth';
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
@@ -173,8 +175,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsubTomb();
   }, [currentUser?.uid]);
 
-  // Firebase Auth listener + live verification via zero-trust self-lookup when Firebase Auth is present
+  // Firebase Auth listener + Google redirect completion + live verification via zero-trust self-lookup
   useEffect(() => {
+    void getRedirectResult(auth).catch(() => null);
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
       if (user && !linkedAccount) {
@@ -304,9 +307,54 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
+      // If no active Firebase Auth session exists yet, try Firebase Email/Password auth automatically
+      // for email inputs or primary admin aliases before requiring Google SSO.
       if (!auth.currentUser) {
+        const lowerUser = cleanUser.toLowerCase();
+        const candidateEmails: string[] = lowerUser.includes('@')
+          ? [lowerUser]
+          : lowerUser === 'admin' || lowerUser === 'usr-admin' || lowerUser === 'usr-hq-001'
+          ? ['admin@pmp-paints.com', 'oaw7ab@gmail.com']
+          : [];
+
+        let signedInFbUser: User | null = null;
+        for (const candidateEmail of candidateEmails) {
+          try {
+            const cred = await signInWithEmailAndPassword(auth, candidateEmail, cleanPin);
+            signedInFbUser = cred.user;
+            break;
+          } catch {
+            // Try next candidate or fall through to clear Google SSO guidance
+          }
+        }
+
+        if (signedInFbUser) {
+          await AccountService.ensureOwnClusterMemberRegistration(
+            null,
+            signedInFbUser.uid,
+            signedInFbUser.email || candidateEmails[0]
+          ).catch(() => {});
+          const matchedViaFb = await AccountService.findSignedInUserAccount(signedInFbUser);
+          if (matchedViaFb) {
+            validateAccountAccessState(matchedViaFb);
+            await AccountService.ensureOwnClusterMemberRegistration(
+              matchedViaFb,
+              signedInFbUser.uid,
+              signedInFbUser.email || candidateEmails[0]
+            ).catch(() => {});
+            LoginRateLimiter.recordSuccess(cleanUser);
+            await ErpDataService.logAudit(
+              matchedViaFb.username,
+              'WEB_LOGIN_SUCCESS',
+              `دخول ناجح للويب (${matchedViaFb.role} - ${matchedViaFb.branch})`
+            );
+            persistSession(matchedViaFb);
+            return;
+          }
+        }
+
         throw new Error(
-          'لأغراض الحماية السحابية (Zero-Trust)، يرجى تسجيل الدخول عبر زر Google المعتمد أو تبويب البريد الإلكتروني وكلمة المرور أولاً.'
+          'للدخول الآمن إلى السحابة، اضغط على زر «تسجيل الدخول عبر Google» أعلاه (نفس حسابك في تطبيق الأندرويد)، أو استخدم بريدك الإلكتروني وكلمة مرور Firebase.'
         );
       }
 
@@ -385,14 +433,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
-      // 1. Check Firebase Auth if configured for this corporate email
+      // 1. Check Firebase Auth (supports direct corporate email OR primary admin alias)
       let fbCredUser: User | null = null;
       let fbAuthError: any = null;
-      try {
-        const cred = await signInWithEmailAndPassword(auth, cleanEmail, cleanPass);
-        fbCredUser = cred.user;
-      } catch (err: any) {
-        fbAuthError = err;
+      const emailCandidates = cleanEmail.includes('@')
+        ? [cleanEmail]
+        : cleanEmail === 'admin' || cleanEmail === 'usr-admin' || cleanEmail === 'usr-hq-001'
+        ? ['admin@pmp-paints.com', 'oaw7ab@gmail.com']
+        : [];
+
+      if (emailCandidates.length === 0) {
+        throw new Error('يرجى إدخال بريد إلكتروني صحيح أو استخدام زر «تسجيل الدخول عبر Google» أعلاه.');
+      }
+
+      for (const candidate of emailCandidates) {
+        try {
+          const cred = await signInWithEmailAndPassword(auth, candidate, cleanPass);
+          fbCredUser = cred.user;
+          break;
+        } catch (err: any) {
+          fbAuthError = err;
+        }
       }
 
       // 2. Resolve employee profile via zero-trust self-lookup when Firebase Auth succeeded
@@ -403,7 +464,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           validateAccountAccessState(matched);
           await AccountService.ensureOwnClusterMemberRegistration(matched, fbCredUser.uid, fbCredUser.email || cleanEmail).catch(() => {});
           LoginRateLimiter.recordSuccess(cleanEmail);
-          await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${cleanEmail}`);
+          await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${fbCredUser.email || cleanEmail}`);
           persistSession(matched);
           return;
         }
@@ -414,10 +475,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       LoginRateLimiter.recordFailure(cleanEmail);
       throw new Error(
         fbAuthError?.code === 'auth/wrong-password' || fbAuthError?.code === 'auth/invalid-credential'
-          ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة. يمكنك أيضاً تسجيل الدخول مباشرة عبر Google.'
+          ? 'بيانات البريد أو كلمة المرور غير مطابقة في Firebase Auth. إذا كان حسابك مرتبطاً بـ Google، استخدم زر «تسجيل الدخول عبر Google» أعلاه.'
           : fbAuthError?.code === 'auth/user-not-found'
-          ? 'هذا البريد غير مسجل في Firebase Auth — يرجى استخدام زر تسجيل الدخول عبر Google المعتمد.'
-          : 'تعذر التحقق من البريد الإلكتروني وكلمة المرور. يرجى استخدام زر تسجيل الدخول عبر Google.'
+          ? 'هذا البريد غير مفعّل بكلمة مرور — اضغط على زر «تسجيل الدخول عبر Google» أعلاه للدخول مباشرة.'
+          : fbAuthError?.code === 'auth/operation-not-allowed'
+          ? 'الدخول بالبريد وكلمة المرور غير مفعّل في إعدادات المشروع — استخدم زر «تسجيل الدخول عبر Google» أعلاه.'
+          : fbAuthError?.code === 'auth/network-request-failed'
+          ? 'تعذر الاتصال بخادم المصادقة. تأكد من اتصال الإنترنت ثم أعد المحاولة.'
+          : 'تعذر التحقق من البريد الإلكتروني وكلمة المرور. يرجى استخدام زر «تسجيل الدخول عبر Google» أعلاه.'
       );
     } finally {
       setIsAuthenticating(false);
@@ -427,7 +492,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginWithGoogle = async () => {
     setIsAuthenticating(true);
     try {
-      const res = await signInWithPopup(auth, googleAuthProvider);
+      googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
+      let res;
+      try {
+        res = await signInWithPopup(auth, googleAuthProvider);
+      } catch (popupErr: any) {
+        const code = String(popupErr?.code || '');
+        if (code === 'auth/popup-blocked') {
+          await signInWithRedirect(auth, googleAuthProvider);
+          return;
+        }
+        if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+          throw new Error('تم إلغاء نافذة تسجيل الدخول عبر Google. يمكنك المحاولة مرة أخرى.');
+        }
+        if (code === 'auth/unauthorized-domain') {
+          const host = typeof window !== 'undefined' ? window.location.hostname : '';
+          throw new Error(
+            `النطاق الحالي (${host}) غير مضاف في النطاقات المصرح بها في Firebase Auth (Authorized Domains). يرجى إضافته من لوحة Firebase أو استخدام النطاق الرسمي المعتمد.`
+          );
+        }
+        throw popupErr;
+      }
+
       const fbUser = res.user;
       const email = (fbUser?.email || '').trim().toLowerCase();
       if (!email) {

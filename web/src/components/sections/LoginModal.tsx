@@ -32,10 +32,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onNavigateRoute
 }) => {
   const { language } = useLanguage();
-  const { loginWithEmail, loginWithUsernamePin, loginWithGoogle, requestPasswordReset, isAuthenticating } = useAuth();
+  const { currentUser, loginWithEmail, loginWithUsernamePin, loginWithGoogle, requestPasswordReset, isAuthenticating } = useAuth();
   const { latestRelease, apkAvailable } = useLatestRelease();
 
-  const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('pin');
+  const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('email');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [username, setUsername] = useState('');
@@ -50,7 +50,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setPin('');
     setErrorMsg(null);
     setSuccessMsg(null);
-    setTab('pin');
+    setTab('email');
   };
 
   const handleClose = () => {
@@ -148,19 +148,34 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         </div>
 
         {tab !== 'reset' && (
-          /* Tab switch */
-          <div className="grid grid-cols-2 p-1 rounded-xl bg-theme-surface border border-theme">
+          <div className="space-y-3">
             <button
               type="button"
-              onClick={() => { setTab('pin'); setErrorMsg(null); }}
-              className={`py-2 text-xs font-bold rounded-lg transition-all ${
-                tab === 'pin'
-                  ? 'bg-pmp-primary text-white shadow-md'
-                  : 'text-theme-secondary hover:text-theme-primary'
-              }`}
+              onClick={handleGoogleLogin}
+              disabled={isAuthenticating}
+              className="w-full py-2.5 rounded-xl bg-white hover:bg-slate-50 text-slate-900 border border-slate-300/80 font-extrabold text-xs shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 min-h-[44px]"
             >
-              {language === 'ar' ? 'اسم المستخدم والرمز (PIN)' : 'Username & PIN'}
+              <img
+                src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
+                alt="Google"
+                className="w-4 h-4"
+              />
+              <span>{language === 'ar' ? 'الدخول السريع بحساب Google المعتمد' : 'Sign in with Google Workspace'}</span>
             </button>
+
+            <div className="relative flex items-center justify-center">
+              <div className="w-full border-t border-theme" />
+              <span className="px-3 bg-theme-surface text-[11px] text-theme-muted font-medium whitespace-nowrap">
+                {language === 'ar' ? 'أو بالبريد وكلمة المرور' : 'Or with Email & Password'}
+              </span>
+              <div className="w-full border-t border-theme" />
+            </div>
+          </div>
+        )}
+
+        {tab !== 'reset' && currentUser && (
+          /* Tab switch (PIN unlock/switch only when Firebase Auth session is active) */
+          <div className="grid grid-cols-2 p-1 rounded-xl bg-theme-surface border border-theme">
             <button
               type="button"
               onClick={() => { setTab('email'); setErrorMsg(null); }}
@@ -171,6 +186,17 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               }`}
             >
               {language === 'ar' ? 'البريد الإلكتروني' : 'Enterprise Email'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setTab('pin'); setErrorMsg(null); }}
+              className={`py-2 text-xs font-bold rounded-lg transition-all ${
+                tab === 'pin'
+                  ? 'bg-pmp-primary text-white shadow-md'
+                  : 'text-theme-secondary hover:text-theme-primary'
+              }`}
+            >
+              {language === 'ar' ? 'اسم المستخدم والرمز (PIN)' : 'Username & PIN'}
             </button>
           </div>
         )}
@@ -189,7 +215,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </div>
         )}
 
-        {tab === 'pin' && (
+        {tab === 'pin' && currentUser && (
           <form onSubmit={handlePinLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-theme-primary mb-1">
@@ -237,20 +263,20 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </form>
         )}
 
-        {tab === 'email' && (
+        {(tab === 'email' || (tab === 'pin' && !currentUser)) && (
           <form onSubmit={handleEmailLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-theme-primary mb-1">
                 {language === 'ar' ? 'البريد الإلكتروني المعتمد' : 'Corporate Email'}
               </label>
               <input
-                type="email"
+                type="text"
                 required
                 maxLength={128}
-                autoComplete="email"
+                autoComplete="username"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@pmppaints.com"
+                placeholder="oaw7ab@gmail.com"
                 className="w-full px-3.5 py-2.5 rounded-lg bg-theme-surface border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary"
               />
             </div>
@@ -338,35 +364,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </form>
         )}
 
-        {/* Google Enterprise Sign-In */}
-        {tab !== 'reset' && (
-          <>
-            <div className="relative pt-2">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-theme"></div>
-              </div>
-              <div className="relative flex justify-center text-xs">
-                <span className="px-3 bg-theme-surface text-theme-muted font-medium">
-                  {language === 'ar' ? 'أو عبر الحساب المعتمد' : 'Or via Verified Enterprise SSO'}
-                </span>
-              </div>
-            </div>
-
-            <GlassButton
-              variant="secondary"
-              onClick={handleGoogleLogin}
-              disabled={isAuthenticating}
-              className="w-full justify-center"
-            >
-              <img
-                src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
-                alt="Google"
-                className="w-4 h-4 ml-2"
-              />
-              <span>{language === 'ar' ? 'الدخول بحساب Google المعتمد' : 'Sign in with Google Workspace'}</span>
-            </GlassButton>
-          </>
-        )}
+        {/* Google SSO moved to primary CTA above */}
 
         {/* Official Android App Download CTA */}
         <div className="pt-3 border-t border-theme space-y-2.5">
