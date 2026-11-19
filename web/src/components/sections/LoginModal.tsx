@@ -8,7 +8,8 @@ import {
   ShieldCheck,
   LogIn,
   Download,
-  Smartphone
+  Smartphone,
+  ExternalLink
 } from 'lucide-react';
 import { Modal } from '../ui/Modal';
 import { GlassButton } from '../ui/GlassButton';
@@ -35,7 +36,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const { currentUser, loginWithEmail, loginWithUsernamePin, loginWithGoogle, requestPasswordReset, isAuthenticating } = useAuth();
   const { latestRelease, apkAvailable } = useLatestRelease();
 
-  const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('email');
+  const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('pin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [username, setUsername] = useState('');
@@ -50,7 +51,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setPin('');
     setErrorMsg(null);
     setSuccessMsg(null);
-    setTab('email');
+    setTab('pin');
   };
 
   const handleClose = () => {
@@ -173,20 +174,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </div>
         )}
 
-        {tab !== 'reset' && currentUser && (
-          /* Tab switch (PIN unlock/switch only when Firebase Auth session is active) */
+        {tab !== 'reset' && (
+          /* Tab switch (Always visible: Username & PIN + Corporate Email) */
           <div className="grid grid-cols-2 p-1 rounded-xl bg-theme-surface border border-theme">
-            <button
-              type="button"
-              onClick={() => { setTab('email'); setErrorMsg(null); }}
-              className={`py-2 text-xs font-bold rounded-lg transition-all ${
-                tab === 'email'
-                  ? 'bg-pmp-primary text-white shadow-md'
-                  : 'text-theme-secondary hover:text-theme-primary'
-              }`}
-            >
-              {language === 'ar' ? 'البريد الإلكتروني' : 'Enterprise Email'}
-            </button>
             <button
               type="button"
               onClick={() => { setTab('pin'); setErrorMsg(null); }}
@@ -198,13 +188,41 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             >
               {language === 'ar' ? 'اسم المستخدم والرمز (PIN)' : 'Username & PIN'}
             </button>
+            <button
+              type="button"
+              onClick={() => { setTab('email'); setErrorMsg(null); }}
+              className={`py-2 text-xs font-bold rounded-lg transition-all ${
+                tab === 'email'
+                  ? 'bg-pmp-primary text-white shadow-md'
+                  : 'text-theme-secondary hover:text-theme-primary'
+              }`}
+            >
+              {language === 'ar' ? 'البريد الإلكتروني' : 'Enterprise Email'}
+            </button>
           </div>
         )}
 
         {errorMsg && (
-          <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 flex items-center gap-2 text-xs text-red-500">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{errorMsg}</span>
+          <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 space-y-2 text-xs text-red-500">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{errorMsg}</span>
+            </div>
+            {errorMsg.includes('Authorized Domains') && (
+              <a
+                href="https://console.firebase.google.com/project/gen-lang-client-0220128746/authentication/settings"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 border border-red-500/35 text-[11px] font-bold text-red-400 transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>
+                  {language === 'ar'
+                    ? 'فتح إعدادات النطاقات المصرح بها في Firebase Console'
+                    : 'Open Firebase Authorized Domains Settings'}
+                </span>
+              </a>
+            )}
           </div>
         )}
 
@@ -215,7 +233,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </div>
         )}
 
-        {tab === 'pin' && currentUser && (
+        {tab === 'pin' && (
           <form onSubmit={handlePinLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-theme-primary mb-1">
@@ -263,7 +281,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </form>
         )}
 
-        {(tab === 'email' || (tab === 'pin' && !currentUser)) && (
+        {tab === 'email' && (
           <form onSubmit={handleEmailLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-theme-primary mb-1">

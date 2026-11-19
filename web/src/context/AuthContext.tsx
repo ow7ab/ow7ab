@@ -315,6 +315,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           ? [lowerUser]
           : lowerUser === 'admin' || lowerUser === 'usr-admin' || lowerUser === 'usr-hq-001'
           ? ['admin@pmp-paints.com', 'oaw7ab@gmail.com']
+          : /^[a-z0-9._-]+$/.test(lowerUser)
+          ? [`${lowerUser}@pmp-paints.com`]
           : [];
 
         let signedInFbUser: User | null = null;

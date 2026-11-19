@@ -46,7 +46,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   } = useAuth();
   const { latestRelease, apkAvailable, unavailableReason, isLoading: isReleaseLoading } = useLatestRelease();
 
-  const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('email');
+  const [tab, setTab] = useState<'pin' | 'email' | 'reset'>('pin');
   const [username, setUsername] = useState('');
   const [pin, setPin] = useState('');
   const [email, setEmail] = useState('');
@@ -287,24 +287,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             </div>
           )}
 
-          {/* Tab Selector (PIN tab only available when Firebase Auth session is already active on device) */}
-          {tab !== 'reset' && currentUser && (
+          {/* Tab Selector (Always visible so staff can choose Username & PIN or Corporate Email) */}
+          {tab !== 'reset' && (
             <div className="grid grid-cols-2 p-1 rounded-xl bg-theme-base border border-theme gap-1">
-              <button
-                type="button"
-                onClick={() => {
-                  setTab('email');
-                  setErrorMsg(null);
-                  setSuccessMsg(null);
-                }}
-                className={`py-2 text-xs font-bold rounded-lg transition-all ${
-                  tab === 'email'
-                    ? 'bg-pmp-primary text-white shadow-md'
-                    : 'text-theme-secondary hover:text-theme-primary'
-                }`}
-              >
-                {language === 'ar' ? 'البريد الإلكتروني' : 'Email & Password'}
-              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -320,14 +305,46 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               >
                 {language === 'ar' ? 'اسم المستخدم والرمز' : 'Username & PIN'}
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTab('email');
+                  setErrorMsg(null);
+                  setSuccessMsg(null);
+                }}
+                className={`py-2 text-xs font-bold rounded-lg transition-all ${
+                  tab === 'email'
+                    ? 'bg-pmp-primary text-white shadow-md'
+                    : 'text-theme-secondary hover:text-theme-primary'
+                }`}
+              >
+                {language === 'ar' ? 'البريد الإلكتروني' : 'Email & Password'}
+              </button>
             </div>
           )}
 
           {/* Alerts */}
           {errorMsg && (
-            <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 flex items-center gap-2 text-xs text-red-500 leading-relaxed">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{errorMsg}</span>
+            <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 space-y-2 text-xs text-red-500 leading-relaxed">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{errorMsg}</span>
+              </div>
+              {errorMsg.includes('Authorized Domains') && (
+                <a
+                  href="https://console.firebase.google.com/project/gen-lang-client-0220128746/authentication/settings"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 border border-red-500/35 text-[11px] font-bold text-red-400 transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>
+                    {language === 'ar'
+                      ? 'فتح إعدادات النطاقات المصرح بها في Firebase Console'
+                      : 'Open Firebase Authorized Domains Settings'}
+                  </span>
+                </a>
+              )}
             </div>
           )}
 
@@ -338,8 +355,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             </div>
           )}
 
-          {/* PIN / Username Form (only when Firebase Auth session is active) */}
-          {tab === 'pin' && currentUser && (
+          {/* PIN / Username Form */}
+          {tab === 'pin' && (
             <form onSubmit={handlePinSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-theme-primary mb-1.5">
@@ -399,7 +416,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           )}
 
           {/* Email Form */}
-          {(tab === 'email' || (tab === 'pin' && !currentUser)) && (
+          {tab === 'email' && (
             <form onSubmit={handleEmailSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-theme-primary mb-1.5">
