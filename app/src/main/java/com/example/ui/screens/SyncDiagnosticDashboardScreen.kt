@@ -22,6 +22,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -30,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.credentials.CredentialManager
 import com.example.data.remote.CloudErrorLogEntry
 import com.example.data.remote.ServiceProbeId
 import com.example.data.remote.ServiceProbeResult
@@ -37,6 +39,9 @@ import com.example.data.remote.SyncDiagnosticRecord
 import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.PmpViewModel
+import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.auth
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -46,7 +51,7 @@ import java.util.Locale
  * Formats a timestamp into an intuitive, human-friendly Arabic relative time phrase.
  */
 fun formatRelativeTimeArabic(timestamp: Long?): String {
-    if (timestamp == null || timestamp == 0L) return "لم تتم المزامنة بعد"
+    if (timestamp == null || timestamp == 0L) return "لم تتم بعد"
     val diff = (System.currentTimeMillis() - timestamp).coerceAtLeast(0L)
     val seconds = diff / 1000
     val minutes = seconds / 60
@@ -122,8 +127,30 @@ fun SyncDiagnosticDashboardView(
         "سجل المزامنة (${syncDiagnostics.size})"
     )
 
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val credentialManager = remember(context) { CredentialManager.create(context) }
+
+    var firebaseUser by remember {
+        mutableStateOf(runCatching { Firebase.auth.currentUser }.getOrNull())
+    }
+    var isGoogleSignInLoading by remember { mutableStateOf(false) }
+    var googleSignInError by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        val authInstance = runCatching { Firebase.auth }.getOrNull()
+        val listener = FirebaseAuth.AuthStateListener { auth ->
+            firebaseUser = auth.currentUser
+        }
+        authInstance?.addAuthStateListener(listener)
+        onDispose {
+            authInstance?.removeAuthStateListener(listener)
+        }
+    }
+
+    val isGoogleSignedIn = firebaseUser != null
     val isHealthMeasured = serverHealthReport != null
-    val isOnline = serverHealthReport?.isOnline == true
+    val isOnline = isGoogleSignedIn && serverHealthReport?.isOnline == true
     val numberFormat = remember { NumberFormat.getNumberInstance(Locale.US) }
 
     // Pulsing animation for live sync indicator
@@ -232,6 +259,7 @@ fun SyncDiagnosticDashboardView(
                                 .background(
                                     when {
                                         isSyncing -> Color(0xFFEFF6FF)
+                                        !isGoogleSignedIn -> Color(0xFFFFFBEB)
                                         hasErrors -> Color(0xFFFEF2F2)
                                         !isHealthMeasured -> Color(0xFFFFFBEB)
                                         isOnline -> Color(0xFFF0FDF4)
@@ -242,6 +270,7 @@ fun SyncDiagnosticDashboardView(
                                     1.dp,
                                     when {
                                         isSyncing -> PmpCyan.copy(alpha = 0.5f)
+                                        !isGoogleSignedIn -> PmpGold.copy(alpha = 0.6f)
                                         hasErrors -> PmpRed.copy(alpha = 0.5f)
                                         !isHealthMeasured -> PmpGold.copy(alpha = 0.5f)
                                         isOnline -> PmpGreen.copy(alpha = 0.5f)
@@ -269,6 +298,7 @@ fun SyncDiagnosticDashboardView(
                                             .background(
                                                 when {
                                                     isSyncing -> PmpCyan
+                                                    !isGoogleSignedIn -> PmpGold
                                                     hasErrors -> PmpRed
                                                     !isHealthMeasured -> PmpGold
                                                     isOnline -> PmpGreen
@@ -279,6 +309,7 @@ fun SyncDiagnosticDashboardView(
                                     Text(
                                         text = when {
                                             isSyncing -> "جارٍ المزامنة السحابية لحظياً مع السيرفر..."
+                                            !isGoogleSignedIn -> "جلسة Google غير نشطة — سجّل الدخول لتفعيل المزامنة"
                                             hasErrors -> "يوجد $totalErrorsBadge أخطاء معلقة تتطلب المراجعة"
                                             !isHealthMeasured -> "بانتظار فحص السيرفر المباشر (لم يُقَس بعد)"
                                             isOnline -> "السيرفر متصل ومزامن بالكامل مع قاعدة البيانات"
@@ -286,24 +317,99 @@ fun SyncDiagnosticDashboardView(
                                         },
                                         color = PmpBrandNavy,
                                         fontSize = 12.5.sp,
+                                        lineHeight = 18.sp,
                                         fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
+                                        maxLines = 2,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
 
+                                Spacer(modifier = Modifier.width(8.dp))
+
                                 GlassBadge(
                                     text = when {
                                         isSyncing -> "مزامنة جارية"
+                                        !isGoogleSignedIn -> "بانتظار الدخول"
                                         !isHealthMeasured -> "غير مقاس"
                                         isOnline -> "سيرفر مستقر"
                                         else -> "غير متاح"
                                     },
                                     color = when {
                                         isSyncing -> PmpCyan
+                                        !isGoogleSignedIn -> PmpGold
                                         !isHealthMeasured -> PmpGold
                                         isOnline -> PmpGreen
                                         else -> PmpRed
+                                    }
+                                )
+                            }
+                        }
+
+                        // One-Tap Google Sign-In Recovery CTA when Firebase Auth session is inactive
+                        if (!isGoogleSignedIn) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(Color(0xFFF8FAFC))
+                                    .border(1.dp, PmpGold.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "تفعيل الجلسة السحابية (Google Sign-In)",
+                                    color = PmpBrandNavy,
+                                    fontSize = 13.sp,
+                                    lineHeight = 19.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "البيانات محفوظة بأمان محلياً على جهازك. سجّل الدخول بحساب Google المعتمد الآن لإزالة تنبيه المصادقة وتفعيل المزامنة الفورية مع السيرفر.",
+                                    color = TextMuted,
+                                    fontSize = 11.5.sp,
+                                    lineHeight = 17.sp
+                                )
+                                googleSignInError?.let { err ->
+                                    Text(
+                                        text = err,
+                                        color = PmpRed,
+                                        fontSize = 11.sp,
+                                        lineHeight = 16.sp
+                                    )
+                                }
+                                GlassButton(
+                                    text = "تسجيل الدخول بحساب Google الآن",
+                                    icon = Icons.Default.AccountCircle,
+                                    gradient = GlassAccentBlueGradient,
+                                    isLoading = isGoogleSignInLoading,
+                                    loadingText = "جارٍ التحقق عبر Google...",
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("diagnostic_google_signin_button"),
+                                    onClick = {
+                                        if (!isGoogleSignInLoading) {
+                                            isGoogleSignInLoading = true
+                                            googleSignInError = null
+                                            onGoogleSignInClicked(
+                                                context = context,
+                                                credentialManager = credentialManager,
+                                                onAuthSuccess = {
+                                                    isGoogleSignInLoading = false
+                                                    firebaseUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+                                                    viewModel.startCloudRealtimeSyncIfAuthenticated()
+                                                    viewModel.checkServerHealth()
+                                                },
+                                                onAuthError = { msg ->
+                                                    isGoogleSignInLoading = false
+                                                    googleSignInError = msg
+                                                },
+                                                scope = coroutineScope,
+                                                onAuthCancelled = {
+                                                    isGoogleSignInLoading = false
+                                                }
+                                            )
+                                        }
                                     }
                                 )
                             }
@@ -321,7 +427,7 @@ fun SyncDiagnosticDashboardView(
                 }
             }
 
-            // 4 KPI Summary Cards with Solid Backgrounds
+            // 4 KPI Summary Cards with Solid Backgrounds & Concise Non-Truncating Arabic Labels
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
@@ -330,23 +436,26 @@ fun SyncDiagnosticDashboardView(
                     ) {
                         // KPI 1: Status
                         GlassStatCard(
-                            title = "حالة اتصال السيرفر",
+                            title = "اتصال السيرفر",
                             value = when {
                                 isSyncing -> "جارٍ الحفظ"
+                                !isGoogleSignedIn -> "بانتظار الدخول"
                                 !isHealthMeasured -> "غير مقاس"
                                 isOnline -> "متصل ومزامن"
                                 else -> "غير متاح"
                             },
                             unit = "Google Cloud",
-                            subtitle = "كود الكلاستر: ${clusterCode.take(18)}",
+                            subtitle = "الكلاستر: ${clusterCode.take(18)}",
                             accentColor = when {
                                 isSyncing -> PmpCyan
+                                !isGoogleSignedIn -> PmpGold
                                 !isHealthMeasured -> PmpGold
                                 isOnline -> PmpGreen
                                 else -> PmpRed
                             },
                             icon = when {
                                 isSyncing -> Icons.Default.Sync
+                                !isGoogleSignedIn -> Icons.Default.LockClock
                                 !isHealthMeasured -> Icons.Default.HourglassEmpty
                                 isOnline -> Icons.Default.CloudDone
                                 else -> Icons.Default.CloudOff
@@ -356,9 +465,9 @@ fun SyncDiagnosticDashboardView(
 
                         // KPI 2: Timestamp of Last Successful Sync
                         GlassStatCard(
-                            title = "آخر مزامنة ناجحة",
+                            title = "آخر مزامنة",
                             value = formatRelativeTimeArabic(lastSyncTime),
-                            unit = "توقيت محلي",
+                            unit = if (lastSyncTime != null && lastSyncTime != 0L) "توقيت محلي" else null,
                             subtitle = formatExactDateTime(lastSyncTime),
                             accentColor = PmpGold,
                             icon = Icons.Default.Schedule,
@@ -374,20 +483,25 @@ fun SyncDiagnosticDashboardView(
                         GlassStatCard(
                             title = "الأخطاء المعلقة",
                             value = "$totalErrorsBadge خطأ",
-                            unit = if (totalErrorsBadge == 0) "نظام مستقر" else "بحاجة لمراجعة",
+                            unit = if (totalErrorsBadge == 0) "مستقر" else "للمراجعة",
                             subtitle = if (totalErrorsBadge == 0) "لا توجد أخطاء معلقة إطلاقاً" else "انقر لتبويب الأخطاء للمعالجة",
                             accentColor = if (totalErrorsBadge == 0) PmpGreen else PmpRed,
                             icon = if (totalErrorsBadge == 0) Icons.Default.VerifiedUser else Icons.Default.ReportProblem,
                             modifier = Modifier.weight(1f)
                         )
 
-                        // KPI 4: Ping / Response Time (Never fake 38ms when unmeasured)
-                        val pingText = serverHealthReport?.responseTimeMs?.let { "$it ms" } ?: "غير مقاس"
+                        // KPI 4: Ping / Response Time (Never show stale latency when unauthenticated)
+                        val measuredLatency = serverHealthReport?.responseTimeMs?.takeIf { it > 0L && isGoogleSignedIn }
+                        val pingText = when {
+                            !isGoogleSignedIn -> "بانتظار الدخول"
+                            measuredLatency != null -> "$measuredLatency ms"
+                            else -> "غير مقاس"
+                        }
                         GlassStatCard(
-                            title = "زمن الاستجابة (Ping)",
+                            title = "زمن الاستجابة",
                             value = pingText,
-                            unit = if (isHealthMeasured) "مللي ثانية" else "بانتظار الفحص",
-                            subtitle = "خوادم Firestore الإقليمية (Source.SERVER)",
+                            unit = if (measuredLatency != null) "مللي ثانية" else null,
+                            subtitle = if (isGoogleSignedIn) "خوادم Firestore (Source.SERVER)" else "يتطلب تسجيل دخول Google",
                             accentColor = if (isOnline) PmpBlueLight else PmpGold,
                             icon = Icons.Default.Speed,
                             modifier = Modifier.weight(1f)
@@ -1223,17 +1337,18 @@ fun SyncDiagnosticDashboardView(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(14.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                        .padding(horizontal = 14.dp, vertical = 14.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalAlignment = Alignment.Top
                                 ) {
                                     Row(
-                                        verticalAlignment = Alignment.CenterVertically,
+                                        verticalAlignment = Alignment.Top,
                                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                                         modifier = Modifier.weight(1f)
                                     ) {
                                         Box(
                                             modifier = Modifier
+                                                .padding(top = 2.dp)
                                                 .size(34.dp)
                                                 .clip(RoundedCornerShape(8.dp))
                                                 .background(
@@ -1253,11 +1368,15 @@ fun SyncDiagnosticDashboardView(
                                             )
                                         }
 
-                                        Column(modifier = Modifier.weight(1f)) {
+                                        Column(
+                                            modifier = Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
                                             Text(
                                                 text = actionName,
                                                 color = PmpBrandNavy,
                                                 fontSize = 13.5.sp,
+                                                lineHeight = 20.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
@@ -1265,14 +1384,16 @@ fun SyncDiagnosticDashboardView(
                                             Text(
                                                 text = record.message,
                                                 color = if (isFailed) PmpRed else TextMuted,
-                                                fontSize = 11.sp,
-                                                maxLines = 2,
+                                                fontSize = 11.5.sp,
+                                                lineHeight = 17.sp,
+                                                maxLines = 3,
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                             Text(
                                                 text = "${record.formattedTime} • السجلات: ${record.entitiesCount} • الجهاز: ${record.deviceId.take(8)}",
-                                                color = TextMuted.copy(alpha = 0.7f),
-                                                fontSize = 10.sp
+                                                color = TextMuted.copy(alpha = 0.75f),
+                                                fontSize = 10.sp,
+                                                lineHeight = 15.sp
                                             )
                                         }
                                     }

@@ -28,6 +28,7 @@ import {
 } from '../services/PasswordSecurity';
 import { getDesktopBridge } from '../utils/desktopBridge';
 import { safeStorageGet, safeStorageRemove, safeStorageSet } from '../utils/safeStorage';
+import { assertTrustedAuthDomain } from '../utils/authDomainGuard';
 
 const SESSION_STORAGE_KEY = 'pmp_web_portal_user';
 
@@ -307,9 +308,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
-      // If no active Firebase Auth session exists yet, try Firebase Email/Password auth automatically
-      // for email inputs or primary admin aliases before requiring Google SSO.
+      // If no active Firebase Auth session exists yet, verify trusted origin first
+      // and try Firebase Email/Password auth automatically for username-only or email inputs.
       if (!auth.currentUser) {
+        assertTrustedAuthDomain();
         const lowerUser = cleanUser.toLowerCase();
         const candidateEmails: string[] = lowerUser.includes('@')
           ? [lowerUser]
@@ -320,14 +322,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           : [];
 
         let signedInFbUser: User | null = null;
+        let lastFbErr: any = null;
         for (const candidateEmail of candidateEmails) {
           try {
             const cred = await signInWithEmailAndPassword(auth, candidateEmail, cleanPin);
             signedInFbUser = cred.user;
             break;
-          } catch {
-            // Try next candidate or fall through to clear Google SSO guidance
+          } catch (err: any) {
+            lastFbErr = err;
+            // Try next candidate or fall through to clear guidance
           }
+        }
+        if (!signedInFbUser && lastFbErr?.code === 'auth/unauthorized-domain') {
+          const host = typeof window !== 'undefined' ? window.location.hostname : '';
+          throw new Error(
+            `النطاق الحالي (${host}) غير مضاف في النطاقات المصرح بها في Firebase Auth (Authorized Domains). يرجى إضافته من لوحة Firebase.`
+          );
         }
 
         if (signedInFbUser) {
@@ -448,6 +458,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error('يرجى إدخال بريد إلكتروني صحيح أو استخدام زر «تسجيل الدخول عبر Google» أعلاه.');
       }
 
+      // Pre-flight trusted domain check before invoking Firebase Auth
+      assertTrustedAuthDomain();
+
       for (const candidate of emailCandidates) {
         try {
           const cred = await signInWithEmailAndPassword(auth, candidate, cleanPass);
@@ -494,6 +507,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginWithGoogle = async () => {
     setIsAuthenticating(true);
     try {
+      // Pre-flight trusted domain & HTTPS verification before starting Firebase Auth flow
+      assertTrustedAuthDomain();
       googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
       let res;
       try {
@@ -548,6 +563,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const requestPasswordReset = async (emailVal: string) => {
+    assertTrustedAuthDomain();
     const cleanEmail = emailVal.trim();
     if (!cleanEmail) throw new Error('يرجى إدخال البريد الإلكتروني أولاً.');
     await sendPasswordResetEmail(auth, cleanEmail);

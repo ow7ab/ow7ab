@@ -314,12 +314,15 @@ object CloudSyncErrorTracker {
             h.contains("duplicate_transaction") || h.contains("معاملة مالية مكررة") ||
                 h.contains("مسجلة مسبقاً") || h.contains("تم منع التكرار") ->
                 CloudErrorCategory.DUPLICATE_TRANSACTION
-            h.contains("permission_denied") || h.contains("permission-denied") ||
-                h.contains("missing or insufficient permissions") || h.contains("صلاحية") ->
-                CloudErrorCategory.PERMISSION_DENIED
             h.contains("unauthenticated") || h.contains("auth/") ||
-                h.contains("invalid-credential") || h.contains("id token") || h.contains("unauthorized") ->
+                h.contains("invalid-credential") || h.contains("id token") || h.contains("unauthorized") ||
+                h.contains("جلسة المصادقة") || h.contains("google sign-in") ||
+                h.contains("تسجيل الدخول بحساب google") || h.contains("جلسة google") ->
                 CloudErrorCategory.UNAUTHENTICATED
+            h.contains("permission_denied") || h.contains("permission-denied") ||
+                h.contains("missing or insufficient permissions") || h.contains("صلاحية") ||
+                h.contains("cluster_members") || h.contains("غير مربوط بدليل عضوية") ->
+                CloudErrorCategory.PERMISSION_DENIED
             h.contains("unavailable") || h.contains("503") ->
                 CloudErrorCategory.UNAVAILABLE
             h.contains("deadline_exceeded") || h.contains("deadline-exceeded") || h.contains("timeout") ->

@@ -1071,6 +1071,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 val activeId = activeSessionUserId.value
                 val isMgr = currentUser.value.isSystemManager()
                 DatabaseBackupManager.restoreIfEmpty(getApplication(), repository.getDao())
+                if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+                    _cloudSyncState.value = "محفوظ محلياً • بانتظار تسجيل الدخول بحساب Google للمزامنة"
+                    _isInitialDataLoading.value = false
+                    return@launch
+                }
                 cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), activeId, devId)
                 val res = cloudErpSyncRepo.syncAllLocalToCloud(serverClusterCode.value, repository.getDao(), isMgr, activeId, devId)
                 res.onFailure { err ->
@@ -1947,14 +1952,16 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
                     DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
                 }
-                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
-                cloudErpSyncRepo.syncAllLocalToCloud(
-                    serverClusterCode.value,
-                    repository.getDao(),
-                    currentUser.value.isSystemManager(),
-                    activeSessionUserId.value,
-                    devId
-                )
+                if (runCatching { Firebase.auth.currentUser }.getOrNull() != null) {
+                    val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+                    cloudErpSyncRepo.syncAllLocalToCloud(
+                        serverClusterCode.value,
+                        repository.getDao(),
+                        currentUser.value.isSystemManager(),
+                        activeSessionUserId.value,
+                        devId
+                    )
+                }
                 val msg = if (hadFinancialHistory) {
                     "تم إلغاء تفعيل وأرشفة الخزنة ($cleanName) عبر جميع الأجهزة مع الاحتفاظ الكامل بكافة الحركات والسجلات المالية التاريخية المرتبطة بها"
                 } else {
@@ -3455,6 +3462,19 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
             val activeId = activeSessionUserId.value
             val isMgr = currentUser.value.isSystemManager()
+            if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+                DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
+                _isSyncing.value = false
+                _cloudSyncState.value = "محفوظ محلياً • يرجى تسجيل الدخول بحساب Google للمزامنة السحابية"
+                if (!silent) {
+                    postMessage(
+                        "جلسة Google غير نشطة — يرجى تسجيل الدخول بحساب Google المعتمد لتفعيل المزامنة السحابية.",
+                        isError = true
+                    )
+                }
+                return@launch
+            }
+
             _isSyncing.value = true
             _cloudSyncState.value = "جاري المزامنة الفورية مع سيرفر Google Cloud..."
 
@@ -3565,6 +3585,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             _cloudSyncState.value = "بانتظار تسجيل الدخول بحساب Google للاتصال بالسيرفر"
             return
         }
+        cloudErpSyncRepo.clearAuthPendingErrors()
         if (cloudObserverJob?.isActive == true && cloudObserverUid == fbUser.uid) return
         cloudObserverJob?.cancel()
         cloudObserverUid = fbUser.uid
@@ -3755,6 +3776,15 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun syncAllErpDataToServer() {
         viewModelScope.launch {
+            if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+                DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
+                _cloudSyncState.value = "محفوظ محلياً • بانتظار تسجيل الدخول بحساب Google للمزامنة"
+                postMessage(
+                    "جلسة Google غير نشطة — اضغط على «تسجيل الدخول بحساب Google» لتفعيل المزامنة السحابية.",
+                    isError = true
+                )
+                return@launch
+            }
             _isSyncing.value = true
             _cloudSyncState.value = "جارٍ حفظ ورفع كافة البيانات والمستخدمين لسيرفر Google Cloud..."
 
@@ -3781,6 +3811,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun restoreAllErpDataFromServer() {
         viewModelScope.launch {
+            if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+                _cloudSyncState.value = "بانتظار تسجيل الدخول بحساب Google للاستعادة من السيرفر"
+                postMessage(
+                    "جلسة Google غير نشطة — اضغط على «تسجيل الدخول بحساب Google» لاستعادة البيانات من السيرفر.",
+                    isError = true
+                )
+                return@launch
+            }
             _isSyncing.value = true
             _cloudSyncState.value = "جارٍ استعادة ومزامنة البيانات من سيرفر Google Cloud..."
 

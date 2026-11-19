@@ -467,6 +467,22 @@ class CloudErpSyncRepository(
         _structuredErrors.value = emptyList()
     }
 
+    /**
+     * Clears stale UNAUTHENTICATED errors automatically once Google Sign-In is active or a sync succeeds.
+     */
+    fun clearAuthPendingErrors() {
+        _structuredErrors.value = _structuredErrors.value.filterNot {
+            it.category == CloudErrorCategory.UNAUTHENTICATED
+        }
+        _pendingErrors.value = _pendingErrors.value.filterNot { rec ->
+            val msg = rec.message.lowercase(java.util.Locale.US)
+            msg.contains("unauthenticated") ||
+                msg.contains("جلسة المصادقة") ||
+                msg.contains("google sign-in") ||
+                msg.contains("تسجيل الدخول بحساب google")
+        }
+    }
+
     fun recordStructuredError(
         operation: String,
         collectionPath: String,
@@ -480,6 +496,10 @@ class CloudErpSyncRepository(
             deviceId = deviceId
         )
         val currentStruct = _structuredErrors.value.toMutableList()
+        // Deduplicate repeated UNAUTHENTICATED errors so background triggers never stack 17+ identical entries
+        if (entry.category == CloudErrorCategory.UNAUTHENTICATED) {
+            currentStruct.removeAll { it.category == CloudErrorCategory.UNAUTHENTICATED }
+        }
         currentStruct.add(0, entry)
         _structuredErrors.value = if (currentStruct.size > 50) currentStruct.take(50) else currentStruct
         return entry
@@ -564,14 +584,37 @@ class CloudErpSyncRepository(
             entitiesCount = count,
             message = safeMessage
         )
+        val isAuthFailure = status == "FAILED" && (
+            safeMessage.contains("UNAUTHENTICATED", ignoreCase = true) ||
+                safeMessage.contains("جلسة المصادقة") ||
+                safeMessage.contains("Google Sign-In", ignoreCase = true)
+            )
+
         val current = _diagnostics.value.toMutableList()
-        current.add(0, record)
+        // Collapse consecutive identical UNAUTHENTICATED diagnostic records into one fresh entry
+        if (isAuthFailure && current.isNotEmpty() && current.first().status == "FAILED" &&
+            (current.first().message.contains("UNAUTHENTICATED", ignoreCase = true) ||
+                current.first().message.contains("جلسة المصادقة") ||
+                current.first().message.contains("Google Sign-In", ignoreCase = true))
+        ) {
+            current[0] = record
+        } else {
+            current.add(0, record)
+        }
         _diagnostics.value = if (current.size > 50) current.take(50) else current
 
         if (status == "SUCCESS") {
             _lastSuccessfulSyncTime.value = now
+            clearAuthPendingErrors()
         } else if (status == "FAILED") {
             val currentErrors = _pendingErrors.value.toMutableList()
+            if (isAuthFailure) {
+                currentErrors.removeAll { rec ->
+                    rec.message.contains("UNAUTHENTICATED", ignoreCase = true) ||
+                        rec.message.contains("جلسة المصادقة") ||
+                        rec.message.contains("Google Sign-In", ignoreCase = true)
+                }
+            }
             currentErrors.add(0, record)
             _pendingErrors.value = if (currentErrors.size > 20) currentErrors.take(20) else currentErrors
         }

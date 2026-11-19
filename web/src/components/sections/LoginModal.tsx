@@ -6,6 +6,8 @@ import {
   AlertCircle,
   CheckCircle,
   ShieldCheck,
+  ShieldAlert,
+  Copy,
   LogIn,
   Download,
   Smartphone,
@@ -18,6 +20,7 @@ import { useLanguage } from '../../context/LanguageContext';
 import { APP_VERSION_CONTRACT } from '../../config/appVersionContract';
 import { useLatestRelease } from '../../hooks/useLatestRelease';
 import { AppRoute } from '../../utils/routing';
+import { evaluateAuthDomain } from '../../utils/authDomainGuard';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -43,6 +46,20 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [pin, setPin] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [domainCopied, setDomainCopied] = useState(false);
+  const domainCheck = evaluateAuthDomain();
+
+  const handleCopyHost = async () => {
+    try {
+      if (navigator.clipboard && domainCheck.hostname) {
+        await navigator.clipboard.writeText(domainCheck.hostname);
+        setDomainCopied(true);
+        setTimeout(() => setDomainCopied(false), 2500);
+      }
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
 
   const resetForm = () => {
     setEmail('');
@@ -63,6 +80,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+    if (!domainCheck.canStartFirebaseAuth) {
+      setErrorMsg(language === 'ar' ? domainCheck.reasonAr : domainCheck.reasonEn);
+      return;
+    }
     try {
       await loginWithEmail(email, password);
       setSuccessMsg(language === 'ar' ? 'تم التحقق بنجاح! جاري تحويلك للبوابة...' : 'Authentication successful! Redirecting...');
@@ -79,9 +100,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+    if (!domainCheck.canStartFirebaseAuth) {
+      setErrorMsg(language === 'ar' ? domainCheck.reasonAr : domainCheck.reasonEn);
+      return;
+    }
     try {
       await loginWithUsernamePin(username, pin);
-      setSuccessMsg(language === 'ar' ? 'تم تسجيل الدخول بالرمز بنجاح!' : 'PIN verified successfully!');
+      setSuccessMsg(language === 'ar' ? 'تم تسجيل الدخول باسم المستخدم بنجاح!' : 'Username verified successfully!');
       setTimeout(() => {
         handleClose();
         if (onLoginSuccess) onLoginSuccess();
@@ -94,6 +119,10 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const handleGoogleLogin = async () => {
     setErrorMsg(null);
     setSuccessMsg(null);
+    if (!domainCheck.canStartFirebaseAuth) {
+      setErrorMsg(language === 'ar' ? domainCheck.reasonAr : domainCheck.reasonEn);
+      return;
+    }
     try {
       await loginWithGoogle();
       setSuccessMsg(language === 'ar' ? 'تم التحقق بحساب Google بنجاح!' : 'Google authentication verified!');
@@ -135,15 +164,37 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       maxWidth="max-w-md"
     >
       <div className="space-y-6">
-        {/* Security Header Banner */}
-        <div className="p-3.5 rounded-xl bg-pmp-primary/10 border border-pmp-primary/30 flex items-center gap-3">
-          <ShieldCheck className="w-5 h-5 text-pmp-primary shrink-0" />
+        {/* Pre-Flight Trusted Domain Verification Banner */}
+        <div
+          className={`p-3 rounded-xl border flex items-start gap-3 ${
+            domainCheck.canStartFirebaseAuth
+              ? 'bg-emerald-500/10 border-emerald-500/30'
+              : 'bg-red-500/10 border-red-500/35'
+          }`}
+        >
+          {domainCheck.canStartFirebaseAuth ? (
+            <ShieldCheck className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
+          ) : (
+            <ShieldAlert className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+          )}
           <div className="text-xs">
             <span className="font-bold text-theme-primary block">
-              {language === 'ar' ? 'اتصال سحابي آمن ومشفر' : 'Secure Encrypted Connection'}
+              {domainCheck.canStartFirebaseAuth
+                ? language === 'ar'
+                  ? `نطاق موثوق: ${domainCheck.hostname}`
+                  : `Verified Domain: ${domainCheck.hostname}`
+                : language === 'ar'
+                ? `نطاق غير موثوق (${domainCheck.hostname || 'غير معروف'})`
+                : `Untrusted Domain (${domainCheck.hostname || 'unknown'})`}
             </span>
             <span className="text-theme-secondary">
-              {language === 'ar' ? 'مرتبط مباشرة بنظام الصلاحيات وحسابات الفروع.' : 'Directly connected to branch operations and staff accounts.'}
+              {domainCheck.canStartFirebaseAuth
+                ? language === 'ar'
+                  ? 'اتصال سحابي مشفر ومرتبط مباشرة بنظام الصلاحيات وحسابات الفروع.'
+                  : 'Directly connected to branch operations and staff accounts.'
+                : language === 'ar'
+                ? domainCheck.reasonAr
+                : domainCheck.reasonEn}
             </span>
           </div>
         </div>
@@ -153,7 +204,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             <button
               type="button"
               onClick={handleGoogleLogin}
-              disabled={isAuthenticating}
+              disabled={isAuthenticating || !domainCheck.canStartFirebaseAuth}
               className="w-full py-2.5 rounded-xl bg-white hover:bg-slate-50 text-slate-900 border border-slate-300/80 font-extrabold text-xs shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 min-h-[44px]"
             >
               <img
@@ -167,7 +218,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             <div className="relative flex items-center justify-center">
               <div className="w-full border-t border-theme" />
               <span className="px-3 bg-theme-surface text-[11px] text-theme-muted font-medium whitespace-nowrap">
-                {language === 'ar' ? 'أو بالبريد وكلمة المرور' : 'Or with Email & Password'}
+                {language === 'ar' ? 'أو باسم المستخدم فقط / البريد' : 'Or with Username Only / Email'}
               </span>
               <div className="w-full border-t border-theme" />
             </div>
@@ -175,7 +226,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         )}
 
         {tab !== 'reset' && (
-          /* Tab switch (Always visible: Username & PIN + Corporate Email) */
+          /* Tab switch (Always visible: Username Only + Corporate Email) */
           <div className="grid grid-cols-2 p-1 rounded-xl bg-theme-surface border border-theme">
             <button
               type="button"
@@ -186,7 +237,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   : 'text-theme-secondary hover:text-theme-primary'
               }`}
             >
-              {language === 'ar' ? 'اسم المستخدم والرمز (PIN)' : 'Username & PIN'}
+              {language === 'ar' ? 'اسم المستخدم فقط' : 'Username Only'}
             </button>
             <button
               type="button"
@@ -209,19 +260,31 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <span>{errorMsg}</span>
             </div>
             {errorMsg.includes('Authorized Domains') && (
-              <a
-                href="https://console.firebase.google.com/project/gen-lang-client-0220128746/authentication/settings"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 border border-red-500/35 text-[11px] font-bold text-red-400 transition-colors"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                <span>
-                  {language === 'ar'
-                    ? 'فتح إعدادات النطاقات المصرح بها في Firebase Console'
-                    : 'Open Firebase Authorized Domains Settings'}
-                </span>
-              </a>
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href={domainCheck.firebaseSettingsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 border border-red-500/35 text-[11px] font-bold text-red-400 transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>
+                    {language === 'ar'
+                      ? 'فتح إعدادات Authorized Domains'
+                      : 'Open Firebase Authorized Domains'}
+                  </span>
+                </a>
+                {domainCheck.hostname && (
+                  <button
+                    type="button"
+                    onClick={handleCopyHost}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-theme-base border border-theme text-[11px] font-bold text-theme-primary"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>{domainCopied ? (language === 'ar' ? 'تم النسخ' : 'Copied') : domainCheck.hostname}</span>
+                  </button>
+                )}
+              </div>
             )}
           </div>
         )}
@@ -237,7 +300,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           <form onSubmit={handlePinLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-theme-primary mb-1">
-                {language === 'ar' ? 'اسم المستخدم الوظيفي' : 'Username'}
+                {language === 'ar' ? 'اسم المستخدم فقط (بدون بريد إلكتروني)' : 'Username Only (No Email Required)'}
               </label>
               <input
                 type="text"
@@ -253,7 +316,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
             <div>
               <label className="block text-xs font-semibold text-theme-primary mb-1">
-                {language === 'ar' ? 'الرمز السري المشفر (PIN)' : 'Secret PIN'}
+                {language === 'ar' ? 'الرمز السري / كلمة المرور' : 'PIN / Password'}
               </label>
               <input
                 type="password"
@@ -270,13 +333,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             <GlassButton
               type="submit"
               variant="primary"
-              disabled={isAuthenticating}
+              disabled={isAuthenticating || !domainCheck.canStartFirebaseAuth}
               className="w-full justify-center shadow-md mt-2"
               icon={<LogIn className="w-4 h-4" />}
             >
               {isAuthenticating
                 ? (language === 'ar' ? 'جاري التحقق...' : 'Authenticating...')
-                : (language === 'ar' ? 'دخول بوابة الموظف' : 'Enter Portal')}
+                : (language === 'ar' ? 'دخول باسم المستخدم' : 'Sign In with Username')}
             </GlassButton>
           </form>
         )}

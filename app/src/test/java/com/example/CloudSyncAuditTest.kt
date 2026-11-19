@@ -96,6 +96,19 @@ class CloudSyncAuditTest {
       FirebaseFirestoreException.Code.ABORTED
     )
     assertEquals(CloudErrorCategory.DATA_CONFLICT, CloudSyncErrorTracker.classifyThrowable(conflict).category)
+
+    val arabicAuthEx = SecurityException(
+      "جلسة المصادقة السحابية (Google Sign-In) غير نشطة — يرجى تسجيل الدخول بحساب Google المعتمد للمزامنة مع السيرفر."
+    )
+    val arabicAuthClassified = CloudSyncErrorTracker.classifyThrowable(arabicAuthEx)
+    assertEquals(CloudErrorCategory.UNAUTHENTICATED, arabicAuthClassified.category)
+    assertEquals("UNAUTHENTICATED", arabicAuthClassified.code)
+    assertFalse(arabicAuthClassified.retryable)
+
+    val arabicMemberEx = SecurityException(
+      "الحساب الحالي غير مربوط بدليل عضوية الكلاستر (cluster_members) على السيرفر"
+    )
+    assertEquals(CloudErrorCategory.PERMISSION_DENIED, CloudSyncErrorTracker.classifyThrowable(arabicMemberEx).category)
   }
 
   @Test
