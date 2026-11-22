@@ -330,18 +330,22 @@ export function deduplicateCollectionRecords<T = any>(collectionName: string, it
       case 'movements': {
         const uuid = String(raw.syncUuid ?? '').trim();
         const ref = normalizeEntityKey(raw.reference);
-        const dir = String(raw.direction || raw.type || '').trim().toUpperCase();
+        const dir = isMovementInflow(raw) ? 'IN' : 'OUT';
         const boxKey = normalizeEntityKey(raw.cashbox || raw.cashboxName);
         const curr = resolveCanonicalCurrency(raw.currency, raw.cashbox || raw.cashboxName);
+        const amtCents = Number.isFinite(Number(raw.amount)) ? Math.round(Math.abs(Number(raw.amount)) * 100) : 0;
+        const docPart = String(raw.cloudDocId ?? raw._docId ?? '').trim();
         const idPart = raw.id !== undefined && raw.id !== null ? String(raw.id).trim() : '';
         if (uuid) {
           key = `uuid:${uuid}`;
         } else if (ref && !ref.startsWith('mov')) {
-          key = `ref:${ref}__${boxKey}__${dir}__${curr}__${Number(raw.amount || 0)}`;
+          key = `ref:${ref}__${boxKey}__${dir}__${curr}__${amtCents}`;
+        } else if (docPart) {
+          key = `doc:${docPart}`;
         } else if (idPart) {
           key = `id:${idPart}`;
         } else {
-          key = `${boxKey}__${dir}__${Number(raw.amount || 0)}__${normalizeEntityKey(raw.description || raw.note)}__${raw.createdAt || raw.timestamp || 0}`;
+          key = `${boxKey}__${dir}__${amtCents}__${normalizeEntityKey(raw.description || raw.note)}__${raw.createdAt || raw.timestamp || 0}`;
         }
         break;
       }
@@ -461,7 +465,7 @@ export interface DistinctCashboxSummary {
   balances: Record<CurrencyCode, number>;
 }
 
-function isMovementInflow(mv: Partial<TreasuryMovement> & Record<string, any>): boolean {
+export function isMovementInflow(mv: Partial<TreasuryMovement> & Record<string, any>): boolean {
   const dir = String(mv.direction ?? mv.type ?? '').trim().toUpperCase();
   return (
     dir === 'وارد' ||
@@ -470,13 +474,15 @@ function isMovementInflow(mv: Partial<TreasuryMovement> & Record<string, any>): 
     dir === 'DEPOSIT' ||
     dir === 'قبض' ||
     dir === 'توريد' ||
-    dir === 'إيداع'
+    dir === 'إيداع' ||
+    dir === 'ايداع'
   );
 }
 
 /**
  * Deduplicates cashboxes by normalized name and computes multi-currency balances (SDG, EGP, USD)
- * from `movements` matching Android `PmpDao.kt` (`getAggregatedCashboxBalances`).
+ * strictly from deduplicated `movements` — matching Android `PmpDao.kt` & `TreasuryBalanceNormalizer.kt`
+ * (never falling back to stale cached `cashboxes.balance` fields).
  */
 export function computeDistinctCashboxesWithBalances(
   cashboxes: Cashbox[],
@@ -491,9 +497,7 @@ export function computeDistinctCashboxesWithBalances(
       branch: string;
       active: boolean;
       primaryCurrency: CurrencyCode;
-      seedBalances: Record<CurrencyCode, number>;
       computedBalances: Record<CurrencyCode, number>;
-      hasMoves: Record<CurrencyCode, boolean>;
     }
   >();
 
@@ -503,22 +507,15 @@ export function computeDistinctCashboxesWithBalances(
     if (!nameKey) continue;
     const curr = resolveCanonicalCurrency(box.currency, box.name);
 
-    const existing = grouped.get(nameKey);
-    if (!existing) {
-      const seedBalances: Record<CurrencyCode, number> = { SDG: 0, EGP: 0, USD: 0 };
-      seedBalances[curr] = Number(box.balance || 0);
+    if (!grouped.has(nameKey)) {
       grouped.set(nameKey, {
         id: Number(box.id || Date.now()),
         name: String(box.name).trim(),
         branch: box.branch || 'SD-001',
         active: box.active !== false,
         primaryCurrency: curr,
-        seedBalances,
-        computedBalances: { SDG: 0, EGP: 0, USD: 0 },
-        hasMoves: { SDG: false, EGP: false, USD: false }
+        computedBalances: { SDG: 0, EGP: 0, USD: 0 }
       });
-    } else {
-      existing.seedBalances[curr] = Math.max(existing.seedBalances[curr], Number(box.balance || 0));
     }
   }
 
@@ -537,15 +534,14 @@ export function computeDistinctCashboxesWithBalances(
         branch: 'SD-001',
         active: true,
         primaryCurrency: curr,
-        seedBalances: { SDG: 0, EGP: 0, USD: 0 },
-        computedBalances: { SDG: 0, EGP: 0, USD: 0 },
-        hasMoves: { SDG: false, EGP: false, USD: false }
+        computedBalances: { SDG: 0, EGP: 0, USD: 0 }
       };
       grouped.set(nameKey, entry);
     }
 
-    entry.hasMoves[curr] = true;
-    const amt = Number(mv.amount || 0);
+    const rawAmt = Number(mv.amount || 0);
+    if (!Number.isFinite(rawAmt)) continue;
+    const amt = Math.abs(rawAmt);
     if (isMovementInflow(mv)) {
       entry.computedBalances[curr] += amt;
     } else {
@@ -556,9 +552,9 @@ export function computeDistinctCashboxesWithBalances(
   const out: DistinctCashboxSummary[] = [];
   for (const entry of grouped.values()) {
     const finalBalances: Record<CurrencyCode, number> = {
-      SDG: entry.hasMoves.SDG ? entry.computedBalances.SDG : entry.seedBalances.SDG,
-      EGP: entry.hasMoves.EGP ? entry.computedBalances.EGP : entry.seedBalances.EGP,
-      USD: entry.hasMoves.USD ? entry.computedBalances.USD : entry.seedBalances.USD
+      SDG: entry.computedBalances.SDG,
+      EGP: entry.computedBalances.EGP,
+      USD: entry.computedBalances.USD
     };
     const primaryBalance = finalBalances[entry.primaryCurrency] || 0;
     out.push({

@@ -123,6 +123,7 @@ export const PurchasesModuleView: React.FC = () => {
         if (paidCashbox && numAmount > 0) {
           const boxObj = cashboxes.find((c) => c.name === paidCashbox);
           const movId = moveId + 1;
+          const movDocId = `MOV-${idempotencyKey}`;
           const cashMov: TreasuryMovement = {
             id: movId,
             txDate: newMove.moveDate,
@@ -132,12 +133,14 @@ export const PurchasesModuleView: React.FC = () => {
             amount: numAmount,
             description: `شراء ${item.name} (${numQty} ${item.unit}) — ${newMove.counterparty}`,
             reference: newMove.batch,
+            cloudDocId: movDocId,
+            syncUuid: movDocId,
             createdBy: actor,
             createdAt: movId
           };
           await ErpDataService.handleTransactionCommit({
             collectionName: 'movements',
-            docId: `MOV-${idempotencyKey}`,
+            docId: movDocId,
             payload: cashMov,
             actorUsername: userProfile?.username
           });

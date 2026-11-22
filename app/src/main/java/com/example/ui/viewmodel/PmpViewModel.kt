@@ -599,7 +599,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .map { rows ->
             val balances = LinkedHashMap<String, Double>(rows.size)
             for (row in rows) {
-                balances[row.currency] = row.netBalance
+                val canonicalCurrency = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(row.currency)
+                balances[canonicalCurrency] = (balances[canonicalCurrency] ?: 0.0) + row.netBalance
             }
             balances as Map<String, Double>
         }
@@ -610,9 +611,24 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     val cashboxBalances: StateFlow<Map<Pair<String, String>, Double>> = repository.getAggregatedCashboxBalances()
         .map { rows ->
-            val map = LinkedHashMap<Pair<String, String>, Double>(rows.size)
+            // Fold Arabic spelling/whitespace variants and currency casing to match Web ErpCalculations.ts 1:1
+            val canonicalTotals = LinkedHashMap<Pair<String, String>, Double>(rows.size)
+            val displayByCanonical = LinkedHashMap<String, MutableSet<String>>()
             for (row in rows) {
-                map[Pair(row.cashbox.trim(), row.currency.trim())] = row.netBalance
+                val trimmedBox = row.cashbox.trim()
+                val canonicalBoxKey = com.example.util.TreasuryBalanceNormalizer.normalizeArabicKey(trimmedBox)
+                val canonicalCurrency = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(row.currency, trimmedBox)
+                val canonicalPair = Pair(canonicalBoxKey, canonicalCurrency)
+                canonicalTotals[canonicalPair] = (canonicalTotals[canonicalPair] ?: 0.0) + row.netBalance
+                displayByCanonical.getOrPut(canonicalBoxKey) { linkedSetOf() }.add(trimmedBox)
+            }
+            val map = LinkedHashMap<Pair<String, String>, Double>(canonicalTotals.size * 2)
+            for ((canonicalPair, total) in canonicalTotals) {
+                val (canonicalBoxKey, canonicalCurrency) = canonicalPair
+                map[canonicalPair] = total
+                displayByCanonical[canonicalBoxKey]?.forEach { rawDisplay ->
+                    map[Pair(rawDisplay, canonicalCurrency)] = total
+                }
             }
             map as Map<Pair<String, String>, Double>
         }
@@ -620,6 +636,15 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         .catch { emit(emptyMap()) }
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    fun getCashboxBalance(cashboxName: String, currency: String): Double {
+        val canonicalBoxKey = com.example.util.TreasuryBalanceNormalizer.normalizeArabicKey(cashboxName)
+        val canonicalCurrency = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(currency, cashboxName)
+        val map = cashboxBalances.value
+        return map[Pair(canonicalBoxKey, canonicalCurrency)]
+            ?: map[Pair(cashboxName.trim(), canonicalCurrency)]
+            ?: 0.0
+    }
 
     val productStockBalances: StateFlow<Map<Long, Double>> = repository.getAggregatedProductStockBalances()
         .map { rows ->
@@ -1072,7 +1097,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 val isMgr = currentUser.value.isSystemManager()
                 DatabaseBackupManager.restoreIfEmpty(getApplication(), repository.getDao())
                 if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
-                    _cloudSyncState.value = "محفوظ محلياً • بانتظار تسجيل الدخول بحساب Google للمزامنة"
+                    _cloudSyncState.value = "الوضع المحلي النشط • يتم الاتصال السحابي تلقائياً عند توفر الجلسة"
                     _isInitialDataLoading.value = false
                     return@launch
                 }
@@ -3465,11 +3490,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
                 _isSyncing.value = false
-                _cloudSyncState.value = "محفوظ محلياً • يرجى تسجيل الدخول بحساب Google للمزامنة السحابية"
+                _cloudSyncState.value = "محفوظ محلياً بأمان • سيتم الرفع السحابي تلقائياً فور تفعيل الجلسة"
                 if (!silent) {
                     postMessage(
-                        "جلسة Google غير نشطة — يرجى تسجيل الدخول بحساب Google المعتمد لتفعيل المزامنة السحابية.",
-                        isError = true
+                        "تم حفظ نسخة احتياطية محلية بنجاح. لبدء المزامنة السحابية لأول مرة على هذا الجهاز، اربط الجهاز بالحساب السحابي مرة واحدة من شاشة الدخول أو الإعدادات."
                     )
                 }
                 return@launch
@@ -3579,10 +3603,46 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Called automatically when Firebase Auth activates silently on startup or via Credential Manager.
+     * Preloads cloud user accounts before ERP login or starts full realtime sync when already logged in.
+     */
+    fun onFirebaseCloudSessionActivated(isErpSessionAuthenticated: Boolean) {
+        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull() ?: return
+        cloudErpSyncRepo.clearAuthPendingErrors()
+        if (isErpSessionAuthenticated) {
+            startCloudRealtimeSyncIfAuthenticated()
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
+                cloudErpSyncRepo.ensureOwnClusterMemberRegistration(
+                    clusterCode = serverClusterCode.value,
+                    account = null,
+                    fbUid = fbUser.uid,
+                    fbEmail = fbUser.email
+                )
+                cloudErpSyncRepo.pullSingleUserAccountFromCloud(
+                    clusterCode = serverClusterCode.value,
+                    dao = repository.getDao(),
+                    fbUid = fbUser.uid,
+                    fbEmail = fbUser.email
+                )
+                cloudErpSyncRepo.pullAndMergeCloudUsers(
+                    clusterCode = serverClusterCode.value,
+                    dao = repository.getDao(),
+                    currentActiveUserId = activeSessionUserId.value,
+                    deviceId = devId
+                )
+            }
+        }
+    }
+
     fun startCloudRealtimeSyncIfAuthenticated() {
         val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
         if (fbUser == null) {
-            _cloudSyncState.value = "بانتظار تسجيل الدخول بحساب Google للاتصال بالسيرفر"
+            _cloudSyncState.value = "الوضع المحلي النشط • جارٍ التجهيز للاتصال السحابي التلقائي"
             return
         }
         cloudErpSyncRepo.clearAuthPendingErrors()
@@ -3778,10 +3838,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
-                _cloudSyncState.value = "محفوظ محلياً • بانتظار تسجيل الدخول بحساب Google للمزامنة"
+                _cloudSyncState.value = "محفوظ محلياً بأمان • بانتظار تفعيل الاتصال السحابي"
                 postMessage(
-                    "جلسة Google غير نشطة — اضغط على «تسجيل الدخول بحساب Google» لتفعيل المزامنة السحابية.",
-                    isError = true
+                    "تم حفظ البيانات محلياً بنجاح. لتفعيل المزامنة السحابية على هذا الجهاز لأول مرة، اربط الحساب السحابي مرة واحدة من الإعدادات."
                 )
                 return@launch
             }
@@ -3812,10 +3871,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     fun restoreAllErpDataFromServer() {
         viewModelScope.launch {
             if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
-                _cloudSyncState.value = "بانتظار تسجيل الدخول بحساب Google للاستعادة من السيرفر"
+                _cloudSyncState.value = "بانتظار تفعيل الاتصال السحابي للاستعادة"
                 postMessage(
-                    "جلسة Google غير نشطة — اضغط على «تسجيل الدخول بحساب Google» لاستعادة البيانات من السيرفر.",
-                    isError = true
+                    "لم يتم ربط هذا الجهاز بالسيرفر السحابي بعد — فعّل الربط السحابي مرة واحدة وسيستمر الاتصال تلقائياً."
                 )
                 return@launch
             }
@@ -3902,8 +3960,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
-                if (Firebase.auth.currentUser == null) {
-                    _cloudSyncState.value = "محفوظ محلياً (يرجى ربط حساب Google للمزامنة السحابية)"
+                if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+                    _cloudSyncState.value = "محفوظ محلياً بأمان • الاتصال السحابي سيتفعل تلقائياً"
                     return@launch
                 }
                 val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
@@ -4077,16 +4135,18 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         method = "PASSWORD",
                         bindBiometricIfFirstOrSameUser = true
                     ) { authenticated ->
-                        // Background cloud user sync (non-blocking, won't freeze login)
-                        viewModelScope.launch(Dispatchers.IO) {
-                            try {
-                                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
-                                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), authenticated.id, devId)
-                                if (com.example.util.PasswordSecurityUtil.isPbkdf2Hash(authenticated.pinOrPassword)) {
-                                    cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, authenticated)
+                        // Background cloud user sync ONLY when cloud transport is already active (prevents auth error spam)
+                        if (runCatching { Firebase.auth.currentUser }.getOrNull() != null) {
+                            viewModelScope.launch(Dispatchers.IO) {
+                                try {
+                                    val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+                                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), authenticated.id, devId)
+                                    if (com.example.util.PasswordSecurityUtil.isPbkdf2Hash(authenticated.pinOrPassword)) {
+                                        cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, authenticated)
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w("PmpViewModel", "Async post-login user sync note: ${e.message}")
                                 }
-                            } catch (e: Exception) {
-                                Log.w("PmpViewModel", "Async post-login user sync note: ${e.message}")
                             }
                         }
                         postMessage("مرحباً بك ${authenticated.fullName} • الصلاحيات: ${authenticated.permissions}")
@@ -4104,20 +4164,23 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                // 3. Fallback: Query Google Cloud Server with a safe timeout (4.5s max) to prevent app freezing
+                // 3. Fallback: Query Google Cloud Server ONLY if a cloud auth session is active (never throw "cloud session inactive" on login)
                 var cloudUser: UserAccountEntity? = null
                 var cloudError: String? = null
-                try {
-                    kotlinx.coroutines.withTimeoutOrNull(4500L) {
-                        val cloudAuthRes = cloudErpSyncRepo.findAndAuthenticateUserInCloud(cleanIdentity, cleanSecret, repository.getDao())
-                        if (cloudAuthRes.isSuccess) {
-                            cloudUser = cloudAuthRes.getOrNull()
-                        } else {
-                            cloudError = cloudAuthRes.exceptionOrNull()?.message
+                val hasActiveCloudSession = runCatching { Firebase.auth.currentUser }.getOrNull() != null
+                if (hasActiveCloudSession) {
+                    try {
+                        kotlinx.coroutines.withTimeoutOrNull(4500L) {
+                            val cloudAuthRes = cloudErpSyncRepo.findAndAuthenticateUserInCloud(cleanIdentity, cleanSecret, repository.getDao())
+                            if (cloudAuthRes.isSuccess) {
+                                cloudUser = cloudAuthRes.getOrNull()
+                            } else {
+                                cloudError = cloudAuthRes.exceptionOrNull()?.message
+                            }
                         }
+                    } catch (e: Exception) {
+                        Log.w("PmpViewModel", "Cloud lookup timeout/error: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    Log.w("PmpViewModel", "Cloud lookup timeout/error: ${e.message}")
                 }
 
                 if (cloudUser != null) {
@@ -4148,21 +4211,26 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 } else {
                     val matchedAccount = repository.findUserByIdentity(cleanIdentity)
+                    val resolvedReason = when {
+                        matchedAccount != null -> localMsg.ifBlank { "كلمة المرور غير صحيحة للحساب ($cleanIdentity)." }
+                        !cloudError.isNullOrBlank() -> cloudError!!
+                        !hasActiveCloudSession -> "اسم المستخدم ($cleanIdentity) غير موجود محلياً بعد أو كلمة المرور غير صحيحة. تأكد من البيانات أو اربط الجهاز بالسحاب مرة واحدة لجلب حسابات الموظفين."
+                        else -> localMsg.ifBlank { "اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات أو مراجعة مدير النظام." }
+                    }
                     val lockoutAfterFail = com.example.util.AuthSecurityManager.recordFailedLoginAttempt(
                         context = app,
                         identity = cleanIdentity,
                         matchedUserCode = matchedAccount?.userCode.orEmpty(),
-                        reason = cloudError ?: localMsg.ifBlank { "كلمة المرور أو الهوية غير صحيحة" }
+                        reason = resolvedReason
                     )
                     refreshSecurityStateForUser()
                     val finalErrMsg = if (lockoutAfterFail.isLocked) {
                         lockoutAfterFail.message
                     } else {
-                        val baseErr = cloudError ?: localMsg.ifBlank { "اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات أو مراجعة مدير النظام." }
                         if (lockoutAfterFail.remainingAttemptsBeforeLock <= 2) {
-                            "$baseErr (تنبيه أمني: متبقي ${lockoutAfterFail.remainingAttemptsBeforeLock} محاولات قبل الإغلاق المؤقت)"
+                            "$resolvedReason (تنبيه أمني: متبقي ${lockoutAfterFail.remainingAttemptsBeforeLock} محاولات قبل الإغلاق المؤقت)"
                         } else {
-                            baseErr
+                            resolvedReason
                         }
                     }
                     postMessage(finalErrMsg, isError = true)

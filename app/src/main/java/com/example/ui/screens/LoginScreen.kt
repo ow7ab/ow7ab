@@ -73,6 +73,7 @@ import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.PmpViewModel
 import com.example.util.BiometricAuthHelper
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
@@ -80,8 +81,10 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 
 /**
  * Interactive Google Sign-In flow via Credential Manager and GetSignInWithGoogleOption.
@@ -138,7 +141,60 @@ fun onGoogleSignInClicked(
 }
 
 /**
- * Full Sign-Out helper clearing both Firebase Auth and Credential Manager state.
+ * Silent automatic cloud authentication via Jetpack Credential Manager (GetGoogleIdOption).
+ * Automatically restores an authorized Google session in the background without manual prompts.
+ */
+fun attemptAutoSignIn(
+    context: Context,
+    credentialManager: CredentialManager,
+    onAuthSuccess: () -> Unit,
+    onUnauthenticated: () -> Unit,
+    scope: CoroutineScope
+) {
+    if (runCatching { Firebase.auth.currentUser }.getOrNull() != null) {
+        onAuthSuccess()
+        return
+    }
+    val clientId = try {
+        context.getString(R.string.default_web_client_id).trim()
+    } catch (_: Exception) {
+        onUnauthenticated()
+        return
+    }
+    if (clientId.isBlank()) {
+        onUnauthenticated()
+        return
+    }
+    val googleIdOption = GetGoogleIdOption.Builder()
+        .setFilterByAuthorizedAccounts(true)
+        .setServerClientId(clientId)
+        .setAutoSelectEnabled(true)
+        .build()
+    val request = GetCredentialRequest.Builder()
+        .addCredentialOption(googleIdOption)
+        .build()
+    scope.launch {
+        try {
+            val activityContext = context as? Activity ?: context
+            val credential = credentialManager.getCredential(activityContext, request).credential
+            if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+                val idToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
+                Firebase.auth.signInWithCredential(GoogleAuthProvider.getCredential(idToken, null)).await()
+                onAuthSuccess()
+            } else {
+                onUnauthenticated()
+            }
+        } catch (e: GetCredentialCancellationException) {
+            Log.w("Auth", "Silent auto sign-in cancelled: ${e.message}")
+            onUnauthenticated()
+        } catch (_: Exception) {
+            onUnauthenticated()
+        }
+    }
+}
+
+/**
+ * Full Sign-Out helper clearing both Firebase Auth and Credential Manager state inside NonCancellable.
  */
 fun signOutFromFirebaseAndCredentials(
     context: Context,
@@ -146,14 +202,16 @@ fun signOutFromFirebaseAndCredentials(
     scope: CoroutineScope
 ) {
     val credentialManager = CredentialManager.create(context)
-    Firebase.auth.signOut()
     scope.launch {
-        try {
-            credentialManager.clearCredentialState(ClearCredentialStateRequest())
-        } catch (e: Exception) {
-            Log.e("Auth", "Failed to clear credential state", e)
-        } finally {
-            onSignOutComplete()
+        withContext(NonCancellable) {
+            try {
+                credentialManager.clearCredentialState(ClearCredentialStateRequest())
+            } catch (e: Exception) {
+                Log.w("Auth", "Failed to clear credential state: ${e.message}")
+            } finally {
+                runCatching { Firebase.auth.signOut() }
+                onSignOutComplete()
+            }
         }
     }
 }

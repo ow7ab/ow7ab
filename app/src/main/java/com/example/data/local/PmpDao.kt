@@ -309,7 +309,40 @@ interface PmpDao {
     @Query("DELETE FROM warehouses WHERE id NOT IN (SELECT MIN(id) FROM warehouses GROUP BY TRIM(LOWER(name)))")
     suspend fun removeDuplicateWarehouses()
 
-    @Query("DELETE FROM movements WHERE TRIM(reference) != '' AND id NOT IN (SELECT MIN(id) FROM movements WHERE TRIM(reference) != '' GROUP BY TRIM(reference))")
+    @Query(
+        """
+        DELETE FROM movements
+        WHERE (
+            TRIM(syncUuid) != ''
+            AND id NOT IN (
+                SELECT MIN(id) FROM movements
+                WHERE TRIM(syncUuid) != ''
+                GROUP BY TRIM(syncUuid)
+            )
+        ) OR (
+            TRIM(syncUuid) = ''
+            AND TRIM(cloudDocId) != ''
+            AND id NOT IN (
+                SELECT MIN(id) FROM movements
+                WHERE TRIM(syncUuid) = '' AND TRIM(cloudDocId) != ''
+                GROUP BY TRIM(cloudDocId)
+            )
+        ) OR (
+            TRIM(syncUuid) = ''
+            AND TRIM(cloudDocId) = ''
+            AND TRIM(reference) != ''
+            AND id NOT IN (
+                SELECT MIN(id) FROM movements
+                WHERE TRIM(syncUuid) = '' AND TRIM(cloudDocId) = '' AND TRIM(reference) != ''
+                GROUP BY LOWER(TRIM(reference)),
+                         LOWER(TRIM(cashbox)),
+                         UPPER(TRIM(currency)),
+                         CASE WHEN UPPER(TRIM(direction)) IN ('وارد', 'IN', 'INCOME', 'DEPOSIT', 'قبض', 'توريد', 'إيداع', 'ايداع') THEN 'IN' ELSE 'OUT' END,
+                         CAST(ROUND(ABS(amount) * 100.0) AS INTEGER)
+            )
+        )
+        """
+    )
     suspend fun removeDuplicateMovements(): Int
 
     @Query("DELETE FROM user_accounts WHERE id NOT IN (SELECT MIN(id) FROM user_accounts GROUP BY TRIM(LOWER(username))) AND isCurrentSession = 0")
@@ -536,8 +569,8 @@ interface PmpDao {
     @Query(
         """
         SELECT TRIM(cashbox) AS cashbox,
-               TRIM(currency) AS currency,
-               COALESCE(SUM(CASE WHEN direction = 'وارد' THEN amount ELSE -amount END), 0.0) AS netBalance
+               UPPER(TRIM(currency)) AS currency,
+               COALESCE(SUM(CASE WHEN UPPER(TRIM(direction)) IN ('وارد', 'IN', 'INCOME', 'DEPOSIT', 'قبض', 'توريد', 'إيداع', 'ايداع') THEN ABS(amount) ELSE -ABS(amount) END), 0.0) AS netBalance
         FROM movements
         GROUP BY TRIM(cashbox), TRIM(currency)
         """
@@ -546,10 +579,10 @@ interface PmpDao {
 
     @Query(
         """
-        SELECT TRIM(currency) AS currency,
-               COALESCE(SUM(CASE WHEN direction = 'وارد' THEN amount ELSE -amount END), 0.0) AS netBalance
+        SELECT UPPER(TRIM(currency)) AS currency,
+               COALESCE(SUM(CASE WHEN UPPER(TRIM(direction)) IN ('وارد', 'IN', 'INCOME', 'DEPOSIT', 'قبض', 'توريد', 'إيداع', 'ايداع') THEN ABS(amount) ELSE -ABS(amount) END), 0.0) AS netBalance
         FROM movements
-        GROUP BY TRIM(currency)
+        GROUP BY UPPER(TRIM(currency))
         """
     )
     fun getAggregatedCurrencyBalances(): Flow<List<CurrencyBalanceTuple>>

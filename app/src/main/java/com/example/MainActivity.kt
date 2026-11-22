@@ -360,8 +360,51 @@ fun PmpAppContent(
 
     var firebaseUser by remember { mutableStateOf(runCatching { Firebase.auth.currentUser }.getOrNull()) }
     val sessionManager = remember { UserSessionManager.getInstance(context) }
+    val credentialManager = remember { androidx.credentials.CredentialManager.create(context) }
     val isAuthTransitioning by sessionManager.isAuthTransitioning.collectAsState()
     val authTransitionMessage by sessionManager.authTransitionMessage.collectAsState()
+
+    // Automatically restore authorized cloud transport session silently on startup (no manual Google prompt)
+    LaunchedEffect(Unit) {
+        if (firebaseUser == null) {
+            attemptAutoSignIn(
+                context = context,
+                credentialManager = credentialManager,
+                onAuthSuccess = {
+                    firebaseUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+                    viewModel.onFirebaseCloudSessionActivated(isErpSessionAuthenticated = isSessionAuthenticated)
+                },
+                onUnauthenticated = {
+                    // Stay seamlessly in local-ready mode without blocking login or throwing auth errors
+                },
+                scope = coroutineScope
+            )
+        } else {
+            viewModel.onFirebaseCloudSessionActivated(isErpSessionAuthenticated = isSessionAuthenticated)
+        }
+    }
+
+    // Whenever ERP session activates, ensure silent cloud transport check runs if not yet connected
+    LaunchedEffect(isSessionAuthenticated, firebaseUser) {
+        if (isSessionAuthenticated) {
+            val activeFb = runCatching { Firebase.auth.currentUser }.getOrNull()
+            if (activeFb != null) {
+                firebaseUser = activeFb
+                viewModel.startCloudRealtimeSyncIfAuthenticated()
+            } else {
+                attemptAutoSignIn(
+                    context = context,
+                    credentialManager = credentialManager,
+                    onAuthSuccess = {
+                        firebaseUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+                        viewModel.startCloudRealtimeSyncIfAuthenticated()
+                    },
+                    onUnauthenticated = {},
+                    scope = coroutineScope
+                )
+            }
+        }
+    }
 
     DisposableEffect(Unit) {
         sessionManager.startMonitoring()
@@ -372,13 +415,15 @@ fun PmpAppContent(
                 }
                 is UserSessionManager.SessionEvent.SignedIn -> {
                     firebaseUser = Firebase.auth.currentUser
+                    viewModel.onFirebaseCloudSessionActivated(isErpSessionAuthenticated = isSessionAuthenticated)
                 }
                 is UserSessionManager.SessionEvent.AccountSwitched -> {
                     firebaseUser = Firebase.auth.currentUser
+                    viewModel.onFirebaseCloudSessionActivated(isErpSessionAuthenticated = isSessionAuthenticated)
                 }
                 is UserSessionManager.SessionEvent.ProfileSynced -> {
                     val activeCode = currentUser?.userCode.orEmpty()
-                    if (activeCode.isBlank() || activeCode.equals(event.user.userCode, ignoreCase = true)) {
+                    if (isSessionAuthenticated && activeCode.isNotBlank() && activeCode.equals(event.user.userCode, ignoreCase = true)) {
                         viewModel.switchActiveUser(event.user.id, null)
                     }
                 }
@@ -506,18 +551,11 @@ fun PmpAppContent(
         }
     }
 
+    // ERP Employee Sign-Out: Ends the employee's ERP session cleanly while preserving the device's
+    // authorized Firebase Cloud transport session so subsequent username/password logins reconnect automatically.
     val handleSignOut: () -> Unit = {
         viewModel.logoutSession {
-            UserSessionManager.getInstance(context).clearLocalCachesAndSessionDataAsync {
-                signOutFromFirebaseAndCredentials(
-                    context = context,
-                    onSignOutComplete = {
-                        firebaseUser = null
-                        currentScreen = PmpScreen.DASHBOARD
-                    },
-                    scope = coroutineScope
-                )
-            }
+            currentScreen = PmpScreen.DASHBOARD
         }
     }
 

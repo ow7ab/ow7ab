@@ -140,6 +140,9 @@ export interface TreasuryMovement {
   employeeName?: string;
   date?: string;
   timestamp?: number;
+  cloudDocId?: string;
+  syncUuid?: string;
+  updatedAt?: number;
 }
 
 export interface InterTreasuryTransfer {

@@ -34,7 +34,7 @@ import {
   buildTreasuryMovementJournalPayload,
   buildTreasuryTransferJournalPayloads
 } from '../../services/ErpDataService';
-import { DistinctCashboxSummary, normalizeEntityKey } from '../../services/ErpCalculations';
+import { DistinctCashboxSummary, isMovementInflow, normalizeEntityKey } from '../../services/ErpCalculations';
 import { GRANULAR_ACTIONS, isSystemManager } from '../../services/SecurityService';
 import { CurrencyCode } from '../../types/erp';
 import { ReportExporter } from '../../services/ReportExporter';
@@ -288,6 +288,8 @@ export const TreasuryModuleView: React.FC = () => {
           amount: amt,
           description: desc,
           reference: ref,
+          cloudDocId: movDocId,
+          syncUuid: movDocId,
           createdBy: userProfile?.fullName || userProfile?.username || 'المدير',
           createdAt: id
         };
@@ -303,15 +305,16 @@ export const TreasuryModuleView: React.FC = () => {
           (c) => normalizeEntityKey(c.name) === normalizeEntityKey(movForm.cashbox)
         );
         const boxId = matchedBox?.id || 1;
-        const newBal =
-          getBalanceForBoxAndCurrency(movForm.cashbox, movForm.currency) +
-          (movForm.direction === 'وارد' ? amt : -amt);
+        const boxPrimaryCurrency = matchedBox?.primaryCurrency || movForm.currency;
+        const primaryBal =
+          getBalanceForBoxAndCurrency(movForm.cashbox, boxPrimaryCurrency) +
+          (movForm.currency === boxPrimaryCurrency ? (movForm.direction === 'وارد' ? amt : -amt) : 0);
 
         await ErpDataService.saveDocument('cashboxes', cashboxDocId(movForm.cashbox, boxId), {
           id: boxId,
           name: movForm.cashbox.trim(),
-          balance: newBal,
-          currency: matchedBox?.primaryCurrency || movForm.currency,
+          balance: primaryBal,
+          currency: boxPrimaryCurrency,
           branch: matchedBox?.branch || userProfile?.branch || 'SD-001',
           active: true,
           updatedAt: Date.now()
@@ -452,6 +455,9 @@ export const TreasuryModuleView: React.FC = () => {
           createdAt: now
         };
 
+        const outDocId = `MOV-${idempotencyKey}-OUT`;
+        const inDocId = `MOV-${idempotencyKey}-IN`;
+
         const outMov: TreasuryMovement = {
           id: now + 1,
           txDate: today,
@@ -461,6 +467,8 @@ export const TreasuryModuleView: React.FC = () => {
           amount: srcAmt,
           description: `تحويل صادر إلى ${trfForm.destinationCashbox} (${trfForm.description || refPreview})`,
           reference: `${refPreview}-OUT`,
+          cloudDocId: outDocId,
+          syncUuid: outDocId,
           createdBy: actor,
           createdAt: now + 1
         };
@@ -474,6 +482,8 @@ export const TreasuryModuleView: React.FC = () => {
           amount: destAmt,
           description: `تحويل وارد من ${trfForm.sourceCashbox} بسعر صرف ${rate} (${trfForm.description || refPreview})`,
           reference: `${refPreview}-IN`,
+          cloudDocId: inDocId,
+          syncUuid: inDocId,
           createdBy: actor,
           createdAt: now + 2
         };
@@ -486,13 +496,13 @@ export const TreasuryModuleView: React.FC = () => {
         });
         await ErpDataService.handleTransactionCommit({
           collectionName: 'movements',
-          docId: `MOV-${idempotencyKey}-OUT`,
+          docId: outDocId,
           payload: outMov,
           actorUsername: userProfile?.username
         });
         await ErpDataService.handleTransactionCommit({
           collectionName: 'movements',
-          docId: `MOV-${idempotencyKey}-IN`,
+          docId: inDocId,
           payload: inMov,
           actorUsername: userProfile?.username
         });
@@ -611,7 +621,7 @@ export const TreasuryModuleView: React.FC = () => {
     let running = 0;
     return statementMovements.map((m) => {
       const amt = Math.abs(Number(m.amount || 0));
-      if (m.direction === 'وارد') running += amt;
+      if (isMovementInflow(m)) running += amt;
       else running -= amt;
       return {
         movement: m,
@@ -861,7 +871,7 @@ export const TreasuryModuleView: React.FC = () => {
     const headers = ['التاريخ', 'رقم المستند', 'الخزنة', 'النوع', 'المبلغ', 'العملة', 'الرصيد التراكمي', 'البيان', 'المنفذ'];
     const rows = ascMoves.map((m) => {
       const amt = Math.abs(Number(m.amount || 0));
-      running += m.direction === 'وارد' ? amt : -amt;
+      running += isMovementInflow(m) ? amt : -amt;
       return [
         m.txDate || '',
         m.reference || '',

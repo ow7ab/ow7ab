@@ -413,6 +413,8 @@ export const SalesModuleView: React.FC = () => {
             actorUsername: userProfile?.username
           });
 
+          const initMovDocId = `MOV-${idempotencyKey}`;
+          const initPayRef = `INV:${invoiceNo}:P${payDoc.id}`;
           const tm: TreasuryMovement = {
             id: now + 101,
             txDate: new Date(now).toISOString().split('T')[0],
@@ -424,8 +426,10 @@ export const SalesModuleView: React.FC = () => {
             category: 'مبيعات نقدية',
             description: `تحصيل فاتورة مبيعات ${invoiceNo} — ${custName}`,
             note: `تحصيل فاتورة مبيعات ${invoiceNo} — ${custName}`,
-            reference: invoiceNo,
-            referenceNo: invoiceNo,
+            reference: initPayRef,
+            referenceNo: initPayRef,
+            cloudDocId: initMovDocId,
+            syncUuid: initMovDocId,
             createdBy: actorName,
             actor: actorName,
             createdAt: now,
@@ -433,7 +437,7 @@ export const SalesModuleView: React.FC = () => {
           };
           await ErpDataService.handleTransactionCommit({
             collectionName: 'movements',
-            docId: `MOV-${idempotencyKey}`,
+            docId: initMovDocId,
             payload: tm,
             actorUsername: userProfile?.username
           });
@@ -538,6 +542,8 @@ export const SalesModuleView: React.FC = () => {
           timestamp: now
         };
 
+        const payMovDocId = `MOV-${idempotencyKey}`;
+        const payRef = `INV:${payingInvoice.invoiceNo}:P${payDoc.id}`;
         const tm: TreasuryMovement = {
           id: now + 1,
           txDate: new Date(now).toISOString().split('T')[0],
@@ -549,8 +555,10 @@ export const SalesModuleView: React.FC = () => {
           category: 'تحصيل عملاء',
           description: `تحصيل فاتورة ${payingInvoice.invoiceNo} — ${payingInvoice.customerName}`,
           note: `تحصيل فاتورة ${payingInvoice.invoiceNo} — ${payingInvoice.customerName}`,
-          reference: payingInvoice.invoiceNo,
-          referenceNo: payingInvoice.invoiceNo,
+          reference: payRef,
+          referenceNo: payRef,
+          cloudDocId: payMovDocId,
+          syncUuid: payMovDocId,
           createdBy: actorName,
           actor: actorName,
           createdAt: now,
@@ -565,7 +573,7 @@ export const SalesModuleView: React.FC = () => {
         });
         await ErpDataService.handleTransactionCommit({
           collectionName: 'movements',
-          docId: `MOV-${idempotencyKey}`,
+          docId: payMovDocId,
           payload: tm,
           actorUsername: userProfile?.username
         });

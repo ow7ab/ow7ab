@@ -843,7 +843,7 @@ class CloudErpSyncRepository(
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
-                ?: throw SecurityException("جلسة المصادقة السحابية غير نشطة — يرجى تفعيل جلسة المصادقة السحابية (بالبريد الإلكتروني أو الدخول الاختياري عبر Google)")
+                ?: throw SecurityException("الاتصال السحابي قيد التجهيز — تم الحفظ محلياً بأمان وسيتم المزامنة تلقائياً فور تفعيل الربط السحابي.")
             val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
             ensureOwnClusterMemberRegistration(cleanCluster, user, fbUser.uid, fbUser.email)
             val roleKey = resolveClusterMemberRoleKey(cleanCluster, fbUser.uid)
@@ -1499,7 +1499,7 @@ class CloudErpSyncRepository(
     ): Result<UserAccountEntity> = withContext(Dispatchers.IO) {
         runCatching {
             val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
-                ?: throw Exception("جلسة المصادقة السحابية غير نشطة حالياً — يتم التحقق عبر الحساب المحلي، ويمكن تفعيل المزامنة السحابية لاحقاً بالبريد الإلكتروني أو Google اختيارياً")
+                ?: throw Exception("تعذر التحقق السحابي حالياً — يتم الاعتماد على قاعدة الحسابات المحلية.")
             val cleanIdentity = identity.trim().lowercase()
             val cleanSecret = passwordOrPin.trim()
 
@@ -1688,7 +1688,7 @@ class CloudErpSyncRepository(
                 // Require active Firebase Auth session before attempting protected Firestore writes
                 val fbCurrentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
                     ?: throw SecurityException(
-                        "جلسة المصادقة السحابية غير نشطة — يعمل النظام محلياً بأمان، ولتفعيل المزامنة السحابية سجّل الدخول بالبريد الإلكتروني أو عبر Google اختيارياً."
+                        "النظام يعمل محلياً بأمان — ستتم المزامنة السحابية تلقائياً بمجرد تفعيل الربط السحابي لهذا الجهاز."
                     )
 
                 // Deduplicate local cashboxes, movements, and user accounts before pushing
@@ -2816,7 +2816,7 @@ class CloudErpSyncRepository(
             runCatching {
                 val fbCurrentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
                     ?: throw SecurityException(
-                        "جلسة المصادقة السحابية غير نشطة — يرجى تفعيل الجلسة السحابية (بالبريد الإلكتروني أو عبر Google اختيارياً) لاستعادة البيانات."
+                        "لم يتم ربط هذا الجهاز بالسيرفر السحابي بعد — فعّل الربط السحابي مرة واحدة لاستعادة البيانات ومزامنتها تلقائياً."
                     )
                 val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
                 val localUsers = dao.getUserAccountsDirect()
@@ -2933,20 +2933,49 @@ class CloudErpSyncRepository(
                 dao.upsertInvoicePayments(restoredPayments)
             }
 
-            // 2. Fetch Movements from Server with deduplication & strict alias tombstone shield
+            // 2. Fetch Movements from Server with Web-parity deduplication, Room ID collision guard & demo-seed purge
             val localMovements = dao.getMovementsDirect()
+            val usedMovIds = localMovements.map { it.id }.toMutableSet()
             val movSnapshot = cRef.collection("movements").get().await()
-            val restoredMovements = movSnapshot.documents.mapNotNull { doc ->
-                val ref = doc.getString("reference")?.trim() ?: doc.id
-                val syncUuid = doc.getString("syncUuid")?.trim().orEmpty()
-                val existingMov = localMovements.firstOrNull {
-                    (syncUuid.isNotBlank() && it.syncUuid == syncUuid) ||
-                        (ref.isNotBlank() && it.reference == ref) ||
-                        it.cloudDocId == doc.id
-                }
-                val movId = existingMov?.id ?: (doc.getLong("id") ?: 0L)
+            val pulledDocIds = HashSet<String>(movSnapshot.documents.size)
+            val pulledRefs = HashSet<String>(movSnapshot.documents.size)
 
-                val docCreatedAt = doc.getLong("createdAt") ?: 0L
+            val restoredMovements = movSnapshot.documents.mapNotNull { doc ->
+                val ref = doc.safeString("reference")?.trim().orEmpty().ifBlank { doc.id }
+                val syncUuid = doc.safeString("syncUuid")?.trim().orEmpty()
+                val rawCashbox = doc.safeString("cashbox")?.trim().orEmpty().ifBlank { "خزنة السودان" }
+                val canonicalCur = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(
+                    doc.safeString("currency"),
+                    rawCashbox
+                )
+                val canonicalDir = com.example.util.TreasuryBalanceNormalizer.canonicalDirection(
+                    doc.safeString("direction"),
+                    doc.safeString("type")
+                )
+                val amountVal = kotlin.math.abs(doc.safeDouble("amount") ?: 0.0)
+                val incomingDedupKey = com.example.util.TreasuryBalanceNormalizer.movementDeduplicationKey(
+                    syncUuid = syncUuid,
+                    cloudDocId = doc.id,
+                    reference = ref,
+                    cashbox = rawCashbox,
+                    currency = canonicalCur,
+                    direction = canonicalDir,
+                    amount = amountVal,
+                    id = doc.safeLong("id") ?: 0L
+                )
+
+                val existingMov = localMovements.firstOrNull { local ->
+                    (syncUuid.isNotBlank() && local.syncUuid.trim() == syncUuid) ||
+                        (local.cloudDocId.isNotBlank() && local.cloudDocId.trim() == doc.id) ||
+                        com.example.util.TreasuryBalanceNormalizer.movementDeduplicationKey(local) == incomingDedupKey
+                }
+                val docIdNum = doc.safeLong("id") ?: 0L
+                val movId = existingMov?.id ?: if (docIdNum > 0L && usedMovIds.add(docIdNum)) docIdNum else 0L
+
+                val docCreatedAt = doc.safeLong("createdAt")
+                    ?: doc.getTimestamp("createdAt")?.toDate()?.time
+                    ?: doc.getTimestamp("serverUpdatedAt")?.toDate()?.time
+                    ?: 0L
                 val isMovDeleted = (movId > 0L && (
                     DeletedRecordsRegistry.isDeleted("movements", movId) ||
                         DeletedRecordsRegistry.isDeleted("movements", "MOV-$movId")
@@ -2958,39 +2987,44 @@ class CloudErpSyncRepository(
                 if (isMovDeleted) {
                     runCatching { doc.reference.delete() }
                     if (movId > 0L) dao.deleteMovementById(movId)
-                    if (ref.isNotBlank()) dao.deleteMovementByReference(ref)
                     dao.deleteMovementByCloudDocId(doc.id)
                     if (syncUuid.isNotBlank()) dao.deleteMovementBySyncUuid(syncUuid)
                     return@mapNotNull null
                 }
 
+                pulledDocIds.add(doc.id)
+                if (ref.isNotBlank()) pulledRefs.add(ref.uppercase(Locale.US))
+
                 MovementEntity(
                     id = movId,
-                    txDate = doc.getString("txDate") ?: "2026-10-26",
-                    cashbox = doc.getString("cashbox") ?: "خزنة السودان",
-                    currency = doc.getString("currency") ?: "SDG",
-                    direction = doc.getString("direction") ?: "وارد",
-                    amount = doc.getDouble("amount") ?: 0.0,
-                    description = doc.getString("description") ?: "",
+                    txDate = doc.safeString("txDate") ?: SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis())),
+                    cashbox = rawCashbox,
+                    currency = canonicalCur,
+                    direction = canonicalDir,
+                    amount = amountVal,
+                    description = doc.safeString("description") ?: "",
                     reference = ref,
-                    createdBy = doc.getString("createdBy") ?: "المدير",
+                    createdBy = doc.safeString("createdBy") ?: "المدير",
                     createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis(),
                     cloudDocId = doc.id,
                     syncUuid = syncUuid,
-                    updatedAt = doc.getLong("updatedAt") ?: 0L
+                    updatedAt = doc.safeLong("updatedAt") ?: 0L
                 )
             }
-            val distinctMovements = restoredMovements.distinctBy {
-                when {
-                    it.syncUuid.isNotBlank() -> "UUID-${it.syncUuid.trim()}"
-                    it.reference.isNotBlank() -> "REF-${it.reference.trim()}"
-                    it.cloudDocId.isNotBlank() -> "DOC-${it.cloudDocId.trim()}"
-                    else -> "ID-${it.id}"
-                }
-            }
+            val distinctMovements = com.example.util.TreasuryBalanceNormalizer.deduplicateMovements(restoredMovements)
             if (distinctMovements.isNotEmpty()) {
                 dao.upsertMovements(distinctMovements)
                 restoredCount += distinctMovements.size
+            }
+            // Purge un-synced Android local demo seed rows (OP-SDG-01 / OP-EGP-01 / OP-USD-01) when cloud has authoritative data
+            if (distinctMovements.isNotEmpty() || DeletedRecordsRegistry.getClusterEpoch() > 0L) {
+                localMovements.filter {
+                    com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(it) &&
+                        !pulledRefs.contains(it.reference.trim().uppercase(Locale.US)) &&
+                        !pulledDocIds.contains(it.cloudDocId.trim())
+                }.forEach { seedMov ->
+                    dao.deleteMovementById(seedMov.id)
+                }
             }
 
             // 3. Fetch Transfers from Server with tombstone shield
@@ -4601,7 +4635,7 @@ class CloudErpSyncRepository(
                 cloudCustomersCount = 0,
                 cloudUsersCount = 0,
                 cloudProductsCount = 0,
-                message = "بانتظار تسجيل الدخول بحساب Google المعتمد للاتصال بالسيرفر"
+                message = "الوضع المحلي النشط — سيتفعل الاتصال السحابي تلقائياً عند ربط الجهاز"
             )
         }
 
@@ -5262,20 +5296,49 @@ class CloudErpSyncRepository(
                             }
                             if (!snapshot.isEmpty) {
                                 val localMovs = dao.getMovementsDirect()
-                                for (doc in snapshot.documents) {
-                                    val ref = doc.safeString("reference")?.trim() ?: doc.id
+                                val usedLiveIds = localMovs.map { it.id }.toMutableSet()
+                                val liveDocIds = HashSet<String>(snapshot.documents.size)
+                                val liveRefs = HashSet<String>(snapshot.documents.size)
+
+                                val list = snapshot.documents.mapNotNull { doc ->
+                                    val ref = doc.safeString("reference")?.trim().orEmpty().ifBlank { doc.id }
                                     val syncUuid = doc.safeString("syncUuid")?.trim().orEmpty()
-                                    val movId = doc.safeLong("id")
-                                        ?: localMovs.firstOrNull {
-                                            (syncUuid.isNotBlank() && it.syncUuid == syncUuid) ||
-                                                (ref.isNotBlank() && it.reference == ref) ||
-                                                it.cloudDocId == doc.id
-                                        }?.id
-                                        ?: 0L
-                                    val docCreatedAt = doc.safeLong("createdAt") ?: 0L
-                                    val isDel = (movId > 0L && (
-                                        DeletedRecordsRegistry.isDeleted("movements", movId) ||
-                                            DeletedRecordsRegistry.isDeleted("movements", "MOV-$movId")
+                                    val rawCashbox = doc.safeString("cashbox")?.trim().orEmpty().ifBlank { "خزنة السودان" }
+                                    val canonicalCur = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(
+                                        doc.safeString("currency"),
+                                        rawCashbox
+                                    )
+                                    val canonicalDir = com.example.util.TreasuryBalanceNormalizer.canonicalDirection(
+                                        doc.safeString("direction"),
+                                        doc.safeString("type")
+                                    )
+                                    val amountVal = kotlin.math.abs(doc.safeDouble("amount") ?: 0.0)
+                                    val incomingKey = com.example.util.TreasuryBalanceNormalizer.movementDeduplicationKey(
+                                        syncUuid = syncUuid,
+                                        cloudDocId = doc.id,
+                                        reference = ref,
+                                        cashbox = rawCashbox,
+                                        currency = canonicalCur,
+                                        direction = canonicalDir,
+                                        amount = amountVal,
+                                        id = doc.safeLong("id") ?: 0L
+                                    )
+
+                                    val existing = localMovs.firstOrNull { local ->
+                                        (syncUuid.isNotBlank() && local.syncUuid.trim() == syncUuid) ||
+                                            (local.cloudDocId.isNotBlank() && local.cloudDocId.trim() == doc.id) ||
+                                            com.example.util.TreasuryBalanceNormalizer.movementDeduplicationKey(local) == incomingKey
+                                    }
+                                    val parsedNumericId = doc.safeLong("id") ?: 0L
+                                    val id = existing?.id ?: if (parsedNumericId > 0L && usedLiveIds.add(parsedNumericId)) parsedNumericId else 0L
+                                    val docCreatedAt = doc.safeLong("createdAt")
+                                        ?: doc.getTimestamp("createdAt")?.toDate()?.time
+                                        ?: doc.getTimestamp("serverUpdatedAt")?.toDate()?.time
+                                        ?: System.currentTimeMillis()
+
+                                    val isDel = (id > 0L && (
+                                        DeletedRecordsRegistry.isDeleted("movements", id) ||
+                                            DeletedRecordsRegistry.isDeleted("movements", "MOV-$id")
                                         )) ||
                                         DeletedRecordsRegistry.isDeleted("movements", doc.id) ||
                                         (ref.isNotBlank() && DeletedRecordsRegistry.isDeleted("movements", ref)) ||
@@ -5283,34 +5346,22 @@ class CloudErpSyncRepository(
                                         DeletedRecordsRegistry.isPreEpoch(docCreatedAt)
                                     if (isDel) {
                                         runCatching { doc.reference.delete() }
-                                        if (movId > 0L) dao.deleteMovementById(movId)
+                                        if (id > 0L) dao.deleteMovementById(id)
                                         dao.deleteMovementByCloudDocId(doc.id)
-                                        if (ref.isNotBlank()) dao.deleteMovementByReference(ref)
                                         if (syncUuid.isNotBlank()) dao.deleteMovementBySyncUuid(syncUuid)
+                                        return@mapNotNull null
                                     }
-                                }
-                                val list = snapshot.documents.mapNotNull { doc ->
-                                    val ref = doc.safeString("reference")?.trim() ?: doc.id
-                                    val syncUuid = doc.safeString("syncUuid")?.trim().orEmpty()
-                                    val existing = localMovs.firstOrNull {
-                                        (syncUuid.isNotBlank() && it.syncUuid == syncUuid) ||
-                                            it.cloudDocId == doc.id ||
-                                            (ref.isNotBlank() && it.reference == ref)
-                                    }
-                                    val parsedNumericId = doc.safeLong("id")
-                                        ?: doc.id.hashCode().toLong().let { h -> if (h <= 0L) -h + 100_000L else h }
-                                    val id = existing?.id ?: parsedNumericId
-                                    val docCreatedAt = doc.safeLong("createdAt")
-                                        ?: doc.getTimestamp("createdAt")?.toDate()?.time
-                                        ?: doc.getTimestamp("serverUpdatedAt")?.toDate()?.time
-                                        ?: System.currentTimeMillis()
+
+                                    liveDocIds.add(doc.id)
+                                    if (ref.isNotBlank()) liveRefs.add(ref.uppercase(Locale.US))
+
                                     val candidate = MovementEntity(
                                         id = id,
                                         txDate = doc.safeString("txDate") ?: SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(docCreatedAt)),
-                                        cashbox = doc.safeString("cashbox") ?: "خزنة السودان",
-                                        currency = doc.safeString("currency") ?: "SDG",
-                                        direction = doc.safeString("direction") ?: "وارد",
-                                        amount = doc.safeDouble("amount") ?: 0.0,
+                                        cashbox = rawCashbox,
+                                        currency = canonicalCur,
+                                        direction = canonicalDir,
+                                        amount = amountVal,
                                         description = doc.safeString("description") ?: "",
                                         reference = ref,
                                         createdBy = doc.safeString("createdBy") ?: "المدير",
@@ -5322,7 +5373,19 @@ class CloudErpSyncRepository(
                                     if (DeletedRecordsRegistry.isMovementDeleted(candidate)) return@mapNotNull null
                                     candidate
                                 }
-                                if (list.isNotEmpty()) dao.upsertMovements(list)
+                                val dedupedLive = com.example.util.TreasuryBalanceNormalizer.deduplicateMovements(list)
+                                if (dedupedLive.isNotEmpty()) dao.upsertMovements(dedupedLive)
+
+                                // On authoritative server snapshots, remove un-synced local demo seed rows absent from cloud
+                                if (!snapshot.metadata.isFromCache && dedupedLive.isNotEmpty()) {
+                                    localMovs.filter {
+                                        com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(it) &&
+                                            !liveRefs.contains(it.reference.trim().uppercase(Locale.US)) &&
+                                            !liveDocIds.contains(it.cloudDocId.trim())
+                                    }.forEach { seedMov ->
+                                        dao.deleteMovementById(seedMov.id)
+                                    }
+                                }
                             }
                             trySend(snapshot.size())
                         } catch (e: Throwable) {
@@ -6146,11 +6209,12 @@ class CloudErpSyncRepository(
                 }
             }
 
-            // Fetch all cloud movements matching cashbox (normalized case/whitespace insensitive fallback)
+            // Fetch all cloud movements matching cashbox using canonical Arabic key normalization
+            val cleanBoxKey = com.example.util.TreasuryBalanceNormalizer.normalizeArabicKey(cleanBox)
             val allCloudMovements = cRef.collection("movements").get().await()
             val matchedDocs = allCloudMovements.documents.filter { doc ->
                 val docBox = doc.safeString("cashbox")?.trim().orEmpty()
-                docBox.equals(cleanBox, ignoreCase = true)
+                com.example.util.TreasuryBalanceNormalizer.normalizeArabicKey(docBox) == cleanBoxKey
             }
 
             if (matchedDocs.isNotEmpty()) {
@@ -6197,6 +6261,26 @@ class CloudErpSyncRepository(
                         delBatch.delete(doc.reference)
                     }
                     delBatch.commit().await()
+                }
+            }
+
+            // Also zero out the legacy balance field on matching cloud cashboxes docs so Web and Android agree
+            runCatching {
+                val allCloudBoxes = cRef.collection("cashboxes").get().await()
+                allCloudBoxes.documents.filter { doc ->
+                    val name = doc.safeString("name")?.trim().orEmpty()
+                    com.example.util.TreasuryBalanceNormalizer.normalizeArabicKey(name) == cleanBoxKey
+                }.forEach { boxDoc ->
+                    runCatching {
+                        boxDoc.reference.set(
+                            mapOf(
+                                "balance" to 0.0,
+                                "updatedAt" to System.currentTimeMillis(),
+                                "serverUpdatedAt" to FieldValue.serverTimestamp()
+                            ),
+                            SetOptions.merge()
+                        ).await()
+                    }
                 }
             }
             Unit

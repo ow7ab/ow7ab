@@ -151,11 +151,13 @@ fun TreasuryScreen(
         contract = ActivityResultContracts.CreateDocument("text/csv")
     ) { uri ->
         if (uri != null) {
+            val stBoxKey = com.example.util.TreasuryBalanceNormalizer.normalizeArabicKey(stBox)
+            val stCurKey = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(stCur, stBox)
             val boxMovements = movements.filter {
-                it.cashbox.trim().equals(stBox.trim(), ignoreCase = true) &&
-                    it.currency.trim().equals(stCur.trim(), ignoreCase = true)
+                com.example.util.TreasuryBalanceNormalizer.normalizeArabicKey(it.cashbox) == stBoxKey &&
+                    com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(it.currency, it.cashbox) == stCurKey
             }
-            val currentTotal = cashboxBalances[Pair(stBox.trim(), stCur.trim())] ?: 0.0
+            val currentTotal = viewModel.getCashboxBalance(stBox, stCur)
             val res = StatementPdfAndExcelExporter.exportTreasuryStatementToExcel(
                 context = context,
                 cashboxName = stBox,
@@ -317,7 +319,7 @@ fun TreasuryScreen(
             "حركة مالية" -> {
                 // New Movement Form
                 item {
-                    val currentBal = cashboxBalances[Pair(moveCashbox, moveCurrency)] ?: 0.0
+                    val currentBal = viewModel.getCashboxBalance(moveCashbox, moveCurrency)
                     GlassCard(modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(18.dp)) {
                             Row(
@@ -950,7 +952,7 @@ fun TreasuryScreen(
             "إقفال اليومية" -> {
                 // Daily Closing Form
                 item {
-                    val bookBal = cashboxBalances[Pair(closeBox, closeCur)] ?: 0.0
+                    val bookBal = viewModel.getCashboxBalance(closeBox, closeCur)
                     val actualVal = closeActualAmount.toDoubleOrNull() ?: 0.0
                     val diff = actualVal - bookBal
 
@@ -1129,11 +1131,13 @@ fun TreasuryScreen(
 
             "كشف الحساب" -> {
                 // Statement of Account (كشف حساب)
+                val stBoxKey = com.example.util.TreasuryBalanceNormalizer.normalizeArabicKey(stBox)
+                val stCurKey = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(stCur, stBox)
                 val boxMovements = movements.filter {
-                    it.cashbox.trim().equals(stBox.trim(), ignoreCase = true) &&
-                    it.currency.trim().equals(stCur.trim(), ignoreCase = true)
+                    com.example.util.TreasuryBalanceNormalizer.normalizeArabicKey(it.cashbox) == stBoxKey &&
+                    com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(it.currency, it.cashbox) == stCurKey
                 }
-                val currentTotal = cashboxBalances[Pair(stBox.trim(), stCur.trim())] ?: 0.0
+                val currentTotal = viewModel.getCashboxBalance(stBox, stCur)
 
                 item {
                     GlassCard(modifier = Modifier.fillMaxWidth()) {
@@ -1386,9 +1390,9 @@ fun TreasuryScreen(
                 }
 
                 items(cashboxes, key = { "cb_${it.id}" }) { box ->
-                    val sdgBal = cashboxBalances[Pair(box.name, "SDG")] ?: 0.0
-                    val egpBal = cashboxBalances[Pair(box.name, "EGP")] ?: 0.0
-                    val usdBal = cashboxBalances[Pair(box.name, "USD")] ?: 0.0
+                    val sdgBal = viewModel.getCashboxBalance(box.name, "SDG")
+                    val egpBal = viewModel.getCashboxBalance(box.name, "EGP")
+                    val usdBal = viewModel.getCashboxBalance(box.name, "USD")
                     GlassCard(modifier = Modifier.fillMaxWidth()) {
                         Row(
                             modifier = Modifier
