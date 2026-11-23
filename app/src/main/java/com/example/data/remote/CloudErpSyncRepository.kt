@@ -1227,7 +1227,9 @@ class CloudErpSyncRepository(
                     fullName = doc.getString("fullName") ?: existing?.fullName ?: uname,
                     username = uname.ifBlank { existing?.username ?: code.lowercase() },
                     phoneOrEmail = email.ifBlank { existing?.phoneOrEmail ?: "" },
-                    pinOrPassword = doc.getString("pinOrPassword") ?: existing?.pinOrPassword ?: "1234",
+                    pinOrPassword = doc.getString("pinOrPassword")?.trim()?.takeIf { it.isNotBlank() }
+                        ?: existing?.pinOrPassword?.trim()?.takeIf { it.isNotBlank() }
+                        ?: "1234",
                     role = doc.getString("role") ?: existing?.role ?: "محاسب خزنة ومبيعات",
                     branch = doc.getString("branch") ?: existing?.branch ?: "فرع السودان (SD-001)",
                     permissions = doc.getString("permissions") ?: existing?.permissions ?: "",
@@ -1500,8 +1502,19 @@ class CloudErpSyncRepository(
         runCatching {
             val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
                 ?: throw Exception("تعذر التحقق السحابي حالياً — يتم الاعتماد على قاعدة الحسابات المحلية.")
-            val cleanIdentity = identity.trim().lowercase()
-            val cleanSecret = passwordOrPin.trim()
+            val cleanIdentity = com.example.util.PasswordSecurityUtil.normalizeLoginIdentity(identity)
+            val cleanSecret = com.example.util.PasswordSecurityUtil.normalizeDigitsAndControlChars(passwordOrPin)
+
+            fun docMatchesIdentity(doc: com.google.firebase.firestore.DocumentSnapshot): Boolean {
+                val uname = doc.getString("username").orEmpty()
+                val email = doc.getString("phoneOrEmail").orEmpty()
+                val code = doc.getString("userCode") ?: doc.id
+                return com.example.util.PasswordSecurityUtil.identitiesMatch(cleanIdentity, uname) ||
+                    com.example.util.PasswordSecurityUtil.identitiesMatch(cleanIdentity, email) ||
+                    com.example.util.PasswordSecurityUtil.identitiesMatch(cleanIdentity, code) ||
+                    (!cleanIdentity.contains("@") && email.contains("@") &&
+                        com.example.util.PasswordSecurityUtil.normalizeLoginIdentity(email).substringBefore("@") == cleanIdentity)
+            }
 
             // Ensure cluster membership is registered/recovered BEFORE querying user_accounts
             runCatching {
@@ -1515,15 +1528,11 @@ class CloudErpSyncRepository(
             if (roleKey == "ADMIN" || roleKey == "MANAGER") {
                 runCatching {
                     val snap = cRef.collection("user_accounts").get().await()
-                    for (doc in snap.documents) {
-                        val uname = doc.getString("username")?.trim()?.lowercase() ?: ""
-                        val email = doc.getString("phoneOrEmail")?.trim()?.lowercase() ?: ""
-                        val code = doc.getString("userCode")?.trim()?.lowercase() ?: doc.id.lowercase()
-                        if (uname == cleanIdentity || email == cleanIdentity || code == cleanIdentity || (cleanIdentity.contains("@") && email.startsWith(cleanIdentity))) {
-                            matchedDoc = doc
-                            break
-                        }
-                    }
+                    val matchingDocs = snap.documents.filter { docMatchesIdentity(it) }
+                    matchedDoc = matchingDocs.firstOrNull { d ->
+                        val stored = d.getString("pinOrPassword")?.trim().orEmpty()
+                        stored.isNotBlank() && com.example.util.PasswordSecurityUtil.verifyPassword(cleanSecret, stored)
+                    } ?: matchingDocs.firstOrNull()
                 }
             }
 
@@ -1541,14 +1550,9 @@ class CloudErpSyncRepository(
                         val directSnap = runCatching {
                             cRef.collection("user_accounts").document(safeId(dirCode, dirCode)).get().await()
                         }.getOrNull()
-                        if (directSnap != null && directSnap.exists()) {
-                            val uname = directSnap.getString("username")?.trim()?.lowercase() ?: ""
-                            val email = directSnap.getString("phoneOrEmail")?.trim()?.lowercase() ?: ""
-                            val code = directSnap.getString("userCode")?.trim()?.lowercase() ?: directSnap.id.lowercase()
-                            if (uname == cleanIdentity || email == cleanIdentity || code == cleanIdentity) {
-                                matchedDoc = directSnap
-                                break
-                            }
+                        if (directSnap != null && directSnap.exists() && docMatchesIdentity(directSnap)) {
+                            matchedDoc = directSnap
+                            break
                         }
                     }
                 }
@@ -1561,20 +1565,15 @@ class CloudErpSyncRepository(
                 }.getOrNull()
                 val candidateDocIds = listOfNotNull(
                     memberSnap?.getString("userCode")?.trim()?.takeIf { it.isNotBlank() },
-                    safeId(identity.trim().uppercase(), "").takeIf { it.isNotBlank() }
+                    safeId(cleanIdentity.uppercase(), "").takeIf { it.isNotBlank() }
                 ).distinct()
                 for (candId in candidateDocIds) {
                     val directSnap = runCatching {
                         cRef.collection("user_accounts").document(safeId(candId, candId)).get().await()
                     }.getOrNull()
-                    if (directSnap != null && directSnap.exists()) {
-                        val uname = directSnap.getString("username")?.trim()?.lowercase() ?: ""
-                        val email = directSnap.getString("phoneOrEmail")?.trim()?.lowercase() ?: ""
-                        val code = directSnap.getString("userCode")?.trim()?.lowercase() ?: directSnap.id.lowercase()
-                        if (uname == cleanIdentity || email == cleanIdentity || code == cleanIdentity) {
-                            matchedDoc = directSnap
-                            break
-                        }
+                    if (directSnap != null && directSnap.exists() && docMatchesIdentity(directSnap)) {
+                        matchedDoc = directSnap
+                        break
                     }
                 }
             }
@@ -1586,15 +1585,7 @@ class CloudErpSyncRepository(
                         .whereEqualTo("linkedUid", fbUser.uid).get().await()
                     val ownedSnap = firestore.collection("linked_accounts")
                         .whereEqualTo("ownerId", fbUser.uid).get().await()
-                    for (doc in (assignedSnap.documents + ownedSnap.documents)) {
-                        val uname = doc.getString("username")?.trim()?.lowercase() ?: ""
-                        val email = doc.getString("phoneOrEmail")?.trim()?.lowercase() ?: ""
-                        val code = doc.getString("userCode")?.trim()?.lowercase() ?: doc.id.lowercase()
-                        if (uname == cleanIdentity || email == cleanIdentity || code == cleanIdentity) {
-                            matchedDoc = doc
-                            break
-                        }
-                    }
+                    matchedDoc = (assignedSnap.documents + ownedSnap.documents).firstOrNull { docMatchesIdentity(it) }
                 }
             }
 
@@ -1603,7 +1594,7 @@ class CloudErpSyncRepository(
             }
 
             val doc = matchedDoc!!
-            val storedPin = doc.getString("pinOrPassword") ?: "1234"
+            val storedPin = doc.getString("pinOrPassword")?.trim()?.takeIf { it.isNotBlank() } ?: "1234"
             val active = doc.getBoolean("active") ?: true
             val syncStatus = doc.getString("syncStatus") ?: "CLOUD_SYNCED"
 
@@ -2037,9 +2028,12 @@ class CloudErpSyncRepository(
                             EnterpriseRbacManager.hasModuleAccess(activeLocalAccount, "التحويلات") ||
                             EnterpriseRbacManager.hasModuleAccess(activeLocalAccount, "العمليات المالية")
                         ))
-                val movements = dao.getMovementsDirect().filterNot {
-                    DeletedRecordsRegistry.isMovementDeleted(it)
-                }
+                val movements = com.example.util.TreasuryBalanceNormalizer.deduplicateMovements(
+                    dao.getMovementsDirect().filterNot {
+                        DeletedRecordsRegistry.isMovementDeleted(it) ||
+                            com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(it)
+                    }
+                )
                 if (canPushTreasury) {
                 RoomTransactionLogger.log(
                     operation = "SYNC_MOVEMENTS_DISPATCH",
@@ -2055,17 +2049,19 @@ class CloudErpSyncRepository(
                             val batch = firestore.batch()
                             var chunkWrites = 0
                             for (m in chunk) {
-                                val docId = safeId(m.cloudDocId.trim().ifBlank { "MOV-${m.id}" }, "MOV-${m.id}")
+                                val fallbackDocId = if (m.syncUuid.isNotBlank()) "MOV-${m.syncUuid}" else "MOV-${m.id}"
+                                val docId = safeId(m.cloudDocId.trim().ifBlank { fallbackDocId }, fallbackDocId)
                                 val cleanCashbox = m.cashbox.trim().ifBlank { "خزنة السودان" }.take(120)
-                                val cleanCurrency = m.currency.trim().uppercase().let { if (it in VALID_CURRENCIES) it else "SDG" }
-                                val cleanDirection = m.direction.trim().let { if (it in VALID_DIRECTIONS) it else "وارد" }
+                                val cleanCurrency = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(m.currency, cleanCashbox)
+                                val cleanDirection = com.example.util.TreasuryBalanceNormalizer.canonicalDirection(m.direction)
+                                val cleanAmount = kotlin.math.abs(m.amount)
                                 val data = mutableMapOf<String, Any>(
                                     "id" to m.id,
                                     "txDate" to m.txDate,
                                     "cashbox" to cleanCashbox,
                                     "currency" to cleanCurrency,
                                     "direction" to cleanDirection,
-                                    "amount" to m.amount,
+                                    "amount" to cleanAmount,
                                     "description" to m.description,
                                     "reference" to m.reference,
                                     "createdBy" to m.createdBy,
@@ -3016,14 +3012,18 @@ class CloudErpSyncRepository(
                 dao.upsertMovements(distinctMovements)
                 restoredCount += distinctMovements.size
             }
-            // Purge un-synced Android local demo seed rows (OP-SDG-01 / OP-EGP-01 / OP-USD-01) when cloud has authoritative data
-            if (distinctMovements.isNotEmpty() || DeletedRecordsRegistry.getClusterEpoch() > 0L) {
-                localMovements.filter {
-                    com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(it) &&
-                        !pulledRefs.contains(it.reference.trim().uppercase(Locale.US)) &&
-                        !pulledDocIds.contains(it.cloudDocId.trim())
-                }.forEach { seedMov ->
-                    dao.deleteMovementById(seedMov.id)
+            // Purge un-synced Android local demo seed rows (OP-SDG-01 / OP-EGP-01 / OP-USD-01)
+            // and reconcile stale cloud-backed local movements deleted on Web/another device.
+            val pulledUuids = distinctMovements.mapNotNull { it.syncUuid.trim().takeIf { u -> u.isNotBlank() } }.toSet()
+            val nowReconcileMs = System.currentTimeMillis()
+            for (localMov in localMovements) {
+                val isDemoSeed = com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(localMov)
+                val matchesCloud = (localMov.cloudDocId.isNotBlank() && pulledDocIds.contains(localMov.cloudDocId.trim())) ||
+                    (localMov.syncUuid.isNotBlank() && pulledUuids.contains(localMov.syncUuid.trim()))
+                if (isDemoSeed && !pulledRefs.contains(localMov.reference.trim().uppercase(Locale.US)) && !matchesCloud) {
+                    dao.deleteMovementById(localMov.id)
+                } else if (localMov.cloudDocId.isNotBlank() && !matchesCloud && (nowReconcileMs - localMov.createdAt > 15_000L)) {
+                    dao.deleteMovementById(localMov.id)
                 }
             }
 
@@ -5086,7 +5086,9 @@ class CloudErpSyncRepository(
                                     fullName = doc.safeString("fullName") ?: existing?.fullName ?: uname,
                                     username = uname.ifBlank { existing?.username ?: code.lowercase() },
                                     phoneOrEmail = email.ifBlank { existing?.phoneOrEmail ?: "" },
-                                    pinOrPassword = doc.safeString("pinOrPassword") ?: existing?.pinOrPassword ?: "1234",
+                                    pinOrPassword = doc.safeString("pinOrPassword")?.trim()?.takeIf { it.isNotBlank() }
+                                        ?: existing?.pinOrPassword?.trim()?.takeIf { it.isNotBlank() }
+                                        ?: "1234",
                                     role = doc.safeString("role") ?: existing?.role ?: "محاسب خزنة ومبيعات",
                                     branch = doc.safeString("branch") ?: existing?.branch ?: "فرع السودان (SD-001)",
                                     permissions = doc.safeString("permissions") ?: existing?.permissions ?: "",
@@ -5281,17 +5283,19 @@ class CloudErpSyncRepository(
                     if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
                     scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
+                            val currentLocalBeforeRemoval = dao.getMovementsDirect()
                             for (dc in snapshot.documentChanges) {
                                 if (dc.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
                                     val movId = dc.document.safeLong("id")
-                                    val removedRef = dc.document.safeString("reference")?.trim().orEmpty()
                                     val removedSyncUuid = dc.document.safeString("syncUuid")?.trim().orEmpty()
-                                    if (movId != null && movId > 0L) {
-                                        dao.deleteMovementById(movId)
-                                    }
                                     dao.deleteMovementByCloudDocId(dc.document.id)
-                                    if (removedRef.isNotBlank()) dao.deleteMovementByReference(removedRef)
                                     if (removedSyncUuid.isNotBlank()) dao.deleteMovementBySyncUuid(removedSyncUuid)
+                                    if (movId != null && movId > 0L) {
+                                        val byId = currentLocalBeforeRemoval.firstOrNull { it.id == movId }
+                                        if (byId != null && (byId.cloudDocId.isBlank() || byId.cloudDocId.trim() == dc.document.id)) {
+                                            dao.deleteMovementById(movId)
+                                        }
+                                    }
                                 }
                             }
                             if (!snapshot.isEmpty) {
@@ -5376,14 +5380,29 @@ class CloudErpSyncRepository(
                                 val dedupedLive = com.example.util.TreasuryBalanceNormalizer.deduplicateMovements(list)
                                 if (dedupedLive.isNotEmpty()) dao.upsertMovements(dedupedLive)
 
-                                // On authoritative server snapshots, remove un-synced local demo seed rows absent from cloud
-                                if (!snapshot.metadata.isFromCache && dedupedLive.isNotEmpty()) {
-                                    localMovs.filter {
-                                        com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(it) &&
-                                            !liveRefs.contains(it.reference.trim().uppercase(Locale.US)) &&
-                                            !liveDocIds.contains(it.cloudDocId.trim())
-                                    }.forEach { seedMov ->
-                                        dao.deleteMovementById(seedMov.id)
+                                // On authoritative server snapshots, purge local demo seeds and reconcile movements deleted on server/Web
+                                if (!snapshot.metadata.isFromCache) {
+                                    val liveSyncUuids = dedupedLive.mapNotNull { it.syncUuid.trim().takeIf { u -> u.isNotBlank() } }.toSet()
+                                    val nowMs = System.currentTimeMillis()
+                                    for (localMov in localMovs) {
+                                        val isDemoSeed = com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(localMov)
+                                        val stillOnServer = (localMov.cloudDocId.isNotBlank() && liveDocIds.contains(localMov.cloudDocId.trim())) ||
+                                            (localMov.syncUuid.isNotBlank() && liveSyncUuids.contains(localMov.syncUuid.trim()))
+                                        if (isDemoSeed && !liveRefs.contains(localMov.reference.trim().uppercase(Locale.US)) && !stillOnServer) {
+                                            dao.deleteMovementById(localMov.id)
+                                        } else if (localMov.cloudDocId.isNotBlank() && !stillOnServer && (nowMs - localMov.createdAt > 15_000L)) {
+                                            dao.deleteMovementById(localMov.id)
+                                        }
+                                    }
+                                }
+                            } else if (!snapshot.metadata.isFromCache) {
+                                // Authoritative empty server snapshot (e.g. cashboxes zeroed on Web): clear local demo seeds & deleted cloud rows
+                                val nowMs = System.currentTimeMillis()
+                                dao.getMovementsDirect().forEach { localMov ->
+                                    if (com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(localMov) ||
+                                        (localMov.cloudDocId.isNotBlank() && (nowMs - localMov.createdAt > 15_000L))
+                                    ) {
+                                        dao.deleteMovementById(localMov.id)
                                     }
                                 }
                             }
@@ -6781,17 +6800,24 @@ class CloudErpSyncRepository(
         m: MovementEntity,
         actor: String = currentActorId
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        if (DeletedRecordsRegistry.isMovementDeleted(m)) {
+        if (DeletedRecordsRegistry.isMovementDeleted(m) ||
+            com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(m)
+        ) {
             return@withContext Result.success(Unit)
         }
-        val docId = m.cloudDocId.trim().ifBlank { "MOV-${m.id}" }
+        val fallbackDocId = if (m.syncUuid.isNotBlank()) "MOV-${m.syncUuid}" else "MOV-${m.id}"
+        val docId = safeId(m.cloudDocId.trim().ifBlank { fallbackDocId }, fallbackDocId)
+        val cleanCashbox = m.cashbox.trim().ifBlank { "خزنة السودان" }.take(120)
+        val cleanCurrency = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(m.currency, cleanCashbox)
+        val cleanDirection = com.example.util.TreasuryBalanceNormalizer.canonicalDirection(m.direction)
+        val cleanAmount = kotlin.math.abs(m.amount)
         val data = mutableMapOf<String, Any>(
             "id" to m.id,
             "txDate" to m.txDate,
-            "cashbox" to m.cashbox,
-            "currency" to m.currency,
-            "direction" to m.direction,
-            "amount" to m.amount,
+            "cashbox" to cleanCashbox,
+            "currency" to cleanCurrency,
+            "direction" to cleanDirection,
+            "amount" to cleanAmount,
             "description" to m.description,
             "reference" to m.reference,
             "createdBy" to m.createdBy,

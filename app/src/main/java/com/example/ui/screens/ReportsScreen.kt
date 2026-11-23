@@ -820,16 +820,21 @@ fun ReportsScreen(
             }
 
             else -> {
-                val totalIn = movements.filter { it.direction == "وارد" }.sumOf { it.amount }
-                val totalOut = movements.filter { it.direction != "وارد" }.sumOf { it.amount }
-                val rows = movements.map { m ->
+                val uniqueMovements = com.example.util.TreasuryBalanceNormalizer.deduplicateMovements(movements)
+                val totalIn = uniqueMovements
+                    .filter { com.example.util.TreasuryBalanceNormalizer.isMovementInflow(it.direction) }
+                    .sumOf { kotlin.math.abs(it.amount) }
+                val totalOut = uniqueMovements
+                    .filter { !com.example.util.TreasuryBalanceNormalizer.isMovementInflow(it.direction) }
+                    .sumOf { kotlin.math.abs(it.amount) }
+                val rows = uniqueMovements.map { m ->
                     listOf(
                         "#${m.id}",
                         m.txDate,
                         m.cashbox,
-                        m.direction,
-                        m.amount.toString(),
-                        m.currency,
+                        com.example.util.TreasuryBalanceNormalizer.canonicalDirection(m.direction),
+                        kotlin.math.abs(m.amount).toString(),
+                        com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(m.currency, m.cashbox),
                         m.reference,
                         m.description,
                         m.createdBy.ifBlank { "المدير" }

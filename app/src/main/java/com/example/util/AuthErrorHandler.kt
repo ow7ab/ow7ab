@@ -30,7 +30,9 @@ object AuthErrorHandler {
     fun getReadableErrorMessage(throwable: Throwable?): String {
         if (throwable == null) return "حدث خطأ غير متوقع، يرجى المحاولة مرة أخرى."
 
-        Log.e(TAG, "Auth error caught: ${throwable::class.java.simpleName}: ${throwable.message}", throwable)
+        runCatching {
+            Log.e(TAG, "Auth error caught: ${throwable::class.java.simpleName}: ${throwable.message}", throwable)
+        }
 
         return when (throwable) {
             is FirebaseAuthInvalidUserException -> {
@@ -85,8 +87,14 @@ object AuthErrorHandler {
                 "تعذر استرداد بيانات الاعتماد من Google: ${throwable.localizedMessage ?: "حاول ثانية"}"
             }
             else -> {
-                val msg = throwable.localizedMessage ?: ""
+                val msg = throwable.localizedMessage ?: throwable.message ?: ""
                 when {
+                    msg.contains("API key not valid", ignoreCase = true) ||
+                        msg.contains("API_KEY_INVALID", ignoreCase = true) ||
+                        msg.contains("INVALID_API_KEY", ignoreCase = true) ||
+                        msg.contains("API_KEY_ANDROID_APP_BLOCKED", ignoreCase = true) ||
+                        msg.contains("API_KEY_SERVICE_BLOCKED", ignoreCase = true) ->
+                        "مفتاح ربط Firebase API غير مقبول أو مقيد على السحابة. يمكنك مواصلة العمل وتسجيل الدخول محلياً بشكل طبيعي، ولإعادة الربط السحابي يرجى التحقق من مفتاح API في Google Cloud Console وتحديث google-services.json."
                     msg.contains("network", ignoreCase = true) || msg.contains("timeout", ignoreCase = true) ->
                         "انقطع الاتصال بالإنترنت أثناء معالجة المصادقة. يرجى التحقق من الشبكة."
                     msg.contains("canceled", ignoreCase = true) || msg.contains("cancelled", ignoreCase = true) ->

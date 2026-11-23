@@ -254,15 +254,20 @@ class PmpRepository(
         val safeRef = reference.trim().ifBlank { "REC-${System.currentTimeMillis() % 1000000}" }
         val safeDesc = description.trim().ifBlank { "حركة $direction نقدية في $cashbox" }
 
+        val cleanCashbox = cashbox.trim().ifBlank { "خزنة السودان" }
+        val cleanCurrency = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(currency, cleanCashbox)
+        val cleanDirection = com.example.util.TreasuryBalanceNormalizer.canonicalDirection(direction)
+        val cleanAmount = kotlin.math.abs(amount)
+
         val nowMs = System.currentTimeMillis()
         val freshUuid = java.util.UUID.randomUUID().toString()
         val uniqueDocId = "MOV-${nowMs}-${freshUuid.take(8)}"
         val movementEntity = MovementEntity(
             txDate = date,
-            cashbox = cashbox,
-            currency = currency,
-            direction = direction,
-            amount = amount,
+            cashbox = cleanCashbox,
+            currency = cleanCurrency,
+            direction = cleanDirection,
+            amount = cleanAmount,
             description = safeDesc,
             reference = safeRef,
             createdBy = user,
@@ -280,7 +285,7 @@ class PmpRepository(
             AuditLogEntity(
                 username = user,
                 action = "CREATE_MOVEMENT",
-                detail = "حركة #$id | $direction $amount $currency في $cashbox | مرجع: $safeRef"
+                detail = "حركة #$id | $cleanDirection $cleanAmount $cleanCurrency في $cleanCashbox | مرجع: $safeRef"
             )
         )
         Result.success(id)
@@ -292,10 +297,15 @@ class PmpRepository(
         details = "حذف الحركة المالية #$id"
     ) {
         val existing = dao.getMovementByIdDirect(id)
+        val existingRef = existing?.reference?.trim().orEmpty()
+        // Only treat reference as an exclusive alias when no other local movement shares it
+        // (protects transfer legs or legacy partial payments that may share a reference).
+        val isReferenceUnique = existingRef.isNotBlank() &&
+            dao.getMovementsDirect().count { it.id != id && it.reference.trim().equals(existingRef, ignoreCase = true) } == 0
         val aliases = listOfNotNull(
             id.toString(),
             "MOV-$id",
-            existing?.reference?.takeIf { it.isNotBlank() },
+            existingRef.takeIf { isReferenceUnique },
             existing?.cloudDocId?.takeIf { it.isNotBlank() },
             existing?.syncUuid?.takeIf { it.isNotBlank() }
         )
@@ -307,8 +317,8 @@ class PmpRepository(
             actor = user
         )
         dao.deleteMovementById(id)
-        if (!existing?.reference.isNullOrBlank()) {
-            dao.deleteMovementByReference(existing!!.reference)
+        if (isReferenceUnique) {
+            dao.deleteMovementByReference(existingRef)
         }
         if (!existing?.cloudDocId.isNullOrBlank()) {
             dao.deleteMovementByCloudDocId(existing!!.cloudDocId)
@@ -399,13 +409,15 @@ class PmpRepository(
         val ref = "PAY-CUST-$customerId-${nowMs % 100000}"
         val freshUuid = java.util.UUID.randomUUID().toString()
         val uniqueDocId = "MOV-${nowMs}-${freshUuid.take(8)}"
+        val cleanCashbox = cashbox.trim().ifBlank { "خزنة السودان" }
+        val canonicalCurrency = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(currency, cleanCashbox)
         val movId = dao.insertMovement(
             MovementEntity(
                 txDate = date,
-                cashbox = cashbox,
-                currency = currency,
+                cashbox = cleanCashbox,
+                currency = canonicalCurrency,
                 direction = "وارد",
-                amount = amount,
+                amount = kotlin.math.abs(amount),
                 description = "تحصيل وسداد دفعة من العميل: $customerName ${if (note.isNotBlank()) "• $note" else ""}",
                 reference = ref,
                 createdBy = user,
@@ -474,17 +486,21 @@ class PmpRepository(
         val fullDescription = if (description.isNotBlank()) "$description [اتجاه الصرف: $rateDirectionText]" else "[اتجاه الصرف: $rateDirectionText]"
 
         // 1. Record Outgoing Movement on Source
+        val cleanSrcBox = sourceCashbox.trim().ifBlank { "خزنة السودان" }
+        val cleanDstBox = destinationCashbox.trim().ifBlank { "خزنة مصر" }
+        val cleanSrcCur = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(sourceCurrency, cleanSrcBox)
+        val cleanDstCur = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(destinationCurrency, cleanDstBox)
         val nowMs = System.currentTimeMillis()
         val outUuid = java.util.UUID.randomUUID().toString()
         val outDocId = "MOV-${nowMs}-${outUuid.take(8)}"
         dao.insertMovement(
             MovementEntity(
                 txDate = date,
-                cashbox = sourceCashbox,
-                currency = sourceCurrency,
+                cashbox = cleanSrcBox,
+                currency = cleanSrcCur,
                 direction = "منصرف",
-                amount = sourceAmount,
-                description = "تحويل صادر $reference إلى $destinationCashbox: $fullDescription",
+                amount = kotlin.math.abs(sourceAmount),
+                description = "تحويل صادر $reference إلى $cleanDstBox: $fullDescription",
                 reference = "TRF:$reference:OUT",
                 createdBy = user,
                 createdAt = nowMs,
@@ -500,11 +516,11 @@ class PmpRepository(
         dao.insertMovement(
             MovementEntity(
                 txDate = date,
-                cashbox = destinationCashbox,
-                currency = destinationCurrency,
+                cashbox = cleanDstBox,
+                currency = cleanDstCur,
                 direction = "وارد",
-                amount = destinationAmount,
-                description = "تحويل وارد $reference من $sourceCashbox: $fullDescription",
+                amount = kotlin.math.abs(destinationAmount),
+                description = "تحويل وارد $reference من $cleanSrcBox: $fullDescription",
                 reference = "TRF:$reference:IN",
                 createdBy = user,
                 createdAt = nowMs + 1,
@@ -821,13 +837,15 @@ class PmpRepository(
             )
             val payMovNow = System.currentTimeMillis()
             val payMovUuid = java.util.UUID.randomUUID().toString()
+            val cleanPayBox = paymentCashbox.trim().ifBlank { "خزنة السودان" }
+            val canonicalPayCur = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(currency, cleanPayBox)
             dao.insertMovement(
                 MovementEntity(
                     txDate = date,
-                    cashbox = paymentCashbox,
-                    currency = currency,
+                    cashbox = cleanPayBox,
+                    currency = canonicalPayCur,
                     direction = "وارد",
-                    amount = actualPay,
+                    amount = kotlin.math.abs(actualPay),
                     description = "دفعة فاتورة $invoiceNumber - $customerName",
                     reference = "INV:$invoiceNumber:P$payId",
                     createdBy = user,
@@ -906,13 +924,15 @@ class PmpRepository(
 
         val payMovNow = System.currentTimeMillis()
         val payMovUuid = java.util.UUID.randomUUID().toString()
+        val cleanPayBox = cashbox.trim().ifBlank { "خزنة السودان" }
+        val canonicalPayCur = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(currency, cleanPayBox)
         dao.insertMovement(
             MovementEntity(
                 txDate = date,
-                cashbox = cashbox,
-                currency = currency,
+                cashbox = cleanPayBox,
+                currency = canonicalPayCur,
                 direction = "وارد",
-                amount = amount,
+                amount = kotlin.math.abs(amount),
                 description = "دفعة فاتورة $invoiceNo - $customerName: $note",
                 reference = "INV:$invoiceNo:P$payId",
                 createdBy = user,
@@ -1001,13 +1021,15 @@ class PmpRepository(
                 if (payment.cashbox.isNotBlank() && !payment.cashbox.contains("تسوية إدارية")) {
                     val revNow = System.currentTimeMillis()
                     val revUuid = java.util.UUID.randomUUID().toString()
+                    val cleanRevBox = payment.cashbox.trim().ifBlank { "خزنة السودان" }
+                    val canonicalRevCur = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(invoice.currency, cleanRevBox)
                     dao.insertMovement(
                         MovementEntity(
                             txDate = reversalDate,
-                            cashbox = payment.cashbox,
-                            currency = invoice.currency.ifBlank { "SDG" },
+                            cashbox = cleanRevBox,
+                            currency = canonicalRevCur,
                             direction = "منصرف",
-                            amount = payment.amount,
+                            amount = kotlin.math.abs(payment.amount),
                             description = "قيد عكسي لاسترداد دفعة فاتورة ملغاة ${invoice.invoiceNo} - ${invoice.customerName}: $cleanReason",
                             reference = "REV:${invoice.invoiceNo}:P${payment.id}",
                             createdBy = user,
@@ -1852,13 +1874,46 @@ class PmpRepository(
     }
 
     suspend fun findUserByIdentity(identity: String): UserAccountEntity? {
-        val cleanIdentity = identity.trim().lowercase(Locale.ROOT)
+        val cleanIdentity = com.example.util.PasswordSecurityUtil.normalizeLoginIdentity(identity)
         if (cleanIdentity.isBlank()) return null
         val allUsers = dao.getAllUserAccounts().first()
-        return allUsers.firstOrNull { user ->
-            user.username.lowercase(Locale.ROOT) == cleanIdentity ||
-                (user.phoneOrEmail.isNotBlank() && user.phoneOrEmail.lowercase(Locale.ROOT) == cleanIdentity) ||
-                user.userCode.lowercase(Locale.ROOT) == cleanIdentity
+        val matches = findMatchingUsersForIdentity(allUsers, cleanIdentity)
+        return matches.firstOrNull { it.active && it.pinOrPassword.isNotBlank() } ?: matches.firstOrNull()
+    }
+
+    private fun findMatchingUsersForIdentity(
+        allUsers: List<UserAccountEntity>,
+        cleanIdentity: String
+    ): List<UserAccountEntity> {
+        if (cleanIdentity.isBlank()) return emptyList()
+        val exact = allUsers.filter { user ->
+            com.example.util.PasswordSecurityUtil.identitiesMatch(cleanIdentity, user.username) ||
+                com.example.util.PasswordSecurityUtil.identitiesMatch(cleanIdentity, user.phoneOrEmail) ||
+                com.example.util.PasswordSecurityUtil.identitiesMatch(cleanIdentity, user.userCode)
+        }
+        if (exact.isNotEmpty()) return exact
+
+        // Fallback: allow entering the local-part prefix of an email (e.g. "admin" for "admin@pmp-paints.com")
+        // or the numeric suffix of a userCode when it uniquely matches an account.
+        if (!cleanIdentity.contains("@")) {
+            val prefixMatches = allUsers.filter { user ->
+                val storedEmail = com.example.util.PasswordSecurityUtil.normalizeLoginIdentity(user.phoneOrEmail)
+                storedEmail.contains("@") && storedEmail.substringBefore("@") == cleanIdentity
+            }
+            if (prefixMatches.isNotEmpty()) return prefixMatches
+        }
+        return emptyList()
+    }
+
+    private fun defaultSeedPasswordForAccount(user: UserAccountEntity): String? {
+        val uname = user.username.trim().lowercase(Locale.ROOT)
+        val code = user.userCode.trim().uppercase(Locale.ROOT)
+        return when {
+            uname == "admin" || code == "USR-PMP-001" -> "1234"
+            uname == "sudan_acc" || code == "USR-SD-002" -> "1111"
+            uname == "egypt_factory" || code == "USR-EG-003" -> "2222"
+            uname == "halfa_logistics" || code == "USR-HF-004" -> "3333"
+            else -> null
         }
     }
 
@@ -1866,8 +1921,8 @@ class PmpRepository(
         emailOrUsername: String,
         passwordOrPin: String
     ): Result<UserAccountEntity> {
-        val cleanIdentity = emailOrUsername.trim().lowercase(Locale.ROOT)
-        val cleanSecret = passwordOrPin.trim()
+        val cleanIdentity = com.example.util.PasswordSecurityUtil.normalizeLoginIdentity(emailOrUsername)
+        val cleanSecret = com.example.util.PasswordSecurityUtil.normalizeDigitsAndControlChars(passwordOrPin)
         if (cleanIdentity.isBlank()) {
             return Result.failure(Exception("يرجى إدخال البريد الإلكتروني أو اسم المستخدم أو كود الحساب"))
         }
@@ -1876,40 +1931,50 @@ class PmpRepository(
         }
 
         val allUsers = dao.getAllUserAccounts().first()
-        val matchedUser = allUsers.firstOrNull { user ->
-            user.username.lowercase(Locale.ROOT) == cleanIdentity ||
-                (user.phoneOrEmail.isNotBlank() && user.phoneOrEmail.lowercase(Locale.ROOT) == cleanIdentity) ||
-                user.userCode.lowercase(Locale.ROOT) == cleanIdentity
-        }
+        val matchedCandidates = findMatchingUsersForIdentity(allUsers, cleanIdentity)
 
-        if (matchedUser != null) {
-            if (matchedUser.syncStatus == "PENDING_MANAGER_APPROVAL") {
+        if (matchedCandidates.isNotEmpty()) {
+            // Check ALL matching candidate rows (handles duplicate rows where one may have an older/blank hash)
+            val activeCandidates = matchedCandidates.filter { it.active && it.syncStatus != "PENDING_MANAGER_APPROVAL" }
+            for (candidate in activeCandidates) {
+                // Self-heal default seeded account if an earlier Web sync overwrote pinOrPassword with ""
+                val effectiveSecret = candidate.pinOrPassword.trim().ifBlank {
+                    defaultSeedPasswordForAccount(candidate).orEmpty()
+                }
+                if (effectiveSecret.isNotBlank() &&
+                    com.example.util.PasswordSecurityUtil.verifyPassword(cleanSecret, effectiveSecret)
+                ) {
+                    var authenticatedUser = candidate
+                    if (candidate.pinOrPassword.isBlank() ||
+                        com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2(effectiveSecret)
+                    ) {
+                        val upgradedHash = com.example.util.PasswordSecurityUtil.hashPassword(cleanSecret)
+                        authenticatedUser = candidate.copy(pinOrPassword = upgradedHash)
+                        dao.updateUserAccount(authenticatedUser)
+                    }
+                    dao.setActiveSessionUser(authenticatedUser.id)
+                    dao.insertAuditLog(
+                        AuditLogEntity(
+                            username = authenticatedUser.fullName,
+                            action = "USER_LOGIN",
+                            detail = "تسجيل دخول ناجح للحساب ${authenticatedUser.fullName} (${authenticatedUser.userCode})"
+                        )
+                    )
+                    return Result.success(authenticatedUser.copy(isCurrentSession = true))
+                }
+            }
+
+            // No active candidate matched the password; report the most relevant status error
+            val primaryUser = activeCandidates.firstOrNull() ?: matchedCandidates.first()
+            if (primaryUser.syncStatus == "PENDING_MANAGER_APPROVAL") {
                 return Result.failure(
                     Exception("لا يُسمح بالدخول: هذا الحساب بانتظار موافقة حساب المدير وتحديد الصلاحيات أولاً")
                 )
             }
-            if (!matchedUser.active) {
+            if (!primaryUser.active) {
                 return Result.failure(Exception("هذا الحساب موقوف أو غير مفعل حالياً، يرجى مراجعة مدير النظام"))
             }
-            val isValidPassword = com.example.util.PasswordSecurityUtil.verifyPassword(cleanSecret, matchedUser.pinOrPassword)
-            if (!isValidPassword) {
-                return Result.failure(Exception("كلمة المرور أو رمز الدخول غير صحيح للحساب ${matchedUser.fullName}"))
-            }
-            var authenticatedUser = matchedUser
-            if (com.example.util.PasswordSecurityUtil.needsUpgradeToPbkdf2(matchedUser.pinOrPassword)) {
-                val upgradedHash = com.example.util.PasswordSecurityUtil.hashPassword(cleanSecret)
-                authenticatedUser = matchedUser.copy(pinOrPassword = upgradedHash)
-                dao.updateUserAccount(authenticatedUser)
-            }
-            dao.setActiveSessionUser(authenticatedUser.id)
-            dao.insertAuditLog(
-                AuditLogEntity(
-                    username = authenticatedUser.fullName,
-                    action = "USER_LOGIN",
-                    detail = "تسجيل دخول ناجح للحساب ${authenticatedUser.fullName} (${authenticatedUser.userCode})"
-                )
-            )
-            return Result.success(authenticatedUser.copy(isCurrentSession = true))
+            return Result.failure(Exception("كلمة المرور أو رمز الدخول غير صحيح للحساب ${primaryUser.fullName}"))
         }
 
         return Result.failure(

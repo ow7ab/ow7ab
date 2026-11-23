@@ -697,25 +697,29 @@ export const AccountService = {
     };
     updated.roleType = resolveUserRoleType(updated);
 
+    const approvePayload: Record<string, any> = {
+      id: updated.id,
+      userCode: updated.userCode,
+      fullName: updated.fullName,
+      username: updated.username,
+      phoneOrEmail: updated.phoneOrEmail,
+      role: updated.role,
+      branch: updated.branch,
+      permissions: updated.permissions,
+      serverSyncToken: updated.serverSyncToken || `SYNC_${Date.now()}`,
+      remoteServerId: updated.remoteServerId || `CLOUD-${updated.userCode}`,
+      syncStatus: 'APPROVED_BY_MANAGER',
+      serverEndpoint: cluster,
+      active: true,
+      serverUpdatedAt: serverTimestamp()
+    };
+    if (updated.pinOrPassword && updated.pinOrPassword.trim().length > 0) {
+      approvePayload.pinOrPassword = updated.pinOrPassword.trim();
+    }
+
     await setDoc(
       doc(firestore, `erp_clusters/${cluster}/user_accounts`, userDocId),
-      {
-        id: updated.id,
-        userCode: updated.userCode,
-        fullName: updated.fullName,
-        username: updated.username,
-        phoneOrEmail: updated.phoneOrEmail,
-        pinOrPassword: updated.pinOrPassword || '',
-        role: updated.role,
-        branch: updated.branch,
-        permissions: updated.permissions,
-        serverSyncToken: updated.serverSyncToken || `SYNC_${Date.now()}`,
-        remoteServerId: updated.remoteServerId || `CLOUD-${updated.userCode}`,
-        syncStatus: 'APPROVED_BY_MANAGER',
-        serverEndpoint: cluster,
-        active: true,
-        serverUpdatedAt: serverTimestamp()
-      },
+      approvePayload,
       { merge: true }
     );
 
@@ -834,8 +838,8 @@ export const AccountService = {
       serverUpdatedAt: serverTimestamp()
     };
 
-    if (passwordHash !== undefined) {
-      payload.pinOrPassword = passwordHash;
+    if (passwordHash && passwordHash.trim().length > 0) {
+      payload.pinOrPassword = passwordHash.trim();
     }
 
     const userPath = `erp_clusters/${cluster}/user_accounts/${docId}`;

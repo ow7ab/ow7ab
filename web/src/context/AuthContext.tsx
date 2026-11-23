@@ -373,8 +373,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     isSubmittingRef.current = true;
     setIsAuthenticating(true);
     try {
-      const cleanUser = (userVal || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 64);
-      const cleanPin = (pinVal || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 128);
+      const normalizeDigits = (val: string) =>
+        (val || '')
+          .replace(/[\u0660-\u0669]/g, (ch) => String(ch.charCodeAt(0) - 0x0660))
+          .replace(/[\u06F0-\u06F9]/g, (ch) => String(ch.charCodeAt(0) - 0x06f0))
+          .replace(/[\u0000-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
+          .trim();
+      const cleanUser = normalizeDigits(userVal).slice(0, 64);
+      const cleanPin = normalizeDigits(pinVal).slice(0, 128);
       if (!cleanUser || !cleanPin) {
         throw new Error('يرجى إدخال اسم المستخدم والرمز السري / كلمة المرور.');
       }
@@ -407,6 +413,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           } catch (err: any) {
             lastFbErr = err;
           }
+        }
+        const errText = `${lastFbErr?.code || ''} ${lastFbErr?.message || ''}`.toLowerCase();
+        if (!signedInFbUser && (errText.includes('api-key-not-valid') || errText.includes('api key not valid'))) {
+          throw new Error(
+            'مفتاح ربط Firebase API غير صالح أو مقيد حالياً في Google Cloud Console. يرجى تحديث المفتاح الصالح في إعدادات Firebase.'
+          );
         }
         if (!signedInFbUser && lastFbErr?.code === 'auth/unauthorized-domain') {
           const host = typeof window !== 'undefined' ? window.location.hostname : '';

@@ -654,6 +654,8 @@ jobs:
 
       - name: Run Automated Unit & Update Verification Tests (Gate Before APK Build)
         if: env.WEBSITE_ONLY != 'true'
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
         run: |
           set -euo pipefail
           if [ -x "./gradlew" ]; then
@@ -673,6 +675,8 @@ jobs:
 
       - name: Build Signed APK with Embedded Build Identity
         if: env.WEBSITE_ONLY != 'true'
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
         run: |
           set -euo pipefail
           if [ -x "./gradlew" ]; then

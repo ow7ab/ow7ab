@@ -309,10 +309,10 @@ fun SyncDiagnosticDashboardView(
                                     Text(
                                         text = when {
                                             isSyncing -> "جارٍ المزامنة السحابية لحظياً مع السيرفر..."
-                                            !isGoogleSignedIn -> "جلسة Google غير نشطة — سجّل الدخول لتفعيل المزامنة"
+                                            !isGoogleSignedIn -> "الوضع المحلي نشط — اربط المزامنة السحابية اختيارياً بضغطة واحدة"
                                             hasErrors -> "يوجد $totalErrorsBadge أخطاء معلقة تتطلب المراجعة"
                                             !isHealthMeasured -> "بانتظار فحص السيرفر المباشر (لم يُقَس بعد)"
-                                            isOnline -> "السيرفر متصل ومزامن بالكامل مع قاعدة البيانات"
+                                            isOnline -> "متصل تلقائياً بالسحابة ومزامن بالكامل مع قاعدة البيانات"
                                             else -> serverHealthReport?.message ?: "السيرفر غير متاح حالياً"
                                         },
                                         color = PmpBrandNavy,
@@ -329,9 +329,9 @@ fun SyncDiagnosticDashboardView(
                                 GlassBadge(
                                     text = when {
                                         isSyncing -> "مزامنة جارية"
-                                        !isGoogleSignedIn -> "بانتظار الدخول"
+                                        !isGoogleSignedIn -> "وضع محلي"
                                         !isHealthMeasured -> "غير مقاس"
-                                        isOnline -> "سيرفر مستقر"
+                                        isOnline -> "متصل تلقائياً"
                                         else -> "غير متاح"
                                     },
                                     color = when {
@@ -345,7 +345,7 @@ fun SyncDiagnosticDashboardView(
                             }
                         }
 
-                        // One-Tap Google Sign-In Recovery CTA when Firebase Auth session is inactive
+                        // Simple One-Tap Optional Cloud Link when not yet connected
                         if (!isGoogleSignedIn) {
                             Spacer(modifier = Modifier.height(10.dp))
                             Column(
@@ -353,19 +353,19 @@ fun SyncDiagnosticDashboardView(
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(14.dp))
                                     .background(Color(0xFFF8FAFC))
-                                    .border(1.dp, PmpGold.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                                    .border(1.dp, PmpCyan.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
                                     .padding(12.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Text(
-                                    text = "تفعيل الجلسة السحابية (Google Sign-In)",
+                                    text = "ربط المزامنة السحابية بضغطة واحدة",
                                     color = PmpBrandNavy,
                                     fontSize = 13.sp,
                                     lineHeight = 19.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "البيانات محفوظة بأمان محلياً على جهازك. سجّل الدخول بحساب Google المعتمد الآن لإزالة تنبيه المصادقة وتفعيل المزامنة الفورية مع السيرفر.",
+                                    text = "التطبيق يعمل محلياً بكامل مزاياه دون أي قيود. اضغط مرة واحدة لربط الجهاز بالسحابة ومزامنة الأرصدة مع نسخة الويب تلقائياً بعد ذلك.",
                                     color = TextMuted,
                                     fontSize = 11.5.sp,
                                     lineHeight = 17.sp
@@ -379,11 +379,11 @@ fun SyncDiagnosticDashboardView(
                                     )
                                 }
                                 GlassButton(
-                                    text = "تسجيل الدخول بحساب Google الآن",
-                                    icon = Icons.Default.AccountCircle,
+                                    text = "ربط المزامنة السحابية الآن",
+                                    icon = Icons.Default.CloudSync,
                                     gradient = GlassAccentBlueGradient,
                                     isLoading = isGoogleSignInLoading,
-                                    loadingText = "جارٍ التحقق عبر Google...",
+                                    loadingText = "جارٍ الربط السحابي...",
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("diagnostic_google_signin_button"),
@@ -397,7 +397,7 @@ fun SyncDiagnosticDashboardView(
                                                 onAuthSuccess = {
                                                     isGoogleSignInLoading = false
                                                     firebaseUser = runCatching { Firebase.auth.currentUser }.getOrNull()
-                                                    viewModel.startCloudRealtimeSyncIfAuthenticated()
+                                                    viewModel.onFirebaseCloudSessionActivated(isErpSessionAuthenticated = true)
                                                     viewModel.checkServerHealth()
                                                 },
                                                 onAuthError = { msg ->

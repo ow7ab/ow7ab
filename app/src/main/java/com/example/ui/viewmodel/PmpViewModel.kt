@@ -4084,8 +4084,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val app = getApplication<Application>()
-                val cleanIdentity = emailOrUsername.trim().lowercase(java.util.Locale.ROOT)
-                val cleanSecret = passwordOrPin.trim()
+                val cleanIdentity = com.example.util.PasswordSecurityUtil.normalizeLoginIdentity(emailOrUsername)
+                val cleanSecret = com.example.util.PasswordSecurityUtil.normalizeDigitsAndControlChars(passwordOrPin)
 
                 if (cleanIdentity.isBlank()) {
                     val err = "يرجى إدخال البريد الإلكتروني أو اسم المستخدم أو كود الحساب"

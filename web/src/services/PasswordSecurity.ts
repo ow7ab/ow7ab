@@ -89,11 +89,24 @@ export function needsUpgradeToPbkdf2(storedSecret: string): boolean {
   return !isModernPbkdf2Hash((storedSecret || '').trim());
 }
 
+export function normalizeDigitsAndControlChars(raw: string): string {
+  return String(raw || '')
+    .replace(/[\u0660-\u0669]/g, (ch) => String(ch.charCodeAt(0) - 0x0660))
+    .replace(/[\u06F0-\u06F9]/g, (ch) => String(ch.charCodeAt(0) - 0x06f0))
+    .replace(/\u00A0/g, ' ')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
+    .trim();
+}
+
+export function normalizeLoginIdentity(raw: string): string {
+  return normalizeDigitsAndControlChars(raw).toLowerCase();
+}
+
 export async function hashPassword(
   rawPassword: string,
   iterations: number = DEFAULT_ITERATIONS
 ): Promise<string> {
-  const clean = (rawPassword || '').trim();
+  const clean = normalizeDigitsAndControlChars(rawPassword || '');
   if (!clean) {
     throw new Error('كلمة المرور أو الرمز السري لا يمكن أن يكون فارغاً');
   }
@@ -112,12 +125,7 @@ export async function legacySha256Hash(secret: string): Promise<string> {
   return bytesToHex(new Uint8Array(digest));
 }
 
-export async function verifyPassword(
-  candidateRaw: string,
-  storedSecret: string
-): Promise<boolean> {
-  const cleanCandidate = (candidateRaw || '').trim();
-  const cleanStored = (storedSecret || '').trim();
+async function verifySingleCandidate(cleanCandidate: string, cleanStored: string): Promise<boolean> {
   if (!cleanCandidate || !cleanStored) return false;
 
   // 1. Modern PBKDF2-HMAC-SHA256 format: pbkdf2$sha256$<iterations>$<hexSalt>$<hexHash>
@@ -148,6 +156,30 @@ export async function verifyPassword(
   // 3. Legacy plaintext PIN fallback (only if storedSecret itself is not a hash format)
   if (!isHashedSecret(cleanStored)) {
     return constantTimeEquals(cleanCandidate, cleanStored);
+  }
+  return false;
+}
+
+export async function verifyPassword(
+  candidateRaw: string,
+  storedSecret: string
+): Promise<boolean> {
+  const cleanCandidate = (candidateRaw || '').trim();
+  const cleanStored = (storedSecret || '').trim();
+  if (!cleanCandidate || !cleanStored) return false;
+
+  if (await verifySingleCandidate(cleanCandidate, cleanStored)) return true;
+
+  const normalizedCandidate = normalizeDigitsAndControlChars(cleanCandidate);
+  if (normalizedCandidate && normalizedCandidate !== cleanCandidate) {
+    if (await verifySingleCandidate(normalizedCandidate, cleanStored)) return true;
+  }
+
+  if (!isHashedSecret(cleanStored)) {
+    const normalizedStored = normalizeDigitsAndControlChars(cleanStored);
+    if (normalizedStored && normalizedStored !== cleanStored) {
+      return constantTimeEquals(normalizedCandidate, normalizedStored);
+    }
   }
   return false;
 }

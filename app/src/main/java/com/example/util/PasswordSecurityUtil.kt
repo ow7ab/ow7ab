@@ -36,11 +36,75 @@ object PasswordSecurityUtil {
     private val secureRandom = SecureRandom()
 
     /**
+     * Converts Arabic-Indic (٠-٩) and Extended Arabic-Indic/Persian (۰-۹) digits to ASCII (0-9)
+     * and strips invisible BiDi/zero-width control characters commonly injected by Arabic keyboards or clipboard paste.
+     */
+    fun normalizeDigitsAndControlChars(raw: String): String {
+        if (raw.isEmpty()) return ""
+        val sb = StringBuilder(raw.length)
+        for (ch in raw) {
+            when (ch) {
+                in '\u0660'..'\u0669' -> sb.append(('0'.code + (ch.code - '\u0660'.code)).toChar())
+                in '\u06F0'..'\u06F9' -> sb.append(('0'.code + (ch.code - '\u06F0'.code)).toChar())
+                '\u00A0' -> sb.append(' ')
+                in '\u200B'..'\u200F',
+                in '\u202A'..'\u202E',
+                in '\u2066'..'\u2069',
+                '\uFEFF' -> Unit // strip invisible BiDi/BOM marks
+                else -> sb.append(ch)
+            }
+        }
+        return sb.toString().trim()
+    }
+
+    /**
+     * Normalizes a login identity (username, email, employee account code, or phone number).
+     */
+    fun normalizeLoginIdentity(raw: String): String {
+        return normalizeDigitsAndControlChars(raw).lowercase(Locale.ROOT)
+    }
+
+    private fun normalizePhoneDigits(raw: String): String {
+        val digits = normalizeDigitsAndControlChars(raw).filter { it.isDigit() }
+        if (digits.length < 7) return ""
+        return when {
+            digits.startsWith("00249") && digits.length >= 13 -> digits.removePrefix("00249").trimStart('0')
+            digits.startsWith("249") && digits.length >= 11 -> digits.removePrefix("249").trimStart('0')
+            digits.startsWith("0020") && digits.length >= 12 -> digits.removePrefix("0020").trimStart('0')
+            digits.startsWith("20") && digits.length >= 11 -> digits.removePrefix("20").trimStart('0')
+            else -> digits.trimStart('0')
+        }
+    }
+
+    /**
+     * Matches user-entered login identity against a stored username, email, userCode, or phone field,
+     * tolerating whitespace, uppercase/lowercase, Arabic-Indic digits, and phone country-code prefixes.
+     */
+    fun identitiesMatch(inputRaw: String, storedRaw: String): Boolean {
+        val cleanInput = normalizeLoginIdentity(inputRaw)
+        val cleanStored = normalizeLoginIdentity(storedRaw)
+        if (cleanInput.isBlank() || cleanStored.isBlank()) return false
+        if (cleanInput == cleanStored) return true
+
+        // Match phone numbers regardless of spaces, dashes, +249 / 00249 / leading 0
+        if (!cleanInput.contains("@") && !cleanStored.contains("@")) {
+            val inputHasLetters = cleanInput.any { it.isLetter() }
+            val storedHasLetters = cleanStored.any { it.isLetter() }
+            if (!inputHasLetters && !storedHasLetters) {
+                val pIn = normalizePhoneDigits(cleanInput)
+                val pSt = normalizePhoneDigits(cleanStored)
+                if (pIn.length >= 7 && pIn == pSt) return true
+            }
+        }
+        return false
+    }
+
+    /**
      * Hashes a raw password or PIN using PBKDF2WithHmacSHA256 and a random 16-byte salt.
      * Format: pbkdf2$sha256$<iterations>$<hexSalt>$<hexHash>
      */
     fun hashPassword(rawPassword: String, iterations: Int = DEFAULT_ITERATIONS): String {
-        val clean = rawPassword.trim()
+        val clean = normalizeDigitsAndControlChars(rawPassword)
         require(clean.isNotEmpty()) { "Password cannot be empty" }
         if (isModernPbkdf2Hash(clean)) return clean
 
@@ -85,13 +149,7 @@ object PasswordSecurityUtil {
         return !isModernPbkdf2Hash(storedSecret.trim())
     }
 
-    /**
-     * Verifies a candidate password or PIN against a stored secret (PBKDF2, legacy SHA-256, or legacy plaintext)
-     * using constant-time byte comparisons to prevent timing side-channel attacks.
-     */
-    fun verifyPassword(candidateRaw: String, storedSecret: String): Boolean {
-        val cleanCandidate = candidateRaw.trim()
-        val cleanStored = storedSecret.trim()
+    private fun verifySingleCandidate(cleanCandidate: String, cleanStored: String): Boolean {
         if (cleanCandidate.isEmpty() || cleanStored.isEmpty()) return false
 
         // 1. Modern PBKDF2-HMAC-SHA256 format: pbkdf2$sha256$<iterations>$<hexSalt>$<hexHash>
@@ -120,6 +178,32 @@ object PasswordSecurityUtil {
 
         // 4. Legacy plaintext PIN fallback (for initial seeded accounts prior to first login migration)
         return constantTimeEquals(cleanCandidate, cleanStored)
+    }
+
+    /**
+     * Verifies a candidate password or PIN against a stored secret (PBKDF2, legacy SHA-256, or legacy plaintext)
+     * using constant-time byte comparisons. Also transparently normalizes Arabic-Indic digits and invisible
+     * BiDi characters so passwords typed on Arabic or English keyboards verify identically.
+     */
+    fun verifyPassword(candidateRaw: String, storedSecret: String): Boolean {
+        val cleanCandidate = candidateRaw.trim()
+        val cleanStored = storedSecret.trim()
+        if (cleanCandidate.isEmpty() || cleanStored.isEmpty()) return false
+
+        if (verifySingleCandidate(cleanCandidate, cleanStored)) return true
+
+        val normalizedCandidate = normalizeDigitsAndControlChars(cleanCandidate)
+        if (normalizedCandidate.isNotEmpty() && normalizedCandidate != cleanCandidate) {
+            if (verifySingleCandidate(normalizedCandidate, cleanStored)) return true
+        }
+
+        if (!isHashedSecret(cleanStored)) {
+            val normalizedStored = normalizeDigitsAndControlChars(cleanStored)
+            if (normalizedStored.isNotEmpty() && normalizedStored != cleanStored) {
+                if (constantTimeEquals(normalizedCandidate, normalizedStored)) return true
+            }
+        }
+        return false
     }
 
     /**

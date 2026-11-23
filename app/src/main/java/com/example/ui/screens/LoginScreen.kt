@@ -115,6 +115,13 @@ fun onGoogleSignInClicked(
 
     scope.launch {
         try {
+            val configuredApiKey = runCatching {
+                com.google.firebase.FirebaseApp.getInstance().options.apiKey.trim()
+            }.getOrDefault("")
+            if (configuredApiKey.isBlank()) {
+                onAuthError("مفتاح ربط Firebase API غير مدمج في هذه النسخة من التطبيق. يرجى بناء التطبيق مع ملف google-services.json أو تعيين FIREBASE_API_KEY.")
+                return@launch
+            }
             val activityContext = context as? Activity ?: context
             val result = credentialManager.getCredential(activityContext, request)
             val credential = result.credential
