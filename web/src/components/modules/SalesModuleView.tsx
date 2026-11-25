@@ -519,7 +519,7 @@ export const SalesModuleView: React.FC = () => {
 
     const amt = Number(payAmount);
     const netTotal = Number(payingInvoice.total || 0);
-    const invFinancials = computeInvoiceFinancials(payingInvoice, payments);
+    const invFinancials = ErpDataService.computeInvoiceFinancials(payingInvoice, payments);
     const currentPaid = invFinancials.paidAmount;
     const maxRemaining = Math.max(0, netTotal - currentPaid);
 

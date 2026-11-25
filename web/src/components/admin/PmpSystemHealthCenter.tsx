@@ -20,8 +20,6 @@ import { auth } from '../../config/firebaseConfig';
 import {
   BalanceAnomalyRecord,
   Cashbox,
-  CloudErrorLogEntry,
-  ComprehensiveDiagnosticReport,
   CrossPlatformReconciliationReport,
   ErpDataService,
   InvoicePayment,
@@ -31,7 +29,9 @@ import {
   UnifiedSyncStatus
 } from '../../services/ErpDataService';
 import {
+  CloudErrorLogEntry,
   CloudErrorLogger,
+  ComprehensiveDiagnosticReport,
   ServiceProbeId,
   ServiceProbeResult
 } from '../../services/CloudErrorLogger';

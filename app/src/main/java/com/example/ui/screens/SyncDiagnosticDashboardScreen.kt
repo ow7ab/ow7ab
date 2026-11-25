@@ -636,7 +636,7 @@ fun SyncDiagnosticDashboardView(
                                                 }
                                             }
                                             structuredErrors.take(15).forEach { e ->
-                                                rows.add(listOf("خطأ مصنف", e.operation, e.collectionPath, e.categoryTitleAr, e.sanitizedMessage))
+                                                rows.add(listOf("خطأ مصنف", e.operation, e.collectionPath, e.category.arabicTitle, e.sanitizedMessage))
                                             }
                                             com.example.util.StatementPdfAndExcelExporter.exportHealthReportToPdf(
                                                 context = context,
@@ -687,7 +687,7 @@ fun SyncDiagnosticDashboardView(
                                                         "خطأ مصنف",
                                                         e.operation,
                                                         e.collectionPath,
-                                                        e.categoryTitleAr,
+                                                        e.category.arabicTitle,
                                                         com.example.util.StatementPdfAndExcelExporter.redactHealthTelemetry(e.sanitizedMessage)
                                                     )
                                                 )

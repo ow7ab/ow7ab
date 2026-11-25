@@ -49,9 +49,6 @@ class UserSessionManager(
     private var lastKnownUid: String? = firebaseAuth.currentUser?.uid
     private var authStateListener: FirebaseAuth.AuthStateListener? = null
 
-    @Volatile
-    var suppressDestructiveResetOnSwitch: Boolean = false
-
     // Global loading state overlay observable across navigation and screens
     val isAuthTransitioning = MutableStateFlow(false)
     val authTransitionMessage = MutableStateFlow("جارٍ تجهيز جلسة المستخدم ومزامنة الصلاحيات...")
@@ -395,6 +392,9 @@ class UserSessionManager(
 
     companion object {
         private const val TAG = "UserSessionManager"
+
+        @Volatile
+        var suppressDestructiveResetOnSwitch: Boolean = false
 
         @Volatile
         private var instance: UserSessionManager? = null

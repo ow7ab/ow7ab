@@ -18,7 +18,11 @@ import {
   normalizeEntityKey,
   resolveCanonicalCurrency
 } from './ErpCalculations';
-import { computeTrialBalance, computeReconciliationReport } from './AccountingEngine';
+import {
+  DEFAULT_CHART_OF_ACCOUNTS,
+  computeTrialBalance,
+  computeReconciliationReport
+} from './AccountingEngine';
 
 export type UnifiedSyncStatus =
   | 'Synced'
@@ -366,7 +370,7 @@ export function computeCrossPlatformBalanceReconciliation(params: {
   }
 
   for (const cur of currencies) {
-    const tb = computeTrialBalance(params.journalEntries, params.journalLines, cur);
+    const tb = computeTrialBalance(DEFAULT_CHART_OF_ACCOUNTS, params.journalEntries, params.journalLines, cur);
     const glCash = tb.rows
       .filter((r) => ['1110', '1111', '1112', '1115'].includes(r.accountCode))
       .reduce((s, r) => s + r.signedBalance, 0);
