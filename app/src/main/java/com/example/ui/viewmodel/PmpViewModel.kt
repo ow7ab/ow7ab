@@ -1096,7 +1096,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 val activeId = activeSessionUserId.value
                 val isMgr = currentUser.value.isSystemManager()
                 DatabaseBackupManager.restoreIfEmpty(getApplication(), repository.getDao())
-                if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+                val authUser = runCatching { cloudErpSyncRepo.getOrEnsureActiveFirebaseUser() }.getOrNull()
+                if (authUser == null) {
                     _cloudSyncState.value = "الوضع المحلي النشط • يتم الاتصال السحابي تلقائياً عند توفر الجلسة"
                     _isInitialDataLoading.value = false
                     return@launch
@@ -3487,13 +3488,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(getApplication())
             val activeId = activeSessionUserId.value
             val isMgr = currentUser.value.isSystemManager()
-            if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+            val authUser = runCatching { cloudErpSyncRepo.getOrEnsureActiveFirebaseUser() }.getOrNull()
+            if (authUser == null) {
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
                 _isSyncing.value = false
                 _cloudSyncState.value = "محفوظ محلياً بأمان • سيتم الرفع السحابي تلقائياً فور تفعيل الجلسة"
                 if (!silent) {
                     postMessage(
-                        "تم حفظ نسخة احتياطية محلية بنجاح. لبدء المزامنة السحابية لأول مرة على هذا الجهاز، اربط الجهاز بالحساب السحابي مرة واحدة من شاشة الدخول أو الإعدادات."
+                        "تم حفظ نسخة احتياطية محلية بنجاح. لبدء المزامنة السحابية لأول مرة على هذا الجهاز، تأكد من الاتصال بالإنترنت."
                     )
                 }
                 return@launch
@@ -3640,17 +3642,16 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startCloudRealtimeSyncIfAuthenticated() {
-        val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
-        if (fbUser == null) {
-            _cloudSyncState.value = "الوضع المحلي النشط • جارٍ التجهيز للاتصال السحابي التلقائي"
-            return
-        }
-        cloudErpSyncRepo.clearAuthPendingErrors()
-        if (cloudObserverJob?.isActive == true && cloudObserverUid == fbUser.uid) return
         cloudObserverJob?.cancel()
-        cloudObserverUid = fbUser.uid
-
         cloudObserverJob = viewModelScope.launch {
+            val fbUser = runCatching { cloudErpSyncRepo.getOrEnsureActiveFirebaseUser() }.getOrNull()
+            if (fbUser == null) {
+                _cloudSyncState.value = "الوضع المحلي النشط • جارٍ التجهيز للاتصال السحابي التلقائي"
+                return@launch
+            }
+            cloudErpSyncRepo.clearAuthPendingErrors()
+            cloudObserverUid = fbUser.uid
+
             val identityLabel = fbUser.email ?: currentUser.value?.username ?: "متصل"
             _cloudSyncState.value = "متصل بسيرفر Google Cloud ($identityLabel)"
 
@@ -3836,11 +3837,12 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun syncAllErpDataToServer() {
         viewModelScope.launch {
-            if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+            val authUser = runCatching { cloudErpSyncRepo.getOrEnsureActiveFirebaseUser() }.getOrNull()
+            if (authUser == null) {
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
                 _cloudSyncState.value = "محفوظ محلياً بأمان • بانتظار تفعيل الاتصال السحابي"
                 postMessage(
-                    "تم حفظ البيانات محلياً بنجاح. لتفعيل المزامنة السحابية على هذا الجهاز لأول مرة، اربط الحساب السحابي مرة واحدة من الإعدادات."
+                    "تم حفظ البيانات محلياً بنجاح. لتفعيل المزامنة السحابية على هذا الجهاز، يرجى التأكد من الاتصال بالإنترنت."
                 )
                 return@launch
             }
@@ -3870,10 +3872,11 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     fun restoreAllErpDataFromServer() {
         viewModelScope.launch {
-            if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+            val authUser = runCatching { cloudErpSyncRepo.getOrEnsureActiveFirebaseUser() }.getOrNull()
+            if (authUser == null) {
                 _cloudSyncState.value = "بانتظار تفعيل الاتصال السحابي للاستعادة"
                 postMessage(
-                    "لم يتم ربط هذا الجهاز بالسيرفر السحابي بعد — فعّل الربط السحابي مرة واحدة وسيستمر الاتصال تلقائياً."
+                    "لم يتم ربط هذا الجهاز بالسيرفر السحابي بعد — تأكد من الاتصال بالإنترنت للمزامنة السحابية."
                 )
                 return@launch
             }
@@ -3960,7 +3963,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
-                if (runCatching { Firebase.auth.currentUser }.getOrNull() == null) {
+                val authUser = runCatching { cloudErpSyncRepo.getOrEnsureActiveFirebaseUser() }.getOrNull()
+                if (authUser == null) {
                     _cloudSyncState.value = "محفوظ محلياً بأمان • الاتصال السحابي سيتفعل تلقائياً"
                     return@launch
                 }
@@ -4135,18 +4139,17 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         method = "PASSWORD",
                         bindBiometricIfFirstOrSameUser = true
                     ) { authenticated ->
-                        // Background cloud user sync ONLY when cloud transport is already active (prevents auth error spam)
-                        if (runCatching { Firebase.auth.currentUser }.getOrNull() != null) {
-                            viewModelScope.launch(Dispatchers.IO) {
-                                try {
-                                    val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
-                                    cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), authenticated.id, devId)
-                                    if (com.example.util.PasswordSecurityUtil.isPbkdf2Hash(authenticated.pinOrPassword)) {
-                                        cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, authenticated)
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w("PmpViewModel", "Async post-login user sync note: ${e.message}")
+                        // Background cloud user sync & parity update
+                        viewModelScope.launch(Dispatchers.IO) {
+                            try {
+                                cloudErpSyncRepo.getOrEnsureActiveFirebaseUser()
+                                val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
+                                cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), authenticated.id, devId)
+                                if (com.example.util.PasswordSecurityUtil.isPbkdf2Hash(authenticated.pinOrPassword)) {
+                                    cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, authenticated)
                                 }
+                            } catch (e: Exception) {
+                                Log.w("PmpViewModel", "Async post-login user sync note: ${e.message}")
                             }
                         }
                         postMessage("مرحباً بك ${authenticated.fullName} • الصلاحيات: ${authenticated.permissions}")
@@ -4164,23 +4167,20 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                // 3. Fallback: Query Google Cloud Server ONLY if a cloud auth session is active (never throw "cloud session inactive" on login)
+                // 3. Fallback: Query Google Cloud Server (auto-authenticates if needed)
                 var cloudUser: UserAccountEntity? = null
                 var cloudError: String? = null
-                val hasActiveCloudSession = runCatching { Firebase.auth.currentUser }.getOrNull() != null
-                if (hasActiveCloudSession) {
-                    try {
-                        kotlinx.coroutines.withTimeoutOrNull(4500L) {
-                            val cloudAuthRes = cloudErpSyncRepo.findAndAuthenticateUserInCloud(cleanIdentity, cleanSecret, repository.getDao())
-                            if (cloudAuthRes.isSuccess) {
-                                cloudUser = cloudAuthRes.getOrNull()
-                            } else {
-                                cloudError = cloudAuthRes.exceptionOrNull()?.message
-                            }
+                try {
+                    kotlinx.coroutines.withTimeoutOrNull(5000L) {
+                        val cloudAuthRes = cloudErpSyncRepo.findAndAuthenticateUserInCloud(cleanIdentity, cleanSecret, repository.getDao())
+                        if (cloudAuthRes.isSuccess) {
+                            cloudUser = cloudAuthRes.getOrNull()
+                        } else {
+                            cloudError = cloudAuthRes.exceptionOrNull()?.message
                         }
-                    } catch (e: Exception) {
-                        Log.w("PmpViewModel", "Cloud lookup timeout/error: ${e.message}")
                     }
+                } catch (e: Exception) {
+                    Log.w("PmpViewModel", "Cloud lookup timeout/error: ${e.message}")
                 }
 
                 if (cloudUser != null) {

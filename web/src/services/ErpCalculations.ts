@@ -521,6 +521,8 @@ export function computeDistinctCashboxesWithBalances(
 
   for (const mv of uniqueMovements) {
     if (!mv) continue;
+    const mvStatus = String((mv as any).status || '').trim().toLowerCase();
+    if (mvStatus === 'reversed' || mvStatus === 'cancelled' || mvStatus === 'ملغاة') continue;
     const rawName = String(mv.cashbox || mv.cashboxName || '').trim();
     const nameKey = normalizeEntityKey(rawName);
     if (!nameKey) continue;
@@ -683,6 +685,8 @@ export function computeProductStocks(
   const byProdWarehouse = new Map<number, Map<number, { inQty: number; outQty: number }>>();
 
   for (const sm of filteredMoves) {
+    const smSt = String((sm as any).status || '').trim().toLowerCase();
+    if (smSt === 'cancelled' || smSt === 'reversed' || smSt === 'ملغاة') continue;
     const pid = Number(sm.productId);
     const rawWhId = Number(sm.warehouseId || 1);
     const canonicalWhId = canonicalWhMap.get(rawWhId) ?? rawWhId;
@@ -1042,14 +1046,21 @@ export function computeInvoiceFinancials(
 
   const paymentMap = new Map<string, number>();
   const embedded: any[] = Array.isArray(inv.payments) ? inv.payments : [];
+  const isPaymentActive = (p: any): boolean => {
+    if (!p) return false;
+    const st = String(p.status || '').trim().toLowerCase();
+    if (st === 'cancelled' || st === 'reversed' || st === 'ملغاة') return false;
+    return st === 'active' || !p.status || Number(p.amount) > 0;
+  };
+
   for (const p of embedded) {
-    if (!p || p.status === 'reversed') continue;
+    if (!isPaymentActive(p)) continue;
     const pid = String(p.id ?? `${p.invoiceId}_${p.amount}_${p.payDate || p.createdAt || ''}`);
     paymentMap.set(pid, Number(p.amount || 0));
   }
 
   for (const p of externalPayments) {
-    if (!p || p.status === 'reversed') continue;
+    if (!isPaymentActive(p)) continue;
     if (Number(p.invoiceId) !== Number(inv.id)) continue;
     const pid = String(p.id ?? `${p.invoiceId}_${p.amount}_${p.payDate || p.createdAt || ''}`);
     paymentMap.set(pid, Number(p.amount || 0));

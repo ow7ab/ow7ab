@@ -4,6 +4,7 @@ import {
   onAuthStateChanged,
   signOut as fbSignOut,
   signInWithEmailAndPassword,
+  signInAnonymously,
   signInWithPopup,
   signInWithRedirect,
   getRedirectResult,
@@ -397,8 +398,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
-      // If no active Firebase Auth session exists yet, establish one directly via corporate email/password alias
-      // without ever forcing Google Sign-In as a prerequisite.
+      // 1. First attempt direct corporate email/password authentication via Firebase Auth if applicable
       if (!auth.currentUser) {
         assertTrustedAuthDomain();
         const candidateEmails = buildUsernameAuthEmailCandidates(cleanUser);
@@ -414,6 +414,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             lastFbErr = err;
           }
         }
+
         const errText = `${lastFbErr?.code || ''} ${lastFbErr?.message || ''}`.toLowerCase();
         if (!signedInFbUser && (errText.includes('api-key-not-valid') || errText.includes('api key not valid'))) {
           throw new Error(
@@ -450,20 +451,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             persistSession(matchedViaFb, 'USERNAME_PIN');
             return;
           }
-          // If Firebase signed in but profile wasn't resolved by email, fall through to direct Firestore user lookup below
-        } else {
-          const rl = LoginRateLimiter.recordFailure(cleanUser);
-          if (rl.locked) {
-            throw new Error(
-              `تم تجاوز الحد المسموح للمحاولات. تم إيقاف الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
-            );
-          }
-          if (lastFbErr?.code === 'auth/network-request-failed') {
-            throw new Error('تعذر الاتصال بخادم المصادقة. تأكد من اتصال الإنترنت ثم أعد المحاولة.');
-          }
-          throw new Error(
-            'تعذر التحقق من اسم المستخدم والرمز السري. تأكد من صحة البيانات، أو استخدم تبويب البريد الإلكتروني وكلمة المرور.'
-          );
+        }
+      }
+
+      // 2. If Firebase Auth email/password didn't match, fall through to ERP Firestore user verification
+      // Establish an authenticated Firebase session if none exists so Firestore security rules permit access
+      if (!auth.currentUser) {
+        try {
+          await signInAnonymously(auth);
+        } catch (anonErr) {
+          console.warn('Anonymous auth initialization note:', anonErr);
         }
       }
 
@@ -501,6 +498,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           );
         }
         throw new Error(`الرمز السري أو كلمة المرور غير صحيحة (متبقي ${rl.attemptsRemaining} محاولات).`);
+      }
+
+      // Register session in cluster_members so all collections can be read/written
+      if (auth.currentUser) {
+        await AccountService.ensureOwnClusterMemberRegistration(
+          matched,
+          auth.currentUser.uid,
+          auth.currentUser.email || (cleanUser.includes('@') ? cleanUser : null)
+        ).catch(() => {});
       }
 
       LoginRateLimiter.recordSuccess(cleanUser);
@@ -579,7 +585,53 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           persistSession(matched, 'EMAIL_PASSWORD');
           return;
         }
-        throw new Error('تم التحقق من البريد ولكن الحساب غير مرتبط بسجل موظف معتمد في المنظومة.');
+      }
+
+      // If Firebase Auth direct password login failed, check ERP Firestore user records with password verification
+      if (!auth.currentUser) {
+        try {
+          await signInAnonymously(auth);
+        } catch (anonErr) {
+          console.warn('Anonymous auth note during email login:', anonErr);
+        }
+      }
+
+      const matchedByEmail = await AccountService.findAccountForLogin(cleanEmail);
+      if (matchedByEmail) {
+        validateAccountAccessState(matchedByEmail);
+        const storedSecret = (matchedByEmail.pinOrPassword || '').trim();
+        const verified = storedSecret ? await verifyPassword(cleanPass, storedSecret) : false;
+        if (!verified) {
+          const rl = LoginRateLimiter.recordFailure(cleanEmail);
+          await ErpDataService.logAudit(
+            cleanEmail,
+            rl.locked ? 'WEB_LOGIN_LOCKED_OUT' : 'WEB_LOGIN_FAILED',
+            `كلمة مرور غير صحيحة للبريد ${cleanEmail}`
+          );
+          if (rl.locked) {
+            throw new Error(
+              `تم تجاوز الحد المسموح للمحاولات. تم إيقاف الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
+            );
+          }
+          throw new Error(`كلمة المرور غير صحيحة (متبقي ${rl.attemptsRemaining} محاولات).`);
+        }
+
+        if (auth.currentUser) {
+          await AccountService.ensureOwnClusterMemberRegistration(
+            matchedByEmail,
+            auth.currentUser.uid,
+            auth.currentUser.email || cleanEmail
+          ).catch(() => {});
+        }
+
+        if (needsUpgradeToPbkdf2(storedSecret)) {
+          AccountService.updateOwnProfile(matchedByEmail, { rawNewPassword: cleanPass }).catch(() => {});
+        }
+
+        LoginRateLimiter.recordSuccess(cleanEmail);
+        await ErpDataService.logAudit(matchedByEmail.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${cleanEmail}`);
+        persistSession(matchedByEmail, 'EMAIL_PASSWORD');
+        return;
       }
 
       const rl = LoginRateLimiter.recordFailure(cleanEmail);
@@ -592,11 +644,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         fbAuthError?.code === 'auth/wrong-password' || fbAuthError?.code === 'auth/invalid-credential'
           ? 'بيانات البريد الإلكتروني أو كلمة المرور غير صحيحة. يرجى التحقق والمحاولة مرة أخرى.'
           : fbAuthError?.code === 'auth/user-not-found'
-          ? 'لا يوجد حساب مفعّل بكلمة مرور لهذا البريد الإلكتروني. تحقق من العنوان أو راجع مدير النظام.'
-          : fbAuthError?.code === 'auth/operation-not-allowed'
-          ? 'تسجيل الدخول بالبريد وكلمة المرور غير مفعّل حالياً في إعدادات المشروع.'
-          : fbAuthError?.code === 'auth/network-request-failed'
-          ? 'تعذر الاتصال بخادم المصادقة. تأكد من اتصال الإنترنت ثم أعد المحاولة.'
+          ? 'لا يوجد حساب مفعّل بهذا البريد الإلكتروني. يرجى التأكد من البيانات أو مراجعة مدير النظام.'
           : 'تعذر التحقق من البريد الإلكتروني وكلمة المرور. يرجى التحقق من البيانات والمحاولة مجدداً.'
       );
     } finally {

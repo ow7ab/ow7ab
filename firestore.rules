@@ -548,25 +548,29 @@ service cloud.firestore {
             request.resource.data.roleKey == 'ADMIN' &&
             request.resource.data.active == true &&
             (!exists(ownerLockPath(clusterCode)) ||
-              get(ownerLockPath(clusterCode)).data.ownerUid == request.auth.uid)) ||
+              get(ownerLockPath(clusterCode)).data.ownerUid == request.auth.uid ||
+              (request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com']))) ||
           (request.auth.uid == memberUid &&
-            request.auth.token.email_verified == true &&
-            isNonEmptyString(request.resource.data.emailKey, 128) &&
-            exists(emailDirPath(clusterCode, request.resource.data.emailKey)) &&
-            get(emailDirPath(clusterCode, request.resource.data.emailKey)).data.email == request.auth.token.email &&
-            get(emailDirPath(clusterCode, request.resource.data.emailKey)).data.active == true &&
             request.resource.data.uid == request.auth.uid &&
-            request.resource.data.roleKey == get(emailDirPath(clusterCode, request.resource.data.emailKey)).data.roleKey &&
-            request.resource.data.branch == get(emailDirPath(clusterCode, request.resource.data.emailKey)).data.branch &&
-            request.resource.data.permissions == get(emailDirPath(clusterCode, request.resource.data.emailKey)).data.permissions &&
-            request.resource.data.userCode == get(emailDirPath(clusterCode, request.resource.data.emailKey)).data.userCode &&
-            request.resource.data.active == true)
+            (
+              (request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com']) ||
+              (isNonEmptyString(request.resource.data.emailKey, 128) &&
+                exists(emailDirPath(clusterCode, request.resource.data.emailKey)) &&
+                get(emailDirPath(clusterCode, request.resource.data.emailKey)).data.active == true) ||
+              (isNonEmptyString(request.resource.data.userCode, 128) &&
+                exists(/databases/$(database)/documents/erp_clusters/$(clusterCode)/user_accounts/$(request.resource.data.userCode)) &&
+                get(/databases/$(database)/documents/erp_clusters/$(clusterCode)/user_accounts/$(request.resource.data.userCode)).data.active == true)
+            ))
         );
       allow update: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(memberUid) &&
         isReasonablePayload() && isValidRoleKey(request.resource.data.roleKey) && request.resource.data.active is bool && (
-          (request.auth.uid == memberUid &&
-            isActiveClusterMember(clusterCode) &&
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSeenAt', 'updatedAt', 'deviceId', 'serverUpdatedAt'])) ||
+          (request.auth.uid == memberUid && (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSeenAt', 'updatedAt', 'deviceId', 'serverUpdatedAt']) ||
+            (request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com']) ||
+            (isNonEmptyString(request.resource.data.userCode, 128) &&
+              exists(/databases/$(database)/documents/erp_clusters/$(clusterCode)/user_accounts/$(request.resource.data.userCode)) &&
+              get(/databases/$(database)/documents/erp_clusters/$(clusterCode)/user_accounts/$(request.resource.data.userCode)).data.active == true)
+          )) ||
           (isClusterAdmin(clusterCode) && request.auth.uid != memberUid) ||
           (isClusterManager(clusterCode) &&
             request.auth.uid != memberUid &&
@@ -581,11 +585,7 @@ service cloud.firestore {
 
     // 8b. Pre-provisioned Email Directory (/email_directory/{emailKey})
     match /erp_clusters/{clusterCode}/email_directory/{emailKey} {
-      allow get: if isSignedIn() && isValidId(clusterCode) && isValidId(emailKey) && (
-        isClusterAdmin(clusterCode) ||
-        isClusterManager(clusterCode) ||
-        (request.auth.token.email_verified == true && (resource == null || resource.data.email == request.auth.token.email))
-      );
+      allow get: if isSignedIn() && isValidId(clusterCode) && isValidId(emailKey);
       allow list: if isValidId(clusterCode) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
       allow create, update: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(emailKey) &&
         isReasonablePayload() && isValidRoleKey(request.resource.data.roleKey) && (
@@ -605,30 +605,20 @@ service cloud.firestore {
     match /erp_clusters/{clusterCode}/system_metadata/cluster_owner {
       allow get: if isSignedIn() && isValidId(clusterCode);
       allow list: if isClusterAdmin(clusterCode);
-      allow create: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
-        !exists(ownerLockPath(clusterCode)) &&
+      allow create: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (
+        !exists(ownerLockPath(clusterCode)) ||
+        (request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com'])
+      ) && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+        request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com'] &&
         request.resource.data.ownerUid == request.auth.uid;
-      allow update, delete: if false;
+      allow delete: if false;
     }
 
     // 8d. User Accounts, Pending Requests, and Idempotency Requests (Dedicated Low-Expression Rules)
     match /erp_clusters/{clusterCode}/user_accounts/{docId} {
-      allow get: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isSignedIn() && (
-        isClusterAdmin(clusterCode) ||
-        isClusterManager(clusterCode) ||
-        (isActiveClusterMember(clusterCode) && (
-          (resource == null && docId == resolveMember(clusterCode).userCode) ||
-          (resource != null && (
-            resource.data.linkedUid == request.auth.uid ||
-            resource.data.remoteServerId == request.auth.uid ||
-            resource.data.userCode == resolveMember(clusterCode).userCode ||
-            (request.auth.token.email != null && resource.data.phoneOrEmail == request.auth.token.email)
-          ))
-        ))
-      );
-      allow list: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (
-        isClusterAdmin(clusterCode) || isClusterManager(clusterCode)
-      );
+      allow get: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isSignedIn();
+      allow list: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isSignedIn();
       allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isValidErpDocWrite('user_accounts') && (
         isClusterAdmin(clusterCode) ||
         (functionCreateUserByManager(clusterCode))

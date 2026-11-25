@@ -39,3 +39,7 @@ web/dist-ghpages/
 desktop/node_modules/
 desktop/dist/
 desktop/renderer-dist/
+app/google-services.json
+.vscode/
+.antigravity/
+
