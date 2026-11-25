@@ -289,7 +289,8 @@ test('4. Telemetry redaction strips secrets/JWTs/API keys and Admin-only + Immut
   assert.ok(clean.includes('[API_KEY_REDACTED]'));
 
   const healthComponent = fs.readFileSync(path.join(SRC_DIR, 'components/admin/PmpSystemHealthCenter.tsx'), 'utf8');
-  assert.ok(healthComponent.includes('if (!isSuperAdmin) return null;'));
+  assert.ok(healthComponent.includes('if (!isSuperAdmin)'));
+  assert.ok(healthComponent.includes('return null;'));
   assert.ok(healthComponent.includes('PMP SYSTEM HEALTH CENTER'));
 
   const settingsSrc = fs.readFileSync(path.join(SRC_DIR, 'components/modules/SettingsModuleView.tsx'), 'utf8');

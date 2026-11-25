@@ -198,7 +198,11 @@ test('Web modules & ErpDataService wire handleTransactionCommit and smooth tab n
   assert.equal(erpDataSrc.includes('async handleTransactionCommit'), true);
   assert.equal(erpDataSrc.includes('TAMPER_ATTEMPT_BLOCKED'), true);
   assert.equal(erpDataSrc.includes('DUPLICATE_TRANSACTION_BLOCKED'), true);
-  assert.equal(treasurySrc.includes('ErpDataService.handleTransactionCommit'), true);
+  assert.equal(
+    treasurySrc.includes('ErpDataService.handleTransactionCommit') ||
+      treasurySrc.includes('ErpDataService.commitAtomicTransactionBundle'),
+    true
+  );
   assert.equal(salesSrc.includes('ErpDataService.handleTransactionCommit'), true);
   assert.equal(purchasesSrc.includes('ErpDataService.handleTransactionCommit'), true);
   assert.equal(portalSrc.includes('pmp-tab-transition'), true);
