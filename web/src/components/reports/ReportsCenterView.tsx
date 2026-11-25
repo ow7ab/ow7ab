@@ -123,7 +123,7 @@ export const ReportsCenterView: React.FC<{ initialTab?: ReportTab }> = ({ initia
     return ErpDataService.computeCustomerStatement(selectedCustomerObj, invoices, payments);
   }, [selectedCustomerObj, invoices, payments]);
 
-  const activeInvoices = invoices.filter((i) => i.status !== 'ملغاة');
+  const activeInvoices = invoices.filter((i) => !ErpDataService.isCancelledOrReversedStatus(i.status));
   const totalSalesSdg = activeInvoices
     .filter((i) => i.currency === 'SDG')
     .reduce((s, i) => s + Number(i.total || 0), 0);
@@ -144,16 +144,19 @@ export const ReportsCenterView: React.FC<{ initialTab?: ReportTab }> = ({ initia
           headers: ['رقم الفاتورة', 'العميل', 'التاريخ', 'الإجمالي', 'المسدد', 'المتبقي', 'العملة', 'الحالة'],
           rows: [...invoices]
             .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-            .map((inv) => [
-              inv.invoiceNo,
-              inv.customerName,
-              new Date(inv.timestamp || Date.now()).toLocaleDateString('ar-EG'),
-              Number(inv.total || 0).toLocaleString(),
-              Number(inv.paidAmount || 0).toLocaleString(),
-              Math.max(0, Number(inv.total || 0) - Number(inv.paidAmount || 0)).toLocaleString(),
-              inv.currency,
-              inv.status
-            ])
+            .map((inv) => {
+              const fin = ErpDataService.computeInvoiceFinancials(inv, payments);
+              return [
+                inv.invoiceNo,
+                inv.customerName,
+                new Date(inv.timestamp || Date.now()).toLocaleDateString('ar-EG'),
+                Number(inv.total || 0).toLocaleString(),
+                fin.paidAmount.toLocaleString(),
+                fin.remainingAmount.toLocaleString(),
+                inv.currency,
+                fin.statusLabel
+              ];
+            })
         };
       case 'الخزنة':
         return {
@@ -161,16 +164,17 @@ export const ReportsCenterView: React.FC<{ initialTab?: ReportTab }> = ({ initia
           subtitle: `الرصيد المجمع: ${cashboxBalances.SDG.toLocaleString()} SDG | ${cashboxBalances.EGP.toLocaleString()} EGP | $${cashboxBalances.USD.toLocaleString()}`,
           headers: ['التاريخ', 'الخزنة', 'النوع', 'الفئة', 'المبلغ', 'العملة', 'البيان', 'المسؤول'],
           rows: [...movements]
+            .filter((m) => !ErpDataService.isCancelledOrReversedStatus((m as any).status))
             .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
             .map((m) => [
               new Date(m.timestamp || Date.now()).toLocaleDateString('ar-EG'),
               m.cashbox,
-              m.type === 'IN' ? 'توريد (+)' : 'صرف (-)',
-              m.category,
+              ErpDataService.isMovementInflow(m) ? 'توريد (+)' : 'صرف (-)',
+              m.category || '-',
               Number(m.amount || 0).toLocaleString(),
               m.currency,
-              m.note,
-              m.actor || '-'
+              m.description || m.note || '-',
+              m.actor || m.createdBy || '-'
             ])
         };
       case 'المخزون': {

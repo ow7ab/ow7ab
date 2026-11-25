@@ -4,14 +4,13 @@ import {
   onAuthStateChanged,
   signOut as fbSignOut,
   signInWithEmailAndPassword,
-  signInAnonymously,
   signInWithPopup,
   signInWithRedirect,
   getRedirectResult,
   sendPasswordResetEmail
 } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
-import { auth, firestore, googleAuthProvider } from '../config/firebaseConfig';
+import { auth, firestore, googleAuthProvider, getProvisioningAuth } from '../config/firebaseConfig';
 import { UserAccount, UserRoleType } from '../types/erp';
 import {
   resolveUserRoleType,
@@ -114,6 +113,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const linkedAccountRef = useRef<UserAccount | null>(null);
   const explicitSignOutRef = useRef<boolean>(false);
   const isSubmittingRef = useRef<boolean>(false);
+  const isSwitchingAccountRef = useRef<boolean>(false);
 
   const clearSessionExpiredNotice = useCallback(() => {
     setSessionExpiredNotice(null);
@@ -190,6 +190,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             linkedAccountRef.current = null;
             setLinkedAccount(null);
           }
+          explicitSignOutRef.current = true;
+          void fbSignOut(auth).catch(() => {});
           setDeviceSessions(deactivateDeviceSession(currentDeviceId));
           setSessionExpiredNotice('انتهت صلاحية جلسة العمل الحالية لأسباب أمنية. يرجى تسجيل الدخول مجدداً.');
         } else if (restored.status === 'INVALID') {
@@ -201,6 +203,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             linkedAccountRef.current = null;
             setLinkedAccount(null);
           }
+          explicitSignOutRef.current = true;
+          void fbSignOut(auth).catch(() => {});
         }
       } catch {
         safeStorageRemove(SESSION_STORAGE_KEY);
@@ -245,12 +249,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [currentUser?.uid]);
 
   // Firebase Auth listener + optional Google redirect completion + zero-trust session sync
-  // Uses linkedAccountRef & explicitSignOutRef so switching accounts or signing out NEVER bounces back
+  // Uses linkedAccountRef, explicitSignOutRef & isSwitchingAccountRef so switching or signing out NEVER bounces back
   useEffect(() => {
     void getRedirectResult(auth).catch(() => null);
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (isSwitchingAccountRef.current) {
+        return;
+      }
+      if (user?.isAnonymous) {
+        await fbSignOut(auth).catch(() => {});
+        setCurrentUser(null);
+        setIsLoading(false);
+        return;
+      }
       setCurrentUser(user);
-      if (user && !linkedAccountRef.current && !explicitSignOutRef.current) {
+      if (!user) {
+        // If Firebase session vanished while not explicitly suppressed offline, clear cached privilege only when explicit sign-out happened
+        if (explicitSignOutRef.current && linkedAccountRef.current) {
+          persistSession(null);
+        }
+        setIsLoading(false);
+        return;
+      }
+      if (!linkedAccountRef.current && !explicitSignOutRef.current) {
         try {
           const matched = await AccountService.findSignedInUserAccount(user);
           if (
@@ -258,7 +279,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             matched.active &&
             matched.syncStatus !== 'PENDING_MANAGER_APPROVAL' &&
             !linkedAccountRef.current &&
-            !explicitSignOutRef.current
+            !explicitSignOutRef.current &&
+            !isSwitchingAccountRef.current
           ) {
             await AccountService.ensureOwnClusterMemberRegistration(matched, user.uid, user.email).catch(() => {});
             persistSession(matched, 'EMAIL_PASSWORD');
@@ -398,130 +420,87 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
-      // 1. First attempt direct corporate email/password authentication via Firebase Auth if applicable
-      if (!auth.currentUser) {
-        assertTrustedAuthDomain();
-        const candidateEmails = buildUsernameAuthEmailCandidates(cleanUser);
-
-        let signedInFbUser: User | null = null;
-        let lastFbErr: any = null;
-        for (const candidateEmail of candidateEmails) {
-          try {
-            const cred = await signInWithEmailAndPassword(auth, candidateEmail, cleanPin);
-            signedInFbUser = cred.user;
-            break;
-          } catch (err: any) {
-            lastFbErr = err;
-          }
+      // 1. Always enforce clean session isolation before Firebase authentication (never retain anonymous/prior UID)
+      assertTrustedAuthDomain();
+      if (auth.currentUser) {
+        isSwitchingAccountRef.current = true;
+        try {
+          await fbSignOut(auth).catch(() => {});
+        } finally {
+          isSwitchingAccountRef.current = false;
         }
+      }
 
-        const errText = `${lastFbErr?.code || ''} ${lastFbErr?.message || ''}`.toLowerCase();
-        if (!signedInFbUser && (errText.includes('api-key-not-valid') || errText.includes('api key not valid'))) {
-          throw new Error(
-            'مفتاح ربط Firebase API غير صالح أو مقيد حالياً في Google Cloud Console. يرجى تحديث المفتاح الصالح في إعدادات Firebase.'
-          );
+      const candidateEmails = buildUsernameAuthEmailCandidates(cleanUser);
+      let signedInFbUser: User | null = null;
+      let lastFbErr: any = null;
+      for (const candidateEmail of candidateEmails) {
+        try {
+          const cred = await signInWithEmailAndPassword(auth, candidateEmail, cleanPin);
+          signedInFbUser = cred.user;
+          break;
+        } catch (err: any) {
+          lastFbErr = err;
         }
-        if (!signedInFbUser && lastFbErr?.code === 'auth/unauthorized-domain') {
-          const host = typeof window !== 'undefined' ? window.location.hostname : '';
-          throw new Error(
-            `النطاق الحالي (${host}) غير مضاف في النطاقات المصرح بها في Firebase Auth (Authorized Domains). يرجى إضافته من لوحة Firebase.`
-          );
-        }
+      }
 
-        if (signedInFbUser) {
+      const errText = `${lastFbErr?.code || ''} ${lastFbErr?.message || ''}`.toLowerCase();
+      if (!signedInFbUser && (errText.includes('api-key-not-valid') || errText.includes('api key not valid'))) {
+        throw new Error(
+          'مفتاح ربط Firebase API غير صالح أو مقيد حالياً في Google Cloud Console. يرجى تحديث المفتاح الصالح في إعدادات Firebase.'
+        );
+      }
+      if (!signedInFbUser && lastFbErr?.code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        throw new Error(
+          `النطاق الحالي (${host}) غير مضاف في النطاقات المصرح بها في Firebase Auth (Authorized Domains). يرجى إضافته من لوحة Firebase.`
+        );
+      }
+
+      if (signedInFbUser) {
+        await signedInFbUser.getIdToken(true).catch(() => {});
+        await AccountService.ensureOwnClusterMemberRegistration(
+          null,
+          signedInFbUser.uid,
+          signedInFbUser.email || candidateEmails[0]
+        ).catch(() => {});
+        const matchedViaFb = await AccountService.findSignedInUserAccount(signedInFbUser);
+        if (matchedViaFb) {
+          validateAccountAccessState(matchedViaFb);
           await AccountService.ensureOwnClusterMemberRegistration(
-            null,
+            matchedViaFb,
             signedInFbUser.uid,
             signedInFbUser.email || candidateEmails[0]
           ).catch(() => {});
-          const matchedViaFb = await AccountService.findSignedInUserAccount(signedInFbUser);
-          if (matchedViaFb) {
-            validateAccountAccessState(matchedViaFb);
-            await AccountService.ensureOwnClusterMemberRegistration(
-              matchedViaFb,
-              signedInFbUser.uid,
-              signedInFbUser.email || candidateEmails[0]
-            ).catch(() => {});
-            LoginRateLimiter.recordSuccess(cleanUser);
-            await ErpDataService.logAudit(
-              matchedViaFb.username,
-              'WEB_LOGIN_SUCCESS',
-              `دخول ناجح باسم المستخدم (${matchedViaFb.role} - ${matchedViaFb.branch})`
-            );
-            persistSession(matchedViaFb, 'USERNAME_PIN');
-            return;
-          }
-        }
-      }
-
-      // 2. If Firebase Auth email/password didn't match, fall through to ERP Firestore user verification
-      // Establish an authenticated Firebase session if none exists so Firestore security rules permit access
-      if (!auth.currentUser) {
-        try {
-          await signInAnonymously(auth);
-        } catch (anonErr) {
-          console.warn('Anonymous auth initialization note:', anonErr);
-        }
-      }
-
-      const matched = await AccountService.findAccountForLogin(cleanUser);
-      if (!matched) {
-        const rl = LoginRateLimiter.recordFailure(cleanUser);
-        if (rl.locked) {
-          throw new Error(
-            `تم قفل تسجيل الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)} حمايةً للنظام.`
+          LoginRateLimiter.recordSuccess(cleanUser);
+          await ErpDataService.logAudit(
+            matchedViaFb.username,
+            'WEB_LOGIN_SUCCESS',
+            `دخول ناجح (${matchedViaFb.role} - ${matchedViaFb.branch})`
           );
+          persistSession(matchedViaFb, cleanUser.includes('@') ? 'EMAIL_PASSWORD' : 'USERNAME_PIN');
+          return;
         }
-        throw new Error('اسم المستخدم أو الرمز السري غير صحيح.');
+        await fbSignOut(auth).catch(() => {});
+        throw new Error('تم التحقق من كلمة المرور لكن هذا الحساب غير مربوط بسجل موظف معتمد في المنظومة.');
       }
 
-      validateAccountAccessState(matched);
-
-      const storedSecret = (matched.pinOrPassword || '').trim();
-      if (!storedSecret) {
-        throw new Error('لم يتم تعيين رمز سري أو كلمة مرور لهذا الحساب. يرجى ضبطها من إدارة المستخدمين.');
-      }
-
-      const verified = await verifyPassword(cleanPin, storedSecret);
-      if (!verified) {
-        const rl = LoginRateLimiter.recordFailure(cleanUser);
-        await ErpDataService.logAudit(
-          cleanUser,
-          rl.locked ? 'WEB_LOGIN_LOCKED_OUT' : 'WEB_LOGIN_FAILED',
-          rl.locked
-            ? `تجاوز الحد الأقصى للمحاولات الفاشلة وتم الحظر لمدة ${formatLockDurationAr(rl.remainingSeconds)}`
-            : `محاولة دخول برمز سري غير صحيح (متبقي ${rl.attemptsRemaining} محاولات)`
-        );
-        if (rl.locked) {
-          throw new Error(
-            `تم تجاوز الحد المسموح للمحاولات. تم إيقاف الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
-          );
-        }
-        throw new Error(`الرمز السري أو كلمة المرور غير صحيحة (متبقي ${rl.attemptsRemaining} محاولات).`);
-      }
-
-      // Register session in cluster_members so all collections can be read/written
-      if (auth.currentUser) {
-        await AccountService.ensureOwnClusterMemberRegistration(
-          matched,
-          auth.currentUser.uid,
-          auth.currentUser.email || (cleanUser.includes('@') ? cleanUser : null)
-        ).catch(() => {});
-      }
-
-      LoginRateLimiter.recordSuccess(cleanUser);
-
-      // Transparent upgrade from legacy SHA-256 / plaintext PIN to PBKDF2-HMAC-SHA256 using 8-key self-update whitelist
-      if (needsUpgradeToPbkdf2(storedSecret)) {
-        AccountService.updateOwnProfile(matched, { rawNewPassword: cleanPin }).catch(() => {});
-      }
-
+      const rl = LoginRateLimiter.recordFailure(cleanUser);
       await ErpDataService.logAudit(
-        matched.username,
-        'WEB_LOGIN_SUCCESS',
-        `دخول ناجح للويب (${matched.role} - ${matched.branch})`
+        cleanUser,
+        rl.locked ? 'WEB_LOGIN_LOCKED_OUT' : 'WEB_LOGIN_FAILED',
+        rl.locked
+          ? `تجاوز الحد الأقصى للمحاولات الفاشلة وتم الحظر لمدة ${formatLockDurationAr(rl.remainingSeconds)}`
+          : `فشل التحقق السحابي للمستخدم (${cleanUser}): ${lastFbErr?.code || 'invalid-credentials'}`
+      ).catch(() => {});
+      if (rl.locked) {
+        throw new Error(
+          `تم تجاوز الحد المسموح للمحاولات. تم إيقاف الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
+        );
+      }
+      throw new Error(
+        `بيانات الدخول غير صحيحة أو لم يتم تفعيل كلمة مرور سحابية لهذا الحساب بعد (متبقي ${rl.attemptsRemaining} محاولات).`
       );
-      persistSession(matched, 'USERNAME_PIN');
     } finally {
       isSubmittingRef.current = false;
       setIsAuthenticating(false);
@@ -563,6 +542,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       assertTrustedAuthDomain();
+      if (auth.currentUser) {
+        isSwitchingAccountRef.current = true;
+        try {
+          await fbSignOut(auth).catch(() => {});
+        } finally {
+          isSwitchingAccountRef.current = false;
+        }
+      }
 
       for (const candidate of emailCandidates) {
         try {
@@ -575,6 +562,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       if (fbCredUser) {
+        await fbCredUser.getIdToken(true).catch(() => {});
         await AccountService.ensureOwnClusterMemberRegistration(null, fbCredUser.uid, fbCredUser.email || cleanEmail).catch(() => {});
         const matched = await AccountService.findSignedInUserAccount(fbCredUser);
         if (matched) {
@@ -585,56 +573,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           persistSession(matched, 'EMAIL_PASSWORD');
           return;
         }
-      }
-
-      // If Firebase Auth direct password login failed, check ERP Firestore user records with password verification
-      if (!auth.currentUser) {
-        try {
-          await signInAnonymously(auth);
-        } catch (anonErr) {
-          console.warn('Anonymous auth note during email login:', anonErr);
-        }
-      }
-
-      const matchedByEmail = await AccountService.findAccountForLogin(cleanEmail);
-      if (matchedByEmail) {
-        validateAccountAccessState(matchedByEmail);
-        const storedSecret = (matchedByEmail.pinOrPassword || '').trim();
-        const verified = storedSecret ? await verifyPassword(cleanPass, storedSecret) : false;
-        if (!verified) {
-          const rl = LoginRateLimiter.recordFailure(cleanEmail);
-          await ErpDataService.logAudit(
-            cleanEmail,
-            rl.locked ? 'WEB_LOGIN_LOCKED_OUT' : 'WEB_LOGIN_FAILED',
-            `كلمة مرور غير صحيحة للبريد ${cleanEmail}`
-          );
-          if (rl.locked) {
-            throw new Error(
-              `تم تجاوز الحد المسموح للمحاولات. تم إيقاف الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
-            );
-          }
-          throw new Error(`كلمة المرور غير صحيحة (متبقي ${rl.attemptsRemaining} محاولات).`);
-        }
-
-        if (auth.currentUser) {
-          await AccountService.ensureOwnClusterMemberRegistration(
-            matchedByEmail,
-            auth.currentUser.uid,
-            auth.currentUser.email || cleanEmail
-          ).catch(() => {});
-        }
-
-        if (needsUpgradeToPbkdf2(storedSecret)) {
-          AccountService.updateOwnProfile(matchedByEmail, { rawNewPassword: cleanPass }).catch(() => {});
-        }
-
-        LoginRateLimiter.recordSuccess(cleanEmail);
-        await ErpDataService.logAudit(matchedByEmail.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${cleanEmail}`);
-        persistSession(matchedByEmail, 'EMAIL_PASSWORD');
-        return;
+        await fbSignOut(auth).catch(() => {});
+        throw new Error('تم التحقق من كلمة المرور لكن هذا البريد غير مرتبط بسجل موظف معتمد في المنظومة.');
       }
 
       const rl = LoginRateLimiter.recordFailure(cleanEmail);
+      await ErpDataService.logAudit(
+        cleanEmail,
+        rl.locked ? 'WEB_LOGIN_LOCKED_OUT' : 'WEB_LOGIN_FAILED',
+        `فشل تسجيل الدخول بالبريد ${cleanEmail}`
+      ).catch(() => {});
       if (rl.locked) {
         throw new Error(
           `تم تجاوز الحد المسموح للمحاولات. تم إيقاف الدخول مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
@@ -677,60 +625,55 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
       }
 
+      assertTrustedAuthDomain();
       const previousActor = linkedAccountRef.current?.username || 'UNKNOWN';
-      let targetAccount: UserAccount | null = null;
+      const candidates = buildUsernameAuthEmailCandidates(cleanId);
+      if (candidates.length === 0) {
+        throw new Error('يرجى إدخال البريد الإلكتروني أو اسم المستخدم الصحيح للتبديل.');
+      }
 
-      if (auth.currentUser) {
-        targetAccount = await AccountService.findAccountForLogin(cleanId);
-        if (targetAccount) {
-          validateAccountAccessState(targetAccount);
-          const storedSecret = (targetAccount.pinOrPassword || '').trim();
-          if (!storedSecret) {
-            throw new Error('لم يتم تعيين رمز سري أو كلمة مرور لهذا الحساب.');
-          }
-          const ok = await verifyPassword(cleanSecret, storedSecret);
-          if (!ok) {
-            const rl = LoginRateLimiter.recordFailure(cleanId);
-            throw new Error(
-              rl.locked
-                ? `تم قفل المحاولات مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
-                : `الرمز السري غير صحيح (متبقي ${rl.attemptsRemaining} محاولات).`
-            );
-          }
-          if (needsUpgradeToPbkdf2(storedSecret)) {
-            AccountService.updateOwnProfile(targetAccount, { rawNewPassword: cleanSecret }).catch(() => {});
-          }
+      // Pre-verify target account on isolated provisioning Auth instance so a failed switch NEVER breaks current session
+      const provAuth = getProvisioningAuth();
+      let verifiedEmail: string | null = null;
+      for (const emailCand of candidates) {
+        try {
+          await signInWithEmailAndPassword(provAuth, emailCand, cleanSecret);
+          verifiedEmail = emailCand;
+          break;
+        } catch {
+          // Try next candidate
+        } finally {
+          await fbSignOut(provAuth).catch(() => {});
         }
       }
 
-      // If not found in active workstation context (or no Firebase user), attempt direct Email/Password auth
-      if (!targetAccount) {
-        assertTrustedAuthDomain();
-        const candidates = buildUsernameAuthEmailCandidates(cleanId);
-        let switchedFbUser: User | null = null;
-        for (const emailCand of candidates) {
-          try {
-            const cred = await signInWithEmailAndPassword(auth, emailCand, cleanSecret);
-            switchedFbUser = cred.user;
-            break;
-          } catch {
-            // Try next candidate
-          }
-        }
-        if (!switchedFbUser) {
-          const rl = LoginRateLimiter.recordFailure(cleanId);
-          throw new Error(
-            rl.locked
-              ? `تم قفل المحاولات مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
-              : 'تعذر التحقق من بيانات الحساب المستهدف. تأكد من اسم المستخدم والرمز السري.'
-          );
-        }
-        await AccountService.ensureOwnClusterMemberRegistration(null, switchedFbUser.uid, switchedFbUser.email).catch(() => {});
-        targetAccount = await AccountService.findSignedInUserAccount(switchedFbUser);
+      if (!verifiedEmail) {
+        const rl = LoginRateLimiter.recordFailure(cleanId);
+        throw new Error(
+          rl.locked
+            ? `تم قفل المحاولات مؤقتاً لمدة ${formatLockDurationAr(rl.remainingSeconds)}.`
+            : `تعذر التحقق من بيانات الحساب المستهدف (متبقي ${rl.attemptsRemaining} محاولات).`
+        );
+      }
+
+      // Now atomically transition primary Firebase Auth & session state without leaking User A's UID/token
+      isSwitchingAccountRef.current = true;
+      let targetAccount: UserAccount | null = null;
+      try {
+        explicitSignOutRef.current = false;
+        await fbSignOut(auth).catch(() => {});
+        const cred = await signInWithEmailAndPassword(auth, verifiedEmail, cleanSecret);
+        await cred.user.getIdToken(true).catch(() => {});
+        setCurrentUser(cred.user);
+        await AccountService.ensureOwnClusterMemberRegistration(null, cred.user.uid, cred.user.email).catch(() => {});
+        targetAccount = await AccountService.findSignedInUserAccount(cred.user);
         if (!targetAccount) {
           throw new Error('الحساب غير مرتبط بسجل موظف معتمد في المنظومة.');
         }
         validateAccountAccessState(targetAccount);
+        await AccountService.ensureOwnClusterMemberRegistration(targetAccount, cred.user.uid, cred.user.email).catch(() => {});
+      } finally {
+        isSwitchingAccountRef.current = false;
       }
 
       LoginRateLimiter.recordSuccess(cleanId);
@@ -738,7 +681,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await ErpDataService.logAudit(
         targetAccount.username,
         'WEB_ACCOUNT_SWITCH',
-        `تبديل الجلسة من (${previousActor}) إلى (${targetAccount.username} - ${targetAccount.role})`
+        `تبديل معزول للجلسة من (${previousActor}) إلى (${targetAccount.username} - ${targetAccount.role})`
       );
       return sanitizeAccountForSession(targetAccount);
     } finally {
@@ -810,9 +753,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const requestPasswordReset = async (emailVal: string) => {
     assertTrustedAuthDomain();
-    const cleanEmail = emailVal.trim();
-    if (!cleanEmail) throw new Error('يرجى إدخال البريد الإلكتروني أولاً.');
-    await sendPasswordResetEmail(auth, cleanEmail);
+    const cleanInput = (emailVal || '').trim().toLowerCase();
+    if (!cleanInput) throw new Error('يرجى إدخال البريد الإلكتروني أو اسم المستخدم أولاً.');
+    const candidates = cleanInput.includes('@')
+      ? [cleanInput]
+      : buildUsernameAuthEmailCandidates(cleanInput);
+    if (candidates.length === 0) {
+      throw new Error('تعذر تحديد بريد إلكتروني مرتبط بهذا الحساب. يرجى مراجعة مدير النظام.');
+    }
+    let lastErr: any = null;
+    for (const targetEmail of candidates) {
+      try {
+        await sendPasswordResetEmail(auth, targetEmail);
+        return;
+      } catch (err: any) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error('تعذر إرسال رابط استعادة كلمة المرور.');
   };
 
   const signOut = async () => {

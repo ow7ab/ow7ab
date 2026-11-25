@@ -57,7 +57,7 @@ import kotlinx.coroutines.sync.withLock
         RawMaterialPriceHistoryEntity::class,
         LabExcelImportBatchEntity::class
     ],
-    version = 17,
+    version = 18,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
@@ -162,13 +162,8 @@ abstract class PmpDatabase : RoomDatabase() {
 
             // Deduplicate cashboxes, movements, and user accounts
             try {
-                // Purge duplicate cashboxes (keep lowest id for each distinct trimmed name)
+                // Keep non-destructive user account/cashbox deduplication ONLY without ever deleting financial movements
                 db.execSQL("DELETE FROM `cashboxes` WHERE `id` NOT IN (SELECT MIN(`id`) FROM `cashboxes` GROUP BY TRIM(LOWER(`name`)))")
-
-                // Purge duplicate financial movements with the same non-empty reference
-                db.execSQL("DELETE FROM `movements` WHERE `reference` != '' AND `id` NOT IN (SELECT MIN(`id`) FROM `movements` WHERE `reference` != '' GROUP BY TRIM(`reference`))")
-
-                // Purge duplicate user accounts (preserve current active session)
                 db.execSQL("DELETE FROM `user_accounts` WHERE `isCurrentSession` = 0 AND `id` NOT IN (SELECT MIN(`id`) FROM `user_accounts` GROUP BY TRIM(LOWER(`username`)))")
 
                 // Ensure default Cashboxes exist without creating duplicates
@@ -187,22 +182,41 @@ abstract class PmpDatabase : RoomDatabase() {
                     }
                 }
 
-                // Update existing warehouse assignments
-                db.execSQL("UPDATE `warehouses` SET `currency` = 'SDG', `linkedCashbox` = 'خزنة حلفا', `warehouseType` = 'مبيعات' WHERE `name` LIKE '%حلفا%'")
-                db.execSQL("UPDATE `warehouses` SET `currency` = 'SDG', `linkedCashbox` = 'خزنة عطبرة', `warehouseType` = 'مبيعات' WHERE `name` LIKE '%عطبرة%'")
-                db.execSQL("UPDATE `warehouses` SET `currency` = 'SDG', `linkedCashbox` = 'خزنة السودان', `warehouseType` = 'مبيعات' WHERE `name` LIKE '%الخرطوم%' OR `name` = 'مخزن السودان'")
-                db.execSQL("UPDATE `warehouses` SET `currency` = 'EGP', `linkedCashbox` = 'خزنة مصر', `warehouseType` = 'مبيعات' WHERE `name` LIKE '%مبيعات المصنع%' OR `name` LIKE '%مبيعات مصر%'")
-                db.execSQL("UPDATE `warehouses` SET `currency` = 'EGP', `linkedCashbox` = 'خزنة مصر', `warehouseType` = 'مواد خام' WHERE `name` LIKE '%مواد خام%'")
-                db.execSQL("UPDATE `warehouses` SET `currency` = 'EGP', `linkedCashbox` = 'خزنة مصر', `warehouseType` = 'داخل المصنع/إنتاج' WHERE `name` LIKE '%الإنتاج التام%'")
+                // Only initialize warehouse assignments when blank so user edits are never overwritten on app reopen
+                db.execSQL("UPDATE `warehouses` SET `currency` = 'SDG', `linkedCashbox` = 'خزنة حلفا', `warehouseType` = 'مبيعات' WHERE `name` LIKE '%حلفا%' AND (TRIM(COALESCE(`linkedCashbox`, '')) = '' OR TRIM(COALESCE(`currency`, '')) = '')")
+                db.execSQL("UPDATE `warehouses` SET `currency` = 'SDG', `linkedCashbox` = 'خزنة عطبرة', `warehouseType` = 'مبيعات' WHERE `name` LIKE '%عطبرة%' AND (TRIM(COALESCE(`linkedCashbox`, '')) = '' OR TRIM(COALESCE(`currency`, '')) = '')")
+                db.execSQL("UPDATE `warehouses` SET `currency` = 'SDG', `linkedCashbox` = 'خزنة السودان', `warehouseType` = 'مبيعات' WHERE (`name` LIKE '%الخرطوم%' OR `name` = 'مخزن السودان') AND (TRIM(COALESCE(`linkedCashbox`, '')) = '' OR TRIM(COALESCE(`currency`, '')) = '')")
+                db.execSQL("UPDATE `warehouses` SET `currency` = 'EGP', `linkedCashbox` = 'خزنة مصر', `warehouseType` = 'مبيعات' WHERE (`name` LIKE '%مبيعات المصنع%' OR `name` LIKE '%مبيعات مصر%') AND (TRIM(COALESCE(`linkedCashbox`, '')) = '' OR TRIM(COALESCE(`currency`, '')) = '')")
+                db.execSQL("UPDATE `warehouses` SET `currency` = 'EGP', `linkedCashbox` = 'خزنة مصر', `warehouseType` = 'مواد خام' WHERE `name` LIKE '%مواد خام%' AND (TRIM(COALESCE(`linkedCashbox`, '')) = '' OR TRIM(COALESCE(`currency`, '')) = '')")
+                db.execSQL("UPDATE `warehouses` SET `currency` = 'EGP', `linkedCashbox` = 'خزنة مصر', `warehouseType` = 'داخل المصنع/إنتاج' WHERE `name` LIKE '%الإنتاج التام%' AND (TRIM(COALESCE(`linkedCashbox`, '')) = '' OR TRIM(COALESCE(`currency`, '')) = '')")
 
-                // Insert distinct sales warehouses for each financial cashbox if not present
-                db.execSQL("INSERT OR IGNORE INTO `warehouses` (`name`, `currency`, `linkedCashbox`, `warehouseType`) VALUES ('مخزن مبيعات حلفا', 'SDG', 'خزنة حلفا', 'مبيعات')")
-                db.execSQL("INSERT OR IGNORE INTO `warehouses` (`name`, `currency`, `linkedCashbox`, `warehouseType`) VALUES ('مخزن مبيعات عطبرة', 'SDG', 'خزنة عطبرة', 'مبيعات')")
-                db.execSQL("INSERT OR IGNORE INTO `warehouses` (`name`, `currency`, `linkedCashbox`, `warehouseType`) VALUES ('مخزن مبيعات الخرطوم', 'SDG', 'خزنة السودان', 'مبيعات')")
-                db.execSQL("INSERT OR IGNORE INTO `warehouses` (`name`, `currency`, `linkedCashbox`, `warehouseType`) VALUES ('مخزن مبيعات المصنع (مصر)', 'EGP', 'خزنة مصر', 'مبيعات')")
-                db.execSQL("INSERT OR IGNORE INTO `warehouses` (`name`, `currency`, `linkedCashbox`, `warehouseType`) VALUES ('مخزن المواد الخام داخل المصنع (مصر)', 'EGP', 'خزنة مصر', 'مواد خام')")
-                db.execSQL("INSERT OR IGNORE INTO `warehouses` (`name`, `currency`, `linkedCashbox`, `warehouseType`) VALUES ('مخزن الإنتاج التام داخل المصنع', 'EGP', 'خزنة مصر', 'داخل المصنع/إنتاج')")
+                // Insert distinct sales warehouses ONLY if missing (never duplicate existing ones)
+                val existingWhs = mutableSetOf<String>()
+                db.query("SELECT TRIM(LOWER(`name`)) FROM `warehouses`").use { cursor ->
+                    while (cursor.moveToNext()) {
+                        existingWhs.add(cursor.getString(0))
+                    }
+                }
+                listOf(
+                    Triple("مخزن مبيعات حلفا", "SDG", "خزنة حلفا") to "مبيعات",
+                    Triple("مخزن مبيعات عطبرة", "SDG", "خزنة عطبرة") to "مبيعات",
+                    Triple("مخزن مبيعات الخرطوم", "SDG", "خزنة السودان") to "مبيعات",
+                    Triple("مخزن مبيعات المصنع (مصر)", "EGP", "خزنة مصر") to "مبيعات",
+                    Triple("مخزن المواد الخام داخل المصنع (مصر)", "EGP", "خزنة مصر") to "مواد خام",
+                    Triple("مخزن الإنتاج التام داخل المصنع", "EGP", "خزنة مصر") to "داخل المصنع/إنتاج"
+                ).forEach { (triple, whType) ->
+                    val (wName, wCur, wBox) = triple
+                    if (wName.trim().lowercase() !in existingWhs &&
+                        !DeletedRecordsRegistry.isDeleted("warehouses", wName)
+                    ) {
+                        db.execSQL("INSERT INTO `warehouses` (`name`, `currency`, `linkedCashbox`, `warehouseType`) VALUES ('$wName', '$wCur', '$wBox', '$whType')")
+                        existingWhs.add(wName.trim().lowercase())
+                    }
+                }
             } catch (_: Exception) {}
+
+            // Non-destructive v18 columns safeguard
+            ensureV18ImmutableLedgerColumns(db)
 
             // Create PMP Science & Chemistry Lab tables if not existing
             db.execSQL(
@@ -1373,6 +1387,44 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        private fun ensureV18ImmutableLedgerColumns(db: SupportSQLiteDatabase) {
+            fun addColIfMissing(table: String, col: String, ddl: String) {
+                val cols = mutableSetOf<String>()
+                db.query("PRAGMA table_info(`$table`)").use { cursor ->
+                    val nameIdx = cursor.getColumnIndex("name")
+                    while (cursor.moveToNext()) {
+                        if (nameIdx >= 0) cols.add(cursor.getString(nameIdx))
+                    }
+                }
+                if (col !in cols) {
+                    db.execSQL("ALTER TABLE `$table` ADD COLUMN `$col` $ddl")
+                }
+            }
+            runCatching {
+                addColIfMissing("movements", "status", "TEXT NOT NULL DEFAULT 'active'")
+                addColIfMissing("movements", "reversedByRef", "TEXT NOT NULL DEFAULT ''")
+                addColIfMissing("movements", "reversalReason", "TEXT NOT NULL DEFAULT ''")
+                addColIfMissing("movements", "syncStatus", "TEXT NOT NULL DEFAULT 'SYNCED'")
+
+                addColIfMissing("transfers", "status", "TEXT NOT NULL DEFAULT 'active'")
+                addColIfMissing("transfers", "reversedByRef", "TEXT NOT NULL DEFAULT ''")
+                addColIfMissing("transfers", "reversalReason", "TEXT NOT NULL DEFAULT ''")
+                addColIfMissing("transfers", "syncStatus", "TEXT NOT NULL DEFAULT 'SYNCED'")
+
+                addColIfMissing("stock_moves", "status", "TEXT NOT NULL DEFAULT 'active'")
+                addColIfMissing("stock_moves", "reversalReason", "TEXT NOT NULL DEFAULT ''")
+                addColIfMissing("stock_moves", "syncStatus", "TEXT NOT NULL DEFAULT 'SYNCED'")
+            }
+        }
+
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+                upgradeSchemaToV17ChemicalLab(db)
+                ensureV18ImmutableLedgerColumns(db)
+            }
+        }
+
         private val dbCallbackMutex = Mutex()
         private val dbCallbackScope = CoroutineScope(
             SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
@@ -1546,7 +1598,8 @@ abstract class PmpDatabase : RoomDatabase() {
                         MIGRATION_13_14,
                         MIGRATION_14_15,
                         MIGRATION_15_16,
-                        MIGRATION_16_17
+                        MIGRATION_16_17,
+                        MIGRATION_17_18
                     )
                     .addCallback(DatabaseCallback(appContext))
                     .build()

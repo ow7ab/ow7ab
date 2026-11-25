@@ -70,6 +70,17 @@ export function resolveCanonicalCurrency(rawCurrency: unknown, fallbackName?: un
   return 'SDG';
 }
 
+export function isCancelledOrReversedStatus(rawStatus: unknown): boolean {
+  const st = String(rawStatus ?? '').trim().toLowerCase();
+  return (
+    st === 'cancelled' ||
+    st === 'reversed' ||
+    st === 'void' ||
+    st === 'ملغاة' ||
+    st === 'ملغي'
+  );
+}
+
 export function isStockInMoveKind(rawKind: unknown): boolean {
   const kind = String(rawKind ?? '').trim().toUpperCase();
   return (
@@ -521,8 +532,7 @@ export function computeDistinctCashboxesWithBalances(
 
   for (const mv of uniqueMovements) {
     if (!mv) continue;
-    const mvStatus = String((mv as any).status || '').trim().toLowerCase();
-    if (mvStatus === 'reversed' || mvStatus === 'cancelled' || mvStatus === 'ملغاة') continue;
+    if (isCancelledOrReversedStatus((mv as any).status)) continue;
     const rawName = String(mv.cashbox || mv.cashboxName || '').trim();
     const nameKey = normalizeEntityKey(rawName);
     if (!nameKey) continue;
@@ -685,8 +695,7 @@ export function computeProductStocks(
   const byProdWarehouse = new Map<number, Map<number, { inQty: number; outQty: number }>>();
 
   for (const sm of filteredMoves) {
-    const smSt = String((sm as any).status || '').trim().toLowerCase();
-    if (smSt === 'cancelled' || smSt === 'reversed' || smSt === 'ملغاة') continue;
+    if (isCancelledOrReversedStatus((sm as any).status)) continue;
     const pid = Number(sm.productId);
     const rawWhId = Number(sm.warehouseId || 1);
     const canonicalWhId = canonicalWhMap.get(rawWhId) ?? rawWhId;
@@ -770,6 +779,7 @@ export function computeProductMoveBreakdown(
 
   const rawBreakdown = new Map<number, { inQty: number; outQty: number }>();
   for (const m of filteredMoves) {
+    if (isCancelledOrReversedStatus((m as any).status)) continue;
     const pid = Number(m.productId);
     const qty = Math.abs(Number(m.quantity || 0));
     if (!Number.isFinite(qty) || qty <= 0) continue;
@@ -877,6 +887,7 @@ export function computeWarehouseStockSummary(
     const perProdNet = new Map<number, number>();
 
     for (const m of whMoves) {
+      if (isCancelledOrReversedStatus((m as any).status)) continue;
       const pid = Number(m.productId);
       const qty = Math.abs(Number(m.quantity || 0));
       if (!Number.isFinite(qty) || qty <= 0) continue;
@@ -975,6 +986,7 @@ export function computeColorWeightStockRows(
     let inQty = 0;
     let outQty = 0;
     for (const m of prodMoves) {
+      if (isCancelledOrReversedStatus((m as any).status)) continue;
       const q = Math.abs(Number(m.quantity || 0));
       if (!Number.isFinite(q) || q <= 0) continue;
       if (isStockInMoveKind(m.kind)) {
@@ -1048,18 +1060,23 @@ export function computeInvoiceFinancials(
   const embedded: any[] = Array.isArray(inv.payments) ? inv.payments : [];
   const isPaymentActive = (p: any): boolean => {
     if (!p) return false;
+    if (isCancelledOrReversedStatus(p.status)) return false;
     const st = String(p.status || '').trim().toLowerCase();
-    if (st === 'cancelled' || st === 'reversed' || st === 'ملغاة') return false;
     return st === 'active' || !p.status || Number(p.amount) > 0;
   };
 
+  let hasReversedPayments = false;
   for (const p of embedded) {
+    if (p && isCancelledOrReversedStatus(p.status)) hasReversedPayments = true;
     if (!isPaymentActive(p)) continue;
     const pid = String(p.id ?? `${p.invoiceId}_${p.amount}_${p.payDate || p.createdAt || ''}`);
     paymentMap.set(pid, Number(p.amount || 0));
   }
 
   for (const p of externalPayments) {
+    if (Number(p?.invoiceId) === Number(inv.id) && isCancelledOrReversedStatus(p?.status)) {
+      hasReversedPayments = true;
+    }
     if (!isPaymentActive(p)) continue;
     if (Number(p.invoiceId) !== Number(inv.id)) continue;
     const pid = String(p.id ?? `${p.invoiceId}_${p.amount}_${p.payDate || p.createdAt || ''}`);
@@ -1071,7 +1088,9 @@ export function computeInvoiceFinancials(
     sumPayments += amt;
   }
 
-  const paidAmount = Math.max(sumPayments, Number(inv.paidAmount || 0));
+  const paidAmount = hasReversedPayments
+    ? sumPayments
+    : Math.max(sumPayments, Number(inv.paidAmount || 0));
   const remainingAmount = Math.max(0, total - paidAmount);
   const statusLabel =
     paidAmount >= total && total > 0
@@ -1115,8 +1134,7 @@ export function computeCustomerDebts(
     const cid = Number(c.id);
     const custNameKey = normalizeEntityKey(c.name);
     const custInvoices = uniqueInvoices.filter((inv) => {
-      const st = String(inv.status || '').toLowerCase();
-      if (st === 'cancelled' || st === 'ملغاة') return false;
+      if (isCancelledOrReversedStatus(inv.status)) return false;
       return (
         Number(inv.customerId) === cid ||
         Boolean(custNameKey && normalizeEntityKey(inv.customerName) === custNameKey)
@@ -1210,8 +1228,7 @@ export function computeCustomerStatement(
 
   const custNameKey = normalizeEntityKey(customer.name);
   const custInvoices = uniqueInvoices.filter((inv) => {
-    const st = String(inv.status || '').toLowerCase();
-    if (st === 'cancelled' || st === 'ملغاة') return false;
+    if (isCancelledOrReversedStatus(inv.status)) return false;
     return (
       Number(inv.customerId) === Number(customer.id) ||
       Boolean(custNameKey && normalizeEntityKey(inv.customerName) === custNameKey)
@@ -1229,14 +1246,14 @@ export function computeCustomerStatement(
   for (const inv of custInvoices) {
     const embedded: any[] = Array.isArray(inv.payments) ? inv.payments : [];
     for (const p of embedded) {
-      if (!p || p.status === 'reversed') continue;
+      if (!p || isCancelledOrReversedStatus(p.status)) continue;
       const key = String(p.id ?? `${inv.id}_${p.amount}_${p.payDate || p.createdAt || ''}`);
       mergedPaymentDocs.set(key, { ...p, invoiceId: Number(inv.id) });
     }
   }
   for (const pay of uniquePayments) {
     const rawPay = pay as InvoicePayment & Record<string, any>;
-    if (!rawPay || rawPay.status === 'reversed') continue;
+    if (!rawPay || isCancelledOrReversedStatus(rawPay.status)) continue;
     if (Number(rawPay.customerId) === Number(customer.id) || invoiceIds.has(Number(rawPay.invoiceId))) {
       const key = String(rawPay.id ?? `${rawPay.invoiceId}_${rawPay.amount}_${rawPay.payDate || rawPay.createdAt || ''}`);
       mergedPaymentDocs.set(key, rawPay);

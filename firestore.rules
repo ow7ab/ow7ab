@@ -1,14 +1,74 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: /linked_accounts/{accountCode}
+    //   - userCode: string (1..128, immutable, == docId)
+    //   - ownerId: string (1..128, immutable, == creator uid)
+    //   - linkedUid: string (1..128)
+    //   - clusterCode: string (optional, <= 80, immutable after create)
+    //   - fullName, username, role, branch, permissions, serverSyncToken: string (bounded)
+    //   - active: bool
+    //   - createdAt (immutable), updatedAt: timestamp
+    //
+    // Collection: /erp_clusters/{clusterCode}/cluster_members/{memberUid}
+    //   - uid: string (== memberUid, immutable)
+    //   - userCode, username, fullName, email, emailKey, branch, permissions, deviceId: string (bounded)
+    //   - roleKey: enum ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE']
+    //   - active: bool
+    //
+    // Collection: /erp_clusters/{clusterCode}/email_directory/{emailKey}
+    //   - email, userCode, username, branch, permissions: string (bounded)
+    //   - roleKey: enum ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE']
+    //   - active: bool
+    //
+    // Collection: /erp_clusters/{clusterCode}/user_accounts/{docId}
+    //   - userCode, username, fullName, phoneOrEmail, pinOrPassword, role, branch, permissions: string (bounded)
+    //   - linkedUid, remoteServerId, serverSyncToken, syncStatus, deviceId: string (bounded)
+    //   - active: bool
+    //
+    // Collections: /erp_clusters/{clusterCode}/{movements|transfers|invoice_payments}/{docId}
+    //   - Financial ledger entries: append/create + controlled one-time reversal only; direct delete denied.
+    //
+    // Collection: /erp_clusters/{clusterCode}/invoices/{docId}
+    //   - Invoices: soft-cancellation (status 'ملغاة'/'cancelled') and payment summary updates only; non-Admin delete denied.
+    //
+    // ===============================================================
+
     // 1. Global Default-Deny Safety Net
     match /{document=**} {
       allow read, write: if false;
     }
 
     // 2. Hardened Global Primitives
+    function isNonAnonymousAuth() {
+      return request.auth != null && (
+        !('firebase' in request.auth.token) ||
+        !(request.auth.token.firebase is map) ||
+        !('sign_in_provider' in request.auth.token.firebase) ||
+        request.auth.token.firebase.sign_in_provider != 'anonymous'
+      );
+    }
+
     function isSignedIn() {
-      return request.auth != null;
+      return isNonAnonymousAuth();
+    }
+
+    function hasVerifiedEmail() {
+      return isNonAnonymousAuth() &&
+        ('email' in request.auth.token) &&
+        (request.auth.token.email is string) &&
+        request.auth.token.email.size() > 0 &&
+        ('email_verified' in request.auth.token) &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isBootstrapAdminEmail() {
+      return hasVerifiedEmail() &&
+        request.auth.token.email.lower() in ['oaw7ab@gmail.com', 'admin@pmp-paints.com'];
     }
 
     function isValidId(id) {
@@ -21,6 +81,10 @@ service cloud.firestore {
 
     function isOptionalString(val, maxLen) {
       return val is string && val.size() <= maxLen;
+    }
+
+    function isNullableOptionalString(val, maxLen) {
+      return val == null || (val is string && val.size() <= maxLen);
     }
 
     function isReasonablePayload() {
@@ -50,14 +114,14 @@ service cloud.firestore {
     }
 
     function hasTokenRoleClaim(clusterCode) {
-      return isSignedIn() &&
+      return isNonAnonymousAuth() &&
         ('roleKey' in request.auth.token) &&
         request.auth.token.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] &&
         (!('clusterCode' in request.auth.token) || request.auth.token.clusterCode == clusterCode);
     }
 
     function resolveMember(clusterCode) {
-      return (isSignedIn() && exists(memberPath(clusterCode, request.auth.uid)))
+      return (isNonAnonymousAuth() && exists(memberPath(clusterCode, request.auth.uid)))
         ? get(memberPath(clusterCode, request.auth.uid)).data
         : (hasTokenRoleClaim(clusterCode)
             ? {'roleKey': request.auth.token.roleKey, 'branch': 'ALL', 'active': true, 'userCode': '', 'permissions': ''}
@@ -65,34 +129,35 @@ service cloud.firestore {
     }
 
     function isMemberAdmin(m) {
-      return m.active == true && m.roleKey == 'ADMIN';
+      return ('active' in m) && m.active == true && ('roleKey' in m) && m.roleKey == 'ADMIN';
     }
 
     function isMemberManager(m) {
-      return m.active == true && m.roleKey == 'MANAGER';
+      return ('active' in m) && m.active == true && ('roleKey' in m) && m.roleKey == 'MANAGER';
     }
 
     function isMemberAccountant(m) {
-      return m.active == true && m.roleKey == 'ACCOUNTANT';
+      return ('active' in m) && m.active == true && ('roleKey' in m) && m.roleKey == 'ACCOUNTANT';
     }
 
     function isMemberDeputyAccountant(m) {
-      return m.active == true && m.roleKey == 'DEPUTY_ACCOUNTANT';
+      return ('active' in m) && m.active == true && ('roleKey' in m) && m.roleKey == 'DEPUTY_ACCOUNTANT';
     }
 
     function isClusterAdmin(clusterCode) {
       let m = resolveMember(clusterCode);
-      return isSignedIn() && m.active == true && m.roleKey == 'ADMIN';
+      return isNonAnonymousAuth() && isMemberAdmin(m);
     }
 
     function isClusterManager(clusterCode) {
       let m = resolveMember(clusterCode);
-      return isSignedIn() && m.active == true && m.roleKey == 'MANAGER';
+      return isNonAnonymousAuth() && isMemberManager(m);
     }
 
     function isActiveClusterMember(clusterCode) {
       let m = resolveMember(clusterCode);
-      return isSignedIn() && m.active == true && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'];
+      return isNonAnonymousAuth() && ('active' in m) && m.active == true && ('roleKey' in m) &&
+        m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'];
     }
 
     function isGlobalBranchValue(branchVal) {
@@ -111,8 +176,13 @@ service cloud.firestore {
 
     function isPrivilegedArabicOrEnRole(roleStr) {
       return roleStr is string && (
-        roleStr.matches('.*(مدير النظام|المدير العام|Super\\s*Admin|SUPER_ADMIN|ADMIN|Manager|المدير|مشرف).*')
+        roleStr.matches('[\\s\\S]*(مدير النظام|المدير العام|Super\\s*Admin|SUPER_ADMIN|ADMIN|Admin|Manager|MANAGER|المدير|مشرف)[\\s\\S]*')
       );
+    }
+
+    function hasForbiddenAdminPermissions(d) {
+      return ('permissions' in d) && (d.permissions is string) &&
+        d.permissions.matches('[\\s\\S]*(USER_MANAGEMENT|ADMIN_SETTINGS|SCOPED_ADMIN|إدارة المستخدمين|الإعدادات الإدارية)[\\s\\S]*');
     }
 
     function isValidRoleKey(rk) {
@@ -136,7 +206,7 @@ service cloud.firestore {
     }
 
     function hasLabSecretRead(m) {
-      return m.active == true && (
+      return ('active' in m) && m.active == true && (
         isMemberAdmin(m) ||
         (isMemberManager(m) && !isLabSecretDenied(m)) ||
         (memberHasPermString(m) &&
@@ -153,7 +223,7 @@ service cloud.firestore {
     }
 
     function hasLabApprove(m) {
-      return m.active == true && (
+      return ('active' in m) && m.active == true && (
         isMemberAdmin(m) ||
         isMemberManager(m) ||
         (memberHasPermString(m) &&
@@ -165,7 +235,7 @@ service cloud.firestore {
     }
 
     function hasQcGate(m) {
-      return m.active == true && (
+      return ('active' in m) && m.active == true && (
         isMemberAdmin(m) ||
         isMemberManager(m) ||
         (memberHasPermString(m) &&
@@ -177,7 +247,7 @@ service cloud.firestore {
     }
 
     function hasProcurementOrCostRead(m) {
-      return m.active == true && (
+      return ('active' in m) && m.active == true && (
         isMemberAdmin(m) ||
         isMemberManager(m) ||
         isMemberAccountant(m) ||
@@ -215,15 +285,15 @@ service cloud.firestore {
     }
 
     // 4. Linked Employee Accounts (/linked_accounts/{accountCode})
-    //    Strictly enforces Firebase Authentication, ownerId/linkedUid isolation,
+    //    Strictly enforces non-anonymous Firebase Authentication, ownerId/linkedUid isolation,
     //    schema validation, and prevents employee privilege escalation.
     match /linked_accounts/{accountCode} {
       function isAccountOwner() {
-        return isSignedIn() && resource.data.ownerId == request.auth.uid;
+        return isNonAnonymousAuth() && resource != null && resource.data.ownerId == request.auth.uid;
       }
 
       function isLinkedEmployee() {
-        return isSignedIn() && resource.data.linkedUid == request.auth.uid;
+        return isNonAnonymousAuth() && resource != null && resource.data.linkedUid == request.auth.uid;
       }
 
       function isValidLinkedAccountCreate(docId) {
@@ -233,7 +303,7 @@ service cloud.firestore {
           'role', 'branch', 'permissions', 'serverSyncToken',
           'active', 'createdAt', 'updatedAt'
         ];
-        return isSignedIn() &&
+        return isNonAnonymousAuth() &&
           isReasonablePayload() &&
           data.keys().hasAll([
             'userCode', 'ownerId', 'linkedUid', 'fullName', 'username',
@@ -258,11 +328,23 @@ service cloud.firestore {
       // Tier 1: Account Owner (Admin) updates employee permissions, role, branch, or active status
       function isValidManagerUpdate() {
         let data = request.resource.data;
+        let allowedKeys = [
+          'userCode', 'ownerId', 'linkedUid', 'clusterCode', 'fullName', 'username',
+          'role', 'branch', 'permissions', 'serverSyncToken',
+          'active', 'createdAt', 'updatedAt'
+        ];
         return isAccountOwner() &&
           isReasonablePayload() &&
+          data.keys().hasAll([
+            'userCode', 'ownerId', 'linkedUid', 'fullName', 'username',
+            'role', 'branch', 'permissions', 'serverSyncToken', 'active', 'createdAt', 'updatedAt'
+          ]) &&
+          data.keys().hasOnly(allowedKeys) &&
           data.userCode == resource.data.userCode &&
           data.ownerId == resource.data.ownerId &&
           data.createdAt == resource.data.createdAt &&
+          (!('clusterCode' in resource.data) || (('clusterCode' in data) && data.clusterCode == resource.data.clusterCode)) &&
+          (!('clusterCode' in data) || isOptionalString(data.clusterCode, 80)) &&
           isNonEmptyString(data.linkedUid, 128) &&
           isNonEmptyString(data.fullName, 120) &&
           isNonEmptyString(data.username, 60) &&
@@ -287,55 +369,55 @@ service cloud.firestore {
 
       allow get: if isAccountOwner() || isLinkedEmployee();
       allow list: if isAccountOwner() || isLinkedEmployee();
-      allow create: if isValidId(accountCode) && isValidLinkedAccountCreate(accountCode);
-      allow update: if isValidId(accountCode) && (isValidManagerUpdate() || isValidEmployeeSyncUpdate());
+      allow create: if isNonAnonymousAuth() && isValidId(accountCode) && isValidLinkedAccountCreate(accountCode);
+      allow update: if isNonAnonymousAuth() && isValidId(accountCode) && (isValidManagerUpdate() || isValidEmployeeSyncUpdate());
       allow delete: if isAccountOwner();
     }
 
     // 5. Root Configuration, Updates & Tombstones (Hardened Auth & Role Scopes)
     match /system_config/{docId} {
       allow read: if isValidId(docId);
-      allow create, update: if isSignedIn() && isValidId(docId) && isReasonablePayload() && isNotVersionDowngrade() && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
-      allow delete: if isSignedIn() && isValidId(docId) && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
+      allow create, update: if isNonAnonymousAuth() && isValidId(docId) && isReasonablePayload() && isNotVersionDowngrade() && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
+      allow delete: if isNonAnonymousAuth() && isValidId(docId) && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
     }
 
     match /app_updates/{docId} {
       allow read: if isValidId(docId);
-      allow create, update: if isSignedIn() && isValidId(docId) && isReasonablePayload() && isNotVersionDowngrade() && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
-      allow delete: if isSignedIn() && isValidId(docId) && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
+      allow create, update: if isNonAnonymousAuth() && isValidId(docId) && isReasonablePayload() && isNotVersionDowngrade() && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
+      allow delete: if isNonAnonymousAuth() && isValidId(docId) && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
     }
 
     match /deleted_records/{docId} {
-      allow read: if isSignedIn() && isValidId(docId) && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
-      allow create, update: if isSignedIn() && isValidId(docId) && isReasonablePayload() && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
-      allow delete: if isSignedIn() && isValidId(docId) && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
+      allow read: if isNonAnonymousAuth() && isValidId(docId) && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
+      allow create, update: if isNonAnonymousAuth() && isValidId(docId) && isReasonablePayload() && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
+      allow delete: if isNonAnonymousAuth() && isValidId(docId) && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
     }
 
     match /deleted_accounts/{accountCode} {
-      allow read: if isSignedIn() && isValidId(accountCode) && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
-      allow create, update: if isSignedIn() && isValidId(accountCode) && isReasonablePayload() && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
-      allow delete: if isSignedIn() && isValidId(accountCode) && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
+      allow read: if isNonAnonymousAuth() && isValidId(accountCode) && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
+      allow create, update: if isNonAnonymousAuth() && isValidId(accountCode) && isReasonablePayload() && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
+      allow delete: if isNonAnonymousAuth() && isValidId(accountCode) && isClusterAdmin('PMP-ERP-MAIN-CLUSTER');
     }
 
     match /permission_audit_logs/{logId} {
-      allow read: if isSignedIn() && isValidId(logId) && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
-      allow create: if isSignedIn() && isValidId(logId) && isReasonablePayload() && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
+      allow read: if isNonAnonymousAuth() && isValidId(logId) && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
+      allow create: if isNonAnonymousAuth() && isValidId(logId) && isReasonablePayload() && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
       allow update, delete: if false;
     }
 
     // 6. Chemical Formulations and Paint Batch Data (RBAC-Protected Lab IP & Batch Data)
     match /lab_formulations/{formulaId} {
-      allow read: if isSignedIn() && isValidId(formulaId) && hasLabSecretRead(resolveMember('PMP-ERP-MAIN-CLUSTER'));
-      allow create, update: if isSignedIn() && isValidId(formulaId) && isReasonablePayload() &&
+      allow read: if isNonAnonymousAuth() && isValidId(formulaId) && hasLabSecretRead(resolveMember('PMP-ERP-MAIN-CLUSTER'));
+      allow create, update: if isNonAnonymousAuth() && isValidId(formulaId) && isReasonablePayload() &&
         hasLabEdit(resolveMember('PMP-ERP-MAIN-CLUSTER')) &&
         (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember('PMP-ERP-MAIN-CLUSTER')));
-      allow delete: if isSignedIn() && isValidId(formulaId) && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
+      allow delete: if isNonAnonymousAuth() && isValidId(formulaId) && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
     }
 
     match /paint_batches/{batchId} {
-      allow read: if isSignedIn() && isValidId(batchId) && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
-      allow create, update: if isSignedIn() && isValidId(batchId) && isReasonablePayload() && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
-      allow delete: if isSignedIn() && isValidId(batchId) && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
+      allow read: if isNonAnonymousAuth() && isValidId(batchId) && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
+      allow create, update: if isNonAnonymousAuth() && isValidId(batchId) && isReasonablePayload() && isActiveClusterMember('PMP-ERP-MAIN-CLUSTER');
+      allow delete: if isNonAnonymousAuth() && isValidId(batchId) && (isClusterAdmin('PMP-ERP-MAIN-CLUSTER') || isClusterManager('PMP-ERP-MAIN-CLUSTER'));
     }
 
     // 7. Collection Semantics & Payload Validation Helpers
@@ -351,8 +433,37 @@ service cloud.firestore {
       return col == 'journal_lines';
     }
 
+    function isImmutableFinancialLedgerCollection(col) {
+      return col in ['movements', 'transfers', 'invoice_payments'];
+    }
+
     function isIdempotencyCollection(col) {
       return col == 'idempotency_requests';
+    }
+
+    function isValidFinancialLedgerReversal() {
+      let d = request.resource.data;
+      return (!('status' in resource.data) || !(resource.data.status in ['reversed', 'REVERSED', 'cancelled', 'CANCELLED', 'ملغاة'])) &&
+        ('status' in d) &&
+        (d.status in ['reversed', 'REVERSED', 'cancelled', 'CANCELLED', 'ملغاة']) &&
+        d.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'reversedByRef', 'reversedByEntryNo', 'reversedMovementId',
+          'reversalReason', 'reversedAt', 'updatedAt', 'serverUpdatedAt', 'serverUpdatedBy', 'recordVersion'
+        ]) &&
+        (!('reversalReason' in d) || isNullableOptionalString(d.reversalReason, 500)) &&
+        (!('reversedByRef' in d) || isNullableOptionalString(d.reversedByRef, 160)) &&
+        (!('reversedByEntryNo' in d) || isNullableOptionalString(d.reversedByEntryNo, 128)) &&
+        (!('serverUpdatedBy' in d) || isNullableOptionalString(d.serverUpdatedBy, 128));
+    }
+
+    function isValidInvoiceSummaryUpdate() {
+      let d = request.resource.data;
+      return (!('status' in resource.data) || !(resource.data.status in ['ملغاة', 'cancelled', 'CANCELLED'])) &&
+        d.diff(resource.data).affectedKeys().hasOnly([
+          'paidAmount', 'status', 'payments', 'cancelReason', 'updatedAt', 'serverUpdatedAt', 'serverUpdatedBy'
+        ]) &&
+        (!('paidAmount' in d) || !('total' in d) || !(d.paidAmount is number) || !(d.total is number) || d.paidAmount <= d.total + 0.05) &&
+        (!('serverUpdatedBy' in d) || isNullableOptionalString(d.serverUpdatedBy, 128));
     }
 
     function isValidErpDocWrite(col) {
@@ -363,24 +474,55 @@ service cloud.firestore {
           (!('subtotal' in d) || (d.subtotal is number && d.subtotal >= 0)) &&
           (!('discount' in d) || (d.discount is number && d.discount >= 0)) &&
           (!('discountAmount' in d) || (d.discountAmount is number && d.discountAmount >= 0)) &&
+          (!('taxAmount' in d) || (d.taxAmount is number && d.taxAmount >= 0)) &&
           (!('paidAmount' in d) || (d.paidAmount is number && d.paidAmount >= 0)) &&
-          (!('customerName' in d) || isNonEmptyString(d.customerName, 200))
+          (!('customerName' in d) || isNonEmptyString(d.customerName, 200)) &&
+          (!('currency' in d) || d.currency in ['SDG', 'EGP', 'USD']) &&
+          (!('status' in d) || isNullableOptionalString(d.status, 60)) &&
+          (!('cancelReason' in d) || isNullableOptionalString(d.cancelReason, 500)) &&
+          (!('notes' in d) || isNullableOptionalString(d.notes, 2000)) &&
+          (!('itemsJson' in d) || isNullableOptionalString(d.itemsJson, 200000)) &&
+          (!('payments' in d) || d.payments == null || (d.payments is list && d.payments.size() <= 500))
         )) &&
-        (col != 'invoice_payments' || (!('amount' in d) || (d.amount is number && d.amount > 0))) &&
+        (col != 'invoice_payments' || (
+          (!('amount' in d) || (d.amount is number && d.amount > 0)) &&
+          (!('currency' in d) || d.currency in ['SDG', 'EGP', 'USD']) &&
+          (!('cashbox' in d) || isOptionalString(d.cashbox, 120)) &&
+          (!('note' in d) || isNullableOptionalString(d.note, 1000)) &&
+          (!('status' in d) || isOptionalString(d.status, 40)) &&
+          (!('reversalReason' in d) || isNullableOptionalString(d.reversalReason, 500)) &&
+          (!('reversedByRef' in d) || isNullableOptionalString(d.reversedByRef, 160))
+        )) &&
         (col != 'movements' || (
           (!('amount' in d) || (d.amount is number && d.amount >= 0)) &&
           (!('direction' in d) || d.direction in ['وارد', 'منصرف', 'IN', 'OUT', 'INCOME', 'EXPENSE', 'TRANSFER_IN', 'TRANSFER_OUT', 'قبض', 'صرف']) &&
           (!('currency' in d) || d.currency in ['SDG', 'EGP', 'USD']) &&
-          (!('cashbox' in d) || isNonEmptyString(d.cashbox, 120))
+          (!('cashbox' in d) || isNonEmptyString(d.cashbox, 120)) &&
+          (!('description' in d) || isNullableOptionalString(d.description, 1000)) &&
+          (!('note' in d) || isNullableOptionalString(d.note, 1000)) &&
+          (!('reference' in d) || isNullableOptionalString(d.reference, 200)) &&
+          (!('status' in d) || isOptionalString(d.status, 40)) &&
+          (!('reversalReason' in d) || isNullableOptionalString(d.reversalReason, 500)) &&
+          (!('reversedByRef' in d) || isNullableOptionalString(d.reversedByRef, 160))
         )) &&
         (col != 'transfers' || (
           (!('sourceAmount' in d) || (d.sourceAmount is number && d.sourceAmount >= 0)) &&
           (!('destinationAmount' in d) || (d.destinationAmount is number && d.destinationAmount >= 0)) &&
-          (!('rate' in d) || (d.rate is number && d.rate > 0))
+          (!('rate' in d) || (d.rate is number && d.rate > 0)) &&
+          (!('sourceCurrency' in d) || d.sourceCurrency in ['SDG', 'EGP', 'USD']) &&
+          (!('destinationCurrency' in d) || d.destinationCurrency in ['SDG', 'EGP', 'USD']) &&
+          (!('sourceCashbox' in d) || isOptionalString(d.sourceCashbox, 120)) &&
+          (!('destinationCashbox' in d) || isOptionalString(d.destinationCashbox, 120)) &&
+          (!('description' in d) || isNullableOptionalString(d.description, 1000)) &&
+          (!('status' in d) || isOptionalString(d.status, 40)) &&
+          (!('reversalReason' in d) || isNullableOptionalString(d.reversalReason, 500)) &&
+          (!('reversedByRef' in d) || isNullableOptionalString(d.reversedByRef, 160))
         )) &&
         (col != 'deleted_records' || (
           isNonEmptyString(d.collection, 64) &&
-          ((('docId' in d) && isNonEmptyString(d.docId, 160)) || (('entityId' in d) && isNonEmptyString(d.entityId, 160)))
+          ((('docId' in d) && isNonEmptyString(d.docId, 160)) || (('entityId' in d) && isNonEmptyString(d.entityId, 160))) &&
+          (!('aliases' in d) || (d.aliases is list && d.aliases.size() <= 50)) &&
+          (!('deletedBy' in d) || isNullableOptionalString(d.deletedBy, 120))
         )) &&
         (col != 'stock_moves' || (
           (!('quantity' in d) || (d.quantity is number && d.quantity >= 0)) &&
@@ -413,7 +555,19 @@ service cloud.firestore {
           (!('rejectedQty' in d) || (d.rejectedQty is number && d.rejectedQty >= 0))
         )) &&
         (col != 'user_accounts' || (
+          (!('userCode' in d) || isNonEmptyString(d.userCode, 128)) &&
           (!('username' in d) || isNonEmptyString(d.username, 120)) &&
+          (!('fullName' in d) || isNullableOptionalString(d.fullName, 160)) &&
+          (!('phoneOrEmail' in d) || isNullableOptionalString(d.phoneOrEmail, 160)) &&
+          (!('pinOrPassword' in d) || isNullableOptionalString(d.pinOrPassword, 256)) &&
+          (!('role' in d) || isNullableOptionalString(d.role, 120)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 120)) &&
+          (!('permissions' in d) || isNullableOptionalString(d.permissions, 2000)) &&
+          (!('linkedUid' in d) || isNullableOptionalString(d.linkedUid, 128)) &&
+          (!('remoteServerId' in d) || isNullableOptionalString(d.remoteServerId, 128)) &&
+          (!('serverSyncToken' in d) || isNullableOptionalString(d.serverSyncToken, 160)) &&
+          (!('syncStatus' in d) || isNullableOptionalString(d.syncStatus, 60)) &&
+          (!('deviceId' in d) || isNullableOptionalString(d.deviceId, 160)) &&
           (!('active' in d) || d.active is bool)
         )) &&
         (col != 'accounting_accounts' || (
@@ -428,6 +582,11 @@ service cloud.firestore {
         (col != 'journal_lines' || (
           (!('debit' in d) || (d.debit is number && d.debit >= 0)) &&
           (!('credit' in d) || (d.credit is number && d.credit >= 0))
+        )) &&
+        (col != 'audit_logs' || (
+          (!('action' in d) || isNullableOptionalString(d.action, 120)) &&
+          (!('actor' in d) || isNullableOptionalString(d.actor, 120)) &&
+          (!('detail' in d) || isNullableOptionalString(d.detail, 2000))
         )) &&
         (col != 'lab_formula_summaries' || (
           !('ingredientsJson' in d) &&
@@ -451,233 +610,367 @@ service cloud.firestore {
     // Single-lookup Collection-level Role Authorization Matrices
     function canReadErpCollection(clusterCode, col) {
       let m = resolveMember(clusterCode);
-      return isSignedIn() && m.active == true && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
-        isMemberAdmin(m) ||
-        (col in ['system_config', 'system_metadata', 'config']) ||
-        (!(col in ['system_config', 'system_metadata', 'config']) && (
-          !('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)
-        ))
-      );
+      return isNonAnonymousAuth() && ('active' in m) && m.active == true && ('roleKey' in m) &&
+        m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
+          isMemberAdmin(m) ||
+          (col in ['system_config', 'system_metadata', 'config']) ||
+          (!(col in ['system_config', 'system_metadata', 'config']) && (
+            !('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)
+          ))
+        );
     }
 
     function canCreateErpCollection(clusterCode, col) {
       let m = resolveMember(clusterCode);
       let d = request.resource.data;
-      return isSignedIn() && m.active == true && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
-        isMemberAdmin(m) ||
-        (col in ['system_metadata', 'system_config', 'app_updates', 'config'] && false) ||
-        (col in ['deleted_records', 'permission_audit_logs'] && isMemberManager(m)) ||
-        (col == 'deleted_users' && isMemberManager(m) &&
-          (!('userCode' in d) || d.userCode != 'USR-ADMIN') &&
-          (!('username' in d) || d.username != 'admin')) ||
-        (col == 'accounting_accounts' && (isMemberManager(m) || isMemberAccountant(m))) ||
-        (col in ['journal_entries', 'journal_lines'] && (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m))) ||
-        (col == 'cashboxes' &&
-          (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m)) &&
-          (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
-        (col in ['movements', 'transfers', 'daily_closings'] &&
-          (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || hasTreasuryPermissionGrant(m)) &&
-          (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
-        (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'permission_audit_logs', 'accounting_accounts', 'journal_entries', 'journal_lines', 'cashboxes', 'movements', 'transfers', 'daily_closings']) &&
-          (!('branch' in d) || canMemberAccessBranch(m, d.branch)))
-      );
+      return isNonAnonymousAuth() && ('active' in m) && m.active == true && ('roleKey' in m) &&
+        m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
+          isMemberAdmin(m) ||
+          (col in ['system_metadata', 'system_config', 'app_updates', 'config'] && false) ||
+          (col in ['deleted_records', 'permission_audit_logs'] && isMemberManager(m)) ||
+          (col == 'deleted_users' && isMemberManager(m) &&
+            (!('userCode' in d) || !(d.userCode in ['USR-ADMIN', 'USR-HQ-001'])) &&
+            (!('username' in d) || !(d.username is string) || d.username.lower() != 'admin')) ||
+          (col == 'accounting_accounts' && (isMemberManager(m) || isMemberAccountant(m))) ||
+          (col in ['journal_entries', 'journal_lines'] && (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m))) ||
+          (col == 'cashboxes' &&
+            (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m)) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
+          (col in ['movements', 'transfers', 'daily_closings'] &&
+            (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || hasTreasuryPermissionGrant(m)) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
+          (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'permission_audit_logs', 'accounting_accounts', 'journal_entries', 'journal_lines', 'cashboxes', 'movements', 'transfers', 'daily_closings']) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch)))
+        );
     }
 
     function canUpdateErpCollection(clusterCode, col) {
       let m = resolveMember(clusterCode);
       let d = request.resource.data;
-      return isSignedIn() && m.active == true && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
-        isMemberAdmin(m) ||
-        (col in ['system_metadata', 'system_config', 'app_updates', 'config'] && false) ||
-        (col == 'deleted_users' && isMemberManager(m) &&
-          (!('userCode' in resource.data) || resource.data.userCode != 'USR-ADMIN') &&
-          (!('username' in resource.data) || resource.data.username != 'admin') &&
-          d.userCode == resource.data.userCode) ||
-        (col == 'deleted_records' && isMemberManager(m)) ||
-        (col == 'journal_entries' && isMemberAccountant(m)) ||
-        (col == 'inventory_movements' && (isMemberManager(m) || isMemberAccountant(m))) ||
-        (col == 'accounting_accounts' && (isMemberManager(m) || isMemberAccountant(m))) ||
-        (col == 'cashboxes' &&
-          (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m)) &&
-          (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
-          (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
-        (col in ['movements', 'transfers', 'daily_closings'] &&
-          (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || hasTreasuryPermissionGrant(m)) &&
-          (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
-          (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
-        (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'journal_entries', 'inventory_movements', 'accounting_accounts', 'cashboxes', 'movements', 'transfers', 'daily_closings']) &&
-          (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || !(col in ['warehouses', 'products', 'packaging_rules'])) &&
-          (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
-          (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)))
-      );
+      return isNonAnonymousAuth() && ('active' in m) && m.active == true && ('roleKey' in m) &&
+        m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
+          isMemberAdmin(m) ||
+          (col in ['system_metadata', 'system_config', 'app_updates', 'config'] && false) ||
+          (col == 'deleted_users' && isMemberManager(m) &&
+            (!('userCode' in resource.data) || !(resource.data.userCode in ['USR-ADMIN', 'USR-HQ-001'])) &&
+            (!('username' in resource.data) || !(resource.data.username is string) || resource.data.username.lower() != 'admin') &&
+            ('userCode' in resource.data) && ('userCode' in d) && d.userCode == resource.data.userCode) ||
+          (col == 'deleted_records' && isMemberManager(m)) ||
+          (col == 'journal_entries' && isMemberAccountant(m)) ||
+          (col == 'inventory_movements' && (isMemberManager(m) || isMemberAccountant(m))) ||
+          (col == 'accounting_accounts' && (isMemberManager(m) || isMemberAccountant(m))) ||
+          (col == 'cashboxes' &&
+            (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m)) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
+            (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
+          (col in ['movements', 'transfers', 'invoice_payments', 'daily_closings'] &&
+            (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || hasTreasuryPermissionGrant(m)) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
+            (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
+          (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'journal_entries', 'inventory_movements', 'accounting_accounts', 'cashboxes', 'movements', 'transfers', 'invoice_payments', 'daily_closings']) &&
+            (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || !(col in ['warehouses', 'products', 'packaging_rules'])) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
+            (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)))
+        );
     }
 
     function canDeleteErpCollection(clusterCode, col) {
       let m = resolveMember(clusterCode);
-      return isSignedIn() && m.active == true && m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
-        isMemberAdmin(m) ||
-        (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'cashboxes', 'warehouses', 'accounting_accounts']) &&
-          isMemberManager(m) &&
-          (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)))
-      );
+      return isNonAnonymousAuth() && ('active' in m) && m.active == true && ('roleKey' in m) &&
+        m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
+          isMemberAdmin(m) ||
+          (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'cashboxes', 'warehouses', 'accounting_accounts', 'invoices', 'movements', 'transfers', 'invoice_payments']) &&
+            isMemberManager(m) &&
+            (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)))
+        );
     }
 
     // 8. Hardened ERP Central Clusters Rules (/erp_clusters/{clusterCode})
     match /erp_clusters/{clusterCode} {
-      allow get, list: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
-      allow create: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isReasonablePayload() &&
+      allow get, list: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
+      allow create: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isReasonablePayload() &&
         (isClusterAdmin(clusterCode) || !exists(ownerLockPath(clusterCode)));
-      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isReasonablePayload() && isClusterAdmin(clusterCode);
-      allow delete: if isValidId(clusterCode) && isClusterAdmin(clusterCode);
+      allow update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isReasonablePayload() && isClusterAdmin(clusterCode);
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && isClusterAdmin(clusterCode);
     }
 
     // 8a. Authoritative Cluster RBAC Directory (/cluster_members/{uid})
+    function isOwnerLockHolder(clusterCode) {
+      let lock = get(ownerLockPath(clusterCode)).data;
+      return ('ownerUid' in lock) && lock.ownerUid == request.auth.uid;
+    }
+
+    function matchesEmailDirectoryClaim(clusterCode, emailKey) {
+      let d = request.resource.data;
+      let dir = get(emailDirPath(clusterCode, emailKey)).data;
+      return ('active' in dir) && dir.active == true &&
+        ('email' in dir) && (dir.email is string) &&
+        dir.email.lower() == request.auth.token.email.lower() &&
+        ('roleKey' in dir) && d.roleKey == dir.roleKey &&
+        d.active == true &&
+        (!('branch' in dir) || (('branch' in d) && d.branch == dir.branch)) &&
+        (!('permissions' in dir) || (('permissions' in d) && d.permissions == dir.permissions)) &&
+        (!('userCode' in dir) || (('userCode' in d) && d.userCode == dir.userCode));
+    }
+
+    function canSelfClaimFromEmailDirectory(clusterCode) {
+      let d = request.resource.data;
+      return hasVerifiedEmail() &&
+        ('emailKey' in d) &&
+        isValidId(d.emailKey) &&
+        exists(emailDirPath(clusterCode, d.emailKey)) &&
+        matchesEmailDirectoryClaim(clusterCode, d.emailKey);
+    }
+
+    function isValidClusterMemberWrite(memberUid) {
+      let d = request.resource.data;
+      return isReasonablePayload() &&
+        ('roleKey' in d) && isValidRoleKey(d.roleKey) &&
+        ('active' in d) && (d.active is bool) &&
+        (!('uid' in d) || (d.uid is string && d.uid == memberUid)) &&
+        (!('userCode' in d) || isNullableOptionalString(d.userCode, 128)) &&
+        (!('username' in d) || isNullableOptionalString(d.username, 120)) &&
+        (!('fullName' in d) || isNullableOptionalString(d.fullName, 160)) &&
+        (!('email' in d) || isNullableOptionalString(d.email, 160)) &&
+        (!('emailKey' in d) || isNullableOptionalString(d.emailKey, 128)) &&
+        (!('branch' in d) || isNullableOptionalString(d.branch, 120)) &&
+        (!('permissions' in d) || isNullableOptionalString(d.permissions, 2000)) &&
+        (!('deviceId' in d) || isNullableOptionalString(d.deviceId, 160));
+    }
+
     match /erp_clusters/{clusterCode}/cluster_members/{memberUid} {
-      allow get: if isSignedIn() && isValidId(clusterCode) && isValidId(memberUid) && (
+      allow get: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(memberUid) && (
         request.auth.uid == memberUid || isClusterAdmin(clusterCode) || isClusterManager(clusterCode)
       );
-      allow list: if isValidId(clusterCode) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
-      allow create: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(memberUid) &&
-        isReasonablePayload() && isValidRoleKey(request.resource.data.roleKey) && request.resource.data.active is bool && (
+      allow list: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (
+        isClusterAdmin(clusterCode) || isClusterManager(clusterCode)
+      );
+      allow create: if isNonAnonymousAuth() &&
+        isValidId(clusterCode) &&
+        clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+        isValidId(memberUid) &&
+        isValidClusterMemberWrite(memberUid) && (
           isClusterAdmin(clusterCode) ||
           (isClusterManager(clusterCode) &&
             request.auth.uid != memberUid &&
-            request.resource.data.roleKey in ['ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE']) ||
+            request.resource.data.roleKey in ['ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] &&
+            !hasForbiddenAdminPermissions(request.resource.data) &&
+            (!('branch' in request.resource.data) || canMemberAccessBranch(resolveMember(clusterCode), request.resource.data.branch))) ||
           (request.auth.uid == memberUid &&
-            request.resource.data.uid == request.auth.uid &&
-            request.resource.data.roleKey == 'ADMIN' &&
-            request.resource.data.active == true &&
-            (!exists(ownerLockPath(clusterCode)) ||
-              get(ownerLockPath(clusterCode)).data.ownerUid == request.auth.uid ||
-              (request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com']))) ||
-          (request.auth.uid == memberUid &&
-            request.resource.data.uid == request.auth.uid &&
-            (
-              (request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com']) ||
-              (isNonEmptyString(request.resource.data.emailKey, 128) &&
-                exists(emailDirPath(clusterCode, request.resource.data.emailKey)) &&
-                get(emailDirPath(clusterCode, request.resource.data.emailKey)).data.active == true) ||
-              (isNonEmptyString(request.resource.data.userCode, 128) &&
-                exists(/databases/$(database)/documents/erp_clusters/$(clusterCode)/user_accounts/$(request.resource.data.userCode)) &&
-                get(/databases/$(database)/documents/erp_clusters/$(clusterCode)/user_accounts/$(request.resource.data.userCode)).data.active == true)
+            ('uid' in request.resource.data) &&
+            request.resource.data.uid == request.auth.uid && (
+              (request.resource.data.roleKey == 'ADMIN' &&
+                request.resource.data.active == true && (
+                  !exists(ownerLockPath(clusterCode)) ||
+                  isOwnerLockHolder(clusterCode) ||
+                  isBootstrapAdminEmail()
+                )) ||
+              (isBootstrapAdminEmail() &&
+                request.resource.data.roleKey == 'ADMIN' &&
+                request.resource.data.active == true) ||
+              canSelfClaimFromEmailDirectory(clusterCode)
             ))
         );
-      allow update: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(memberUid) &&
-        isReasonablePayload() && isValidRoleKey(request.resource.data.roleKey) && request.resource.data.active is bool && (
+      allow update: if isNonAnonymousAuth() &&
+        isValidId(clusterCode) &&
+        clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+        isValidId(memberUid) &&
+        isValidClusterMemberWrite(memberUid) &&
+        (!('uid' in resource.data) || !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid) && (
           (request.auth.uid == memberUid && (
             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSeenAt', 'updatedAt', 'deviceId', 'serverUpdatedAt']) ||
-            (request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com']) ||
-            (isNonEmptyString(request.resource.data.userCode, 128) &&
-              exists(/databases/$(database)/documents/erp_clusters/$(clusterCode)/user_accounts/$(request.resource.data.userCode)) &&
-              get(/databases/$(database)/documents/erp_clusters/$(clusterCode)/user_accounts/$(request.resource.data.userCode)).data.active == true)
+            (isBootstrapAdminEmail() && request.resource.data.roleKey == 'ADMIN' && request.resource.data.active == true)
           )) ||
           (isClusterAdmin(clusterCode) && request.auth.uid != memberUid) ||
           (isClusterManager(clusterCode) &&
             request.auth.uid != memberUid &&
-            !(resource.data.roleKey in ['ADMIN', 'MANAGER']) &&
-            request.resource.data.roleKey in ['ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'])
+            ('roleKey' in resource.data) && !(resource.data.roleKey in ['ADMIN', 'MANAGER']) &&
+            request.resource.data.roleKey in ['ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] &&
+            !hasForbiddenAdminPermissions(request.resource.data) &&
+            (!('branch' in resource.data) || canMemberAccessBranch(resolveMember(clusterCode), resource.data.branch)) &&
+            (!('branch' in request.resource.data) || canMemberAccessBranch(resolveMember(clusterCode), request.resource.data.branch)))
         );
-      allow delete: if isSignedIn() && isValidId(clusterCode) && isValidId(memberUid) && request.auth.uid != memberUid && (
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(memberUid) && request.auth.uid != memberUid && (
         isClusterAdmin(clusterCode) ||
-        (isClusterManager(clusterCode) && !(resource.data.roleKey in ['ADMIN', 'MANAGER']))
+        (isClusterManager(clusterCode) && ('roleKey' in resource.data) && !(resource.data.roleKey in ['ADMIN', 'MANAGER']))
       );
     }
 
     // 8b. Pre-provisioned Email Directory (/email_directory/{emailKey})
+    function isValidEmailDirectoryWrite() {
+      let d = request.resource.data;
+      return isReasonablePayload() &&
+        ('roleKey' in d) && isValidRoleKey(d.roleKey) &&
+        ('email' in d) && isNonEmptyString(d.email, 160) &&
+        (!('active' in d) || d.active is bool) &&
+        (!('userCode' in d) || isNullableOptionalString(d.userCode, 128)) &&
+        (!('username' in d) || isNullableOptionalString(d.username, 120)) &&
+        (!('branch' in d) || isNullableOptionalString(d.branch, 120)) &&
+        (!('permissions' in d) || isNullableOptionalString(d.permissions, 2000));
+    }
+
     match /erp_clusters/{clusterCode}/email_directory/{emailKey} {
-      allow get: if isSignedIn() && isValidId(clusterCode) && isValidId(emailKey);
-      allow list: if isValidId(clusterCode) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
-      allow create, update: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(emailKey) &&
-        isReasonablePayload() && isValidRoleKey(request.resource.data.roleKey) && (
+      allow get: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(emailKey) && (
+        isClusterAdmin(clusterCode) ||
+        isClusterManager(clusterCode) ||
+        (resource != null && hasVerifiedEmail() && ('email' in resource.data) &&
+          (resource.data.email is string) && resource.data.email.lower() == request.auth.token.email.lower())
+      );
+      allow list: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (
+        isClusterAdmin(clusterCode) || isClusterManager(clusterCode)
+      );
+      allow create, update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(emailKey) &&
+        isValidEmailDirectoryWrite() && (
           isClusterAdmin(clusterCode) ||
           (isClusterManager(clusterCode) &&
             request.resource.data.roleKey in ['ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] &&
-            request.resource.data.email != request.auth.token.email &&
-            (resource == null || !(resource.data.roleKey in ['ADMIN', 'MANAGER'])))
+            !hasForbiddenAdminPermissions(request.resource.data) &&
+            (!('email' in request.auth.token) || request.auth.token.email == null || !(request.auth.token.email is string) ||
+              request.resource.data.email.lower() != request.auth.token.email.lower()) &&
+            (!('branch' in request.resource.data) || canMemberAccessBranch(resolveMember(clusterCode), request.resource.data.branch)) &&
+            (resource == null || (
+              !(resource.data.roleKey in ['ADMIN', 'MANAGER']) &&
+              (!('branch' in resource.data) || canMemberAccessBranch(resolveMember(clusterCode), resource.data.branch))
+            )))
         );
-      allow delete: if isValidId(clusterCode) && isValidId(emailKey) && (
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(emailKey) && (
         isClusterAdmin(clusterCode) ||
-        (isClusterManager(clusterCode) && !(resource.data.roleKey in ['ADMIN', 'MANAGER']))
+        (isClusterManager(clusterCode) && ('roleKey' in resource.data) && !(resource.data.roleKey in ['ADMIN', 'MANAGER']))
       );
     }
 
     // 8c. Immutable Cluster Owner Bootstrap Lock (/system_metadata/cluster_owner)
     match /erp_clusters/{clusterCode}/system_metadata/cluster_owner {
-      allow get: if isSignedIn() && isValidId(clusterCode);
-      allow list: if isClusterAdmin(clusterCode);
-      allow create: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (
-        !exists(ownerLockPath(clusterCode)) ||
-        (request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com'])
-      ) && request.resource.data.ownerUid == request.auth.uid;
-      allow update: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
-        request.auth.token.email != null && request.auth.token.email in ['oaw7ab@gmail.com', 'admin@pmp-paints.com'] &&
-        request.resource.data.ownerUid == request.auth.uid;
+      allow get: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER';
+      allow list: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isClusterAdmin(clusterCode);
+      allow create: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+        isReasonablePayload() && (
+          !exists(ownerLockPath(clusterCode)) ||
+          isBootstrapAdminEmail()
+        ) &&
+        ('ownerUid' in request.resource.data) &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        (!('userCode' in request.resource.data) || isNullableOptionalString(request.resource.data.userCode, 128));
+      allow update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+        isReasonablePayload() &&
+        isBootstrapAdminEmail() &&
+        ('ownerUid' in request.resource.data) &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        (!('userCode' in request.resource.data) || isNullableOptionalString(request.resource.data.userCode, 128));
       allow delete: if false;
     }
 
     // 8d. User Accounts, Pending Requests, and Idempotency Requests (Dedicated Low-Expression Rules)
-    match /erp_clusters/{clusterCode}/user_accounts/{docId} {
-      allow get: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isSignedIn();
-      allow list: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isSignedIn();
-      allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isValidErpDocWrite('user_accounts') && (
-        isClusterAdmin(clusterCode) ||
-        (functionCreateUserByManager(clusterCode))
+    function canGetUserAccount(clusterCode) {
+      let m = resolveMember(clusterCode);
+      return isNonAnonymousAuth() && (
+        isMemberAdmin(m) ||
+        isMemberManager(m) ||
+        (resource != null && (
+          (('linkedUid' in resource.data) && resource.data.linkedUid == request.auth.uid) ||
+          (('remoteServerId' in resource.data) && resource.data.remoteServerId == request.auth.uid) ||
+          (hasVerifiedEmail() && ('phoneOrEmail' in resource.data) && (resource.data.phoneOrEmail is string) &&
+            resource.data.phoneOrEmail.lower() == request.auth.token.email.lower()) ||
+          (('active' in m) && m.active == true && ('roleKey' in m) && isValidRoleKey(m.roleKey) &&
+            ('userCode' in m) && (m.userCode is string) && m.userCode != '' &&
+            ('userCode' in resource.data) && resource.data.userCode == m.userCode)
+        ))
       );
-      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isValidErpDocWrite('user_accounts') && (
-        functionUpdateUserAccount(clusterCode)
-      );
-      allow delete: if isValidId(clusterCode) && isValidId(docId) &&
-        resource.data.userCode != 'USR-ADMIN' &&
-        resource.data.username != 'admin' &&
-        resource.data.linkedUid != request.auth.uid && (
-          isClusterAdmin(clusterCode) ||
-          (isClusterManager(clusterCode) && !isPrivilegedArabicOrEnRole(resource.data.role))
-        );
     }
 
     function functionCreateUserByManager(clusterCode) {
       let m = resolveMember(clusterCode);
-      return isSignedIn() && isMemberManager(m) &&
-        !isPrivilegedArabicOrEnRole(request.resource.data.role) &&
-        canMemberAccessBranch(m, request.resource.data.branch);
+      let d = request.resource.data;
+      return isNonAnonymousAuth() && isMemberManager(m) &&
+        (!('userCode' in d) || !(d.userCode in ['USR-ADMIN', 'USR-HQ-001'])) &&
+        (!('username' in d) || !(d.username is string) || d.username.lower() != 'admin') &&
+        ('role' in d) && !isPrivilegedArabicOrEnRole(d.role) &&
+        !hasForbiddenAdminPermissions(d) &&
+        (isGlobalBranchValue(m.branch) || ('branch' in d)) &&
+        (!('branch' in d) || canMemberAccessBranch(m, d.branch));
     }
 
     function functionUpdateUserAccount(clusterCode) {
       let m = resolveMember(clusterCode);
       let d = request.resource.data;
-      let isSelf = (resource.data.linkedUid == request.auth.uid || (m.userCode != '' && resource.data.userCode == m.userCode));
-      return isSignedIn() && m.active == true && (
-        (isMemberAdmin(m) && (!isSelf || d.active == true)) ||
+      let isSelf = (
+        (('linkedUid' in resource.data) && resource.data.linkedUid == request.auth.uid) ||
+        (('remoteServerId' in resource.data) && resource.data.remoteServerId == request.auth.uid) ||
+        (('userCode' in m) && (m.userCode is string) && m.userCode != '' && ('userCode' in resource.data) && resource.data.userCode == m.userCode)
+      );
+      return isNonAnonymousAuth() && ('active' in m) && m.active == true && ('roleKey' in m) && (
+        (isMemberAdmin(m) && (!isSelf || (('active' in d) && d.active == true))) ||
         (isSelf && m.roleKey in ['MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] &&
           d.diff(resource.data).affectedKeys().hasOnly(['fullName', 'phoneOrEmail', 'pinOrPassword', 'serverSyncToken', 'lastLoginAt', 'deviceId', 'updatedAt', 'serverUpdatedAt'])) ||
         (isMemberManager(m) && !isSelf &&
-          resource.data.userCode != 'USR-ADMIN' &&
-          resource.data.username != 'admin' &&
-          !isPrivilegedArabicOrEnRole(resource.data.role) &&
-          !isPrivilegedArabicOrEnRole(d.role) &&
-          canMemberAccessBranch(m, d.branch))
+          (!('userCode' in resource.data) || !(resource.data.userCode in ['USR-ADMIN', 'USR-HQ-001'])) &&
+          (!('username' in resource.data) || !(resource.data.username is string) || resource.data.username.lower() != 'admin') &&
+          (!('userCode' in d) || !(d.userCode in ['USR-ADMIN', 'USR-HQ-001'])) &&
+          (!('username' in d) || !(d.username is string) || d.username.lower() != 'admin') &&
+          (!('role' in resource.data) || !isPrivilegedArabicOrEnRole(resource.data.role)) &&
+          (!('role' in d) || !isPrivilegedArabicOrEnRole(d.role)) &&
+          !hasForbiddenAdminPermissions(d) &&
+          (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)) &&
+          (!('branch' in d) || canMemberAccessBranch(m, d.branch)))
       );
     }
 
-    match /erp_clusters/{clusterCode}/pending_requests/{docId} {
-      allow get: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isSignedIn() && (
-        isClusterAdmin(clusterCode) ||
-        isClusterManager(clusterCode) ||
-        resource.data.linkedUid == request.auth.uid ||
-        (request.auth.token.email != null && resource.data.phoneOrEmail == request.auth.token.email)
-      );
-      allow list: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (
+    match /erp_clusters/{clusterCode}/user_accounts/{docId} {
+      allow get: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && canGetUserAccount(clusterCode);
+      allow list: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (
         isClusterAdmin(clusterCode) || isClusterManager(clusterCode)
       );
-      allow create: if isSignedIn() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() && (
+      allow create: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
+        isValidErpDocWrite('user_accounts') && (
+          isClusterAdmin(clusterCode) ||
+          functionCreateUserByManager(clusterCode)
+        );
+      allow update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
+        isValidErpDocWrite('user_accounts') &&
+        functionUpdateUserAccount(clusterCode);
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
+        resource != null &&
+        (!('userCode' in resource.data) || !(resource.data.userCode in ['USR-ADMIN', 'USR-HQ-001'])) &&
+        (!('username' in resource.data) || !(resource.data.username is string) || resource.data.username.lower() != 'admin') &&
+        (!('linkedUid' in resource.data) || resource.data.linkedUid != request.auth.uid) &&
+        (!('remoteServerId' in resource.data) || resource.data.remoteServerId != request.auth.uid) && (
+          isClusterAdmin(clusterCode) ||
+          (isClusterManager(clusterCode) &&
+            (!('role' in resource.data) || !isPrivilegedArabicOrEnRole(resource.data.role)) &&
+            (!('branch' in resource.data) || canMemberAccessBranch(resolveMember(clusterCode), resource.data.branch)))
+        );
+    }
+
+    match /erp_clusters/{clusterCode}/pending_requests/{docId} {
+      allow get: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (
         isClusterAdmin(clusterCode) ||
         isClusterManager(clusterCode) ||
-        (request.resource.data.syncStatus == 'PENDING_MANAGER_APPROVAL' &&
-          request.resource.data.active == false &&
-          !isPrivilegedArabicOrEnRole(request.resource.data.role) &&
-          (!('permissions' in request.resource.data) || request.resource.data.permissions == '' || request.resource.data.permissions == 'صلاحية العرض'))
+        (resource != null && (
+          (('linkedUid' in resource.data) && resource.data.linkedUid == request.auth.uid) ||
+          (hasVerifiedEmail() && ('phoneOrEmail' in resource.data) && (resource.data.phoneOrEmail is string) &&
+            resource.data.phoneOrEmail.lower() == request.auth.token.email.lower())
+        ))
       );
-      allow update, delete: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && (
+      allow list: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && (
+        isClusterAdmin(clusterCode) || isClusterManager(clusterCode)
+      );
+      allow create: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
+        isValidErpDocWrite('user_accounts') && (
+          isClusterAdmin(clusterCode) ||
+          isClusterManager(clusterCode) ||
+          (('syncStatus' in request.resource.data) &&
+            request.resource.data.syncStatus == 'PENDING_MANAGER_APPROVAL' &&
+            ('active' in request.resource.data) &&
+            request.resource.data.active == false &&
+            (!('role' in request.resource.data) || !isPrivilegedArabicOrEnRole(request.resource.data.role)) &&
+            (!('permissions' in request.resource.data) || request.resource.data.permissions == '' || request.resource.data.permissions == 'صلاحية العرض') &&
+            (
+              (('linkedUid' in request.resource.data) && request.resource.data.linkedUid == request.auth.uid) ||
+              (hasVerifiedEmail() && ('phoneOrEmail' in request.resource.data) && (request.resource.data.phoneOrEmail is string) &&
+                request.resource.data.phoneOrEmail.lower() == request.auth.token.email.lower())
+            ))
+        );
+      allow update, delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && (
         isClusterAdmin(clusterCode) || isClusterManager(clusterCode)
       );
     }
@@ -686,15 +979,19 @@ service cloud.firestore {
       function isValidIdemDoc() {
         let d = request.resource.data;
         return isReasonablePayload() &&
-          isNonEmptyString(d.idempotencyKey, 128) &&
-          isNonEmptyString(d.operationType, 80) &&
-          d.requestStatus in ['DRAFT', 'PROCESSING', 'PENDING_CONFIRMATION', 'COMPLETED', 'FAILED', 'CANCELLED'] &&
-          (!('resultReference' in d) || d.resultReference == null || isOptionalString(d.resultReference, 256)) &&
-          (!('errorDetails' in d) || d.errorDetails == null || isOptionalString(d.errorDetails, 1000));
+          ('idempotencyKey' in d) && isNonEmptyString(d.idempotencyKey, 128) &&
+          ('operationType' in d) && isNonEmptyString(d.operationType, 80) &&
+          ('requestStatus' in d) && d.requestStatus in ['DRAFT', 'PROCESSING', 'PENDING_CONFIRMATION', 'COMPLETED', 'FAILED', 'CANCELLED'] &&
+          (!('userId' in d) || isNullableOptionalString(d.userId, 128)) &&
+          (!('documentReference' in d) || isNullableOptionalString(d.documentReference, 200)) &&
+          (!('payloadSummary' in d) || isNullableOptionalString(d.payloadSummary, 500)) &&
+          (!('platform' in d) || isNullableOptionalString(d.platform, 40)) &&
+          (!('resultReference' in d) || isNullableOptionalString(d.resultReference, 256)) &&
+          (!('errorDetails' in d) || isNullableOptionalString(d.errorDetails, 1000));
       }
-      allow get, list: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
-      allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isActiveClusterMember(clusterCode) && isValidIdemDoc();
-      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isActiveClusterMember(clusterCode) && isValidIdemDoc() &&
+      allow get, list: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
+      allow create: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isActiveClusterMember(clusterCode) && isValidIdemDoc();
+      allow update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isActiveClusterMember(clusterCode) && isValidIdemDoc() &&
         resource.data.requestStatus != 'COMPLETED' &&
         request.resource.data.idempotencyKey == resource.data.idempotencyKey &&
         request.resource.data.operationType == resource.data.operationType;
@@ -710,85 +1007,87 @@ service cloud.firestore {
     }
 
     match /erp_clusters/{clusterCode}/lab_formulations/{docId} {
-      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+      allow read: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         hasLabSecretRead(resolveMember(clusterCode));
-      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+      allow create, update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
         (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode))) &&
         (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember(clusterCode)));
-      allow delete: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
         (isClusterAdmin(clusterCode) || (isClusterManager(clusterCode) && !isLabSecretDenied(resolveMember(clusterCode))));
     }
 
     match /erp_clusters/{clusterCode}/formulations/{docId} {
-      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+      allow read: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         hasLabSecretRead(resolveMember(clusterCode));
-      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+      allow create, update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
         (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode))) &&
         (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember(clusterCode)));
-      allow delete: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) &&
         (isClusterAdmin(clusterCode) || (isClusterManager(clusterCode) && !isLabSecretDenied(resolveMember(clusterCode))));
     }
 
     match /erp_clusters/{clusterCode}/lab_formula_versions/{docId} {
-      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+      allow read: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         hasLabSecretRead(resolveMember(clusterCode));
-      allow create: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+      allow create: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
         (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode))) &&
         (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember(clusterCode)));
-      allow update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+      allow update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
         (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode))) &&
         (!isApprovingFormulaWrite(request.resource.data) || hasLabApprove(resolveMember(clusterCode))) &&
         (!('approvalStatus' in resource.data) || resource.data.approvalStatus != 'APPROVED' || hasLabApprove(resolveMember(clusterCode)));
-      allow delete: if isValidId(clusterCode) && isValidId(docId) && isClusterAdmin(clusterCode);
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isClusterAdmin(clusterCode);
     }
 
     match /erp_clusters/{clusterCode}/lab_formula_summaries/{docId} {
-      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
-      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+      allow read: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
+      allow create, update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
         !('ingredientsJson' in request.resource.data) && !('ingredients' in request.resource.data) &&
         !('confidentialCiphertext' in request.resource.data) && !('saltBase64' in request.resource.data) && !('ivBase64' in request.resource.data) &&
         (hasLabEdit(resolveMember(clusterCode)) || hasLabApprove(resolveMember(clusterCode)));
-      allow delete: if isValidId(clusterCode) && isValidId(docId) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
     }
 
     match /erp_clusters/{clusterCode}/lab_experiments/{docId} {
-      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
-      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+      allow read: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isActiveClusterMember(clusterCode);
+      allow create, update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
         !('ingredientsJson' in request.resource.data) && !('confidentialCiphertext' in request.resource.data) &&
         !('saltBase64' in request.resource.data) && !('ivBase64' in request.resource.data) &&
         (hasLabEdit(resolveMember(clusterCode)) || hasQcGate(resolveMember(clusterCode))) &&
         (!('decision' in request.resource.data) || !(request.resource.data.decision in ['APPROVED', 'REJECTED', 'RETEST']) || hasQcGate(resolveMember(clusterCode))) &&
         (!('status' in request.resource.data) || !(request.resource.data.status in ['PASSED', 'FAILED', 'RETEST_REQUIRED']) || hasQcGate(resolveMember(clusterCode)));
-      allow delete: if isValidId(clusterCode) && isValidId(docId) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
     }
 
     match /erp_clusters/{clusterCode}/lab_excel_imports/{docId} {
-      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && hasLabSecretRead(resolveMember(clusterCode));
-      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+      allow read: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && hasLabSecretRead(resolveMember(clusterCode));
+      allow create, update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
         hasLabEdit(resolveMember(clusterCode));
-      allow delete: if isValidId(clusterCode) && isValidId(docId) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && (isClusterAdmin(clusterCode) || isClusterManager(clusterCode));
     }
 
     match /erp_clusters/{clusterCode}/raw_material_price_history/{docId} {
-      allow read: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
+      allow read: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         hasProcurementOrCostRead(resolveMember(clusterCode));
-      allow create, update: if isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
+      allow create, update: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isReasonablePayload() &&
         hasProcurementOrCostRead(resolveMember(clusterCode)) &&
         (!('newPrice' in request.resource.data) || (request.resource.data.newPrice is number && request.resource.data.newPrice >= 0)) &&
         (!('previousPrice' in request.resource.data) || (request.resource.data.previousPrice is number && request.resource.data.previousPrice >= 0));
-      allow delete: if isValidId(clusterCode) && isValidId(docId) && isClusterAdmin(clusterCode);
+      allow delete: if isNonAnonymousAuth() && isValidId(clusterCode) && clusterCode != 'PMP-ERP-V16-CLUSTER' && isValidId(docId) && isClusterAdmin(clusterCode);
     }
 
     // 8e. Operational ERP Collections inside Cluster
     match /erp_clusters/{clusterCode}/{collectionName}/{docId} {
-      allow get, list: if isValidId(clusterCode) &&
+      allow get, list: if isNonAnonymousAuth() &&
+        isValidId(clusterCode) &&
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         !(collectionName in ['user_accounts', 'pending_requests', 'idempotency_requests']) &&
         !isLabCollection(collectionName) &&
         canReadErpCollection(clusterCode, collectionName);
 
-      allow create: if isValidId(clusterCode) &&
+      allow create: if isNonAnonymousAuth() &&
+        isValidId(clusterCode) &&
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         !(collectionName in ['user_accounts', 'pending_requests', 'idempotency_requests']) &&
@@ -797,7 +1096,8 @@ service cloud.firestore {
         isValidErpDocWrite(collectionName) &&
         canCreateErpCollection(clusterCode, collectionName);
 
-      allow update: if isValidId(clusterCode) &&
+      allow update: if isNonAnonymousAuth() &&
+        isValidId(clusterCode) &&
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         !(collectionName in ['user_accounts', 'pending_requests', 'idempotency_requests']) &&
@@ -811,9 +1111,12 @@ service cloud.firestore {
           request.resource.data.status == 'REVERSED' &&
           resource.data.status == 'POSTED' &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reversedByEntryNo', 'reversalReason', 'recordVersion', 'updatedAt', 'serverUpdatedAt', 'serverUpdatedBy'])
-        ));
+        )) &&
+        (!isImmutableFinancialLedgerCollection(collectionName) || isValidFinancialLedgerReversal()) &&
+        (collectionName != 'invoices' || isValidInvoiceSummaryUpdate());
 
-      allow delete: if isValidId(clusterCode) &&
+      allow delete: if isNonAnonymousAuth() &&
+        isValidId(clusterCode) &&
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         !(collectionName in ['user_accounts', 'pending_requests', 'idempotency_requests']) &&
@@ -821,18 +1124,21 @@ service cloud.firestore {
         !isImmutableAuditCollection(collectionName) &&
         !isAppendOnlyMovementCollection(collectionName) &&
         !isImmutableJournalLineCollection(collectionName) &&
+        !isImmutableFinancialLedgerCollection(collectionName) &&
         isValidId(docId) &&
         canDeleteErpCollection(clusterCode, collectionName);
     }
 
     match /erp_clusters/{clusterCode}/{collectionName}/{docId}/{subCollection}/{subDocId} {
-      allow get, list: if isValidId(clusterCode) &&
+      allow get, list: if isNonAnonymousAuth() &&
+        isValidId(clusterCode) &&
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         isValidId(docId) &&
         isActiveClusterMember(clusterCode);
 
-      allow create: if isValidId(clusterCode) &&
+      allow create: if isNonAnonymousAuth() &&
+        isValidId(clusterCode) &&
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         isValidId(docId) &&
@@ -840,12 +1146,14 @@ service cloud.firestore {
         isReasonablePayload() &&
         canCreateErpCollection(clusterCode, collectionName);
 
-      allow update, delete: if isValidId(clusterCode) &&
+      allow update, delete: if isNonAnonymousAuth() &&
+        isValidId(clusterCode) &&
         clusterCode != 'PMP-ERP-V16-CLUSTER' &&
         isAllowedErpCollection(collectionName) &&
         !isImmutableAuditCollection(collectionName) &&
         !isAppendOnlyMovementCollection(collectionName) &&
         !isImmutableJournalLineCollection(collectionName) &&
+        !isImmutableFinancialLedgerCollection(collectionName) &&
         !isIdempotencyCollection(collectionName) &&
         isValidId(docId) &&
         isValidId(subDocId) &&

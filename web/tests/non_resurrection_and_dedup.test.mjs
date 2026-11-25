@@ -129,14 +129,15 @@ test('deduplicateCollectionRecords merges cross-platform Web+Android movement du
   assert.equal(deduped.filter((m) => m.reference === 'TRF-100').length, 2);
 });
 
-test('Web modules use tombstone-backed deletions for movements/cashboxes/warehouses & reactive epoch filtering', () => {
+test('Web modules enforce immutable reversals for movements/invoices & tombstones for cashboxes/warehouses', () => {
   const treasurySrc = fs.readFileSync(path.join(SRC_DIR, 'components/modules/TreasuryModuleView.tsx'), 'utf8');
   const warehouseSrc = fs.readFileSync(path.join(SRC_DIR, 'components/modules/WarehousesModuleView.tsx'), 'utf8');
   const erpDataSrc = fs.readFileSync(path.join(SRC_DIR, 'services/ErpDataService.ts'), 'utf8');
 
   assert.equal(treasurySrc.includes("ErpDataService.deleteDocument('movements'"), false);
   assert.equal(treasurySrc.includes("ErpDataService.deleteDocument('cashboxes'"), false);
-  assert.match(treasurySrc, /ErpDataService\.deleteDocumentWithTombstone\(\s*'movements'/);
+  assert.equal(treasurySrc.includes("ErpDataService.deleteDocumentWithTombstone(\n          'movements'"), false);
+  assert.match(treasurySrc, /reverseTreasuryMovementAtomic/);
   assert.match(treasurySrc, /ErpDataService\.deleteDocumentWithTombstone\(\s*'cashboxes'/);
   assert.equal(warehouseSrc.includes("ErpDataService.deleteDocument('warehouses'"), false);
   assert.match(warehouseSrc, /ErpDataService\.deleteDocumentWithTombstone\(\s*'warehouses'/);

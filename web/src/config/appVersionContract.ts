@@ -14,7 +14,7 @@ export const APP_VERSION_CONTRACT = {
   RELEASE_TITLE: 'الإصدار المعتمد 21.0 (Build 21)',
   RELEASE_DATE: '2026-11-15',
   SIGNING_CERT_SHA256: '1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05',
-  MIN_ANDROID_SDK: 26,
+  MIN_ANDROID_SDK: 24,
   TARGET_ANDROID_SDK: 36,
   DOWNLOAD_APK_FILENAME: 'pmp-paints-latest.apk',
   RELEASE_ASSET_NAME: 'pmp-paints-latest.apk',
@@ -48,8 +48,8 @@ export const APP_VERSION_CONTRACT = {
   releaseDate: '2026-11-15',
   applicationId: 'com.aistudio.pmppaints.erp',
   sha256Certificate: '1F:F7:75:2A:F4:96:A6:A7:4F:DF:5F:62:07:10:C7:47:83:03:1E:83:4B:2D:6D:A0:5A:AD:DB:57:A1:0D:11:05',
-  minSdk: 26,
-  minSdkAndroid: 'Android 8.0 (Oreo) وما فوق',
+  minSdk: 24,
+  minSdkAndroid: 'Android 7.0 (Nougat) وما فوق',
   repositoryOwner: 'ow7ab',
   repositoryName: 'ow7ab'
 };

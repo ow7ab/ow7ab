@@ -33,10 +33,10 @@ import {
   ComprehensiveDiagnosticReport
 } from '../../services/CloudErrorLogger';
 import { APP_VERSION_CONTRACT } from '../../config/appVersionContract';
-import { GRANULAR_ACTIONS } from '../../services/SecurityService';
 import { fetchReleaseFeed } from '../../services/ReleaseService';
 import { AuditLog } from '../../types/erp';
 import { ReportExporter } from '../../services/ReportExporter';
+import { PmpSystemHealthCenter } from '../admin/PmpSystemHealthCenter';
 import {
   getDesktopBridge,
   DesktopAppInfo,
@@ -57,9 +57,10 @@ const COLLECTION_ARABIC_LABELS: Record<string, string> = {
 export const SettingsModuleView: React.FC = () => {
   const { language, toggleLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
-  const { userProfile, isSuperAdmin, canPerformAction } = useAuth();
+  const { userProfile, isSuperAdmin } = useAuth();
 
-  const canManageSystemSettings = isSuperAdmin || canPerformAction(GRANULAR_ACTIONS.ADMIN_SETTINGS);
+  // Strict Admin exclusivity for infrastructure, cloud health, audit logs & System Health Center
+  const canManageSystemSettings = isSuperAdmin;
 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [cloudErrors, setCloudErrors] = useState<CloudErrorLogEntry[]>([]);
@@ -196,6 +197,7 @@ export const SettingsModuleView: React.FC = () => {
             </div>
           </div>
 
+          {isSuperAdmin && (
           <GlassButton
             variant="primary"
             onClick={handleRunHealthCheck}
@@ -207,6 +209,7 @@ export const SettingsModuleView: React.FC = () => {
               ? language === 'ar' ? 'جاري الفحص...' : 'Checking...'
               : language === 'ar' ? 'فحص حالة الاتصال والمزامنة' : 'Check Sync Connection'}
           </GlassButton>
+          )}
         </div>
       </GlassCard>
 
@@ -409,7 +412,11 @@ export const SettingsModuleView: React.FC = () => {
         </GlassCard>
       )}
 
-      {/* Admin Sync Overview & Activity Log */}
+      {/* Admin-Only PMP SYSTEM HEALTH CENTER */}
+      {isSuperAdmin && <PmpSystemHealthCenter />}
+
+      {/* Admin Sync Overview & Activity Log (Strictly Hidden from non-Admin Users) */}
+      {isSuperAdmin && (
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <div className="lg:col-span-6 space-y-6">
           <GlassCard className="p-6">
@@ -770,6 +777,7 @@ export const SettingsModuleView: React.FC = () => {
           </GlassCard>
         </div>
       </div>
+      )}
     </div>
   );
 };

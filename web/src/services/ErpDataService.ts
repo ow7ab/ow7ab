@@ -21,8 +21,10 @@ import {
   setDoc,
   deleteDoc,
   onSnapshot,
+  runTransaction,
   serverTimestamp,
   where,
+  writeBatch,
   Unsubscribe
 } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -118,6 +120,19 @@ import {
   computeReconciliationReport
 } from './AccountingEngine';
 import {
+  UnifiedSyncStatus,
+  CollectionSyncMetadata,
+  UnifiedSyncSnapshot,
+  PlatformKind,
+  CrossPlatformBalanceCheckpoint,
+  BalanceAnomalyRecord,
+  CrossPlatformReconciliationReport,
+  getSyncStatusArabicLabel,
+  resolveUnifiedSyncState,
+  computePlatformCheckpointPayload,
+  computeCrossPlatformBalanceReconciliation
+} from './ReconciliationAndSyncService';
+import {
   DEFAULT_PACKAGING_RULES,
   resolveWarehouseClass,
   isSalesWarehouse,
@@ -162,6 +177,8 @@ import {
   buildTombstoneKeySet,
   isRecordTombstoned as checkRecordTombstoned,
   resolveCanonicalCurrency,
+  isCancelledOrReversedStatus,
+  isMovementInflow,
   isStockInMoveKind,
   resolveWarehouseFilterIds,
   parseDateStringToEpochMs,
@@ -197,6 +214,8 @@ export {
   normalizeArabicText,
   normalizeEntityKey,
   resolveCanonicalCurrency,
+  isCancelledOrReversedStatus,
+  isMovementInflow,
   isStockInMoveKind,
   resolveWarehouseFilterIds,
   parseDateStringToEpochMs,
@@ -234,10 +253,21 @@ export {
   computeIncomeStatement,
   computeBalanceSheet,
   computeConsolidatedFxSummary,
-  computeReconciliationReport
+  computeReconciliationReport,
+  getSyncStatusArabicLabel,
+  resolveUnifiedSyncState,
+  computePlatformCheckpointPayload,
+  computeCrossPlatformBalanceReconciliation
 };
 
 export type {
+  UnifiedSyncStatus,
+  CollectionSyncMetadata,
+  UnifiedSyncSnapshot,
+  PlatformKind,
+  CrossPlatformBalanceCheckpoint,
+  BalanceAnomalyRecord,
+  CrossPlatformReconciliationReport,
   DistinctCashboxSummary,
   WarehouseStockSummaryItem,
   ColorWeightStockRow,
@@ -331,6 +361,37 @@ export interface ClusterHealthReport {
   error?: string;
 }
 
+export interface AtomicBundleOperation {
+  kind: 'set' | 'merge' | 'invoice_summary' | 'reverse_ledger';
+  collectionName: ErpCollectionName | string;
+  docId: string;
+  payload: Record<string, any>;
+  checkDuplicateFinancial?: boolean;
+}
+
+function isOfflineTransactionFallbackError(err: unknown): boolean {
+  const code = String((err as any)?.code || '').toLowerCase();
+  const msg = String((err as any)?.message || err || '').toLowerCase();
+  const offlineBrowser = typeof navigator !== 'undefined' && navigator.onLine === false;
+  return (
+    offlineBrowser ||
+    code === 'unavailable' ||
+    msg.includes('client is offline') ||
+    msg.includes('failed to get document because the client is offline') ||
+    msg.includes('network error')
+  );
+}
+
+const TRANSACTION_FINANCIAL_COLLECTIONS = new Set(['movements', 'transfers', 'invoices', 'invoice_payments']);
+const APPEND_ONLY_IMMUTABLE_COLLECTIONS = new Set([
+  'journal_lines',
+  'journal_entries',
+  'inventory_movements',
+  'movements',
+  'transfers',
+  'invoice_payments'
+]);
+
 class ErpDataServiceImpl {
   private currentCluster: string = PRIMARY_CLUSTER;
   private legacyPurged = false;
@@ -384,6 +445,87 @@ class ErpDataServiceImpl {
   private tombstoneUnsub: Unsubscribe | null = null;
   private epochUnsub: Unsubscribe | null = null;
   private activeCollectionRefreshers: Set<() => void> = new Set();
+  private syncMetaByCollection: Map<string, CollectionSyncMetadata> = new Map();
+  private activeSyncListeners: Set<(snap: UnifiedSyncSnapshot) => void> = new Set();
+  private activeSyncConflictCount = 0;
+  private syncFailedCount = 0;
+  private syncNetworkBound = false;
+
+  private ensureSyncNetworkListeners(): void {
+    if (this.syncNetworkBound || typeof window === 'undefined') return;
+    this.syncNetworkBound = true;
+    const notify = () => this.emitUnifiedSyncSnapshot();
+    window.addEventListener('online', notify);
+    window.addEventListener('offline', notify);
+  }
+
+  getUnifiedSyncSnapshot(): UnifiedSyncSnapshot {
+    const online = typeof navigator !== 'undefined' ? navigator.onLine !== false : true;
+    let pendingWritesCount = 0;
+    let fromCacheCollectionsCount = 0;
+    let maxAckAt = 0;
+    const collectionsObj: Record<string, CollectionSyncMetadata> = {};
+
+    for (const [col, meta] of this.syncMetaByCollection.entries()) {
+      collectionsObj[col] = meta;
+      if (meta.hasPendingWrites) pendingWritesCount++;
+      if (meta.fromCache) fromCacheCollectionsCount++;
+      if (meta.lastServerAckAt > maxAckAt) maxAckAt = meta.lastServerAckAt;
+    }
+
+    const totalCols = this.syncMetaByCollection.size;
+    const status = resolveUnifiedSyncState({
+      online,
+      hasPendingWrites: pendingWritesCount > 0,
+      fromCache: totalCols > 0 && fromCacheCollectionsCount === totalCols,
+      syncingCount: totalCols === 0 ? 1 : 0,
+      failedCount: this.syncFailedCount,
+      conflictCount: this.activeSyncConflictCount,
+      lastServerAckAt: maxAckAt
+    });
+
+    return {
+      status,
+      labelAr: getSyncStatusArabicLabel(status),
+      online,
+      pendingWritesCount,
+      fromCacheCollectionsCount,
+      failedCount: this.syncFailedCount,
+      conflictCount: this.activeSyncConflictCount,
+      lastServerAckAt: maxAckAt,
+      collections: collectionsObj
+    };
+  }
+
+  private emitUnifiedSyncSnapshot(): void {
+    const snap = this.getUnifiedSyncSnapshot();
+    this.activeSyncListeners.forEach((cb) => {
+      try {
+        cb(snap);
+      } catch {
+        // Ignore listener failure
+      }
+    });
+  }
+
+  subscribeUnifiedSyncState(cb: (snap: UnifiedSyncSnapshot) => void): Unsubscribe {
+    this.ensureSyncNetworkListeners();
+    this.activeSyncListeners.add(cb);
+    cb(this.getUnifiedSyncSnapshot());
+    return () => {
+      this.activeSyncListeners.delete(cb);
+    };
+  }
+
+  detectRuntimePlatform(): PlatformKind {
+    if (typeof window !== 'undefined') {
+      const w = window as any;
+      if (w.__PMP_DESKTOP__ || w.electronAPI || (typeof navigator !== 'undefined' && navigator.userAgent.includes('Electron'))) {
+        return 'DESKTOP';
+      }
+    }
+    return 'WEB';
+  }
 
   private notifyCollectionRefreshers(): void {
     this.activeCollectionRefreshers.forEach((refresh) => {
@@ -522,8 +664,10 @@ class ErpDataServiceImpl {
       detachSnapshot();
       attachedUid = uid;
       this.ensureTombstoneSubscription();
+      this.ensureSyncNetworkListeners();
       unsubPrimary = onSnapshot(
         primaryColRef,
+        { includeMetadataChanges: true },
         (snap) => {
           const rawList: T[] = [];
           snap.forEach((docSnap) => {
@@ -531,9 +675,25 @@ class ErpDataServiceImpl {
           });
           latestRawItems = rawList;
           hasReceivedSnapshot = true;
+
+          const colKey = String(collectionName);
+          const hasPending = snap.metadata.hasPendingWrites;
+          const fromCache = snap.metadata.fromCache;
+          const prevMeta = this.syncMetaByCollection.get(colKey);
+          const serverAckAt = !hasPending && !fromCache ? Date.now() : (prevMeta?.lastServerAckAt || 0);
+          this.syncMetaByCollection.set(colKey, {
+            collectionName: colKey,
+            hasPendingWrites: hasPending,
+            fromCache,
+            docCount: rawList.length,
+            lastServerAckAt: serverAckAt,
+            lastError: null
+          });
+          this.emitUnifiedSyncSnapshot();
           refilterAndEmit();
         },
         (err) => {
+          const colKey = String(collectionName);
           const path = this.collectionPath(collectionName, PRIMARY_CLUSTER);
           const msg = String((err as any)?.code || (err as any)?.message || '');
           if (collectionName === 'lab_formulations' && msg.toLowerCase().includes('permission')) {
@@ -542,6 +702,17 @@ class ErpDataServiceImpl {
             }
             return;
           }
+          this.syncFailedCount += 1;
+          const prevMeta = this.syncMetaByCollection.get(colKey);
+          this.syncMetaByCollection.set(colKey, {
+            collectionName: colKey,
+            hasPendingWrites: prevMeta?.hasPendingWrites ?? false,
+            fromCache: true,
+            docCount: prevMeta?.docCount ?? 0,
+            lastServerAckAt: prevMeta?.lastServerAckAt ?? 0,
+            lastError: sanitizeCloudMessage(err)
+          });
+          this.emitUnifiedSyncSnapshot();
           CloudErrorLogger.recordError(`SUBSCRIBE_${String(collectionName).toUpperCase()}`, path, err);
           console.error(`Firestore subscription error on [${collectionName}]:`, sanitizeCloudMessage(err));
           if (onError) onError(err);
@@ -753,17 +924,44 @@ class ErpDataServiceImpl {
       throw new Error(reason);
     }
 
-    // 5. Commit verified transaction atomically
+    // 5. Commit verified transaction atomically using Firestore runTransaction
+    //    (with offline atomic writeBatch fallback ONLY when network is offline)
     this.recentFinancialFingerprints.set(fingerprint, now);
+    const commitPayload = {
+      ...dataToWrite,
+      serverUpdatedAt: serverTimestamp()
+    };
+    const commitViaTransaction = async () => {
+      await runTransaction(firestore, async (tx) => {
+        const currentSnap = await tx.get(docRef);
+        if (currentSnap.exists()) {
+          const currentData = currentSnap.data() || {};
+          if (colStr === 'movements' || colStr === 'transfers' || colStr === 'invoice_payments') {
+            const isReversal = isCancelledOrReversedStatus(dataToWrite.status);
+            if (!isReversal) {
+              throw new Error(`DUPLICATE_OR_IMMUTABLE_LEDGER: السجل [${colStr}/${cleanId}] موجود ومحصن ضد التعديل المباشر.`);
+            }
+          }
+          if (colStr === 'invoices' && isCancelledOrReversedStatus(currentData.status)) {
+            throw new Error(`CANCELLED_INVOICE_IMMUTABLE: الفاتورة [${cleanId}] ملغاة ولا يمكن تعديلها.`);
+          }
+        }
+        tx.set(docRef, commitPayload, { merge: true });
+      });
+    };
+
     try {
-      await setDoc(
-        docRef,
-        {
-          ...dataToWrite,
-          serverUpdatedAt: serverTimestamp()
-        },
-        { merge: true }
-      );
+      try {
+        await commitViaTransaction();
+      } catch (txErr) {
+        if (isOfflineTransactionFallbackError(txErr)) {
+          const batch = writeBatch(firestore);
+          batch.set(docRef, commitPayload, { merge: true });
+          await batch.commit();
+        } else {
+          throw txErr;
+        }
+      }
       return cleanId;
     } catch (err) {
       this.recentFinancialFingerprints.delete(fingerprint);
@@ -841,7 +1039,9 @@ class ErpDataServiceImpl {
     if (
       collectionName === 'journal_lines' ||
       collectionName === 'journal_entries' ||
-      collectionName === 'inventory_movements'
+      collectionName === 'inventory_movements' ||
+      ((collectionName === 'movements' || collectionName === 'transfers' || collectionName === 'invoice_payments') &&
+        !isCancelledOrReversedStatus(dataToWrite.status))
     ) {
       try {
         const existingSnap = await getDoc(ref);
@@ -941,6 +1141,9 @@ class ErpDataServiceImpl {
       'journal_entries',
       'journal_lines',
       'inventory_movements',
+      'movements',
+      'transfers',
+      'invoice_payments',
       'idempotency_requests'
     ]);
     const cleanId = safeId(docId, docId);
@@ -1459,6 +1662,624 @@ class ErpDataServiceImpl {
     order: 'desc' | 'asc' = 'desc'
   ): number {
     return compareRecordsChronologically(a, b, order);
+  }
+
+  isCancelledOrReversedStatus(rawStatus: unknown): boolean {
+    return isCancelledOrReversedStatus(rawStatus);
+  }
+
+  isMovementInflow(mv: Partial<TreasuryMovement> & Record<string, any>): boolean {
+    return isMovementInflow(mv);
+  }
+
+  async commitAtomicTransactionBundle(params: {
+    operations: AtomicBundleOperation[];
+    journals?: Array<{ entry: JournalEntry; lines: JournalLine[] } | null | undefined>;
+    auditLog?: { username: string; action: string; detail: string };
+    clusterOverride?: string;
+    actorUsername?: string;
+  }): Promise<void> {
+    const cluster = params.clusterOverride || PRIMARY_CLUSTER;
+    if (cluster === REMOVED_V16_CLUSTER) {
+      const err = new Error('الكتابة في الكلاستر المهجور PMP-ERP-V16-CLUSTER مرفوضة أمنياً');
+      CloudErrorLogger.recordTamperAttempt('COMMIT_BUNDLE', `erp_clusters/${cluster}`, err.message, params.actorUsername);
+      throw err;
+    }
+
+    const fbUser = auth.currentUser;
+    if (!fbUser || fbUser.isAnonymous) {
+      const err = new Error('جلسة المصادقة غير صالحة أو مجهولة — يرجى تسجيل الدخول بحساب معتمد.');
+      CloudErrorLogger.recordError('COMMIT_BUNDLE_AUTH', `erp_clusters/${cluster}`, err);
+      throw err;
+    }
+
+    const actor = params.actorUsername || fbUser.email || 'WEB_USER';
+    const validOps: Array<{
+      op: AtomicBundleOperation;
+      cleanId: string;
+      ref: ReturnType<typeof doc>;
+      dataToWrite: Record<string, any>;
+    }> = [];
+
+    for (const op of params.operations) {
+      const colStr = String(op.collectionName || '').trim();
+      const cleanId = safeId(op.docId, `DOC-${Date.now()}`);
+      const ref = doc(firestore, this.collectionPath(colStr, cluster), cleanId);
+      const rawData: Record<string, any> = { ...op.payload };
+      delete rawData._docId;
+
+      if (op.kind === 'reverse_ledger') {
+        const reversalPayload: Record<string, any> = {
+          status: rawData.status || 'reversed',
+          reversedByRef: String(rawData.reversedByRef || cleanId).slice(0, 160),
+          reversalReason: String(rawData.reversalReason || 'قيد عكسي معتمد').slice(0, 500),
+          reversedAt: Number(rawData.reversedAt || Date.now()),
+          updatedAt: Number(rawData.updatedAt || Date.now()),
+          serverUpdatedBy: String(rawData.serverUpdatedBy || actor).slice(0, 128),
+          serverUpdatedAt: serverTimestamp()
+        };
+        if (rawData.reversedByEntryNo !== undefined) reversalPayload.reversedByEntryNo = String(rawData.reversedByEntryNo).slice(0, 128);
+        if (rawData.reversedMovementId !== undefined) reversalPayload.reversedMovementId = rawData.reversedMovementId;
+        if (rawData.recordVersion !== undefined) reversalPayload.recordVersion = Number(rawData.recordVersion) || 2;
+        validOps.push({ op, cleanId, ref, dataToWrite: reversalPayload });
+        continue;
+      }
+
+      if (op.kind === 'invoice_summary') {
+        const summaryPayload: Record<string, any> = {
+          updatedAt: Number(rawData.updatedAt || Date.now()),
+          serverUpdatedBy: String(rawData.serverUpdatedBy || actor).slice(0, 128),
+          serverUpdatedAt: serverTimestamp()
+        };
+        if (rawData.paidAmount !== undefined) summaryPayload.paidAmount = Math.max(0, Number(rawData.paidAmount || 0));
+        if (rawData.status !== undefined) summaryPayload.status = String(rawData.status);
+        if (rawData.payments !== undefined) summaryPayload.payments = rawData.payments;
+        if (rawData.cancelReason !== undefined) summaryPayload.cancelReason = String(rawData.cancelReason || '').slice(0, 500);
+        validOps.push({ op, cleanId, ref, dataToWrite: summaryPayload });
+        continue;
+      }
+
+      if (this.isRecordTombstoned(colStr, { ...rawData, _docId: cleanId })) {
+        throw new Error(`TOMBSTONE_REPLAY_BLOCKED: السجل [${colStr}/${cleanId}] محذوف ولا يمكن إعادة إرساله.`);
+      }
+
+      if (TRANSACTION_FINANCIAL_COLLECTIONS.has(colStr)) {
+        const integrity = validateFinancialCommitPayload(colStr, cleanId, rawData);
+        if (!integrity.valid) {
+          const reason = integrity.reason || 'قيم مالية غير صالحة.';
+          CloudErrorLogger.recordTamperAttempt('COMMIT_BUNDLE_INTEGRITY', `${colStr}/${cleanId}`, reason, actor);
+          throw new Error(reason);
+        }
+        if (op.checkDuplicateFinancial !== false) {
+          const colRef = collection(firestore, this.collectionPath(colStr, cluster));
+          const existingDocs = await this.collectMatchingFinancialDocs(colRef, ref, rawData);
+          const conflict = checkExistingFinancialConflict(colStr, cleanId, rawData, existingDocs);
+          if (!conflict.valid) {
+            throw new Error(conflict.reason || `تعارض أو تكرار مالي في [${colStr}/${cleanId}].`);
+          }
+        }
+      }
+
+      validOps.push({
+        op,
+        cleanId,
+        ref,
+        dataToWrite: {
+          ...rawData,
+          serverUpdatedBy: rawData.serverUpdatedBy || actor,
+          serverUpdatedAt: serverTimestamp()
+        }
+      });
+    }
+
+    // Append balanced GL journal entries + lines into the exact same atomic transaction
+    const journalWrites: Array<{ ref: ReturnType<typeof doc>; col: string; data: Record<string, any> }> = [];
+    for (const j of params.journals || []) {
+      if (!j) continue;
+      const td = j.lines.reduce((s, l) => s + (Number(l.debit) || 0), 0);
+      const tc = j.lines.reduce((s, l) => s + (Number(l.credit) || 0), 0);
+      if (Math.abs(td - tc) >= 0.001) {
+        const err = new Error('رفض الترحيل الذري: القيد المحاسبي المرفق غير متوازن.');
+        CloudErrorLogger.recordError('COMMIT_BUNDLE_JOURNAL', `erp_clusters/${cluster}/journal_entries`, err);
+        throw err;
+      }
+      const jId = safeId(j.entry.syncUuid, `JRN-${Date.now()}`);
+      journalWrites.push({
+        ref: doc(firestore, this.collectionPath('journal_entries', cluster), jId),
+        col: 'journal_entries',
+        data: { ...j.entry, serverUpdatedAt: serverTimestamp() }
+      });
+      for (const ln of j.lines) {
+        const lId = safeId(ln.syncUuid, `JLN-${Date.now()}`);
+        journalWrites.push({
+          ref: doc(firestore, this.collectionPath('journal_lines', cluster), lId),
+          col: 'journal_lines',
+          data: { ...ln, serverUpdatedAt: serverTimestamp() }
+        });
+      }
+    }
+
+    let auditWrite: { ref: ReturnType<typeof doc>; data: Record<string, any> } | null = null;
+    if (params.auditLog) {
+      const aId = `AUD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      auditWrite = {
+        ref: doc(firestore, this.collectionPath('audit_logs', cluster), aId),
+        data: {
+          id: Date.now(),
+          username: params.auditLog.username,
+          action: params.auditLog.action,
+          detail: params.auditLog.detail,
+          createdAt: Date.now(),
+          timestamp: Date.now(),
+          serverUpdatedAt: serverTimestamp()
+        }
+      };
+    }
+
+    const executeBatch = async () => {
+      const batch = writeBatch(firestore);
+      for (const item of validOps) {
+        batch.set(item.ref, item.dataToWrite, { merge: item.op.kind !== 'set' });
+      }
+      for (const jw of journalWrites) {
+        batch.set(jw.ref, jw.data, { merge: true });
+      }
+      if (auditWrite) {
+        batch.set(auditWrite.ref, auditWrite.data, { merge: true });
+      }
+      await batch.commit();
+    };
+
+    try {
+      await runTransaction(firestore, async (tx) => {
+        // Phase 1: all tx.get reads BEFORE any writes
+        const readChecks = await Promise.all(
+          validOps
+            .filter(
+              (item) =>
+                item.op.kind === 'reverse_ledger' ||
+                item.op.kind === 'invoice_summary' ||
+                APPEND_ONLY_IMMUTABLE_COLLECTIONS.has(String(item.op.collectionName))
+            )
+            .map(async (item) => ({ item, snap: await tx.get(item.ref) }))
+        );
+        const existingJournals = await Promise.all(
+          journalWrites.map(async (jw) => ({ jw, snap: await tx.get(jw.ref) }))
+        );
+
+        for (const { item, snap } of readChecks) {
+          if (item.op.kind === 'reverse_ledger') {
+            if (!snap.exists()) {
+              throw new Error(`لم يتم العثور على السجل الأصلي [${item.op.collectionName}/${item.cleanId}] لتنفيذ القيد العكسي.`);
+            }
+            if (isCancelledOrReversedStatus(snap.data()?.status)) {
+              throw new Error(`السجل [${item.op.collectionName}/${item.cleanId}] معكوس مسبقاً — ممنوع تكرار القيد العكسي.`);
+            }
+          } else if (item.op.kind === 'invoice_summary') {
+            if (snap.exists() && isCancelledOrReversedStatus(snap.data()?.status)) {
+              throw new Error(`الفاتورة [${item.cleanId}] ملغاة ولا تقبل أي تعديل لاحق.`);
+            }
+          } else if (APPEND_ONLY_IMMUTABLE_COLLECTIONS.has(String(item.op.collectionName)) && snap.exists()) {
+            // Preserve existing immutable doc instead of mutating it illegally
+            continue;
+          }
+        }
+
+        // Phase 2: atomic writes
+        for (const item of validOps) {
+          const skipExistingImmutable = readChecks.some(
+            (rc) =>
+              rc.item === item &&
+              rc.snap.exists() &&
+              item.op.kind !== 'reverse_ledger' &&
+              item.op.kind !== 'invoice_summary' &&
+              APPEND_ONLY_IMMUTABLE_COLLECTIONS.has(String(item.op.collectionName))
+          );
+          if (!skipExistingImmutable) {
+            tx.set(item.ref, item.dataToWrite, { merge: item.op.kind !== 'set' });
+          }
+        }
+        for (const { jw, snap } of existingJournals) {
+          if (!snap.exists()) {
+            tx.set(jw.ref, jw.data, { merge: true });
+          }
+        }
+        if (auditWrite) {
+          tx.set(auditWrite.ref, auditWrite.data, { merge: true });
+        }
+      });
+    } catch (txErr) {
+      if (isOfflineTransactionFallbackError(txErr)) {
+        await executeBatch();
+      } else {
+        CloudErrorLogger.recordError('COMMIT_ATOMIC_BUNDLE', `erp_clusters/${cluster}`, txErr);
+        throw txErr;
+      }
+    }
+  }
+
+  async reverseTreasuryMovementAtomic(params: {
+    movement: TreasuryMovement;
+    reason: string;
+    actorUsername: string;
+    actorDisplayName?: string;
+  }): Promise<string> {
+    const mov = params.movement;
+    const origDocId = safeId((mov as any)._docId || mov.cloudDocId || `MOV-${mov.id}`, `MOV-${mov.id}`);
+    const now = Date.now();
+    const today = new Date(now).toISOString().split('T')[0];
+    const inflow = isMovementInflow(mov);
+    const revDirection: 'وارد' | 'منصرف' = inflow ? 'منصرف' : 'وارد';
+    const amt = Math.abs(Number(mov.amount || 0));
+    const cur = resolveCanonicalCurrency(mov.currency, mov.cashbox);
+    const actor = params.actorDisplayName || params.actorUsername || 'admin';
+    const origRef = mov.reference || mov.referenceNo || origDocId;
+
+    const revJournal = buildTreasuryMovementJournalPayload({
+      id: now,
+      txDate: today,
+      cashbox: mov.cashbox,
+      currency: cur,
+      direction: revDirection,
+      amount: amt,
+      description: `قيد عكسي لحركة ${origRef}: ${params.reason || 'تصحيح معتمد'}`,
+      reference: `REV-${origRef}`,
+      createdBy: actor
+    });
+    const revJournalUuid = revJournal?.entry.syncUuid || `JRN-REV-${origDocId}-${String(now).slice(-5)}`;
+
+    await this.commitAtomicTransactionBundle({
+      actorUsername: params.actorUsername,
+      operations: [
+        {
+          kind: 'reverse_ledger',
+          collectionName: 'movements',
+          docId: origDocId,
+          payload: {
+            status: 'reversed',
+            reversedByRef: `REV-${origRef}`,
+            reversedByEntryNo: revJournal?.entry.entryNo || revJournalUuid,
+            reversalReason: params.reason || 'عكس حركة مالية بسجل غير قابل للحذف',
+            reversedAt: now,
+            updatedAt: now,
+            serverUpdatedBy: params.actorUsername || actor
+          }
+        }
+      ],
+      journals: [revJournal],
+      auditLog: {
+        username: params.actorUsername || actor,
+        action: 'REVERSE_TREASURY_MOVEMENT',
+        detail: `قيد عكسي للحركة ${origRef} (${amt.toLocaleString()} ${cur} في ${mov.cashbox}) رقم القيد: ${revJournalUuid}`
+      }
+    });
+    return revJournalUuid;
+  }
+
+  async cancelInvoiceAndReverseAtomic(params: {
+    invoice: SalesInvoice;
+    payments: InvoicePayment[];
+    warehouses: Warehouse[];
+    reason: string;
+    actorUsername: string;
+    actorDisplayName?: string;
+  }): Promise<{ restoredCount: number; reversedTotal: number }> {
+    const { invoice: inv, payments, warehouses, reason, actorUsername, actorDisplayName } = params;
+    const now = Date.now();
+    const actor = actorDisplayName || actorUsername || 'المدير';
+    const invDocId = safeId((inv as any)._docId || inv.invoiceNo || `INV-${inv.id}`, `INV-${inv.id}`);
+
+    const ops: AtomicBundleOperation[] = [
+      {
+        kind: 'invoice_summary',
+        collectionName: 'invoices',
+        docId: invDocId,
+        payload: {
+          status: 'ملغاة',
+          cancelReason: reason || `إلغاء معتمد بواسطة ${actor}`,
+          paidAmount: 0,
+          updatedAt: now,
+          serverUpdatedBy: actorUsername || actor
+        }
+      }
+    ];
+
+    // 1. Compensating RETURN_IN StockMoves
+    let parsedItems: any[] = [];
+    if (Array.isArray(inv.items) && inv.items.length > 0) {
+      parsedItems = inv.items;
+    } else if (typeof inv.itemsJson === 'string' && inv.itemsJson) {
+      try {
+        const decoded = JSON.parse(inv.itemsJson);
+        if (Array.isArray(decoded)) parsedItems = decoded;
+      } catch {
+        parsedItems = [];
+      }
+    }
+
+    let restoredCount = 0;
+    for (let idx = 0; idx < parsedItems.length; idx++) {
+      const it = parsedItems[idx];
+      const pid = Number(it.productId || 0);
+      const qty = Math.abs(Number(it.quantity || 0));
+      const whId = Number(it.warehouseId || inv.warehouseId || warehouses[0]?.id || 1);
+      const whObj = warehouses.find((w) => Number(w.id) === whId);
+      if (pid > 0 && qty > 0) {
+        const moveTs = now + idx + 1;
+        const revMove: StockMove = {
+          id: moveTs,
+          productId: pid,
+          productName: String(it.description || it.productName || `صنف #${pid}`),
+          warehouseId: whId,
+          warehouseName: whObj?.name || 'المخزن الرئيسي',
+          kind: 'RETURN_IN',
+          quantity: qty,
+          invoiceId: Number(inv.id),
+          note: `قيد عكسي لإرجاع مخزون فاتورة ملغاة ${inv.invoiceNo}`,
+          referenceNo: `REV-${inv.invoiceNo}`,
+          createdBy: actor,
+          actor,
+          createdAt: moveTs,
+          timestamp: moveTs
+        };
+        ops.push({
+          kind: 'merge',
+          collectionName: 'stock_moves',
+          docId: `SM-REV-${invDocId}-${idx}`,
+          payload: revMove,
+          checkDuplicateFinancial: false
+        });
+        restoredCount += 1;
+      }
+    }
+
+    // 2. Reverse linked active payments (reversal-only keys) + compensating OUT movement + GL journals
+    const linkedPays = payments.filter(
+      (p) => Number(p.invoiceId) === Number(inv.id) && !isCancelledOrReversedStatus(p.status)
+    );
+    const journals: Array<{ entry: JournalEntry; lines: JournalLine[] } | null> = [];
+    const invTotal = Number(inv.total || 0);
+    if (invTotal > 0.001) {
+      journals.push(
+        createBalancedJournalPayload({
+          entryDate: new Date(now).toISOString().split('T')[0],
+          sourceType: 'INVOICE_CANCEL',
+          sourceDocId: Number(inv.id),
+          sourceDocNo: inv.invoiceNo,
+          description: `عكس إيراد فاتورة ملغاة ${inv.invoiceNo}`,
+          currency: inv.currency || 'SDG',
+          lines: [
+            { accountCode: '4100', debit: invTotal, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: inv.customerName, memo: `إلغاء إيراد ${inv.invoiceNo}` },
+            { accountCode: '1130', credit: invTotal, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: inv.customerName, memo: `إلغاء ذمة ${inv.invoiceNo}` }
+          ],
+          createdBy: actor,
+          idempotencyKey: `JRN-CANCEL-INV-${inv.invoiceNo}`
+        })
+      );
+    }
+
+    let reversedTotal = 0;
+    for (let idx = 0; idx < linkedPays.length; idx++) {
+      const p = linkedPays[idx];
+      const amt = Math.abs(Number(p.amount || 0));
+      const payDocId = safeId((p as any)._docId || `PAY-${p.id}`, `PAY-${p.id}`);
+      const revTs = now + 200 + idx;
+      const revMovDocId = `MOV-REV-${invDocId}-P${p.id}`;
+
+      ops.push({
+        kind: 'reverse_ledger',
+        collectionName: 'invoice_payments',
+        docId: payDocId,
+        payload: {
+          status: 'reversed',
+          reversedByRef: revMovDocId,
+          reversalReason: reason || `إلغاء فاتورة ${inv.invoiceNo}`,
+          reversedAt: now,
+          updatedAt: now,
+          serverUpdatedBy: actorUsername || actor
+        }
+      });
+
+      if (amt > 0 && p.cashbox && !String(p.cashbox).includes('تسوية إدارية')) {
+        const cur = resolveCanonicalCurrency(p.currency || inv.currency, p.cashbox);
+        const revMov: TreasuryMovement = {
+          id: revTs,
+          txDate: new Date(revTs).toISOString().split('T')[0],
+          cashbox: p.cashbox,
+          currency: cur,
+          direction: 'منصرف',
+          type: 'OUT',
+          amount: amt,
+          category: 'عكس تحصيل فاتورة ملغاة',
+          description: `قيد عكسي لاسترداد دفعة فاتورة ملغاة ${inv.invoiceNo} — ${inv.customerName}`,
+          note: `قيد عكسي لاسترداد دفعة فاتورة ملغاة ${inv.invoiceNo} — ${inv.customerName}`,
+          reference: `REV-${inv.invoiceNo}-P${p.id}`,
+          referenceNo: `REV-${inv.invoiceNo}`,
+          cloudDocId: revMovDocId,
+          syncUuid: revMovDocId,
+          createdBy: actor,
+          actor,
+          createdAt: revTs,
+          timestamp: revTs
+        };
+        ops.push({
+          kind: 'merge',
+          collectionName: 'movements',
+          docId: revMovDocId,
+          payload: revMov,
+          checkDuplicateFinancial: true
+        });
+        reversedTotal += amt;
+
+        const cashCode = resolveCashAccountCode(p.cashbox, cur);
+        journals.push(
+          createBalancedJournalPayload({
+            entryDate: new Date(now).toISOString().split('T')[0],
+            sourceType: 'INVOICE_CANCEL',
+            sourceDocId: Number(p.id),
+            sourceDocNo: inv.invoiceNo,
+            description: `رد دفعة نقدية لإلغاء الفاتورة ${inv.invoiceNo}`,
+            currency: cur,
+            lines: [
+              { accountCode: '1130', debit: amt, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: inv.customerName, memo: 'تسوية ذمة عميل عند الإلغاء' },
+              { accountCode: cashCode, credit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: p.cashbox, memo: `صرف استرداد من ${p.cashbox}` }
+            ],
+            createdBy: actor,
+            idempotencyKey: `JRN-CANCEL-PAY-${p.id}`
+          })
+        );
+      }
+    }
+
+    await this.commitAtomicTransactionBundle({
+      actorUsername,
+      operations: ops,
+      journals,
+      auditLog: {
+        username: actorUsername || actor,
+        action: 'CANCEL_INVOICE',
+        detail: `إلغاء فاتورة ${inv.invoiceNo} بقيد عكسي ذري (استرجاع ${restoredCount} بنود وعكس ${reversedTotal.toLocaleString()} ${inv.currency})`
+      }
+    });
+
+    return { restoredCount, reversedTotal };
+  }
+
+  async publishPlatformBalanceCheckpoint(params: {
+    cashboxes: Cashbox[];
+    movements: TreasuryMovement[];
+    invoices: SalesInvoice[];
+    payments: InvoicePayment[];
+    actorUsername?: string;
+  }): Promise<CrossPlatformBalanceCheckpoint | null> {
+    if (!auth.currentUser || auth.currentUser.isAnonymous) return null;
+    const platform = this.detectRuntimePlatform();
+    const payload = computePlatformCheckpointPayload({
+      platform,
+      cashboxes: params.cashboxes,
+      movements: params.movements,
+      invoices: params.invoices,
+      payments: params.payments,
+      appVersion: APP_VERSION_CONTRACT.CURRENT_VERSION_NAME
+    });
+    const docId = `CHECKPOINT_${platform}`;
+    await setDoc(
+      doc(firestore, this.collectionPath('server_status', PRIMARY_CLUSTER), docId),
+      {
+        ...payload,
+        reportedBy: params.actorUsername || auth.currentUser.email || platform,
+        serverUpdatedAt: serverTimestamp()
+      },
+      { merge: true }
+    ).catch(() => {});
+    return payload;
+  }
+
+  async runCrossPlatformBalanceReconciliation(params: {
+    localCashboxes: Cashbox[];
+    localMovements: TreasuryMovement[];
+    localInvoices: SalesInvoice[];
+    localPayments: InvoicePayment[];
+    actorUsername?: string;
+  }): Promise<CrossPlatformReconciliationReport> {
+    // Always query authoritative Firestore server state directly (bypass local offline cache)
+    const [centralCashboxes, centralMovements, centralInvoices, centralPayments, journalEntries, journalLines, statusDocs] =
+      await Promise.all([
+        this.fetchCollectionOnce<Cashbox>('cashboxes'),
+        this.fetchCollectionOnce<TreasuryMovement>('movements'),
+        this.fetchCollectionOnce<SalesInvoice>('invoices'),
+        this.fetchCollectionOnce<InvoicePayment>('invoice_payments'),
+        this.fetchCollectionOnce<JournalEntry>('journal_entries').catch(() => [] as JournalEntry[]),
+        this.fetchCollectionOnce<JournalLine>('journal_lines').catch(() => [] as JournalLine[]),
+        this.fetchCollectionOnce<any>('server_status').catch(() => [] as any[])
+      ]);
+
+    await this.publishPlatformBalanceCheckpoint({
+      cashboxes: params.localCashboxes,
+      movements: params.localMovements,
+      invoices: params.localInvoices,
+      payments: params.localPayments,
+      actorUsername: params.actorUsername
+    }).catch(() => null);
+
+    const findCheckpoint = (p: PlatformKind): CrossPlatformBalanceCheckpoint | null => {
+      const hit = statusDocs.find((d) => String(d?._docId || '').toUpperCase() === `CHECKPOINT_${p}` || d?.platform === p);
+      return hit ? (hit as CrossPlatformBalanceCheckpoint) : null;
+    };
+
+    const syncSnap = this.getUnifiedSyncSnapshot();
+    const report = computeCrossPlatformBalanceReconciliation({
+      centralCashboxes,
+      centralMovements,
+      centralInvoices,
+      centralPayments,
+      localCashboxes: params.localCashboxes,
+      localMovements: params.localMovements,
+      journalEntries,
+      journalLines,
+      checkpoints: {
+        web: findCheckpoint('WEB'),
+        desktop: findCheckpoint('DESKTOP'),
+        android: findCheckpoint('ANDROID')
+      },
+      pendingWritesCount: syncSnap.pendingWritesCount
+    });
+
+    this.activeSyncConflictCount = report.anomalies.filter((a) => Math.abs(a.varianceAmount) >= 1.0).length;
+    this.emitUnifiedSyncSnapshot();
+    return report;
+  }
+
+  async applySafeReconciliationJournalAdjustment(params: {
+    anomaly: BalanceAnomalyRecord;
+    actorUsername: string;
+    actorProfile?: UserAccount | null;
+  }): Promise<string> {
+    if (!isSuperAdminAccount(params.actorProfile)) {
+      throw new Error('صلاحية تنفيذ قيود التسوية والمطابقة المحاسبية مقصورة على حساب Admin فقط.');
+    }
+    const amt = Math.abs(Number(params.anomaly.proposedAdjustmentAmount || params.anomaly.varianceAmount || 0));
+    if (amt <= 0.01) {
+      throw new Error('لا يوجد فرق جوهري يتطلب إنشاء قيد تسوية.');
+    }
+    const now = Date.now();
+    const today = new Date(now).toISOString().split('T')[0];
+    const cashCode = resolveCashAccountCode(params.anomaly.affectedAccount, params.anomaly.currency);
+    const dir = params.anomaly.proposedAdjustmentDirection || (params.anomaly.varianceAmount >= 0 ? 'وارد' : 'منصرف');
+    const adjJournal = createBalancedJournalPayload({
+      entryDate: today,
+      sourceType: 'RECONCILIATION_ADJUSTMENT',
+      sourceDocId: now,
+      sourceDocNo: `REC-ADJ-${String(now).slice(-6)}`,
+      description: `قيد تسوية مطابقة (${params.anomaly.affectedAccount}): ${params.anomaly.rootCauseDetailAr}`,
+      currency: params.anomaly.currency,
+      lines:
+        dir === 'وارد'
+          ? [
+              { accountCode: cashCode, debit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: params.anomaly.affectedAccount, memo: 'تسوية رصيد من واقع سجل الحركات' },
+              { accountCode: '3900', credit: amt, costCenter: 'ADMIN', partyType: 'SYSTEM', partyName: 'حساب فروق التسوية', memo: 'مقابل مطابقة الأرصدة' }
+            ]
+          : [
+              { accountCode: '3900', debit: amt, costCenter: 'ADMIN', partyType: 'SYSTEM', partyName: 'حساب فروق التسوية', memo: 'مقابل مطابقة الأرصدة' },
+              { accountCode: cashCode, credit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: params.anomaly.affectedAccount, memo: 'تسوية رصيد من واقع سجل الحركات' }
+            ],
+      createdBy: params.actorUsername,
+      idempotencyKey: `JRN-RECON-${params.anomaly.id}-${now}`
+    });
+    if (!adjJournal) {
+      throw new Error('تعذر توليد قيد تسوية متوازن.');
+    }
+    await this.commitAtomicTransactionBundle({
+      actorUsername: params.actorUsername,
+      operations: [],
+      journals: [adjJournal],
+      auditLog: {
+        username: params.actorUsername,
+        action: 'RECONCILIATION_SAFE_ADJUSTMENT',
+        detail: `تسوية آمنة من دفتر الحركات لحساب (${params.anomaly.affectedAccount}) بقيمة ${amt} ${params.anomaly.currency}`
+      }
+    });
+    return adjJournal.entry.syncUuid;
   }
 
   async persistJournalPayload(

@@ -38,7 +38,6 @@ import { useLanguage } from '../context/LanguageContext';
 import { IdempotencyProtectionSystem } from '../services/IdempotencyService';
 import type { ReportTab } from '../components/reports/ReportsCenterView';
 import {
-  canConfigureEmployeePermissions,
   isSystemManager
 } from '../services/SecurityService';
 import { resolveAssetUrl } from '../config/appVersionContract';
@@ -150,12 +149,8 @@ export const PortalPage: React.FC<PortalPageProps> = ({
   } = useAuth();
 
   const hasSystemManagerAccess = isSystemManager(userProfile);
-  const canAccessAdminArea =
-    Boolean(userProfile) &&
-    (isSuperAdmin ||
-      hasSystemManagerAccess ||
-      canConfigureEmployeePermissions(userProfile) ||
-      canAccessModule('المستخدمين'));
+  // Strict Admin-only exclusivity for User & Role Management tabs
+  const canAccessAdminArea = Boolean(userProfile) && isSuperAdmin;
 
   const [activeTab, setActiveTab] = useState<PmpScreenRoute>(() =>
     portalRoute === '/admin' && canAccessAdminArea ? 'USERS' : 'DASHBOARD'
@@ -342,11 +337,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
       labelAr: 'المستخدمين',
       labelEn: 'Users & Permissions',
       icon: <Users className="w-4 h-4" />,
-      visible:
-        canAccessModule('المستخدمين') ||
-        canConfigureEmployeePermissions(userProfile) ||
-        hasSystemManagerAccess ||
-        isSuperAdmin
+      visible: isSuperAdmin
     },
     {
       id: 'POSTER',

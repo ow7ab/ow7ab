@@ -31,7 +31,11 @@ data class MovementEntity(
     val createdAt: Long = System.currentTimeMillis(),
     val cloudDocId: String = "",
     val syncUuid: String = "",
-    val updatedAt: Long = 0L
+    val updatedAt: Long = 0L,
+    val status: String = "active",
+    val reversedByRef: String = "",
+    val reversalReason: String = "",
+    val syncStatus: String = "SYNCED"
 )
 
 @Entity(tableName = "transfers")
@@ -50,7 +54,11 @@ data class TransferEntity(
     val halfaInvoiceId: Long? = null,
     val halfaAmount: Double? = null,
     val createdBy: String = "المدير",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val status: String = "active",
+    val reversedByRef: String = "",
+    val reversalReason: String = "",
+    val syncStatus: String = "SYNCED"
 )
 
 @Entity(tableName = "daily_closings")
@@ -229,7 +237,10 @@ data class StockMoveEntity(
     val batchNumber: String = "",
     val syncUuid: String = "",
     val recordVersion: Int = 1,
-    val deviceId: String = ""
+    val deviceId: String = "",
+    val status: String = "active",
+    val reversalReason: String = "",
+    val syncStatus: String = "SYNCED"
 )
 
 @Entity(tableName = "factory_items")

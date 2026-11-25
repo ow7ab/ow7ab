@@ -49,6 +49,9 @@ class UserSessionManager(
     private var lastKnownUid: String? = firebaseAuth.currentUser?.uid
     private var authStateListener: FirebaseAuth.AuthStateListener? = null
 
+    @Volatile
+    var suppressDestructiveResetOnSwitch: Boolean = false
+
     // Global loading state overlay observable across navigation and screens
     val isAuthTransitioning = MutableStateFlow(false)
     val authTransitionMessage = MutableStateFlow("جارٍ تجهيز جلسة المستخدم ومزامنة الصلاحيات...")
@@ -85,7 +88,12 @@ class UserSessionManager(
         Log.i(TAG, "Starting FirebaseAuth session monitoring. Initial UID: $lastKnownUid")
 
         val listener = FirebaseAuth.AuthStateListener { auth ->
-            val currentUid = auth.currentUser?.uid
+            val fbUser = auth.currentUser
+            if (fbUser?.isAnonymous == true) {
+                Log.d(TAG, "Ignoring anonymous FirebaseAuth transition in UserSessionManager")
+                return@AuthStateListener
+            }
+            val currentUid = fbUser?.uid
             val prevUid = lastKnownUid
 
             if (prevUid != null && currentUid == null) {
@@ -96,17 +104,19 @@ class UserSessionManager(
                 _sessionEventFlow.value = event
                 sessionListeners.forEach { runCatching { it(event) } }
 
-                scope.launch {
-                    isAuthTransitioning.value = true
-                    authTransitionMessage.value = "جارٍ إنهاء الجلسة وتطهير البيانات المؤقتة..."
-                    try {
-                        clearLocalCachesAndSessionData(
-                            clearBiometrics = false,
-                            clearFileCache = true,
-                            clearActiveRoomSession = true
-                        )
-                    } finally {
-                        isAuthTransitioning.value = false
+                if (!suppressDestructiveResetOnSwitch) {
+                    scope.launch {
+                        isAuthTransitioning.value = true
+                        authTransitionMessage.value = "جارٍ إنهاء الجلسة وتطهير البيانات المؤقتة..."
+                        try {
+                            clearLocalCachesAndSessionData(
+                                clearBiometrics = false,
+                                clearFileCache = true,
+                                clearActiveRoomSession = true
+                            )
+                        } finally {
+                            isAuthTransitioning.value = false
+                        }
                     }
                 }
             } else if (prevUid != null && currentUid != null && prevUid != currentUid) {
@@ -117,18 +127,20 @@ class UserSessionManager(
                 _sessionEventFlow.value = event
                 sessionListeners.forEach { runCatching { it(event) } }
 
-                scope.launch {
-                    isAuthTransitioning.value = true
-                    authTransitionMessage.value = "جارٍ التبديل وتأمين بيانات الحساب الجديد ومزامنة الصلاحيات..."
-                    try {
-                        clearLocalCachesAndSessionData(
-                            clearBiometrics = false,
-                            clearFileCache = true,
-                            clearActiveRoomSession = true
-                        )
-                        fetchAndSyncUserProfileFromFirestore(currentUid)
-                    } finally {
-                        isAuthTransitioning.value = false
+                if (!suppressDestructiveResetOnSwitch) {
+                    scope.launch {
+                        isAuthTransitioning.value = true
+                        authTransitionMessage.value = "جارٍ التبديل وتأمين بيانات الحساب الجديد ومزامنة الصلاحيات..."
+                        try {
+                            clearLocalCachesAndSessionData(
+                                clearBiometrics = false,
+                                clearFileCache = true,
+                                clearActiveRoomSession = false
+                            )
+                            fetchAndSyncUserProfileFromFirestore(currentUid)
+                        } finally {
+                            isAuthTransitioning.value = false
+                        }
                     }
                 }
             } else if (prevUid == null && currentUid != null) {

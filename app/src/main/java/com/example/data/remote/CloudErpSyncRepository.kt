@@ -410,6 +410,92 @@ class CloudErpSyncRepository(
     private val _comprehensiveReport = kotlinx.coroutines.flow.MutableStateFlow<ComprehensiveDiagnosticReport?>(null)
     val comprehensiveReport: kotlinx.coroutines.flow.StateFlow<ComprehensiveDiagnosticReport?> = _comprehensiveReport
 
+    private val _syncMetaMap = java.util.concurrent.ConcurrentHashMap<String, com.example.domain.accounting.CollectionSyncMetadata>()
+    @Volatile
+    private var lastKnownNetworkOnline: Boolean = true
+    @Volatile
+    private var currentSyncConflictCount: Int = 0
+    @Volatile
+    private var currentSyncFailedCount: Int = 0
+
+    private val _unifiedSyncSnapshot = kotlinx.coroutines.flow.MutableStateFlow(
+        com.example.domain.accounting.UnifiedSyncSnapshot(
+            status = com.example.domain.accounting.UnifiedSyncStatus.SYNCING,
+            labelAr = com.example.domain.accounting.UnifiedSyncStatus.SYNCING.labelAr,
+            online = true,
+            pendingWritesCount = 0,
+            fromCacheCollectionsCount = 0,
+            failedCount = 0,
+            conflictCount = 0,
+            lastServerAckAt = 0L,
+            collections = emptyMap()
+        )
+    )
+    val unifiedSyncSnapshot: kotlinx.coroutines.flow.StateFlow<com.example.domain.accounting.UnifiedSyncSnapshot> = _unifiedSyncSnapshot
+
+    private val _reconciliationReport =
+        kotlinx.coroutines.flow.MutableStateFlow<com.example.domain.accounting.CrossPlatformReconciliationReport?>(null)
+    val reconciliationReport: kotlinx.coroutines.flow.StateFlow<com.example.domain.accounting.CrossPlatformReconciliationReport?> = _reconciliationReport
+
+    private fun refreshUnifiedSyncState() {
+        val cols = _syncMetaMap.toMap()
+        val pendingCount = cols.values.count { it.hasPendingWrites }
+        val fromCacheCount = cols.values.count { it.fromCache }
+        val maxAck = cols.values.maxOfOrNull { it.lastServerAckAt } ?: 0L
+        val status = com.example.domain.accounting.CrossPlatformReconciliationEngine.resolveUnifiedSyncState(
+            online = lastKnownNetworkOnline,
+            hasPendingWrites = pendingCount > 0,
+            fromCache = cols.isNotEmpty() && fromCacheCount == cols.size,
+            syncingCount = if (cols.isEmpty()) 1 else 0,
+            failedCount = currentSyncFailedCount,
+            conflictCount = currentSyncConflictCount,
+            lastServerAckAt = maxAck
+        )
+        _unifiedSyncSnapshot.value = com.example.domain.accounting.UnifiedSyncSnapshot(
+            status = status,
+            labelAr = status.labelAr,
+            online = lastKnownNetworkOnline,
+            pendingWritesCount = pendingCount,
+            fromCacheCollectionsCount = fromCacheCount,
+            failedCount = currentSyncFailedCount,
+            conflictCount = currentSyncConflictCount,
+            lastServerAckAt = maxAck,
+            collections = cols
+        )
+    }
+
+    fun setOnlineStateForSync(online: Boolean) {
+        lastKnownNetworkOnline = online
+        refreshUnifiedSyncState()
+    }
+
+    fun updateCollectionSyncMetadata(
+        collectionName: String,
+        hasPendingWrites: Boolean,
+        fromCache: Boolean,
+        docCount: Int,
+        errorMsg: String? = null
+    ) {
+        val prev = _syncMetaMap[collectionName]
+        val ackAt = if (!hasPendingWrites && !fromCache && errorMsg == null) {
+            System.currentTimeMillis()
+        } else {
+            prev?.lastServerAckAt ?: 0L
+        }
+        if (errorMsg != null) {
+            currentSyncFailedCount += 1
+        }
+        _syncMetaMap[collectionName] = com.example.domain.accounting.CollectionSyncMetadata(
+            collectionName = collectionName,
+            hasPendingWrites = hasPendingWrites,
+            fromCache = fromCache,
+            docCount = docCount,
+            lastServerAckAt = ackAt,
+            lastError = errorMsg
+        )
+        refreshUnifiedSyncState()
+    }
+
     // Global mutex guaranteeing non-overlapping synchronization passes (prevents sync concurrency collisions)
     private val syncMutex = Mutex()
 
@@ -621,13 +707,102 @@ class CloudErpSyncRepository(
     }
 
     private val currentActorId: String
-        get() = runCatching { Firebase.auth.currentUser?.uid }.getOrNull() ?: "ERP-CLUSTER-NODE"
+        get() = runCatching { Firebase.auth.currentUser?.takeUnless { it.isAnonymous }?.uid }.getOrNull() ?: "ERP-CLUSTER-NODE"
 
     suspend fun getOrEnsureActiveFirebaseUser(): com.google.firebase.auth.FirebaseUser? = withContext(Dispatchers.IO) {
         val existing = runCatching { Firebase.auth.currentUser }.getOrNull()
-        if (existing != null) return@withContext existing
+        if (existing != null && existing.isAnonymous) {
+            runCatching { Firebase.auth.signOut() }
+            return@withContext null
+        }
+        existing
+    }
+
+    fun resolveCorporateAuthEmail(username: String, phoneOrEmail: String?): String {
+        val rawEmail = phoneOrEmail?.trim()?.lowercase(Locale.ROOT).orEmpty()
+        if (rawEmail.contains("@") && android.util.Patterns.EMAIL_ADDRESS.matcher(rawEmail).matches()) {
+            return rawEmail
+        }
+        val cleanUser = username.trim().lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9._-]+"), ".")
+            .trim('.')
+            .ifBlank { "employee" }
+        return "$cleanUser@pmp-paints.com"
+    }
+
+    fun buildUsernameAuthEmailCandidates(identity: String): List<String> {
+        val clean = identity.trim().lowercase(Locale.ROOT)
+        if (clean.isBlank()) return emptyList()
+        if (clean.contains("@")) return listOf(clean)
+        if (clean == "admin" || clean == "usr-admin" || clean == "usr-hq-001") {
+            return listOf("admin@pmp-paints.com", "oaw7ab@gmail.com")
+        }
+        val sanitized = clean.replace(Regex("[^a-z0-9._-]"), "")
+        return if (sanitized.isNotBlank()) {
+            listOf("$sanitized@pmp-paints.com", "$sanitized@pmppaints.com")
+        } else {
+            emptyList()
+        }
+    }
+
+    suspend fun signInFirebaseWithCredentialsIfAvailable(
+        identity: String,
+        secret: String,
+        extraEmails: List<String> = emptyList()
+    ): com.google.firebase.auth.FirebaseUser? = withContext(Dispatchers.IO) {
+        if (secret.length < 4) return@withContext null
+        val candidates = (buildUsernameAuthEmailCandidates(identity) + extraEmails.map { it.trim().lowercase(Locale.ROOT) })
+            .filter { it.contains("@") }
+            .distinct()
+        if (candidates.isEmpty()) return@withContext null
+
+        val currentFb = runCatching { Firebase.auth.currentUser }.getOrNull()
+        if (currentFb != null && !currentFb.isAnonymous &&
+            currentFb.email?.trim()?.lowercase(Locale.ROOT) in candidates
+        ) {
+            return@withContext currentFb
+        }
+
+        com.example.util.UserSessionManager.suppressDestructiveResetOnSwitch = true
+        try {
+            for (emailCand in candidates) {
+                val res = runCatching {
+                    Firebase.auth.signInWithEmailAndPassword(emailCand, secret).await().user
+                }.getOrNull()
+                if (res != null) {
+                    runCatching { res.getIdToken(true).await() }
+                    return@withContext res
+                }
+            }
+        } finally {
+            com.example.util.UserSessionManager.suppressDestructiveResetOnSwitch = false
+        }
+        null
+    }
+
+    suspend fun provisionFirebaseEmailAccount(
+        authEmail: String,
+        rawSecret: String
+    ): String? = withContext(Dispatchers.IO) {
+        val cleanEmail = authEmail.trim().lowercase(Locale.ROOT)
+        val cleanPass = rawSecret.trim()
+        if (!cleanEmail.contains("@") || cleanPass.length < 6) return@withContext null
         runCatching {
-            Firebase.auth.signInAnonymously().await().user
+            val appCtx = firestore.app.applicationContext
+            val provApp = com.google.firebase.FirebaseApp.getApps(appCtx)
+                .firstOrNull { it.name == "pmp-auth-provisioner" }
+                ?: com.google.firebase.FirebaseApp.initializeApp(appCtx, firestore.app.options, "pmp-auth-provisioner")
+            val provAuth = com.google.firebase.auth.FirebaseAuth.getInstance(provApp)
+            try {
+                val created = runCatching {
+                    provAuth.createUserWithEmailAndPassword(cleanEmail, cleanPass).await().user?.uid
+                }.getOrNull()
+                created ?: runCatching {
+                    provAuth.signInWithEmailAndPassword(cleanEmail, cleanPass).await().user?.uid
+                }.getOrNull()
+            } finally {
+                runCatching { provAuth.signOut() }
+            }
         }.getOrNull()
     }
 
@@ -655,15 +830,23 @@ class CloudErpSyncRepository(
         linkedUid: String? = null
     ) = withContext(Dispatchers.IO) {
         val fbUser = getOrEnsureActiveFirebaseUser() ?: return@withContext
+        if (fbUser.isAnonymous) return@withContext
         val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
         if (cleanCluster.equals(DEPRECATED_V16_CLUSTER, ignoreCase = true)) return@withContext
         val cRef = clusterRef(cleanCluster)
         val roleKey = resolveCanonicalRbacTier(account)
         val docUserCode = safeId(account.userCode, "USR-${account.id}")
-        val email = account.phoneOrEmail.trim().lowercase()
-        val emailKey = if (email.contains("@")) buildEmailDirectoryKey(email) else ""
+        val rawContactEmail = account.phoneOrEmail.trim().lowercase(Locale.ROOT)
+        val corporateEmail = resolveCorporateAuthEmail(account.username, account.phoneOrEmail)
+        val emailsToRegister = listOfNotNull(
+            rawContactEmail.takeIf { it.contains("@") },
+            corporateEmail.takeIf { it.contains("@") }
+        ).distinct()
 
-        if (emailKey.isNotEmpty()) {
+        var primaryEmailKey = ""
+        for (email in emailsToRegister) {
+            val emailKey = buildEmailDirectoryKey(email)
+            if (primaryEmailKey.isEmpty()) primaryEmailKey = emailKey
             runCatching {
                 cRef.collection("email_directory").document(emailKey).set(
                     mapOf(
@@ -684,7 +867,9 @@ class CloudErpSyncRepository(
             }
         }
 
-        val uid = linkedUid?.trim().orEmpty()
+        val uid = linkedUid?.trim()?.takeIf { it.isNotBlank() }
+            ?: account.remoteServerId.trim().takeIf { it.isNotBlank() && !it.startsWith("SRV-NODE-") }
+            ?: ""
         if (uid.isNotEmpty()) {
             val cleanUid = safeId(uid, uid)
             runCatching {
@@ -698,7 +883,7 @@ class CloudErpSyncRepository(
                         put("branch", account.branch.ifBlank { "الخرطوم" })
                         put("permissions", account.permissions.ifBlank { "صلاحية العرض" })
                         put("active", account.active)
-                        if (emailKey.isNotEmpty()) put("emailKey", emailKey)
+                        if (primaryEmailKey.isNotEmpty()) put("emailKey", primaryEmailKey)
                         put("updatedAt", System.currentTimeMillis())
                         put("serverUpdatedAt", FieldValue.serverTimestamp())
                     },
@@ -723,6 +908,7 @@ class CloudErpSyncRepository(
         fbEmail: String? = null
     ) = withContext(Dispatchers.IO) {
         val currentUser = getOrEnsureActiveFirebaseUser() ?: return@withContext
+        if (currentUser.isAnonymous) return@withContext
         val uid = fbUid?.takeIf { it.isNotBlank() } ?: currentUser.uid
         if (uid.isBlank()) return@withContext
 
@@ -740,19 +926,25 @@ class CloudErpSyncRepository(
 
             val resolvedEmail = (fbEmail?.takeIf { it.isNotBlank() }
                 ?: currentUser.email?.takeIf { it.isNotBlank() }
-                ?: account?.phoneOrEmail.orEmpty()).trim().lowercase()
+                ?: account?.phoneOrEmail.orEmpty()).trim().lowercase(Locale.ROOT)
 
             val ownerRef = cRef.collection("system_metadata").document("cluster_owner")
             val ownerSnap = runCatching { ownerRef.get(Source.SERVER).await() }.getOrNull()
             val ownerExists = ownerSnap != null && ownerSnap.exists()
+            val ownerUid = ownerSnap?.getString("ownerUid")?.trim().orEmpty()
 
-            val canBootstrapAdmin = account?.isSuperAdminAccount() == true ||
+            val isVerifiedBootstrapEmail = currentUser.isEmailVerified &&
+                (resolvedEmail == "oaw7ab@gmail.com" || resolvedEmail == "admin@pmp-paints.com")
+
+            val matchesAdminAccount = account?.isSuperAdminAccount() == true ||
                 account?.isSystemManager() == true ||
-                resolvedEmail == "oaw7ab@gmail.com" ||
-                resolvedEmail == "admin@pmp-paints.com" ||
                 account?.userCode == "USR-ADMIN" ||
                 account?.userCode == "USR-HQ-001" ||
                 account?.username.equals("admin", ignoreCase = true)
+
+            val canBootstrapAdmin = isVerifiedBootstrapEmail ||
+                ownerUid == cleanUid ||
+                (!ownerExists && (matchesAdminAccount || resolvedEmail == "oaw7ab@gmail.com" || resolvedEmail == "admin@pmp-paints.com"))
 
             if (canBootstrapAdmin) {
                 val adminCode = account?.let { safeId(it.userCode, "USR-ADMIN") } ?: "USR-ADMIN"
@@ -768,7 +960,7 @@ class CloudErpSyncRepository(
                     ),
                     SetOptions.merge()
                 ).await()
-                if (!ownerExists || resolvedEmail == "oaw7ab@gmail.com" || resolvedEmail == "admin@pmp-paints.com") {
+                if (!ownerExists) {
                     ownerRef.set(
                         mapOf(
                             "ownerUid" to cleanUid,
@@ -781,26 +973,13 @@ class CloudErpSyncRepository(
                 return@withContext
             }
 
-            if (account != null) {
-                val memberCode = safeId(account.userCode, "USR-${account.id}")
-                val roleTier = resolveCanonicalRbacTier(account)
-                memberRef.set(
-                    mapOf(
-                        "uid" to cleanUid,
-                        "userCode" to memberCode,
-                        "roleKey" to roleTier,
-                        "branch" to account.branch.ifBlank { "فرع السودان (SD-001)" },
-                        "permissions" to account.permissions,
-                        "active" to account.active,
-                        "updatedAt" to System.currentTimeMillis()
-                    ),
-                    SetOptions.merge()
-                ).await()
-                return@withContext
-            }
-
-            if (resolvedEmail.contains("@")) {
-                val emailKey = buildEmailDirectoryKey(resolvedEmail)
+            // Always resolve pre-provisioned email_directory first to honor server-side RBAC rules
+            val candidateDirectoryEmails = listOfNotNull(
+                resolvedEmail.takeIf { it.contains("@") },
+                account?.let { resolveCorporateAuthEmail(it.username, it.phoneOrEmail) }?.takeIf { it.contains("@") }
+            ).distinct()
+            for (dirEmail in candidateDirectoryEmails) {
+                val emailKey = buildEmailDirectoryKey(dirEmail)
                 val dirSnap = runCatching {
                     cRef.collection("email_directory").document(emailKey).get(Source.SERVER).await()
                 }.getOrNull()
@@ -1514,10 +1693,16 @@ class CloudErpSyncRepository(
         dao: PmpDao
     ): Result<UserAccountEntity> = withContext(Dispatchers.IO) {
         runCatching {
-            val fbUser = getOrEnsureActiveFirebaseUser()
-                ?: throw Exception("تعذر التحقق السحابي حالياً — يتم الاعتماد على قاعدة الحسابات المحلية.")
             val cleanIdentity = com.example.util.PasswordSecurityUtil.normalizeLoginIdentity(identity)
             val cleanSecret = com.example.util.PasswordSecurityUtil.normalizeDigitsAndControlChars(passwordOrPin)
+
+            // Authenticate via Firebase Auth Email/Password first when logged out or switching accounts
+            val fbUser = signInFirebaseWithCredentialsIfAvailable(cleanIdentity, cleanSecret)
+                ?: getOrEnsureActiveFirebaseUser()
+                ?: throw Exception("تعذر المصادقة السحابية حالياً — يرجى إدخال بريد إلكتروني وكلمة مرور صحيحة (6 خانات فأكثر) أو ربط حساب Google أولاً.")
+            if (fbUser.isAnonymous) {
+                throw Exception("لا يمكن تسجيل الدخول بجلسة مجهولة.")
+            }
 
             fun docMatchesIdentity(doc: com.google.firebase.firestore.DocumentSnapshot): Boolean {
                 val uname = doc.getString("username").orEmpty()
@@ -1981,6 +2166,9 @@ class CloudErpSyncRepository(
                 val allItems = dao.getInvoiceItemsDirect()
                 val allPayments = dao.getInvoicePaymentsDirect()
                 runSyncStep("مزامنة فواتير المبيعات", "invoices", critical = true) {
+                    val existingInvoicesMap = runCatching {
+                        cRef.collection("invoices").get().await().documents.associateBy { it.id }
+                    }.getOrDefault(emptyMap())
                     var committed = 0
                     invoices.chunked(200).forEach { chunk ->
                         val batch = firestore.batch()
@@ -1997,20 +2185,53 @@ class CloudErpSyncRepository(
                                     "warehouseId" to (item.warehouseId ?: 0L)
                                 )
                             }
-                            val activeInvPayments = allPayments.filter { it.invoiceId == inv.id && it.status == "active" }
+                            val invPaymentsAll = allPayments.filter { it.invoiceId == inv.id }
+                            val activeInvPayments = invPaymentsAll.filter {
+                                !com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(it.status)
+                            }
                             val paidSum = activeInvPayments.sumOf { it.amount }.coerceAtLeast(0.0)
-                            val invPayments = activeInvPayments.map { p ->
+                            val invPayments = invPaymentsAll.map { p ->
                                 mapOf(
                                     "id" to p.id,
                                     "payDate" to p.payDate,
                                     "cashbox" to p.cashbox,
                                     "amount" to p.amount,
                                     "note" to p.note,
+                                    "status" to p.status,
                                     "createdBy" to p.createdBy
                                 )
                             }
 
                             val docId = safeId(inv.invoiceNo, "INV-${inv.id}")
+                            val existingDoc = existingInvoicesMap[docId]
+                            if (existingDoc != null) {
+                                val remoteStatus = existingDoc.getString("status").orEmpty()
+                                if (com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(remoteStatus)) {
+                                    continue
+                                }
+                                val remotePaid = existingDoc.getDouble("paidAmount") ?: 0.0
+                                val remoteCancel = existingDoc.getString("cancelReason").orEmpty()
+                                if (kotlin.math.abs(remotePaid - paidSum) < 0.01 &&
+                                    remoteStatus == inv.status &&
+                                    remoteCancel == (inv.cancelReason ?: "")
+                                ) {
+                                    continue
+                                }
+                                // Strictly honor firestore.rules isValidInvoiceSummaryUpdate() allowed keys
+                                val summaryPatch = mapOf(
+                                    "paidAmount" to paidSum,
+                                    "status" to inv.status,
+                                    "payments" to invPayments,
+                                    "cancelReason" to (inv.cancelReason ?: ""),
+                                    "updatedAt" to System.currentTimeMillis(),
+                                    "serverUpdatedBy" to actor,
+                                    "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                )
+                                batch.set(cRef.collection("invoices").document(docId), summaryPatch, SetOptions.merge())
+                                chunkWrites++
+                                continue
+                            }
+
                             val cleanCustomer = inv.customerName.trim().ifBlank { "عميل نقدي" }.take(200)
                             val cleanCurrency = inv.currency.trim().uppercase().let { if (it in VALID_CURRENCIES) it else "SDG" }
                             val data = mapOf(
@@ -2049,6 +2270,68 @@ class CloudErpSyncRepository(
                     committed
                 }
 
+                // Ensure standalone invoice_payments collection stays synced & reversed cleanly
+                val existingPayDocs = runCatching {
+                    cRef.collection("invoice_payments").get().await().documents.associateBy { it.id }
+                }.getOrDefault(emptyMap())
+                if (allPayments.isNotEmpty()) {
+                    runSyncStep("مزامنة سجل دفعات الفواتير", "invoice_payments", critical = false) {
+                        var payCommitted = 0
+                        allPayments.chunked(200).forEach { payChunk ->
+                            val payBatch = firestore.batch()
+                            var writes = 0
+                            for (p in payChunk) {
+                                val pDocId = safeId("PAY-${p.id}", "PAY-${p.id}")
+                                val serverPay = existingPayDocs[pDocId]
+                                if (serverPay == null) {
+                                    payBatch.set(
+                                        cRef.collection("invoice_payments").document(pDocId),
+                                        mapOf(
+                                            "id" to p.id,
+                                            "invoiceId" to p.invoiceId,
+                                            "payDate" to p.payDate,
+                                            "cashbox" to p.cashbox,
+                                            "amount" to p.amount,
+                                            "note" to p.note,
+                                            "status" to p.status,
+                                            "createdBy" to p.createdBy,
+                                            "createdAt" to System.currentTimeMillis(),
+                                            "serverUpdatedBy" to actor,
+                                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                        ),
+                                        SetOptions.merge()
+                                    )
+                                    writes++
+                                } else {
+                                    val srvStatus = serverPay.getString("status").orEmpty()
+                                    if (com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(p.status) &&
+                                        !com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(srvStatus)
+                                    ) {
+                                        payBatch.set(
+                                            cRef.collection("invoice_payments").document(pDocId),
+                                            mapOf(
+                                                "status" to "reversed",
+                                                "reversalReason" to (p.reversalReason ?: "عكس دفعة فاتورة"),
+                                                "reversedAt" to System.currentTimeMillis(),
+                                                "updatedAt" to System.currentTimeMillis(),
+                                                "serverUpdatedBy" to actor,
+                                                "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                            ),
+                                            SetOptions.merge()
+                                        )
+                                        writes++
+                                    }
+                                }
+                            }
+                            if (writes > 0) {
+                                payBatch.commit().await()
+                                payCommitted += writes
+                            }
+                        }
+                        payCommitted
+                    }
+                }
+
                 // 2. Financial Movements (Batched - excluding deleted; requires treasury authorization in rules)
                 val canPushTreasury = isCloudAdmin ||
                     isCloudManager ||
@@ -2076,12 +2359,42 @@ class CloudErpSyncRepository(
                 runSyncStep("مزامنة الحركات المالية والخزن", "movements", critical = true) {
                     var committed = 0
                     try {
+                        val existingMovDocs = runCatching {
+                            cRef.collection("movements").get().await().documents.associateBy { it.id }
+                        }.getOrDefault(emptyMap())
                         movements.chunked(300).forEach { chunk ->
                             val batch = firestore.batch()
                             var chunkWrites = 0
                             for (m in chunk) {
                                 val fallbackDocId = if (m.syncUuid.isNotBlank()) "MOV-${m.syncUuid}" else "MOV-${m.id}"
                                 val docId = safeId(m.cloudDocId.trim().ifBlank { fallbackDocId }, fallbackDocId)
+                                val existingServer = existingMovDocs[docId]
+                                if (existingServer != null) {
+                                    val srvStatus = existingServer.getString("status").orEmpty()
+                                    if (com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(m.status) &&
+                                        !com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(srvStatus)
+                                    ) {
+                                        val nowRev = System.currentTimeMillis()
+                                        batch.set(
+                                            cRef.collection("movements").document(docId),
+                                            mapOf(
+                                                "status" to "reversed",
+                                                "reversedByRef" to m.reversedByRef.ifBlank { "REV-${m.reference.ifBlank { docId }}" },
+                                                "reversalReason" to m.reversalReason.ifBlank { "قيد عكسي معتمد" },
+                                                "reversedAt" to (m.updatedAt.takeIf { it > 0L } ?: nowRev),
+                                                "updatedAt" to nowRev,
+                                                "serverUpdatedBy" to actor,
+                                                "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                            ),
+                                            SetOptions.merge()
+                                        )
+                                        chunkWrites++
+                                    } else if (m.syncStatus != "SYNCED") {
+                                        dao.updateMovement(m.copy(syncStatus = "SYNCED"))
+                                    }
+                                    continue
+                                }
+
                                 val cleanCashbox = m.cashbox.trim().ifBlank { "خزنة السودان" }.take(120)
                                 val cleanCurrency = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(m.currency, cleanCashbox)
                                 val cleanDirection = com.example.util.TreasuryBalanceNormalizer.canonicalDirection(m.direction)
@@ -2095,6 +2408,9 @@ class CloudErpSyncRepository(
                                     "amount" to cleanAmount,
                                     "description" to m.description,
                                     "reference" to m.reference,
+                                    "status" to m.status.ifBlank { "active" },
+                                    "reversedByRef" to m.reversedByRef,
+                                    "reversalReason" to m.reversalReason,
                                     "createdBy" to m.createdBy,
                                     "createdAt" to m.createdAt,
                                     "cloudDocId" to docId,
@@ -2110,6 +2426,7 @@ class CloudErpSyncRepository(
                                     continue
                                 }
                                 batch.set(cRef.collection("movements").document(docId), data, SetOptions.merge())
+                                dao.updateMovement(m.copy(cloudDocId = docId, syncStatus = "SYNCED"))
                                 chunkWrites++
                             }
                             if (chunkWrites > 0) {
@@ -2148,11 +2465,40 @@ class CloudErpSyncRepository(
                 if (canPushTreasury) {
                 runSyncStep("مزامنة تحويلات الخزن", "transfers", critical = true) {
                     var committed = 0
+                    val existingTrfDocs = runCatching {
+                        cRef.collection("transfers").get().await().documents.associateBy { it.id }
+                    }.getOrDefault(emptyMap())
                     transfers.chunked(300).forEach { chunk ->
                         val batch = firestore.batch()
                         var chunkWrites = 0
                         for (t in chunk) {
                             val docId = safeId("TRF-${t.id}-${t.reference}", "TRF-${t.id}")
+                            val existingTrf = existingTrfDocs[docId]
+                            if (existingTrf != null) {
+                                val srvStatus = existingTrf.getString("status").orEmpty()
+                                if (com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(t.status) &&
+                                    !com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(srvStatus)
+                                ) {
+                                    val nowRev = System.currentTimeMillis()
+                                    batch.set(
+                                        cRef.collection("transfers").document(docId),
+                                        mapOf(
+                                            "status" to "reversed",
+                                            "reversedByRef" to t.reversedByRef.ifBlank { "REV-${t.reference}" },
+                                            "reversalReason" to t.reversalReason.ifBlank { "قيد عكسي معتمد" },
+                                            "reversedAt" to nowRev,
+                                            "updatedAt" to nowRev,
+                                            "serverUpdatedBy" to actor,
+                                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                        ),
+                                        SetOptions.merge()
+                                    )
+                                    chunkWrites++
+                                } else if (t.syncStatus != "SYNCED") {
+                                    dao.updateTransfer(t.copy(syncStatus = "SYNCED"))
+                                }
+                                continue
+                            }
                             val data = mapOf(
                                 "id" to t.id,
                                 "reference" to t.reference,
@@ -2165,6 +2511,7 @@ class CloudErpSyncRepository(
                                 "rate" to t.rate,
                                 "destinationAmount" to t.destinationAmount,
                                 "description" to t.description,
+                                "status" to t.status.ifBlank { "active" },
                                 "createdBy" to t.createdBy,
                                 "createdAt" to t.createdAt,
                                 "serverUpdatedBy" to actor,
@@ -2177,6 +2524,7 @@ class CloudErpSyncRepository(
                                 continue
                             }
                             batch.set(cRef.collection("transfers").document(docId), data, SetOptions.merge())
+                            dao.updateTransfer(t.copy(syncStatus = "SYNCED"))
                             chunkWrites++
                         }
                         if (chunkWrites > 0) {
@@ -3035,7 +3383,11 @@ class CloudErpSyncRepository(
                     createdAt = docCreatedAt.takeIf { it > 0L } ?: System.currentTimeMillis(),
                     cloudDocId = doc.id,
                     syncUuid = syncUuid,
-                    updatedAt = doc.safeLong("updatedAt") ?: 0L
+                    updatedAt = doc.safeLong("updatedAt") ?: 0L,
+                    status = doc.safeString("status") ?: "active",
+                    reversedByRef = doc.safeString("reversedByRef") ?: "",
+                    reversalReason = doc.safeString("reversalReason") ?: "",
+                    syncStatus = "SYNCED"
                 )
             }
             val distinctMovements = com.example.util.TreasuryBalanceNormalizer.deduplicateMovements(restoredMovements)
@@ -5157,7 +5509,9 @@ class CloudErpSyncRepository(
     fun observeClusterErpDataRealtime(
         clusterCode: String,
         dao: PmpDao,
-        scope: CoroutineScope
+        scope: CoroutineScope,
+        inventoryDao: ErpInventoryDao? = null,
+        accountingDao: ErpAccountingDao? = null
     ): Flow<Int> = callbackFlow {
         val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
         if (fbUser == null) {
@@ -5206,8 +5560,17 @@ class CloudErpSyncRepository(
 
         val invListener = cRef.collection("invoices")
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
-                if (error == null && snapshot != null) {
-                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                if (error != null) {
+                    updateCollectionSyncMetadata("invoices", hasPendingWrites = false, fromCache = true, docCount = 0, errorMsg = error.message)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    updateCollectionSyncMetadata(
+                        collectionName = "invoices",
+                        hasPendingWrites = snapshot.metadata.hasPendingWrites(),
+                        fromCache = snapshot.metadata.isFromCache(),
+                        docCount = snapshot.size()
+                    )
                     scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             for (dc in snapshot.documentChanges) {
@@ -5280,7 +5643,7 @@ class CloudErpSyncRepository(
                                                 cashbox = payMap["cashbox"] as? String ?: "خزنة السودان",
                                                 amount = (payMap["amount"] as? Number)?.toDouble() ?: 0.0,
                                                 note = payMap["note"] as? String ?: "دفعة سحابية",
-                                                status = "active",
+                                                status = (payMap["status"] as? String)?.trim()?.takeIf { it.isNotBlank() } ?: "active",
                                                 createdBy = (payMap["createdBy"] as? String) ?: "المدير"
                                             )
                                         )
@@ -5301,6 +5664,7 @@ class CloudErpSyncRepository(
         val movListener = cRef.collection("movements")
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
                 if (error != null) {
+                    updateCollectionSyncMetadata("movements", hasPendingWrites = false, fromCache = true, docCount = 0, errorMsg = error.message)
                     RoomTransactionLogger.recordSyncBreakage(
                         operation = "OBSERVE_LIVE_MOVEMENTS",
                         entityType = "movements",
@@ -5311,7 +5675,12 @@ class CloudErpSyncRepository(
                     return@addSnapshotListener
                 }
                 if (snapshot != null) {
-                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                    updateCollectionSyncMetadata(
+                        collectionName = "movements",
+                        hasPendingWrites = snapshot.metadata.hasPendingWrites(),
+                        fromCache = snapshot.metadata.isFromCache(),
+                        docCount = snapshot.size()
+                    )
                     scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             val currentLocalBeforeRemoval = dao.getMovementsDirect()
@@ -5403,7 +5772,11 @@ class CloudErpSyncRepository(
                                         createdAt = docCreatedAt,
                                         cloudDocId = doc.id,
                                         syncUuid = syncUuid,
-                                        updatedAt = doc.safeLong("updatedAt") ?: 0L
+                                        updatedAt = doc.safeLong("updatedAt") ?: 0L,
+                                        status = doc.safeString("status") ?: "active",
+                                        reversedByRef = doc.safeString("reversedByRef") ?: "",
+                                        reversalReason = doc.safeString("reversalReason") ?: "",
+                                        syncStatus = if (snapshot.metadata.hasPendingWrites()) "PENDING" else "SYNCED"
                                     )
                                     if (DeletedRecordsRegistry.isMovementDeleted(candidate)) return@mapNotNull null
                                     candidate
@@ -5412,10 +5785,12 @@ class CloudErpSyncRepository(
                                 if (dedupedLive.isNotEmpty()) dao.upsertMovements(dedupedLive)
 
                                 // On authoritative server snapshots, purge local demo seeds and reconcile movements deleted on server/Web
-                                if (!snapshot.metadata.isFromCache) {
+                                // (NEVER drop local unconfirmed PENDING movements awaiting flush)
+                                if (!snapshot.metadata.isFromCache && !snapshot.metadata.hasPendingWrites()) {
                                     val liveSyncUuids = dedupedLive.mapNotNull { it.syncUuid.trim().takeIf { u -> u.isNotBlank() } }.toSet()
                                     val nowMs = System.currentTimeMillis()
                                     for (localMov in localMovs) {
+                                        if (localMov.syncStatus.equals("PENDING", ignoreCase = true)) continue
                                         val isDemoSeed = com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(localMov)
                                         val stillOnServer = (localMov.cloudDocId.isNotBlank() && liveDocIds.contains(localMov.cloudDocId.trim())) ||
                                             (localMov.syncUuid.isNotBlank() && liveSyncUuids.contains(localMov.syncUuid.trim()))
@@ -5426,10 +5801,11 @@ class CloudErpSyncRepository(
                                         }
                                     }
                                 }
-                            } else if (!snapshot.metadata.isFromCache) {
+                            } else if (!snapshot.metadata.isFromCache && !snapshot.metadata.hasPendingWrites()) {
                                 // Authoritative empty server snapshot (e.g. cashboxes zeroed on Web): clear local demo seeds & deleted cloud rows
                                 val nowMs = System.currentTimeMillis()
                                 dao.getMovementsDirect().forEach { localMov ->
+                                    if (localMov.syncStatus.equals("PENDING", ignoreCase = true)) return@forEach
                                     if (com.example.util.TreasuryBalanceNormalizer.isLocalDemoSeedMovement(localMov) ||
                                         (localMov.cloudDocId.isNotBlank() && (nowMs - localMov.createdAt > 15_000L))
                                     ) {
@@ -5454,8 +5830,12 @@ class CloudErpSyncRepository(
 
         val custListener = cRef.collection("customers")
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
-                if (error == null && snapshot != null) {
-                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                if (error != null) {
+                    updateCollectionSyncMetadata("customers", hasPendingWrites = false, fromCache = true, docCount = 0, errorMsg = error.message)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    updateCollectionSyncMetadata("customers", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
                     scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             for (dc in snapshot.documentChanges) {
@@ -5556,7 +5936,6 @@ class CloudErpSyncRepository(
         val weightsListener = cRef.collection("config").document("inventory_weights")
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
                 if (error == null && snapshot != null && snapshot.exists()) {
-                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
                     scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             @Suppress("UNCHECKED_CAST")
@@ -5574,8 +5953,12 @@ class CloudErpSyncRepository(
 
         val fiListener = cRef.collection("factory_items")
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
-                if (error == null && snapshot != null) {
-                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                if (error != null) {
+                    updateCollectionSyncMetadata("factory_items", hasPendingWrites = false, fromCache = true, docCount = 0, errorMsg = error.message)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    updateCollectionSyncMetadata("factory_items", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
                     scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             for (dc in snapshot.documentChanges) {
@@ -5617,8 +6000,12 @@ class CloudErpSyncRepository(
 
         val cbListener = cRef.collection("cashboxes")
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
-                if (error == null && snapshot != null) {
-                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                if (error != null) {
+                    updateCollectionSyncMetadata("cashboxes", hasPendingWrites = false, fromCache = true, docCount = 0, errorMsg = error.message)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    updateCollectionSyncMetadata("cashboxes", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
                     scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             val localBoxes = dao.getCashboxesDirect()
@@ -5671,8 +6058,12 @@ class CloudErpSyncRepository(
 
         val whListener = cRef.collection("warehouses")
             .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
-                if (error == null && snapshot != null) {
-                    if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
+                if (error != null) {
+                    updateCollectionSyncMetadata("warehouses", hasPendingWrites = false, fromCache = true, docCount = 0, errorMsg = error.message)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    updateCollectionSyncMetadata("warehouses", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
                     scope.launch(Dispatchers.IO + syncExceptionHandler) {
                         try {
                             val localWh = dao.getWarehousesDirect()
@@ -5736,6 +6127,285 @@ class CloudErpSyncRepository(
                 }
             }
 
+        val payListener = cRef.collection("invoice_payments")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error != null) {
+                    updateCollectionSyncMetadata("invoice_payments", false, true, 0, error.message)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    updateCollectionSyncMetadata("invoice_payments", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                        runCatching {
+                            if (!snapshot.isEmpty) {
+                                val pays = snapshot.documents.mapNotNull { doc ->
+                                    val pid = doc.safeLong("id") ?: return@mapNotNull null
+                                    val invId = doc.safeLong("invoiceId") ?: return@mapNotNull null
+                                    InvoicePaymentEntity(
+                                        id = pid,
+                                        invoiceId = invId,
+                                        payDate = doc.safeString("payDate") ?: "2026-10-26",
+                                        cashbox = doc.safeString("cashbox") ?: "خزنة السودان",
+                                        amount = doc.safeDouble("amount") ?: 0.0,
+                                        note = doc.safeString("note") ?: "دفعة سحابية",
+                                        status = doc.safeString("status") ?: "active",
+                                        reversalReason = doc.safeString("reversalReason"),
+                                        createdBy = doc.safeString("createdBy") ?: "المدير",
+                                        createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis()
+                                    )
+                                }
+                                if (pays.isNotEmpty()) dao.upsertInvoicePayments(pays)
+                                trySend(snapshot.size())
+                            }
+                        }
+                    }
+                }
+            }
+
+        val trfListener = cRef.collection("transfers")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error != null) {
+                    updateCollectionSyncMetadata("transfers", false, true, 0, error.message)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    updateCollectionSyncMetadata("transfers", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                        runCatching {
+                            if (!snapshot.isEmpty) {
+                                val list = snapshot.documents.mapNotNull { doc ->
+                                    val tid = doc.safeLong("id") ?: 0L
+                                    val ref = doc.safeString("reference") ?: doc.id
+                                    val created = doc.safeLong("createdAt") ?: System.currentTimeMillis()
+                                    if (DeletedRecordsRegistry.isPreEpoch(created) ||
+                                        (tid > 0L && DeletedRecordsRegistry.isDeleted("transfers", tid)) ||
+                                        DeletedRecordsRegistry.isDeleted("transfers", doc.id)
+                                    ) return@mapNotNull null
+                                    TransferEntity(
+                                        id = tid,
+                                        reference = ref,
+                                        txDate = doc.safeString("txDate") ?: "2026-10-26",
+                                        sourceCashbox = doc.safeString("sourceCashbox") ?: "خزنة السودان",
+                                        destinationCashbox = doc.safeString("destinationCashbox") ?: "خزنة مصر",
+                                        sourceCurrency = doc.safeString("sourceCurrency") ?: "SDG",
+                                        destinationCurrency = doc.safeString("destinationCurrency") ?: "EGP",
+                                        sourceAmount = doc.safeDouble("sourceAmount") ?: 0.0,
+                                        rate = doc.safeDouble("rate") ?: 1.0,
+                                        destinationAmount = doc.safeDouble("destinationAmount") ?: 0.0,
+                                        description = doc.safeString("description") ?: "",
+                                        createdBy = doc.safeString("createdBy") ?: "المدير",
+                                        createdAt = created,
+                                        status = doc.safeString("status") ?: "active",
+                                        reversedByRef = doc.safeString("reversedByRef") ?: "",
+                                        reversalReason = doc.safeString("reversalReason") ?: "",
+                                        syncStatus = if (snapshot.metadata.hasPendingWrites()) "PENDING" else "SYNCED"
+                                    )
+                                }
+                                if (list.isNotEmpty()) dao.upsertTransfers(list)
+                                trySend(snapshot.size())
+                            }
+                        }
+                    }
+                }
+            }
+
+        val smListener = cRef.collection("stock_moves")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error != null) {
+                    updateCollectionSyncMetadata("stock_moves", false, true, 0, error.message)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    updateCollectionSyncMetadata("stock_moves", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                        runCatching {
+                            if (!snapshot.isEmpty) {
+                                val list = snapshot.documents.mapNotNull { doc ->
+                                    val sid = doc.safeLong("id") ?: return@mapNotNull null
+                                    val whId = doc.safeLong("warehouseId") ?: 1L
+                                    val pId = doc.safeLong("productId") ?: 1L
+                                    val created = doc.safeLong("createdAt") ?: System.currentTimeMillis()
+                                    if (DeletedRecordsRegistry.isPreEpoch(created) ||
+                                        DeletedRecordsRegistry.isDeleted("stock_moves", sid) ||
+                                        DeletedRecordsRegistry.isDeleted("stock_moves", doc.id)
+                                    ) return@mapNotNull null
+                                    StockMoveEntity(
+                                        id = sid,
+                                        warehouseId = whId,
+                                        productId = pId,
+                                        quantity = doc.safeDouble("quantity") ?: 0.0,
+                                        kind = doc.safeString("kind") ?: "IN",
+                                        invoiceId = doc.safeLong("invoiceId")?.takeIf { it > 0L },
+                                        note = doc.safeString("note") ?: "",
+                                        createdBy = doc.safeString("createdBy") ?: "المدير",
+                                        createdAt = created,
+                                        syncUuid = doc.safeString("syncUuid") ?: doc.id,
+                                        status = doc.safeString("status") ?: "active",
+                                        reversalReason = doc.safeString("reversalReason") ?: "",
+                                        syncStatus = if (snapshot.metadata.hasPendingWrites()) "PENDING" else "SYNCED"
+                                    )
+                                }
+                                if (list.isNotEmpty()) dao.upsertStockMoves(list)
+                                trySend(snapshot.size())
+                            }
+                        }
+                    }
+                }
+            }
+
+        val halfaListener = cRef.collection("halfa_invoices")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error == null && snapshot != null && !snapshot.isEmpty) {
+                    updateCollectionSyncMetadata("halfa_invoices", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                        runCatching {
+                            val list = snapshot.documents.mapNotNull { doc ->
+                                val id = doc.safeLong("id") ?: return@mapNotNull null
+                                HalfaInvoiceEntity(
+                                    id = id,
+                                    invoiceNo = doc.safeString("invoiceNo") ?: "HINV-$id",
+                                    invoiceDate = doc.safeString("invoiceDate") ?: "2026-10-26",
+                                    cashbox = doc.safeString("cashbox") ?: "خزنة مصر",
+                                    currency = doc.safeString("currency") ?: "EGP",
+                                    warehouseId = doc.safeLong("warehouseId") ?: 1L,
+                                    productId = doc.safeLong("productId") ?: 1L,
+                                    productName = doc.safeString("productName") ?: "منتج",
+                                    quantity = doc.safeDouble("quantity") ?: 0.0,
+                                    unitPrice = doc.safeDouble("unitPrice") ?: 0.0,
+                                    total = doc.safeDouble("total") ?: 0.0,
+                                    factoryMoveId = doc.safeLong("factoryMoveId")?.takeIf { it > 0L },
+                                    note = doc.safeString("note") ?: "",
+                                    status = doc.safeString("status") ?: "active",
+                                    createdBy = doc.safeString("createdBy") ?: "مسؤول التحميل",
+                                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis()
+                                )
+                            }
+                            if (list.isNotEmpty()) dao.upsertHalfaInvoices(list)
+                            trySend(snapshot.size())
+                        }
+                    }
+                }
+            }
+
+        val closingListener = cRef.collection("daily_closings")
+            .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                if (error == null && snapshot != null && !snapshot.isEmpty) {
+                    updateCollectionSyncMetadata("daily_closings", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                    scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                        runCatching {
+                            val list = snapshot.documents.mapNotNull { doc ->
+                                val id = doc.safeLong("id") ?: return@mapNotNull null
+                                DailyClosingEntity(
+                                    id = id,
+                                    closeDate = doc.safeString("closeDate") ?: "",
+                                    cashbox = doc.safeString("cashbox") ?: "خزنة السودان",
+                                    currency = doc.safeString("currency") ?: "SDG",
+                                    bookBalance = doc.safeDouble("bookBalance") ?: 0.0,
+                                    countedBalance = doc.safeDouble("countedBalance") ?: 0.0,
+                                    difference = doc.safeDouble("difference") ?: 0.0,
+                                    notes = doc.safeString("notes") ?: "",
+                                    preparedBy = doc.safeString("preparedBy") ?: "المدير",
+                                    status = doc.safeString("status") ?: "closed",
+                                    closedAt = doc.safeLong("closedAt") ?: System.currentTimeMillis()
+                                )
+                            }
+                            if (list.isNotEmpty()) dao.upsertDailyClosings(list)
+                            trySend(snapshot.size())
+                        }
+                    }
+                }
+            }
+
+        val invMovListener = inventoryDao?.let { iDao ->
+            cRef.collection("inventory_movements")
+                .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                    if (error == null && snapshot != null) {
+                        updateCollectionSyncMetadata("inventory_movements", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                        scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                            runCatching {
+                                restorePhase2InventoryFromCloud(cRef, iDao)
+                                trySend(snapshot.size())
+                            }
+                        }
+                    }
+                }
+        }
+
+        val prListener = inventoryDao?.let { iDao ->
+            cRef.collection("purchase_receipts")
+                .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                    if (error == null && snapshot != null) {
+                        updateCollectionSyncMetadata("purchase_receipts", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                        scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                            runCatching {
+                                restorePhase3ManufacturingFromCloud(cRef, iDao)
+                                trySend(snapshot.size())
+                            }
+                        }
+                    }
+                }
+        }
+
+        val poListener = inventoryDao?.let { iDao ->
+            cRef.collection("production_orders")
+                .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                    if (error == null && snapshot != null) {
+                        updateCollectionSyncMetadata("production_orders", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                        scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                            runCatching {
+                                restorePhase3ManufacturingFromCloud(cRef, iDao)
+                                trySend(snapshot.size())
+                            }
+                        }
+                    }
+                }
+        }
+
+        val qcListener = inventoryDao?.let { iDao ->
+            cRef.collection("qc_inspections")
+                .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                    if (error == null && snapshot != null) {
+                        updateCollectionSyncMetadata("qc_inspections", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                        scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                            runCatching {
+                                restorePhase3ManufacturingFromCloud(cRef, iDao)
+                                trySend(snapshot.size())
+                            }
+                        }
+                    }
+                }
+        }
+
+        val jrnListener = accountingDao?.let { aDao ->
+            cRef.collection("journal_entries")
+                .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                    if (error == null && snapshot != null) {
+                        updateCollectionSyncMetadata("journal_entries", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                        scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                            runCatching {
+                                restorePhase4AccountingFromCloud(cRef, aDao)
+                                trySend(snapshot.size())
+                            }
+                        }
+                    }
+                }
+        }
+
+        val jlnListener = accountingDao?.let { aDao ->
+            cRef.collection("journal_lines")
+                .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                    if (error == null && snapshot != null) {
+                        updateCollectionSyncMetadata("journal_lines", snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                        scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                            runCatching {
+                                restorePhase4AccountingFromCloud(cRef, aDao)
+                                trySend(snapshot.size())
+                            }
+                        }
+                    }
+                }
+        }
+
         awaitClose {
             epochListener.remove()
             tombListener.remove()
@@ -5747,6 +6417,159 @@ class CloudErpSyncRepository(
             fiListener.remove()
             cbListener.remove()
             whListener.remove()
+            payListener.remove()
+            trfListener.remove()
+            smListener.remove()
+            halfaListener.remove()
+            closingListener.remove()
+            invMovListener?.remove()
+            prListener?.remove()
+            poListener?.remove()
+            qcListener?.remove()
+            jrnListener?.remove()
+            jlnListener?.remove()
+        }
+    }
+
+    suspend fun publishAndroidBalanceCheckpoint(
+        clusterCode: String,
+        dao: PmpDao,
+        appVersion: String
+    ): com.example.domain.accounting.CrossPlatformBalanceCheckpoint? = withContext(Dispatchers.IO) {
+        val fbUser = getOrEnsureActiveFirebaseUser() ?: return@withContext null
+        val cp = com.example.domain.accounting.CrossPlatformReconciliationEngine.computeCheckpointPayload(
+            cashboxes = dao.getCashboxesDirect(),
+            movements = dao.getMovementsDirect(),
+            invoices = dao.getInvoicesDirect(),
+            payments = dao.getInvoicePaymentsDirect(),
+            appVersion = appVersion
+        )
+        runCatching {
+            val payload = mapOf(
+                "platform" to "ANDROID",
+                "currencyTotals" to cp.currencyTotals,
+                "arTotals" to cp.arTotals,
+                "cashboxTotals" to cp.cashboxTotals,
+                "movementCount" to cp.movementCount,
+                "invoiceCount" to cp.invoiceCount,
+                "lastSyncedTransactionRef" to cp.lastSyncedTransactionRef,
+                "lastSyncedAtMillis" to cp.lastSyncedAtMillis,
+                "updatedAtMillis" to cp.updatedAtMillis,
+                "appVersion" to appVersion,
+                "reportedBy" to (fbUser.email ?: fbUser.uid),
+                "serverUpdatedAt" to FieldValue.serverTimestamp()
+            )
+            clusterRef(clusterCode).collection("server_status").document("CHECKPOINT_ANDROID")
+                .set(payload, SetOptions.merge()).await()
+        }
+        cp
+    }
+
+    suspend fun runCrossPlatformBalanceReconciliation(
+        clusterCode: String,
+        dao: PmpDao,
+        accountingDao: ErpAccountingDao,
+        appVersion: String
+    ): Result<com.example.domain.accounting.CrossPlatformReconciliationReport> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            publishAndroidBalanceCheckpoint(cleanCluster, dao, appVersion)
+
+            val cbSnap = runCatching { cRef.collection("cashboxes").get(Source.SERVER).await() }
+                .getOrElse { cRef.collection("cashboxes").get().await() }
+            val movSnap = runCatching { cRef.collection("movements").get(Source.SERVER).await() }
+                .getOrElse { cRef.collection("movements").get().await() }
+            val invSnap = runCatching { cRef.collection("invoices").get(Source.SERVER).await() }
+                .getOrElse { cRef.collection("invoices").get().await() }
+            val statusSnap = runCatching { cRef.collection("server_status").get(Source.SERVER).await() }
+                .getOrElse { cRef.collection("server_status").get().await() }
+
+            val centralCashboxes = cbSnap.documents.mapNotNull { doc ->
+                val n = doc.safeString("name")?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                CashboxEntity(id = doc.safeLong("id") ?: 0L, name = n)
+            }
+            val centralMovements = movSnap.documents.mapNotNull { doc ->
+                val rawBox = doc.safeString("cashbox")?.trim().orEmpty().ifBlank { "خزنة السودان" }
+                val docCreated = doc.safeLong("createdAt") ?: 0L
+                MovementEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    txDate = doc.safeString("txDate") ?: "",
+                    cashbox = rawBox,
+                    currency = com.example.util.TreasuryBalanceNormalizer.resolveCanonicalCurrency(doc.safeString("currency"), rawBox),
+                    direction = com.example.util.TreasuryBalanceNormalizer.canonicalDirection(doc.safeString("direction"), doc.safeString("type")),
+                    amount = kotlin.math.abs(doc.safeDouble("amount") ?: 0.0),
+                    description = doc.safeString("description") ?: "",
+                    reference = doc.safeString("reference") ?: doc.id,
+                    createdBy = doc.safeString("createdBy") ?: "المدير",
+                    createdAt = docCreated,
+                    cloudDocId = doc.id,
+                    syncUuid = doc.safeString("syncUuid") ?: "",
+                    updatedAt = doc.safeLong("updatedAt") ?: 0L,
+                    status = doc.safeString("status") ?: "active",
+                    reversedByRef = doc.safeString("reversedByRef") ?: "",
+                    reversalReason = doc.safeString("reversalReason") ?: "",
+                    syncStatus = "SYNCED"
+                )
+            }
+            val centralInvoices = invSnap.documents.mapNotNull { doc ->
+                val invId = doc.safeLong("id") ?: return@mapNotNull null
+                InvoiceEntity(
+                    id = invId,
+                    invoiceNo = doc.safeString("invoiceNo") ?: doc.id,
+                    customerId = doc.safeLong("customerId") ?: 1L,
+                    customerName = doc.safeString("customerName") ?: "عميل",
+                    invoiceDate = doc.safeString("invoiceDate") ?: "",
+                    currency = doc.safeString("currency") ?: "SDG",
+                    subtotal = doc.safeDouble("subtotal") ?: 0.0,
+                    discount = doc.safeDouble("discount") ?: 0.0,
+                    total = doc.safeDouble("total") ?: 0.0,
+                    status = doc.safeString("status") ?: "active",
+                    createdBy = doc.safeString("createdBy") ?: "المدير"
+                )
+            }
+            val centralPayments = dao.getInvoicePaymentsDirect()
+            val localMovs = dao.getMovementsDirect()
+
+            fun parseCp(docId: String): com.example.domain.accounting.CrossPlatformBalanceCheckpoint? {
+                val doc = statusSnap.documents.firstOrNull { it.id.equals(docId, ignoreCase = true) } ?: return null
+                @Suppress("UNCHECKED_CAST")
+                val rawCurMap = (doc.get("currencyTotals") as? Map<String, Any?>).orEmpty()
+                val curTotals = rawCurMap.mapValues { (_, v) -> (v as? Number)?.toDouble() ?: 0.0 }
+                @Suppress("UNCHECKED_CAST")
+                val rawArMap = (doc.get("arTotals") as? Map<String, Any?>).orEmpty()
+                val arTotals = rawArMap.mapValues { (_, v) -> (v as? Number)?.toDouble() ?: 0.0 }
+                return com.example.domain.accounting.CrossPlatformBalanceCheckpoint(
+                    platform = doc.safeString("platform") ?: docId.removePrefix("CHECKPOINT_"),
+                    currencyTotals = curTotals,
+                    arTotals = arTotals,
+                    movementCount = doc.safeLong("movementCount")?.toInt() ?: 0,
+                    invoiceCount = doc.safeLong("invoiceCount")?.toInt() ?: 0,
+                    lastSyncedTransactionRef = doc.safeString("lastSyncedTransactionRef") ?: "NONE",
+                    lastSyncedAtMillis = doc.safeLong("lastSyncedAtMillis") ?: 0L,
+                    updatedAtMillis = doc.safeLong("updatedAtMillis") ?: 0L,
+                    appVersion = doc.safeString("appVersion") ?: ""
+                )
+            }
+
+            val report = com.example.domain.accounting.CrossPlatformReconciliationEngine.reconcile(
+                centralCashboxes = centralCashboxes,
+                centralMovements = centralMovements,
+                centralInvoices = centralInvoices,
+                centralPayments = centralPayments,
+                localCashboxes = dao.getCashboxesDirect(),
+                localMovements = localMovs,
+                journalEntries = accountingDao.getAllJournalEntriesDirect(),
+                journalLines = accountingDao.getAllJournalLinesDirect(),
+                webCheckpoint = parseCp("CHECKPOINT_WEB"),
+                desktopCheckpoint = parseCp("CHECKPOINT_DESKTOP"),
+                androidCheckpoint = parseCp("CHECKPOINT_ANDROID"),
+                pendingWritesCount = localMovs.count { it.syncStatus.equals("PENDING", ignoreCase = true) }
+            )
+            _reconciliationReport.value = report
+            currentSyncConflictCount = report.anomalies.count { kotlin.math.abs(it.varianceAmount) >= 1.0 }
+            refreshUnifiedSyncState()
+            report
         }
     }
 
@@ -6036,6 +6859,56 @@ class CloudErpSyncRepository(
                 count = 1,
                 message = "تم تسجيل شاهد الحذف ($cleanDocId) وحذف المستند من ($collectionName) على السيرفر لمنع استرجاعه"
             )
+            Unit
+        }
+    }
+
+    /**
+     * يعكس حركة مالية في السحابة بوضع حالة reversed دون حذف المستند الأصلي (متوافق مع قواعد Immutable Ledger).
+     */
+    suspend fun reverseMovementInCloud(
+        clusterCode: String,
+        movement: MovementEntity,
+        reason: String,
+        actor: String = currentActorId,
+        dao: PmpDao? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanCluster = safeId(clusterCode, DEFAULT_CLUSTER)
+            val cRef = clusterRef(cleanCluster)
+            val fallbackDoc = if (movement.syncUuid.isNotBlank()) "MOV-${movement.syncUuid}" else "MOV-${movement.id}"
+            val primaryDoc = safeId(movement.cloudDocId.trim().ifBlank { fallbackDoc }, fallbackDoc)
+            val now = System.currentTimeMillis()
+            val payload = mapOf(
+                "status" to "reversed",
+                "reversedByRef" to movement.reversedByRef.ifBlank { "REV-${movement.reference.ifBlank { primaryDoc }}" },
+                "reversalReason" to reason.trim().ifBlank { "قيد عكسي معتمد" }.take(500),
+                "reversedAt" to now,
+                "updatedAt" to now,
+                "serverUpdatedBy" to actor.take(128),
+                "serverUpdatedAt" to FieldValue.serverTimestamp()
+            )
+            val candidateDocs = linkedSetOf(primaryDoc)
+            if (movement.id > 0L) candidateDocs.add("MOV-${movement.id}")
+            var applied = false
+            for (cand in candidateDocs) {
+                val snap = runCatching { cRef.collection("movements").document(cand).get().await() }.getOrNull()
+                if (snap != null && snap.exists()) {
+                    cRef.collection("movements").document(cand).set(payload, SetOptions.merge()).await()
+                    dao?.updateMovement(movement.copy(cloudDocId = cand, syncStatus = "SYNCED"))
+                    applied = true
+                }
+            }
+            if (!applied && movement.syncUuid.isNotBlank()) {
+                val byUuid = runCatching {
+                    cRef.collection("movements").whereEqualTo("syncUuid", movement.syncUuid).limit(5).get().await()
+                }.getOrNull()
+                byUuid?.documents?.forEach { doc ->
+                    doc.reference.set(payload, SetOptions.merge()).await()
+                    dao?.updateMovement(movement.copy(cloudDocId = doc.id, syncStatus = "SYNCED"))
+                    applied = true
+                }
+            }
             Unit
         }
     }

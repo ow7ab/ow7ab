@@ -359,10 +359,14 @@ class AccountingLedgerEngine(
                 .sumOf { it.signedBalance }
 
             val activeInvoices = invoices.filter {
-                it.status == "active" && resolveCanonicalCurrency(it.currency) == targetCur
+                !com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(it.status) &&
+                    resolveCanonicalCurrency(it.currency) == targetCur
             }
             val operationalAr = activeInvoices.sumOf { inv ->
-                val paid = payments.filter { it.invoiceId == inv.id && it.status == "active" }.sumOf { it.amount }
+                val paid = payments.filter {
+                    it.invoiceId == inv.id &&
+                        !com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(it.status)
+                }.sumOf { it.amount }
                 (inv.total - paid).coerceAtLeast(0.0)
             }
             val glAr = trialBalance.rows.firstOrNull { it.accountCode == "1130" }?.signedBalance ?: 0.0

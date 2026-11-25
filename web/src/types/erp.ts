@@ -39,6 +39,8 @@ export interface UserAccount {
   permissions: string;
   serverSyncToken: string;
   remoteServerId?: string;
+  linkedUid?: string;
+  authEmail?: string;
   syncStatus: 'APPROVED_BY_MANAGER' | 'PENDING_MANAGER_APPROVAL' | 'REJECTED' | 'READY_FOR_SYNC';
   active: boolean;
   isCurrentSession?: boolean;

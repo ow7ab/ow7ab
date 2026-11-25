@@ -96,14 +96,29 @@ function startLoopbackRendererServer({ rendererDistDir, preferredPort = 47821 })
       });
     };
 
-    const listenOnPort = (port) => {
+    const portCandidates = Array.from(
+      new Set([preferredPort, preferredPort + 1, preferredPort + 2, 0])
+    );
+    let candidateIdx = 0;
+    let retriedPreferred = false;
+
+    const listenOnNextCandidate = () => {
+      const port = portCandidates[candidateIdx] ?? 0;
       const server = http.createServer(requestHandler);
       server.once('error', (err) => {
-        if (err.code === 'EADDRINUSE' && port !== 0) {
-          listenOnPort(0);
-        } else {
-          reject(err);
+        if (err.code === 'EADDRINUSE') {
+          if (candidateIdx === 0 && !retriedPreferred) {
+            retriedPreferred = true;
+            setTimeout(listenOnNextCandidate, 180);
+            return;
+          }
+          if (candidateIdx + 1 < portCandidates.length) {
+            candidateIdx += 1;
+            listenOnNextCandidate();
+            return;
+          }
         }
+        reject(err);
       });
       server.listen(port, '127.0.0.1', () => {
         const addr = server.address();
@@ -112,7 +127,7 @@ function startLoopbackRendererServer({ rendererDistDir, preferredPort = 47821 })
       });
     };
 
-    listenOnPort(preferredPort);
+    listenOnNextCandidate();
   });
 }
 

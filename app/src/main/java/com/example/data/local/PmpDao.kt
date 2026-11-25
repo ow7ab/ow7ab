@@ -28,6 +28,9 @@ interface PmpDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMovement(movement: MovementEntity): Long
 
+    @Update
+    suspend fun updateMovement(movement: MovementEntity)
+
     @Query("SELECT * FROM movements WHERE id = :id LIMIT 1")
     suspend fun getMovementByIdDirect(id: Long): MovementEntity?
 
@@ -62,6 +65,9 @@ interface PmpDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTransfer(transfer: TransferEntity): Long
 
+    @Update
+    suspend fun updateTransfer(transfer: TransferEntity)
+
     @Query("DELETE FROM transfers WHERE id = :id")
     suspend fun deleteTransferById(id: Long)
 
@@ -74,6 +80,9 @@ interface PmpDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDailyClosing(closing: DailyClosingEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertDailyClosings(closings: List<DailyClosingEntity>)
 
     // --- Customers ---
     @Query("SELECT * FROM customers ORDER BY name ASC")
@@ -559,6 +568,7 @@ interface PmpDao {
                    MAX(0.0, COALESCE(SUM(CASE WHEN kind IN ('IN', 'RETURN', 'RETURN_IN', 'CANCEL', 'وارد', 'مرتجع', 'توريد', 'إضافة') THEN ABS(quantity) ELSE -ABS(quantity) END), 0.0)) AS whNet
             FROM stock_moves
             WHERE productId IN (SELECT id FROM products)
+              AND UPPER(TRIM(COALESCE(status, 'active'))) NOT IN ('CANCELLED', 'REVERSED', 'VOID', 'ملغاة', 'ملغي')
             GROUP BY productId, warehouseId
         )
         GROUP BY productId
@@ -572,6 +582,7 @@ interface PmpDao {
                UPPER(TRIM(currency)) AS currency,
                COALESCE(SUM(CASE WHEN UPPER(TRIM(direction)) IN ('وارد', 'IN', 'INCOME', 'DEPOSIT', 'قبض', 'توريد', 'إيداع', 'ايداع') THEN ABS(amount) ELSE -ABS(amount) END), 0.0) AS netBalance
         FROM movements
+        WHERE UPPER(TRIM(COALESCE(status, 'active'))) NOT IN ('CANCELLED', 'REVERSED', 'VOID', 'ملغاة', 'ملغي')
         GROUP BY TRIM(cashbox), TRIM(currency)
         """
     )
@@ -582,6 +593,7 @@ interface PmpDao {
         SELECT UPPER(TRIM(currency)) AS currency,
                COALESCE(SUM(CASE WHEN UPPER(TRIM(direction)) IN ('وارد', 'IN', 'INCOME', 'DEPOSIT', 'قبض', 'توريد', 'إيداع', 'ايداع') THEN ABS(amount) ELSE -ABS(amount) END), 0.0) AS netBalance
         FROM movements
+        WHERE UPPER(TRIM(COALESCE(status, 'active'))) NOT IN ('CANCELLED', 'REVERSED', 'VOID', 'ملغاة', 'ملغي')
         GROUP BY UPPER(TRIM(currency))
         """
     )

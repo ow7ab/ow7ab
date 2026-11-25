@@ -56,10 +56,10 @@ fun UsersScreen(
     var showPermissionHistoryDialog by remember { mutableStateOf(false) }
 
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = when {
-        isSuperAdmin -> listOf("حسابات المستخدمين", "+ إنشاء حساب", "الأرشيف")
-        isManager || isAuthorizedRbacAdmin -> listOf("حسابات المستخدمين (إشراف)")
-        else -> listOf("حسابي الحالي")
+    val tabs = if (isSuperAdmin) {
+        listOf("حسابات المستخدمين", "+ إنشاء حساب", "الأرشيف")
+    } else {
+        listOf("حسابي الحالي")
     }
 
     // Form state for creating a new user account

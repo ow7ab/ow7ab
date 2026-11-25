@@ -846,4 +846,104 @@ object StatementPdfAndExcelExporter {
         }
         context.startActivity(chooser)
     }
+
+    fun redactHealthTelemetry(raw: String): String {
+        return raw
+            .replace(Regex("Bearer\\s+[A-Za-z0-9\\-_.~+/]+=*", RegexOption.IGNORE_CASE), "Bearer [REDACTED]")
+            .replace(Regex("\\beyJ[A-Za-z0-9\\-_]+\\.[A-Za-z0-9\\-_]+\\.[A-Za-z0-9\\-_]+"), "[JWT_REDACTED]")
+            .replace(Regex("AIza[0-9A-Za-z\\-_]{20,}"), "[API_KEY_REDACTED]")
+            .replace(Regex("(pinOrPassword|password|secret|idToken|refreshToken|accessToken)\\s*[:=]\\s*[^\\s,;]+", RegexOption.IGNORE_CASE), "$1=[REDACTED]")
+    }
+
+    fun exportHealthReportToPdf(
+        context: Context,
+        reportTitle: String,
+        subtitle: String,
+        headers: List<String>,
+        rows: List<List<String>>,
+        shareAfterExport: Boolean = false
+    ): Result<String> {
+        return runCatching {
+            val pdfDocument = PdfDocument()
+            val pageInfo = PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, 1).create()
+            var page = pdfDocument.startPage(pageInfo)
+            var canvas = page.canvas
+
+            val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(15, 23, 42)
+                textSize = 15f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            }
+            val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(71, 85, 105)
+                textSize = 10f
+            }
+            val rowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(30, 41, 59)
+                textSize = 9f
+            }
+
+            var y = 36f
+            canvas.drawText(redactHealthTelemetry(reportTitle).take(85), 24f, y, titlePaint)
+            y += 18f
+            canvas.drawText(redactHealthTelemetry(subtitle).take(100), 24f, y, subPaint)
+            y += 18f
+            canvas.drawText(headers.joinToString(" | ").take(105), 24f, y, titlePaint.apply { textSize = 9.5f })
+            y += 16f
+
+            var pageNum = 1
+            for (row in rows) {
+                if (y > PAGE_HEIGHT - 40f) {
+                    pdfDocument.finishPage(page)
+                    pageNum++
+                    page = pdfDocument.startPage(PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNum).create())
+                    canvas = page.canvas
+                    y = 36f
+                }
+                val line = redactHealthTelemetry(row.joinToString(" | ")).take(115)
+                canvas.drawText(line, 24f, y, rowPaint)
+                y += 14f
+            }
+            pdfDocument.finishPage(page)
+
+            val fileName = "PMP_System_Health_${SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())}.pdf"
+            val shareDir = File(context.cacheDir, "PMP_Reports").apply { mkdirs() }
+            val shareFile = File(shareDir, fileName)
+            FileOutputStream(shareFile).use { pdfDocument.writeTo(it) }
+
+            var displayPath = shareFile.absolutePath
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                runCatching {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                        put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
+                        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/PMP_Reports")
+                        put(MediaStore.Downloads.IS_PENDING, 1)
+                    }
+                    val resolver = context.contentResolver
+                    val uri = resolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+                    if (uri != null) {
+                        resolver.openOutputStream(uri)?.use { pdfDocument.writeTo(it) }
+                        values.clear()
+                        values.put(MediaStore.Downloads.IS_PENDING, 0)
+                        resolver.update(uri, values, null, null)
+                        displayPath = "Downloads/PMP_Reports/$fileName"
+                    }
+                }
+            }
+            pdfDocument.close()
+
+            if (shareAfterExport) {
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", shareFile)
+                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/pdf"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_SUBJECT, reportTitle)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(Intent.createChooser(sendIntent, reportTitle).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+            }
+            displayPath
+        }
+    }
 }

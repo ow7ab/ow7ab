@@ -118,7 +118,15 @@ export const PurchasesModuleView: React.FC = () => {
           createdAt: moveId
         };
 
-        await ErpDataService.saveRecord('factory_moves', safeDocId, newMove, userProfile?.username);
+        const purchaseOps: any[] = [
+          {
+            kind: 'merge',
+            collectionName: 'factory_moves',
+            docId: safeDocId,
+            payload: newMove,
+            checkDuplicateFinancial: false
+          }
+        ];
 
         if (paidCashbox && numAmount > 0) {
           const boxObj = cashboxes.find((c) => c.name === paidCashbox);
@@ -138,19 +146,24 @@ export const PurchasesModuleView: React.FC = () => {
             createdBy: actor,
             createdAt: movId
           };
-          await ErpDataService.handleTransactionCommit({
+          purchaseOps.push({
+            kind: 'merge',
             collectionName: 'movements',
             docId: movDocId,
             payload: cashMov,
-            actorUsername: userProfile?.username
+            checkDuplicateFinancial: true
           });
         }
 
-        await ErpDataService.logAudit(
-          userProfile?.username || 'WEB',
-          'PURCHASE_SUPPLY',
-          `توريد ${numQty} ${item.unit} من ${item.name} — ${newMove.counterparty}`
-        );
+        await ErpDataService.commitAtomicTransactionBundle({
+          actorUsername: userProfile?.username,
+          operations: purchaseOps,
+          auditLog: {
+            username: userProfile?.username || 'WEB',
+            action: 'PURCHASE_SUPPLY',
+            detail: `توريد ذري ${numQty} ${item.unit} من ${item.name} — ${newMove.counterparty}`
+          }
+        });
         return { resultReference: safeDocId };
       }
     });

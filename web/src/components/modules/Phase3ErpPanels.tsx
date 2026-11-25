@@ -237,7 +237,7 @@ export const WebProcurementGrnPanel: React.FC<{
           currency: receipt.currency,
           performedBy: actor
         });
-        await ErpDataService.persistJournalPayload(grnJournal).catch(() => {});
+        await ErpDataService.persistJournalPayload(grnJournal);
 
         if (receipt.acceptedQty > 0) {
           const fm: FactoryMove = {
@@ -715,7 +715,7 @@ export const WebProductionOrderQcPanel: React.FC<{
           actor,
           currency: 'EGP'
         });
-        await ErpDataService.persistJournalPayload(issueJournal).catch(() => {});
+        await ErpDataService.persistJournalPayload(issueJournal);
         await ErpDataService.logAudit(actor, 'ISSUE_PRODUCTION_MATERIALS', `صرف ${issueQty} ${mat.unit} من ${mat.name} لأمر ${updatedOrder.orderNo}`);
         return { resultReference: updatedOrder.syncUuid, result: updatedOrder };
       }
@@ -789,7 +789,7 @@ export const WebProductionOrderQcPanel: React.FC<{
             inspectorName: actor,
             currency: 'EGP'
           });
-          await ErpDataService.persistJournalPayload(fgJournal).catch(() => {});
+          await ErpDataService.persistJournalPayload(fgJournal);
         }
 
         await ErpDataService.logAudit(

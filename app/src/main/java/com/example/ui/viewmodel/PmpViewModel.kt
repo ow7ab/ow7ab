@@ -59,6 +59,9 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
     private val _serverHealthReport = MutableStateFlow<ServerHealthReport?>(null)
     val serverHealthReport: StateFlow<ServerHealthReport?> = _serverHealthReport.asStateFlow()
 
+    val unifiedSyncSnapshot = cloudErpSyncRepo.unifiedSyncSnapshot
+    val crossPlatformReconciliationReport = cloudErpSyncRepo.reconciliationReport
+
     val serverClusterCode = MutableStateFlow(CloudErpSyncRepository.DEFAULT_CLUSTER)
 
     // مراقبة اتصال الشبكة في الوقت الحقيقي لضمان تنفيذ وتسلسل العمليات حصرياً على السيرفر السحابي
@@ -1068,6 +1071,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch(Dispatchers.IO) {
                 runCatching { idempotencyGuard.recoverPendingOperations() }
                 isNetworkOnline.collect { online ->
+                    cloudErpSyncRepo.setOnlineStateForSync(online)
                     if (online && !wasNetworkOnlineForRecovery) {
                         runCatching {
                             val recovered = idempotencyGuard.recoverPendingOperations()
@@ -1076,6 +1080,10 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                             }
                             if (confirmed > 0) {
                                 postMessage("تم التحقق التلقائي بعد عودة الاتصال: تم تأكيد $confirmed عملية سابقة.")
+                            }
+                            if (cloudErpSyncRepo.getOrEnsureActiveFirebaseUser() != null && isSessionAuthenticated.value) {
+                                persistAndSyncToServer()
+                                runCrossPlatformReconciliation()
                             }
                         }
                     }
@@ -1459,16 +1467,17 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             }
             val actor = resolveUserActor("المدير")
             val res = repository.deleteMovement(id, actor)
-            res.map { deletedMov ->
-                cloudErpSyncRepo.deleteMovementFromCloud(
-                    clusterCode = serverClusterCode.value,
-                    movementId = id,
-                    reference = deletedMov?.reference.orEmpty(),
-                    cloudDocId = deletedMov?.cloudDocId.orEmpty(),
-                    syncUuid = deletedMov?.syncUuid.orEmpty(),
-                    actor = actor
-                )
-                postMessage("تم حذف الحركة المالية نهائياً ومزامنة الحذف مع السيرفر بنجاح")
+            res.map { reversedMov ->
+                if (reversedMov != null) {
+                    cloudErpSyncRepo.reverseMovementInCloud(
+                        clusterCode = serverClusterCode.value,
+                        movement = reversedMov,
+                        reason = reversedMov.reversalReason.ifBlank { "عكس حركة مالية معتمد بواسطة $actor" },
+                        actor = actor,
+                        dao = repository.getDao()
+                    )
+                }
+                postMessage("تم تنفيذ القيد العكسي الموثق للحركة المالية ومزامنته مع السيرفر بنجاح (سجل غير قابل للحذف)")
                 persistAndSyncToServer()
                 "MOV-$id" to Unit
             }
@@ -1869,19 +1878,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             onComplete = onComplete
         ) { _ ->
             val res = repository.deleteInvoicePermanently(invoiceId, user)
-            res.map { deletedInv ->
-                cloudErpSyncRepo.deleteInvoiceFromCloud(
-                    clusterCode = serverClusterCode.value,
-                    invoiceId = deletedInv.id,
-                    invoiceNo = deletedInv.invoiceNo,
-                    actor = user
-                )
+            res.map { cancelledInv ->
                 kotlinx.coroutines.withContext(Dispatchers.IO) {
                     DatabaseBackupManager.saveLocalSnapshot(getApplication(), repository.getDao())
                 }
-                postMessage("تم الحذف النهائي للفاتورة ${deletedInv.invoiceNo} (${deletedInv.customerName}) من السيرفر")
+                postMessage("تم إغلاق الفاتورة ${cancelledInv.invoiceNo} (${cancelledInv.customerName}) وعكس قيودها مالياً ومخزنياً بسجل غير قابل للحذف")
                 persistAndSyncToServer()
-                deletedInv.invoiceNo to deletedInv
+                cancelledInv.invoiceNo to cancelledInv
             }
         }
     }
@@ -2593,11 +2596,25 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                 serverEndpoint = serverEndpoint,
                 actor = resolveUserActor("Admin")
             )
-            res.map { createdUser ->
+            res.map { createdUserId ->
+                val createdAccount = repository.getDao().getUserById(createdUserId)
+                if (createdAccount != null && pinOrPassword.trim().length >= 6) {
+                    val authEmail = cloudErpSyncRepo.resolveCorporateAuthEmail(username, phoneOrEmail)
+                    val provisionedUid = cloudErpSyncRepo.provisionFirebaseEmailAccount(authEmail, pinOrPassword.trim())
+                    val enrichedAccount = if (!provisionedUid.isNullOrBlank()) {
+                        val updated = createdAccount.copy(remoteServerId = provisionedUid)
+                        repository.getDao().updateUserAccount(updated)
+                        updated
+                    } else {
+                        createdAccount
+                    }
+                    cloudErpSyncRepo.syncSingleUserToCloud(serverClusterCode.value, enrichedAccount)
+                    cloudErpSyncRepo.syncRbacDirectoryForAccount(serverClusterCode.value, enrichedAccount, provisionedUid)
+                }
                 postMessage("تم إنشاء حساب المستخدم ($fullName) ورفعه إلى سيرفر Google Cloud للمزامنة الفورية")
                 persistAndSyncToServer()
                 syncAllAccountsToGoogleCloud(clusterCode = serverClusterCode.value, silent = true)
-                "USR-$createdUser" to createdUser
+                "USR-$createdUserId" to createdUserId
             }
         }
     }
@@ -2606,7 +2623,40 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = repository.switchActiveUser(userId, pinInput)
             res.onSuccess { user ->
-                postMessage("تم تبديل الجلسة النشطة إلى: ${user.fullName} (${user.role})")
+                com.example.util.UserSessionManager.suppressDestructiveResetOnSwitch = true
+                try {
+                    val cleanPin = pinInput?.trim().orEmpty()
+                    val extraEmails = listOfNotNull(
+                        user.phoneOrEmail.trim().takeIf { it.contains("@") },
+                        cloudErpSyncRepo.resolveCorporateAuthEmail(user.username, user.phoneOrEmail)
+                    )
+                    val signedIn = if (cleanPin.isNotBlank()) {
+                        cloudErpSyncRepo.signInFirebaseWithCredentialsIfAvailable(
+                            identity = user.username.ifBlank { user.userCode },
+                            secret = cleanPin,
+                            extraEmails = extraEmails
+                        )
+                    } else null
+                    if (signedIn == null) {
+                        val existingFb = runCatching { Firebase.auth.currentUser }.getOrNull()
+                        val existingEmail = existingFb?.email?.trim()?.lowercase(java.util.Locale.ROOT).orEmpty()
+                        val sameUser = existingEmail.isNotBlank() &&
+                            (existingEmail in extraEmails.map { it.lowercase(java.util.Locale.ROOT) } ||
+                                user.remoteServerId == existingFb?.uid)
+                        if (existingFb != null && !sameUser) {
+                            runCatching { Firebase.auth.signOut() }
+                        }
+                    }
+                } finally {
+                    com.example.util.UserSessionManager.suppressDestructiveResetOnSwitch = false
+                }
+                completeAuthenticatedSessionLogin(
+                    user = user,
+                    method = if (pinInput != null) "ACCOUNT_SWITCH_PIN" else "ACCOUNT_SWITCH",
+                    bindBiometricIfFirstOrSameUser = false
+                ) { switched ->
+                    postMessage("تم تبديل الجلسة النشطة بالكامل إلى: ${switched.fullName} (${switched.role})")
+                }
             }.onFailure {
                 postMessage(it.message ?: "تعذر تبديل حساب المستخدم", isError = true)
             }
@@ -3568,7 +3618,12 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
             if (matchedInCluster != null) {
                 if (activateSession) {
-                    repository.switchActiveUser(matchedInCluster.id, matchedInCluster.pinOrPassword)
+                    repository.switchActiveUser(matchedInCluster.id, pinInput = null)
+                    completeAuthenticatedSessionLogin(
+                        user = matchedInCluster,
+                        method = "CLOUD_CODE_LINK",
+                        bindBiometricIfFirstOrSameUser = false
+                    )
                 }
                 _cloudSyncState.value = "تم ربط ومزامنة الحساب ${matchedInCluster.userCode} من سيرفر Google Cloud"
                 postMessage("تم استيراد وربط حساب ${matchedInCluster.fullName} وصلاحياته المعتمدة (${matchedInCluster.permissions}) من سيرفر Google Cloud بنجاح")
@@ -3703,12 +3758,14 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     }
             }
 
-            // 3. Real-time multi-user listener for ERP operational data (invoices, movements, customers)
+            // 3. Real-time multi-user listener for ALL ERP operational collections (invoices, movements, transfers, stock_moves, payments, manufacturing, accounting)
             launch {
                 cloudErpSyncRepo.observeClusterErpDataRealtime(
                     clusterCode = serverClusterCode.value,
                     dao = repository.getDao(),
-                    scope = viewModelScope
+                    scope = viewModelScope,
+                    inventoryDao = database.erpInventoryDao(),
+                    accountingDao = database.erpAccountingDao()
                 )
                     .catch { Log.w("PmpViewModel", "Cluster ERP data observer warning: ${it.message}") }
                     .collect {
@@ -3778,6 +3835,18 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 _cloudSyncState.value = report.message
             }
+        }
+    }
+
+    fun runCrossPlatformReconciliation(onComplete: ((Boolean) -> Unit)? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = cloudErpSyncRepo.runCrossPlatformBalanceReconciliation(
+                clusterCode = serverClusterCode.value,
+                dao = repository.getDao(),
+                accountingDao = database.erpAccountingDao(),
+                appVersion = BuildConfig.VERSION_NAME
+            )
+            onComplete?.invoke(res.isSuccess)
         }
     }
 
@@ -4139,10 +4208,43 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                         method = "PASSWORD",
                         bindBiometricIfFirstOrSameUser = true
                     ) { authenticated ->
-                        // Background cloud user sync & parity update
+                        // Synchronize & isolate Firebase Auth identity for the authenticated ERP user
                         viewModelScope.launch(Dispatchers.IO) {
+                            com.example.util.UserSessionManager.suppressDestructiveResetOnSwitch = true
                             try {
-                                cloudErpSyncRepo.getOrEnsureActiveFirebaseUser()
+                                val extraEmails = listOfNotNull(
+                                    authenticated.phoneOrEmail.trim().takeIf { it.contains("@") },
+                                    cloudErpSyncRepo.resolveCorporateAuthEmail(authenticated.username, authenticated.phoneOrEmail)
+                                )
+                                val signedInFb = cloudErpSyncRepo.signInFirebaseWithCredentialsIfAvailable(
+                                    identity = cleanIdentity,
+                                    secret = cleanSecret,
+                                    extraEmails = extraEmails
+                                )
+                                if (signedInFb == null) {
+                                    // Never leak a prior user's Firebase session to a different logged-in account
+                                    val existingFb = runCatching { Firebase.auth.currentUser }.getOrNull()
+                                    val existingEmail = existingFb?.email?.trim()?.lowercase(java.util.Locale.ROOT).orEmpty()
+                                    val matchesAuthenticated = existingEmail.isNotBlank() &&
+                                        (existingEmail in extraEmails.map { it.lowercase(java.util.Locale.ROOT) } ||
+                                            authenticated.remoteServerId == existingFb?.uid)
+                                    if (existingFb != null && !matchesAuthenticated) {
+                                        runCatching { Firebase.auth.signOut() }
+                                    }
+                                    if (cleanSecret.length >= 6 && cloudErpSyncRepo.getOrEnsureActiveFirebaseUser() == null) {
+                                        val authEmail = cloudErpSyncRepo.resolveCorporateAuthEmail(authenticated.username, authenticated.phoneOrEmail)
+                                        cloudErpSyncRepo.provisionFirebaseEmailAccount(authEmail, cleanSecret)
+                                        cloudErpSyncRepo.signInFirebaseWithCredentialsIfAvailable(authenticated.username, cleanSecret, extraEmails)
+                                    }
+                                }
+                                cloudErpSyncRepo.getOrEnsureActiveFirebaseUser()?.let { activeFb ->
+                                    cloudErpSyncRepo.ensureOwnClusterMemberRegistration(
+                                        clusterCode = serverClusterCode.value,
+                                        account = authenticated,
+                                        fbUid = activeFb.uid,
+                                        fbEmail = activeFb.email
+                                    )
+                                }
                                 val devId = com.example.util.BiometricPreferenceManager.getDeviceIdentifier(app)
                                 cloudErpSyncRepo.pullAndMergeCloudUsers(serverClusterCode.value, repository.getDao(), authenticated.id, devId)
                                 if (com.example.util.PasswordSecurityUtil.isPbkdf2Hash(authenticated.pinOrPassword)) {
@@ -4150,6 +4252,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                             } catch (e: Exception) {
                                 Log.w("PmpViewModel", "Async post-login user sync note: ${e.message}")
+                            } finally {
+                                com.example.util.UserSessionManager.suppressDestructiveResetOnSwitch = false
                             }
                         }
                         postMessage("مرحباً بك ${authenticated.fullName} • الصلاحيات: ${authenticated.permissions}")
@@ -4214,8 +4318,7 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     val resolvedReason = when {
                         matchedAccount != null -> localMsg.ifBlank { "كلمة المرور غير صحيحة للحساب ($cleanIdentity)." }
                         !cloudError.isNullOrBlank() -> cloudError!!
-                        !hasActiveCloudSession -> "اسم المستخدم ($cleanIdentity) غير موجود محلياً بعد أو كلمة المرور غير صحيحة. تأكد من البيانات أو اربط الجهاز بالسحاب مرة واحدة لجلب حسابات الموظفين."
-                        else -> localMsg.ifBlank { "اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات أو مراجعة مدير النظام." }
+                        else -> localMsg.ifBlank { "اسم المستخدم ($cleanIdentity) غير موجود أو كلمة المرور غير صحيحة. تأكد من البيانات أو اربط الجهاز بحساب Google المعتمد مرة واحدة لمزامنة الحسابات." }
                     }
                     val lockoutAfterFail = com.example.util.AuthSecurityManager.recordFailedLoginAttempt(
                         context = app,
@@ -4463,6 +4566,20 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             )
             val res = repository.generatePasswordResetCode(identity, channel, providedOtpCode = issuedOtp)
             res.onSuccess { (code, user) ->
+                if (channel.equals("EMAIL", ignoreCase = true)) {
+                    val resetEmails = listOfNotNull(
+                        user.phoneOrEmail.trim().lowercase(java.util.Locale.ROOT).takeIf { it.contains("@") },
+                        cloudErpSyncRepo.resolveCorporateAuthEmail(user.username, user.phoneOrEmail).takeIf { it.contains("@") },
+                        identity.trim().lowercase(java.util.Locale.ROOT).takeIf { it.contains("@") }
+                    ).distinct()
+                    for (em in resetEmails) {
+                        val sent = runCatching {
+                            Firebase.auth.sendPasswordResetEmail(em).await()
+                            true
+                        }.getOrDefault(false)
+                        if (sent) break
+                    }
+                }
                 refreshSecurityStateForUser(user)
                 persistAndSyncToServer()
                 onCodeReady(code, user)
@@ -5040,11 +5157,13 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
         DeviceSessionStore.clearActiveSession(app)
         com.example.util.BiometricAuthManager.clearRecentAuthentication(app)
         stopCloudRealtimeSync()
+        com.example.util.UserSessionManager.suppressDestructiveResetOnSwitch = false
         if (clearBiometrics) {
             com.example.util.BiometricPreferenceManager.clearBinding(app)
         }
         refreshSecurityStateForUser(null)
         viewModelScope.launch {
+            runCatching { Firebase.auth.signOut() }
             repository.getDao().setActiveSessionUser(-1L)
             onLoggedOut()
         }

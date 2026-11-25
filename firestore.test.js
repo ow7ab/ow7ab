@@ -1116,6 +1116,331 @@ test("24. Active Accountant/Employee self-get via remoteServerId, health probes,
   );
 });
 
+test("25. Anonymous Auth Isolation: anonymous sign_in_provider is denied user_accounts list/get, cluster_members ADMIN self-creation, and ERP read/create", async () => {
+  await seedClusterRbac();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("user_accounts").doc("USR-SD-1001").set({
+      userCode: "USR-SD-1001",
+      username: "sudan_emp",
+      linkedUid: EMPLOYEE_SD_UID,
+      active: true,
+    });
+    await cRef.collection("invoices").doc("INV-25").set({
+      invoiceNo: "INV-25",
+      customerName: "عميل الخرطوم",
+      branch: "فرع السودان (SD-001)",
+      total: 1000,
+      subtotal: 1000,
+    });
+    await cRef.collection("movements").doc("MOV-25").set({
+      id: 2501,
+      cashbox: "خزنة السودان",
+      currency: "SDG",
+      direction: "وارد",
+      amount: 1000,
+      branch: "فرع السودان (SD-001)",
+    });
+  });
+
+  const ANON_UID = "anon_session_901";
+  const anonDb = testEnv
+    .authenticatedContext(ANON_UID, { firebase: { sign_in_provider: "anonymous" } })
+    .firestore();
+  const cAnon = anonDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Anonymous auth cannot list or get user_accounts
+  await assertFails(cAnon.collection("user_accounts").get());
+  await assertFails(cAnon.collection("user_accounts").doc("USR-SD-1001").get());
+
+  // Anonymous auth cannot self-create ADMIN (or EMPLOYEE) in cluster_members even with active userCode
+  await assertFails(
+    cAnon.collection("cluster_members").doc(ANON_UID).set({
+      uid: ANON_UID,
+      userCode: "USR-SD-1001",
+      roleKey: "ADMIN",
+      branch: "ALL",
+      active: true,
+    })
+  );
+  await assertFails(
+    cAnon.collection("cluster_members").doc(ANON_UID).set({
+      uid: ANON_UID,
+      userCode: "USR-SD-1001",
+      roleKey: "EMPLOYEE",
+      branch: "فرع السودان (SD-001)",
+      active: true,
+    })
+  );
+
+  // Anonymous auth has zero read/create access to operational ERP collections or linked_accounts
+  await assertFails(cAnon.collection("invoices").get());
+  await assertFails(cAnon.collection("invoices").doc("INV-25").get());
+  await assertFails(
+    cAnon.collection("invoices").doc("INV-ANON-NEW").set({
+      customerName: "عميل مجهول",
+      total: 500,
+      subtotal: 500,
+    })
+  );
+  await assertFails(cAnon.collection("movements").get());
+  await assertFails(cAnon.collection("movements").doc("MOV-25").get());
+  await assertFails(
+    cAnon.collection("movements").doc("MOV-ANON-NEW").set({
+      cashbox: "خزنة السودان",
+      currency: "SDG",
+      direction: "وارد",
+      amount: 500,
+    })
+  );
+  await assertFails(
+    anonDb.collection("linked_accounts").doc("USR-ANON-1").set(
+      validLinkedAccountPayload({ userCode: "USR-ANON-1", ownerId: ANON_UID })
+    )
+  );
+});
+
+test("26. Non-Verified User & Privilege Boundaries: blocks cluster_members self-promotion via active userCode, cross-user user_accounts read/list, and Manager admin-token escalation", async () => {
+  await seedClusterRbac();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("user_accounts").doc("USR-SD-1001").set({
+      userCode: "USR-SD-1001",
+      username: "sudan_emp",
+      phoneOrEmail: "emp@pmp.sd",
+      linkedUid: EMPLOYEE_SD_UID,
+      branch: "فرع السودان (SD-001)",
+      active: true,
+    });
+    await cRef.collection("user_accounts").doc("USR-ACC-1").set({
+      userCode: "USR-ACC-1",
+      username: "acc_omar",
+      phoneOrEmail: "acc@pmp.sd",
+      linkedUid: ACCOUNTANT_UID,
+      branch: "ALL",
+      active: true,
+    });
+  });
+
+  const UNVERIFIED_UID = "unverified_user_888";
+  const SPOOF_BOOT_UID = "unverified_boot_889";
+  const unverifiedDb = testEnv
+    .authenticatedContext(UNVERIFIED_UID, { email: "new.emp@pmp.sd", email_verified: false })
+    .firestore();
+  const unverifiedBootDb = testEnv
+    .authenticatedContext(SPOOF_BOOT_UID, { email: "oaw7ab@gmail.com", email_verified: false })
+    .firestore();
+  const empDb = testEnv
+    .authenticatedContext(EMPLOYEE_SD_UID, { email: "emp@pmp.sd", email_verified: true })
+    .firestore();
+  const managerDb = testEnv.authenticatedContext(MANAGER_UID).firestore();
+
+  const cUnv = unverifiedDb.collection("erp_clusters").doc(CLUSTER);
+  const cSpoof = unverifiedBootDb.collection("erp_clusters").doc(CLUSTER);
+  const cEmp = empDb.collection("erp_clusters").doc(CLUSTER);
+  const cMgr = managerDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Regular non-verified user CANNOT self-promote in cluster_members using an existing active userCode
+  await assertFails(
+    cUnv.collection("cluster_members").doc(UNVERIFIED_UID).set({
+      uid: UNVERIFIED_UID,
+      userCode: "USR-SD-1001",
+      roleKey: "ADMIN",
+      branch: "ALL",
+      active: true,
+    })
+  );
+  await assertFails(
+    cUnv.collection("cluster_members").doc(UNVERIFIED_UID).set({
+      uid: UNVERIFIED_UID,
+      userCode: "USR-SD-1001",
+      roleKey: "EMPLOYEE",
+      branch: "فرع السودان (SD-001)",
+      active: true,
+    })
+  );
+
+  // Unverified bootstrap email CANNOT claim ADMIN or overwrite cluster_owner
+  await assertFails(
+    cSpoof.collection("cluster_members").doc(SPOOF_BOOT_UID).set({
+      uid: SPOOF_BOOT_UID,
+      userCode: "USR-ADMIN",
+      roleKey: "ADMIN",
+      branch: "ALL",
+      active: true,
+    })
+  );
+  await assertFails(
+    cSpoof.collection("system_metadata").doc("cluster_owner").set({
+      ownerUid: SPOOF_BOOT_UID,
+    })
+  );
+
+  // Non-verified user and active employee CANNOT list user_accounts or read another user's doc
+  await assertFails(cUnv.collection("user_accounts").doc("USR-SD-1001").get());
+  await assertFails(cUnv.collection("user_accounts").get());
+  await assertFails(cEmp.collection("user_accounts").doc("USR-ACC-1").get());
+  await assertFails(cEmp.collection("user_accounts").get());
+
+  // Manager CANNOT grant USER_MANAGEMENT / ADMIN_SETTINGS tokens via user_accounts create or update
+  await assertFails(
+    cMgr.collection("user_accounts").doc("USR-MGR-ESC").set({
+      userCode: "USR-MGR-ESC",
+      username: "mgr_esc",
+      role: "موظف مبيعات",
+      branch: "فرع السودان (SD-001)",
+      permissions: "إدارة المستخدمين,الإعدادات الإدارية",
+      active: true,
+    })
+  );
+  await assertFails(
+    cMgr.collection("user_accounts").doc("USR-SD-1001").update({
+      permissions: "USER_MANAGEMENT,ADMIN_SETTINGS",
+    })
+  );
+});
+
+test("27. Financial Ledger Immutability: movements, transfers, invoice_payments deny delete & field tampering while allowing controlled reversal; invoices protect totals & block non-Admin delete", async () => {
+  await seedClusterRbac();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const cRef = ctx.firestore().collection("erp_clusters").doc(CLUSTER);
+    await cRef.collection("movements").doc("MOV-IMM-1").set({
+      id: 2701,
+      cashbox: "خزنة السودان",
+      currency: "SDG",
+      direction: "وارد",
+      amount: 5000,
+      status: "active",
+      branch: "فرع السودان (SD-001)",
+    });
+    await cRef.collection("transfers").doc("TRF-IMM-1").set({
+      id: 2702,
+      sourceCashbox: "خزنة السودان",
+      destinationCashbox: "خزنة مصر",
+      sourceCurrency: "SDG",
+      destinationCurrency: "EGP",
+      sourceAmount: 10000,
+      destinationAmount: 500,
+      rate: 0.05,
+      status: "active",
+      branch: "فرع السودان (SD-001)",
+    });
+    await cRef.collection("invoice_payments").doc("PAY-IMM-1").set({
+      id: 2703,
+      invoiceId: 2704,
+      cashbox: "خزنة السودان",
+      currency: "SDG",
+      amount: 2500,
+      status: "active",
+      branch: "فرع السودان (SD-001)",
+    });
+    await cRef.collection("invoices").doc("INV-IMM-1").set({
+      id: 2704,
+      invoiceNo: "INV-IMM-1",
+      customerName: "عميل الثبات المالي",
+      total: 5000,
+      subtotal: 5000,
+      paidAmount: 2500,
+      currency: "SDG",
+      status: "سداد جزئي",
+      branch: "فرع السودان (SD-001)",
+    });
+  });
+
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const managerDb = testEnv.authenticatedContext(MANAGER_UID).firestore();
+  const accDb = testEnv.authenticatedContext(ACCOUNTANT_UID).firestore();
+  const empDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+
+  const cAdm = adminDb.collection("erp_clusters").doc(CLUSTER);
+  const cMgr = managerDb.collection("erp_clusters").doc(CLUSTER);
+  const cAcc = accDb.collection("erp_clusters").doc(CLUSTER);
+  const cEmp = empDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Direct delete denied even for Admin & Manager on movements, transfers, invoice_payments
+  await assertFails(cAdm.collection("movements").doc("MOV-IMM-1").delete());
+  await assertFails(cMgr.collection("movements").doc("MOV-IMM-1").delete());
+  await assertFails(cAdm.collection("transfers").doc("TRF-IMM-1").delete());
+  await assertFails(cMgr.collection("transfers").doc("TRF-IMM-1").delete());
+  await assertFails(cAdm.collection("invoice_payments").doc("PAY-IMM-1").delete());
+  await assertFails(cMgr.collection("invoice_payments").doc("PAY-IMM-1").delete());
+
+  // Mutating amount/currency/direction/rate denied even for Admin & Manager
+  await assertFails(cAdm.collection("movements").doc("MOV-IMM-1").update({ amount: 9999 }));
+  await assertFails(cMgr.collection("movements").doc("MOV-IMM-1").update({ currency: "USD" }));
+  await assertFails(cAcc.collection("movements").doc("MOV-IMM-1").update({ direction: "منصرف" }));
+  await assertFails(cAdm.collection("movements").doc("MOV-IMM-1").update({ status: "reversed", amount: 1 }));
+  await assertFails(cMgr.collection("transfers").doc("TRF-IMM-1").update({ sourceAmount: 1, rate: 1 }));
+  await assertFails(cAcc.collection("invoice_payments").doc("PAY-IMM-1").update({ amount: 1 }));
+
+  // Plain employee without treasury permission cannot reverse movements or payments
+  await assertFails(
+    cEmp.collection("movements").doc("MOV-IMM-1").update({
+      status: "reversed",
+      reversalReason: "محاولة غير مصرحة",
+    })
+  );
+  await assertFails(
+    cEmp.collection("invoice_payments").doc("PAY-IMM-1").update({
+      status: "reversed",
+      reversalReason: "محاولة غير مصرحة",
+    })
+  );
+
+  // Controlled one-time reversal succeeds on movements, transfers, invoice_payments; second reversal fails
+  await assertSucceeds(
+    cAcc.collection("movements").doc("MOV-IMM-1").update({
+      status: "reversed",
+      reversedByRef: "MOV-REV-2701",
+      reversalReason: "تصحيح قيد معتمد",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertFails(
+    cAcc.collection("movements").doc("MOV-IMM-1").update({
+      status: "reversed",
+      reversalReason: "عكس مكرر",
+    })
+  );
+  await assertSucceeds(
+    cMgr.collection("transfers").doc("TRF-IMM-1").update({
+      status: "reversed",
+      reversalReason: "إلغاء تحويل معتمد",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cAcc.collection("invoice_payments").doc("PAY-IMM-1").update({
+      status: "reversed",
+      reversalReason: "إلغاء فاتورة INV-IMM-1",
+      updatedAt: Date.now(),
+    })
+  );
+
+  // Invoices block non-Admin deletion & total tampering while allowing payment summary & soft-cancellation
+  await assertFails(cMgr.collection("invoices").doc("INV-IMM-1").delete());
+  await assertFails(cMgr.collection("invoices").doc("INV-IMM-1").update({ total: 100 }));
+  await assertSucceeds(
+    cEmp.collection("invoices").doc("INV-IMM-1").update({
+      paidAmount: 5000,
+      status: "مدفوعة",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cMgr.collection("invoices").doc("INV-IMM-1").update({
+      status: "ملغاة",
+      cancelReason: "إلغاء معتمد",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertFails(
+    cMgr.collection("invoices").doc("INV-IMM-1").update({
+      status: "مدفوعة",
+    })
+  );
+});
+
 
 
 

@@ -292,48 +292,50 @@ class PmpRepository(
     }
 
     suspend fun deleteMovement(id: Long, user: String): Result<MovementEntity?> = runInTransaction(
-        operationName = "DELETE_MOVEMENT",
+        operationName = "REVERSE_MOVEMENT_LEDGER",
         entityType = "movements",
-        details = "حذف الحركة المالية #$id"
+        details = "عكس الحركة المالية #$id بقيد عكسي معتمد (سجل غير قابل للحذف)"
     ) {
         val existing = dao.getMovementByIdDirect(id)
-        val existingRef = existing?.reference?.trim().orEmpty()
-        // Only treat reference as an exclusive alias when no other local movement shares it
-        // (protects transfer legs or legacy partial payments that may share a reference).
-        val isReferenceUnique = existingRef.isNotBlank() &&
-            dao.getMovementsDirect().count { it.id != id && it.reference.trim().equals(existingRef, ignoreCase = true) } == 0
-        val aliases = listOfNotNull(
-            id.toString(),
-            "MOV-$id",
-            existingRef.takeIf { isReferenceUnique },
-            existing?.cloudDocId?.takeIf { it.isNotBlank() },
-            existing?.syncUuid?.takeIf { it.isNotBlank() }
+            ?: return@runInTransaction Result.success(null)
+        if (com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(existing.status)) {
+            return@runInTransaction Result.failure(Exception("تم عكس هذه الحركة المالية مسبقاً في دفتر الأستاذ."))
+        }
+        val cleanRef = existing.reference.trim().ifBlank { "MOV-$id" }
+        val revRef = "REV-$cleanRef"
+        val now = System.currentTimeMillis()
+        val reason = "قيد عكسي معتمد بواسطة $user"
+        val reversedEntity = existing.copy(
+            status = "reversed",
+            reversedByRef = revRef,
+            reversalReason = reason,
+            updatedAt = now,
+            syncStatus = "PENDING"
         )
-        DeletedRecordsRegistry.registerDeletedWithAliases(
-            collection = "movements",
-            aliases = aliases,
-            primaryEntityId = id.toString(),
-            primaryDocId = existing?.cloudDocId?.ifBlank { "MOV-$id" } ?: "MOV-$id",
-            actor = user
+        dao.updateMovement(reversedEntity)
+
+        val oppositeDirection = if (com.example.util.TreasuryBalanceNormalizer.isMovementInflow(existing.direction)) {
+            "منصرف"
+        } else {
+            "وارد"
+        }
+        accountingEngine?.postTreasuryMovementJournalInternal(
+            existing.copy(
+                direction = oppositeDirection,
+                reference = revRef,
+                description = "قيد عكسي لحركة $cleanRef: ${existing.description} ($reason)",
+                createdBy = user
+            )
         )
-        dao.deleteMovementById(id)
-        if (isReferenceUnique) {
-            dao.deleteMovementByReference(existingRef)
-        }
-        if (!existing?.cloudDocId.isNullOrBlank()) {
-            dao.deleteMovementByCloudDocId(existing!!.cloudDocId)
-        }
-        if (!existing?.syncUuid.isNullOrBlank()) {
-            dao.deleteMovementBySyncUuid(existing!!.syncUuid)
-        }
+
         dao.insertAuditLog(
             AuditLogEntity(
                 username = user,
-                action = "DELETE_MOVEMENT",
-                detail = "حذف الحركة المالية #$id (${existing?.reference ?: ""})"
+                action = "REVERSE_MOVEMENT",
+                detail = "عكس الحركة المالية #$id ($cleanRef) بقيد عكسي $revRef دون حذف السجل الأصلي"
             )
         )
-        Result.success(existing)
+        Result.success(reversedEntity)
     }
 
     suspend fun recordCustomerPayment(
@@ -964,26 +966,21 @@ class PmpRepository(
         Result.success(payId)
     }
 
-    suspend fun cancelInvoice(invoiceId: Long, reason: String, user: String): Result<Unit> = runInTransaction(
-        operationName = "CANCEL_INVOICE_COMPENSATING",
-        entityType = "invoices",
-        details = "إلغاء الفاتورة #$invoiceId بقيد عكسي مخزني ومالي: $reason"
-    ) {
-        val invoice = dao.getInvoiceById(invoiceId) ?: return@runInTransaction Result.failure(Exception("الفاتورة غير موجودة"))
-        if (invoice.status == "cancelled") return@runInTransaction Result.failure(Exception("الفاتورة ملغاة مسبقاً"))
+    private suspend fun executeCancelInvoiceInternal(invoiceId: Long, reason: String, user: String): Result<InvoiceEntity> {
+        val invoice = dao.getInvoiceById(invoiceId) ?: return Result.failure(Exception("الفاتورة غير موجودة"))
+        if (com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(invoice.status)) {
+            return Result.failure(Exception("الفاتورة ملغاة مسبقاً"))
+        }
 
         val cleanReason = reason.trim().ifBlank { "إلغاء فاتورة معتمد" }
         val reversalDate = currentDateString()
 
-        // 1. تحديث حالة الفاتورة إلى ملغاة مع حفظ سبب الإلغاء
-        dao.updateInvoice(
-            invoice.copy(
-                status = "cancelled",
-                cancelReason = cleanReason
-            )
+        val cancelledInvoice = invoice.copy(
+            status = "cancelled",
+            cancelReason = cleanReason
         )
+        dao.updateInvoice(cancelledInvoice)
 
-        // 2. القيود العكسية للمخزون (Compensating Stock Moves): إرجاع كافة الأصناف المباعة في الفاتورة إلى مخازنها الأصلية
         val invoiceItems = dao.getInvoiceItemsByInvoiceIdDirect(invoiceId)
         var restoredItemsCount = 0
         for (item in invoiceItems) {
@@ -1005,16 +1002,16 @@ class PmpRepository(
             }
         }
 
-        // 3. القيود العكسية للخزينة والمدفوعات (Compensating Financial Movements): عكس أي دفعات مسجلة على الفاتورة في الخزنة
         val invoicePayments = dao.getInvoicePaymentsByInvoiceIdDirect(invoiceId)
         var reversedPaymentsTotal = 0.0
         val cancelledPayments = mutableListOf<InvoicePaymentEntity>()
         for (payment in invoicePayments) {
-            if (payment.status == "active" && payment.amount > 0.0) {
+            if (!com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(payment.status) && payment.amount > 0.0) {
                 cancelledPayments.add(payment)
                 dao.updateInvoicePayment(
                     payment.copy(
-                        status = "cancelled",
+                        status = "reversed",
+                        reversalReason = cleanReason,
                         note = "${payment.note} | ملغاة بقيد عكسي لإلغاء الفاتورة ${invoice.invoiceNo}: $cleanReason"
                     )
                 )
@@ -1036,7 +1033,8 @@ class PmpRepository(
                             createdAt = revNow,
                             cloudDocId = "MOV-${revNow}-${revUuid.take(8)}",
                             syncUuid = revUuid,
-                            updatedAt = revNow
+                            updatedAt = revNow,
+                            syncStatus = "PENDING"
                         )
                     )
                 }
@@ -1058,34 +1056,32 @@ class PmpRepository(
                 detail = "إلغاء الفاتورة ${invoice.invoiceNo} بقيد عكسي شامل (استرجاع $restoredItemsCount بنود مخزنية وعكس مدفوعات بقيمة $reversedPaymentsTotal ${invoice.currency}): $cleanReason"
             )
         )
-        Result.success(Unit)
+        return Result.success(cancelledInvoice)
+    }
+
+    suspend fun cancelInvoice(invoiceId: Long, reason: String, user: String): Result<Unit> = runInTransaction(
+        operationName = "CANCEL_INVOICE_COMPENSATING",
+        entityType = "invoices",
+        details = "إلغاء الفاتورة #$invoiceId بقيد عكسي مخزني ومالي: $reason"
+    ) {
+        executeCancelInvoiceInternal(invoiceId, reason, user).map { Unit }
     }
 
     suspend fun deleteInvoicePermanently(invoiceId: Long, user: String): Result<InvoiceEntity> = runInTransaction(
-        operationName = "DELETE_INVOICE_PERMANENTLY",
+        operationName = "CANCEL_ARCHIVE_INVOICE_IMMUTABLE",
         entityType = "invoices",
-        details = "حذف نهائي للفاتورة #$invoiceId من قاعدة البيانات والسيرفر"
+        details = "إلغاء وأرشفة الفاتورة #$invoiceId بقيد عكسي معتمد (دفتر الأستاذ محصن ضد المسح المباشر)"
     ) {
-        val invoice = dao.getInvoiceById(invoiceId)
+        val existing = dao.getInvoiceById(invoiceId)
             ?: return@runInTransaction Result.failure(Exception("الفاتورة غير موجودة"))
-
-        DeletedRecordsRegistry.registerDeleted("invoices", invoice.id, "INV-${invoice.id}", user)
-        if (invoice.invoiceNo.isNotBlank()) {
-            DeletedRecordsRegistry.registerDeleted("invoices", invoice.invoiceNo, invoice.invoiceNo, user)
+        if (com.example.util.TreasuryBalanceNormalizer.isCancelledOrReversedStatus(existing.status)) {
+            return@runInTransaction Result.success(existing)
         }
-
-        dao.deleteInvoicePaymentsByInvoiceId(invoiceId)
-        dao.deleteInvoiceItemsByInvoiceId(invoiceId)
-        dao.deleteInvoiceById(invoiceId)
-
-        dao.insertAuditLog(
-            AuditLogEntity(
-                username = user,
-                action = "DELETE_INVOICE_PERMANENT",
-                detail = "حذف نهائي للفاتورة ${invoice.invoiceNo} (${invoice.customerName})"
-            )
+        executeCancelInvoiceInternal(
+            invoiceId = invoiceId,
+            reason = "إغلاق وأرشفة الفاتورة بقيد عكسي معتمد بواسطة $user (سجل غير قابل للحذف المباشر)",
+            user = user
         )
-        Result.success(invoice)
     }
 
     // --- Warehouses & Products ---

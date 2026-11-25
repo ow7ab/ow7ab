@@ -436,25 +436,39 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   <input
                     type="text"
                     required
-                    maxLength={64}
+                    maxLength={120}
                     autoComplete="username"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    placeholder={language === 'ar' ? 'مثال: admin أو ahmed' : 'e.g. admin or ahmed'}
+                    placeholder={language === 'ar' ? 'مثال: admin أو ahmed@pmp-paints.com' : 'e.g. admin or ahmed@pmp-paints.com'}
                     className="w-full pr-9 pl-3 py-2.5 rounded-xl bg-theme-base border border-theme text-theme-primary text-sm focus:outline-none focus:border-pmp-primary transition-all font-mono"
                   />
                 </div>
                 <p className="text-[11px] text-theme-muted mt-1">
                   {language === 'ar'
-                    ? 'أدخل اسم المستخدم أو الكود الوظيفي مع الرمز السري أو كلمة المرور مباشرة.'
-                    : 'Enter your username or employee code with your PIN or password directly.'}
+                    ? 'يمكنك إدخال اسم المستخدم أو البريد الإلكتروني أو الكود الوظيفي مع كلمة المرور مباشرة.'
+                    : 'Enter your username, email, or employee code with your password/PIN directly.'}
                 </p>
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-theme-primary mb-1.5">
-                  {language === 'ar' ? 'الرمز السري / كلمة المرور' : 'PIN / Password'}
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-bold text-theme-primary">
+                    {language === 'ar' ? 'الرمز السري / كلمة المرور' : 'PIN / Password'}
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmail(username.includes('@') ? username : '');
+                      setTab('reset');
+                      setErrorMsg(null);
+                      setSuccessMsg(null);
+                    }}
+                    className="text-[11px] text-pmp-cyan hover:underline font-bold"
+                  >
+                    {language === 'ar' ? 'نسيت كلمة المرور؟' : 'Forgot password?'}
+                  </button>
+                </div>
                 <div className="relative">
                   <KeyRound className="w-4 h-4 absolute right-3 top-3 text-theme-secondary" />
                   <input

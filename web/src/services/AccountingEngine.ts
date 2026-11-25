@@ -14,7 +14,11 @@ import {
   TrialBalanceRow,
   WarehouseStockBalance
 } from '../types/erp';
-import { resolveCanonicalCurrency } from './ErpCalculations';
+import {
+  computeInvoiceFinancials,
+  isCancelledOrReversedStatus,
+  resolveCanonicalCurrency
+} from './ErpCalculations';
 
 export const BALANCE_EPSILON = 0.001;
 
@@ -883,16 +887,12 @@ export function computeReconciliationReport(
 
   const activeInvoices = invoices.filter(
     (inv) =>
-      inv.status !== 'cancelled' &&
-      inv.status !== 'ملغاة' &&
+      !isCancelledOrReversedStatus(inv.status) &&
       resolveCanonicalCurrency(inv.currency) === targetCur
   );
   const operationalAr = activeInvoices.reduce((sum, inv) => {
-    const invPayments = payments
-      .filter((p) => Number(p.invoiceId) === Number(inv.id) && p.status !== 'reversed')
-      .reduce((s, p) => s + Number(p.amount || 0), 0);
-    const paid = Math.max(invPayments, Number(inv.paidAmount || 0));
-    return sum + Math.max(0, Number(inv.total || 0) - paid);
+    const fin = computeInvoiceFinancials(inv, payments);
+    return sum + fin.remainingAmount;
   }, 0);
   const glAr = trialBalance.rows.find((r) => r.accountCode === '1130')?.signedBalance || 0;
 

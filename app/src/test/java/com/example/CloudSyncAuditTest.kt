@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -226,6 +227,26 @@ class CloudSyncAuditTest {
         SyncDiagnosticDashboardView(viewModel = viewModel)
       }
     }
+
+    // Without an authenticated Admin session, diagnostic telemetry must remain locked
+    assertEquals(0, composeTestRule.onAllNodesWithTag("sync_dashboard_list").fetchSemanticsNodes().size)
+    assertEquals(1, composeTestRule.onAllNodesWithText("Admin فقط", substring = true).fetchSemanticsNodes().size)
+
+    // Elevate test session to SuperAdmin (matching Admin-only PMP SYSTEM HEALTH CENTER contract)
+    composeTestRule.runOnIdle {
+      viewModel.activeSessionOverride.value = UserAccountEntity(
+        id = 1L,
+        userCode = "USR-ADMIN",
+        fullName = "Admin",
+        username = "admin",
+        role = "مدير النظام",
+        branch = "الإدارة العامة",
+        permissions = "ALL",
+        serverSyncToken = "T",
+        active = true
+      )
+    }
+    composeTestRule.waitForIdle()
 
     // Must NOT display fabricated 38 ms latency when serverHealthReport is null
     assertEquals(0, composeTestRule.onAllNodesWithText("38 ms", substring = true).fetchSemanticsNodes().size)

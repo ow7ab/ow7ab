@@ -183,7 +183,9 @@ fun DashboardScreen(
                     if (canAccessInventory) add(Triple("inventory", "المخازن", Icons.Default.Warehouse))
                     if (canAccessFactory || isManager) add(Triple("factory", "الإنتاج والمصنع", Icons.Default.PrecisionManufacturing))
                     if (canAccessReports) add(Triple("reports", "التقارير", Icons.Default.Assessment))
-                    add(Triple("diagnostics", "درع الحماية والسجل", Icons.Default.Shield))
+                    if (currentUser.isSuperAdminAccount()) {
+                        add(Triple("diagnostics", "درع الحماية والسجل", Icons.Default.Shield))
+                    }
                 }
                 LazyRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -621,7 +623,7 @@ fun DashboardScreen(
     }
     }
 
-    if (showDiagnosticDashboard) {
+    if (showDiagnosticDashboard && currentUser.isSuperAdminAccount()) {
         SyncDiagnosticDashboardDialog(
             viewModel = viewModel,
             initialTab = diagnosticInitialTab,

@@ -300,6 +300,7 @@ export const SalesModuleView: React.FC = () => {
       execute: async ({ idempotencyKey }) => {
         const now = Date.now();
         const actorName = userProfile?.fullName || userProfile?.username || 'مبيعات';
+        const ops: any[] = [];
         let finalCustId = existingCust ? Number(existingCust.id) : now;
         if (!existingCust && quickCustomerName.trim()) {
           const newCust: Customer = {
@@ -311,7 +312,13 @@ export const SalesModuleView: React.FC = () => {
             active: true,
             createdAt: now
           };
-          await ErpDataService.upsertDocument('customers', `CUST-${finalCustId}`, newCust);
+          ops.push({
+            kind: 'merge',
+            collectionName: 'customers',
+            docId: `CUST-${finalCustId}`,
+            payload: newCust,
+            checkDuplicateFinancial: false
+          });
         }
 
         const authoritativeSubtotal = draftLines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
@@ -361,11 +368,12 @@ export const SalesModuleView: React.FC = () => {
           timestamp: now
         };
 
-        await ErpDataService.handleTransactionCommit({
+        ops.push({
+          kind: 'merge',
           collectionName: 'invoices',
           docId: invoiceNo,
           payload: newInv,
-          actorUsername: userProfile?.username
+          checkDuplicateFinancial: true
         });
 
         const whObj = warehouses.find((w) => Number(w.id) === Number(invWarehouseId));
@@ -388,7 +396,13 @@ export const SalesModuleView: React.FC = () => {
             createdAt: moveTs,
             timestamp: moveTs
           };
-          await ErpDataService.upsertDocument('stock_moves', `SM-${idempotencyKey}-${idx}`, sm);
+          ops.push({
+            kind: 'merge',
+            collectionName: 'stock_moves',
+            docId: `SM-${idempotencyKey}-${idx}`,
+            payload: sm,
+            checkDuplicateFinancial: false
+          });
         }
 
         if (paidInit > 0) {
@@ -406,11 +420,12 @@ export const SalesModuleView: React.FC = () => {
             createdAt: now,
             timestamp: now
           };
-          await ErpDataService.handleTransactionCommit({
+          ops.push({
+            kind: 'merge',
             collectionName: 'invoice_payments',
             docId: `PAY-${idempotencyKey}`,
             payload: payDoc,
-            actorUsername: userProfile?.username
+            checkDuplicateFinancial: true
           });
 
           const initMovDocId = `MOV-${idempotencyKey}`;
@@ -435,11 +450,12 @@ export const SalesModuleView: React.FC = () => {
             createdAt: now,
             timestamp: now
           };
-          await ErpDataService.handleTransactionCommit({
+          ops.push({
+            kind: 'merge',
             collectionName: 'movements',
             docId: initMovDocId,
             payload: tm,
-            actorUsername: userProfile?.username
+            checkDuplicateFinancial: true
           });
         }
 
@@ -460,13 +476,17 @@ export const SalesModuleView: React.FC = () => {
           cashbox: resolvedCashbox,
           actor: actorName
         });
-        await ErpDataService.persistJournalPayloads(salesJournals).catch(() => {});
 
-        await ErpDataService.logAudit(
-          userProfile?.username || 'sales',
-          'CREATE_INVOICE',
-          `إصدار فاتورة ${invoiceNo} للعميل ${custName} بقيمة ${authoritativeNetTotal.toLocaleString()} ${invCurrency}`
-        );
+        await ErpDataService.commitAtomicTransactionBundle({
+          actorUsername: userProfile?.username,
+          operations: ops,
+          journals: salesJournals,
+          auditLog: {
+            username: userProfile?.username || 'sales',
+            action: 'CREATE_INVOICE',
+            detail: `إصدار فاتورة ذرية ${invoiceNo} للعميل ${custName} بقيمة ${authoritativeNetTotal.toLocaleString()} ${invCurrency}`
+          }
+        });
 
         return { resultReference: invoiceNo };
       }
@@ -492,14 +512,15 @@ export const SalesModuleView: React.FC = () => {
       showNotice('err', 'لا تملك صلاحية تحصيل الدفعات المالية');
       return;
     }
-    if (payingInvoice.status === 'ملغاة' || payingInvoice.status === 'cancelled') {
+    if (ErpDataService.isCancelledOrReversedStatus(payingInvoice.status)) {
       showNotice('err', 'لا يمكن تحصيل دفعة على فاتورة ملغاة');
       return;
     }
 
     const amt = Number(payAmount);
     const netTotal = Number(payingInvoice.total || 0);
-    const currentPaid = Number(payingInvoice.paidAmount || 0);
+    const invFinancials = computeInvoiceFinancials(payingInvoice, payments);
+    const currentPaid = invFinancials.paidAmount;
     const maxRemaining = Math.max(0, netTotal - currentPaid);
 
     if (!Number.isFinite(amt) || amt <= 0) {
@@ -565,29 +586,6 @@ export const SalesModuleView: React.FC = () => {
           timestamp: now
         };
 
-        await ErpDataService.handleTransactionCommit({
-          collectionName: 'invoice_payments',
-          docId: payDocId,
-          payload: payDoc,
-          actorUsername: userProfile?.username
-        });
-        await ErpDataService.handleTransactionCommit({
-          collectionName: 'movements',
-          docId: payMovDocId,
-          payload: tm,
-          actorUsername: userProfile?.username
-        });
-        await ErpDataService.handleTransactionCommit({
-          collectionName: 'invoices',
-          docId: invDocId,
-          payload: {
-            ...payingInvoice,
-            paidAmount: newPaid,
-            status: newStatus
-          },
-          actorUsername: userProfile?.username
-        });
-
         const cashCode = resolveCashAccountCode(targetCashbox, payingInvoice.currency);
         const payJournal = createBalancedJournalPayload({
           entryDate: new Date(now).toISOString().split('T')[0],
@@ -603,13 +601,43 @@ export const SalesModuleView: React.FC = () => {
           createdBy: actorName,
           idempotencyKey: `JRN-PAY-${idempotencyKey}`
         });
-        await ErpDataService.persistJournalPayload(payJournal).catch(() => {});
 
-        await ErpDataService.logAudit(
-          userProfile?.username || 'treasury',
-          'INVOICE_PAYMENT',
-          `تحصيل ${amt.toLocaleString()} ${payingInvoice.currency} على فاتورة ${payingInvoice.invoiceNo} (${targetCashbox})`
-        );
+        await ErpDataService.commitAtomicTransactionBundle({
+          actorUsername: userProfile?.username,
+          operations: [
+            {
+              kind: 'merge',
+              collectionName: 'invoice_payments',
+              docId: payDocId,
+              payload: payDoc,
+              checkDuplicateFinancial: true
+            },
+            {
+              kind: 'merge',
+              collectionName: 'movements',
+              docId: payMovDocId,
+              payload: tm,
+              checkDuplicateFinancial: true
+            },
+            {
+              kind: 'invoice_summary',
+              collectionName: 'invoices',
+              docId: invDocId,
+              payload: {
+                paidAmount: newPaid,
+                status: newStatus,
+                updatedAt: now,
+                serverUpdatedBy: userProfile?.username || actorName
+              }
+            }
+          ],
+          journals: [payJournal],
+          auditLog: {
+            username: userProfile?.username || 'treasury',
+            action: 'INVOICE_PAYMENT',
+            detail: `تحصيل ذري ${amt.toLocaleString()} ${payingInvoice.currency} على فاتورة ${payingInvoice.invoiceNo} (${targetCashbox})`
+          }
+        });
         return { resultReference: payDocId };
       }
     });
@@ -630,7 +658,7 @@ export const SalesModuleView: React.FC = () => {
       showNotice('err', 'لا تملك صلاحية إلغاء الفواتير');
       return;
     }
-    if (inv.status === 'ملغاة' || inv.status === 'cancelled') return;
+    if (ErpDataService.isCancelledOrReversedStatus(inv.status)) return;
 
     if (!window.confirm(`تأكيد إلغاء الفاتورة ${inv.invoiceNo} وإرجاع الكميات المباعة إلى المخزون وعكس الدفعات؟`)) {
       return;
@@ -644,149 +672,20 @@ export const SalesModuleView: React.FC = () => {
       targetCollection: 'invoices',
       payloadSummary: `إلغاء فاتورة ${inv.invoiceNo}`,
       execute: async () => {
-      const now = Date.now();
-      const actorName = userProfile?.fullName || userProfile?.username || 'المدير';
-      const invDocId = (inv as any)._docId || safeId(inv.invoiceNo, `INV-${inv.id}`);
-
-      await ErpDataService.upsertDocument('invoices', invDocId, {
-        ...inv,
-        status: 'ملغاة',
-        cancelReason: `إلغاء معتمد من بوابة الويب بواسطة ${actorName}`
-      });
-
-      // 1. Compensating Stock Moves (RETURN_IN) matching Android PmpRepository.cancelInvoice
-      let parsedItems: any[] = [];
-      if (Array.isArray(inv.items) && inv.items.length > 0) {
-        parsedItems = inv.items;
-      } else if (typeof inv.itemsJson === 'string' && inv.itemsJson) {
-        try {
-          const decoded = JSON.parse(inv.itemsJson);
-          if (Array.isArray(decoded)) parsedItems = decoded;
-        } catch {
-          parsedItems = [];
-        }
-      }
-
-      let restoredCount = 0;
-      for (let idx = 0; idx < parsedItems.length; idx++) {
-        const it = parsedItems[idx];
-        const pid = Number(it.productId || 0);
-        const qty = Math.abs(Number(it.quantity || 0));
-        const whId = Number(it.warehouseId || inv.warehouseId || warehouses[0]?.id || 1);
-        const whObj = warehouses.find((w) => Number(w.id) === whId);
-        if (pid > 0 && qty > 0) {
-          const moveTs = now + idx + 1;
-          const revMove: StockMove = {
-            id: moveTs,
-            productId: pid,
-            productName: String(it.description || it.productName || `صنف #${pid}`),
-            warehouseId: whId,
-            warehouseName: whObj?.name || 'المخزن الرئيسي',
-            kind: 'RETURN_IN',
-            quantity: qty,
-            invoiceId: Number(inv.id),
-            note: `قيد عكسي لإرجاع مخزون فاتورة ملغاة ${inv.invoiceNo}`,
-            referenceNo: `REV-${inv.invoiceNo}`,
-            createdBy: actorName,
-            actor: actorName,
-            createdAt: moveTs,
-            timestamp: moveTs
-          };
-          await ErpDataService.upsertDocument('stock_moves', `SM-${moveTs}`, revMove);
-          restoredCount += 1;
-        }
-      }
-
-      // 2. Reverse linked active payments and record compensating outflow movement
-      const linkedPays = payments.filter(
-        (p) => Number(p.invoiceId) === Number(inv.id) && p.status !== 'reversed'
-      );
-      let reversedTotal = 0;
-      for (let idx = 0; idx < linkedPays.length; idx++) {
-        const p = linkedPays[idx];
-        const amt = Math.abs(Number(p.amount || 0));
-        const payDocId = (p as any)._docId || `PAY-${p.id}`;
-        await ErpDataService.upsertDocument('invoice_payments', payDocId, {
-          ...p,
-          status: 'reversed',
-          reversalReason: `إلغاء فاتورة ${inv.invoiceNo}`
+        const actorName = userProfile?.fullName || userProfile?.username || 'المدير';
+        await ErpDataService.cancelInvoiceAndReverseAtomic({
+          invoice: inv,
+          payments,
+          warehouses,
+          reason: `إلغاء معتمد من بوابة الويب بواسطة ${actorName}`,
+          actorUsername: userProfile?.username || actorName,
+          actorDisplayName: actorName
         });
-        if (amt > 0 && p.cashbox) {
-          const revTs = now + 200 + idx;
-          const revMov: TreasuryMovement = {
-            id: revTs,
-            txDate: new Date(revTs).toISOString().split('T')[0],
-            cashbox: p.cashbox,
-            currency: (p.currency || inv.currency || 'SDG') as CurrencyCode,
-            direction: 'منصرف',
-            type: 'OUT',
-            amount: amt,
-            category: 'عكس تحصيل فاتورة ملغاة',
-            description: `قيد عكسي لاسترداد دفعة فاتورة ملغاة ${inv.invoiceNo} — ${inv.customerName}`,
-            note: `قيد عكسي لاسترداد دفعة فاتورة ملغاة ${inv.invoiceNo} — ${inv.customerName}`,
-            reference: `REV-${inv.invoiceNo}-P${p.id}`,
-            referenceNo: `REV-${inv.invoiceNo}`,
-            createdBy: actorName,
-            actor: actorName,
-            createdAt: revTs,
-            timestamp: revTs
-          };
-          await ErpDataService.upsertDocument('movements', `MOV-${revTs}`, revMov);
-          reversedTotal += amt;
-        }
-      }
-
-      const invTotal = Number(inv.total || 0);
-      if (invTotal > 0.001) {
-        const cancelInvJournal = createBalancedJournalPayload({
-          entryDate: new Date(now).toISOString().split('T')[0],
-          sourceType: 'INVOICE_CANCEL',
-          sourceDocId: Number(inv.id),
-          sourceDocNo: inv.invoiceNo,
-          description: `عكس إيراد فاتورة ملغاة ${inv.invoiceNo}`,
-          currency: inv.currency || 'SDG',
-          lines: [
-            { accountCode: '4100', debit: invTotal, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: inv.customerName, memo: `إلغاء إيراد ${inv.invoiceNo}` },
-            { accountCode: '1130', credit: invTotal, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: inv.customerName, memo: `إلغاء ذمة ${inv.invoiceNo}` }
-          ],
-          createdBy: actorName,
-          idempotencyKey: `JRN-CANCEL-INV-${inv.invoiceNo}`
-        });
-        await ErpDataService.persistJournalPayload(cancelInvJournal).catch(() => {});
-      }
-      for (const p of linkedPays) {
-        const amt = Math.abs(Number(p.amount || 0));
-        if (amt > 0.001 && p.cashbox) {
-          const cur = (p.currency || inv.currency || 'SDG') as CurrencyCode;
-          const cashCode = resolveCashAccountCode(p.cashbox, cur);
-          const cancelPayJournal = createBalancedJournalPayload({
-            entryDate: new Date(now).toISOString().split('T')[0],
-            sourceType: 'INVOICE_CANCEL',
-            sourceDocId: Number(p.id),
-            sourceDocNo: inv.invoiceNo,
-            description: `رد دفعة نقدية لإلغاء الفاتورة ${inv.invoiceNo}`,
-            currency: cur,
-            lines: [
-              { accountCode: '1130', debit: amt, costCenter: 'SALES', partyType: 'CUSTOMER', partyName: inv.customerName, memo: 'تسوية ذمة عميل عند الإلغاء' },
-              { accountCode: cashCode, credit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: p.cashbox, memo: `صرف استرداد من ${p.cashbox}` }
-            ],
-            createdBy: actorName,
-            idempotencyKey: `JRN-CANCEL-PAY-${p.id}`
-          });
-          await ErpDataService.persistJournalPayload(cancelPayJournal).catch(() => {});
-        }
-      }
-
-      await ErpDataService.logAudit(
-        userProfile?.username || 'admin',
-        'CANCEL_INVOICE',
-        `إلغاء فاتورة ${inv.invoiceNo} بقيد عكسي (استرجاع ${restoredCount} بنود مخزنية وعكس مدفوعات ${reversedTotal.toLocaleString()} ${inv.currency})`
-      );
-      return { resultReference: inv.invoiceNo };
+        return { resultReference: inv.invoiceNo };
       }
     });
     if (res.ok) {
-      showNotice('ok', `تم إلغاء الفاتورة ${inv.invoiceNo} وإرجاع المخزون وعكس القيود المالية`);
+      showNotice('ok', `تم إلغاء الفاتورة ${inv.invoiceNo} ذرياً وإرجاع المخزون وعكس القيود المالية`);
     } else {
       showNotice('err', res.message);
     }
@@ -795,52 +694,36 @@ export const SalesModuleView: React.FC = () => {
   const handleDeleteInvoicePermanently = async (inv: SalesInvoice) => {
     if (isSubmitting) return;
     if (!canDelete) {
-      showNotice('err', 'لا تملك صلاحية الحذف النهائي للفواتير');
+      showNotice('err', 'لا تملك صلاحية إلغاء أو أرشفة الفواتير');
       return;
     }
 
     const res = await deleteGuard.runGuarded({
-      guardKey: `sales_perm_delete_${inv.invoiceNo}`,
-      operationType: 'DELETE',
+      guardKey: `sales_perm_reverse_${inv.invoiceNo}`,
+      operationType: 'UPDATE',
       userId: userProfile?.username || 'admin',
       documentReference: inv.invoiceNo,
       targetCollection: 'invoices',
-      payloadSummary: `حذف نهائي للفاتورة ${inv.invoiceNo}`,
+      payloadSummary: `إلغاء وأرشفة الفاتورة بقيد عكسي ${inv.invoiceNo}`,
       execute: async () => {
         const actorName = userProfile?.fullName || userProfile?.username || 'المدير';
-        const invDocId = (inv as any)._docId || safeId(inv.invoiceNo, `INV-${inv.id}`);
-
-        await ErpDataService.deleteDocumentWithTombstone('invoices', invDocId, inv.id, actorName);
-        if (inv.invoiceNo && safeId(inv.invoiceNo, '') !== invDocId) {
-          await ErpDataService.deleteDocumentWithTombstone('invoices', safeId(inv.invoiceNo, `INV-${inv.id}`), inv.invoiceNo, actorName).catch(() => {});
+        if (!ErpDataService.isCancelledOrReversedStatus(inv.status)) {
+          await ErpDataService.cancelInvoiceAndReverseAtomic({
+            invoice: inv,
+            payments,
+            warehouses,
+            reason: `إغلاق وأرشفة الفاتورة بقيد عكسي معتمد بواسطة ${actorName} (دفتر الأستاذ محصن ضد المسح المباشر)`,
+            actorUsername: userProfile?.username || actorName,
+            actorDisplayName: actorName
+          });
         }
-
-        const linkedPays = payments.filter((p) => Number(p.invoiceId) === Number(inv.id));
-        for (const p of linkedPays) {
-          const payDocId = (p as any)._docId || `PAY-${p.id}`;
-          await ErpDataService.deleteDocumentWithTombstone('invoice_payments', payDocId, p.id, actorName).catch(() => {});
-        }
-
-        const allItems = await ErpDataService.fetchCollectionOnce<InvoiceItem>('invoice_items').catch(() => []);
-        for (const it of allItems) {
-          if (Number(it.invoiceId) === Number(inv.id)) {
-            const itemDocId = (it as any)._docId || `ITEM-${it.id ?? Date.now()}`;
-            await ErpDataService.deleteDocumentWithTombstone('invoice_items', itemDocId, it.id ?? itemDocId, actorName).catch(() => {});
-          }
-        }
-
-        await ErpDataService.logAudit(
-          userProfile?.username || 'admin',
-          'INVOICE_PERMANENT_DELETE',
-          `حذف نهائي للفاتورة ${inv.invoiceNo} (${inv.customerName}) من السيرفر`
-        );
         return { resultReference: inv.invoiceNo };
       }
     });
 
     if (res.ok) {
       setDeletingInvoice(null);
-      showNotice('ok', `تم الحذف النهائي للفاتورة ${inv.invoiceNo} (${inv.customerName}) من السيرفر بنجاح`);
+      showNotice('ok', `تم إغلاق الفاتورة ${inv.invoiceNo} وعكس قيودها مالياً ومخزنياً بسجل غير قابل للتعديل`);
     } else {
       showNotice('err', res.message);
     }

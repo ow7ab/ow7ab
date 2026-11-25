@@ -334,6 +334,7 @@ fun UserAccountEntity?.resolveAllowedScreens(
             PmpScreen.CHEMISTRY_LAB -> hasModulePermission("المختبر الكيميائي", nowMillis) ||
                 hasModulePermission("المصنع", nowMillis) ||
                 isSystemManager()
+            PmpScreen.USERS -> isSuperAdminAccount()
             else -> hasModulePermission(screen.title, nowMillis)
         }
     }
@@ -966,10 +967,25 @@ fun PmpAppContent(
                                 PmpScreen.INVENTORY -> InventoryScreen(viewModel = viewModel)
                                 PmpScreen.FACTORY -> FactoryScreen(viewModel = viewModel)
                                 PmpScreen.CHEMISTRY_LAB -> ChemistryLabScreen(viewModel = viewModel)
-                                PmpScreen.USERS -> UsersScreen(
-                                    viewModel = viewModel,
-                                    onSignOut = handleSignOut
-                                )
+                                PmpScreen.USERS -> {
+                                    if (currentUser.isSuperAdminAccount()) {
+                                        UsersScreen(
+                                            viewModel = viewModel,
+                                            onSignOut = handleSignOut
+                                        )
+                                    } else {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize().padding(24.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "إدارة المستخدمين والأدوار متاحة لحساب Admin فقط.",
+                                                color = PmpRedLight,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
                                 PmpScreen.POSTER -> PosterPriceScreen(viewModel = viewModel)
                                 PmpScreen.REPORTS -> ReportsScreen(viewModel = viewModel)
                                 PmpScreen.SETTINGS -> SettingsScreen(

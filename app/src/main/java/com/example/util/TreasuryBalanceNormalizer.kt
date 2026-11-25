@@ -43,6 +43,11 @@ object TreasuryBalanceNormalizer {
         return "SDG"
     }
 
+    fun isCancelledOrReversedStatus(status: String?): Boolean {
+        val st = (status ?: "").trim().lowercase()
+        return st == "cancelled" || st == "reversed" || st == "void" || st == "ملغاة" || st == "ملغي"
+    }
+
     fun isMovementInflow(direction: String?, typeFallback: String? = null): Boolean {
         val raw = direction?.takeIf { it.isNotBlank() } ?: typeFallback.orEmpty()
         val dir = raw.trim().uppercase()
@@ -64,6 +69,11 @@ object TreasuryBalanceNormalizer {
         if (!amount.isFinite()) return 0.0
         val mag = abs(amount)
         return if (isMovementInflow(direction, typeFallback)) mag else -mag
+    }
+
+    fun signedActiveAmount(movement: MovementEntity): Double {
+        if (isCancelledOrReversedStatus(movement.status)) return 0.0
+        return signedAmount(movement.direction, movement.amount)
     }
 
     /**

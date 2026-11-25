@@ -294,32 +294,11 @@ export const TreasuryModuleView: React.FC = () => {
           createdAt: id
         };
 
-        await ErpDataService.handleTransactionCommit({
-          collectionName: 'movements',
-          docId: movDocId,
-          payload: newMov,
-          actorUsername: userProfile?.username
-        });
-
         const matchedBox = distinctCashboxes.find(
           (c) => normalizeEntityKey(c.name) === normalizeEntityKey(movForm.cashbox)
         );
         const boxId = matchedBox?.id || 1;
         const boxPrimaryCurrency = matchedBox?.primaryCurrency || movForm.currency;
-        const primaryBal =
-          getBalanceForBoxAndCurrency(movForm.cashbox, boxPrimaryCurrency) +
-          (movForm.currency === boxPrimaryCurrency ? (movForm.direction === 'وارد' ? amt : -amt) : 0);
-
-        await ErpDataService.saveDocument('cashboxes', cashboxDocId(movForm.cashbox, boxId), {
-          id: boxId,
-          name: movForm.cashbox.trim(),
-          balance: primaryBal,
-          currency: boxPrimaryCurrency,
-          branch: matchedBox?.branch || userProfile?.branch || 'SD-001',
-          active: true,
-          updatedAt: Date.now()
-        });
-
         const movJournal = buildTreasuryMovementJournalPayload({
           id,
           txDate: today,
@@ -331,13 +310,44 @@ export const TreasuryModuleView: React.FC = () => {
           reference: ref,
           createdBy: userProfile?.fullName || userProfile?.username || 'المدير'
         });
-        await ErpDataService.persistJournalPayload(movJournal).catch(() => {});
 
-        await ErpDataService.logAudit(
-          userProfile?.username || 'admin',
-          'ADD_TREASURY_MOVEMENT',
-          `${movForm.direction} بقيمة ${amt.toLocaleString()} ${movForm.currency} في ${movForm.cashbox} (${ref})`
-        );
+        const ops: any[] = [
+          {
+            kind: 'merge',
+            collectionName: 'movements',
+            docId: movDocId,
+            payload: newMov,
+            checkDuplicateFinancial: true
+          }
+        ];
+        if (!matchedBox) {
+          ops.push({
+            kind: 'merge',
+            collectionName: 'cashboxes',
+            docId: cashboxDocId(movForm.cashbox, boxId),
+            payload: {
+              id: boxId,
+              name: movForm.cashbox.trim(),
+              balance: 0,
+              currency: boxPrimaryCurrency,
+              branch: userProfile?.branch || 'SD-001',
+              active: true,
+              updatedAt: Date.now()
+            },
+            checkDuplicateFinancial: false
+          });
+        }
+
+        await ErpDataService.commitAtomicTransactionBundle({
+          actorUsername: userProfile?.username,
+          operations: ops,
+          journals: [movJournal],
+          auditLog: {
+            username: userProfile?.username || 'admin',
+            action: 'ADD_TREASURY_MOVEMENT',
+            detail: `${movForm.direction} ذري بقيمة ${amt.toLocaleString()} ${movForm.currency} في ${movForm.cashbox} (${ref})`
+          }
+        });
         return { resultReference: movDocId };
       }
     });
@@ -357,40 +367,38 @@ export const TreasuryModuleView: React.FC = () => {
 
   const handleDeleteMovement = async (mov: TreasuryMovement) => {
     if (!canDeleteOrZero || actionGuard.isSubmitting) return;
-    if (!window.confirm(`حذف الحركة المالية رقم ${mov.reference} بقيمة ${mov.amount.toLocaleString()} ${mov.currency}؟`)) {
+    if (ErpDataService.isCancelledOrReversedStatus((mov as any).status)) {
+      notify('error', 'تم عكس هذه الحركة مسبقاً في دفتر الأستاذ ولا يمكن عكسها مرتين.');
+      return;
+    }
+    if (
+      !window.confirm(
+        `إنشاء قيد عكسي موثق لإلغاء أثر الحركة رقم ${mov.reference} بقيمة ${mov.amount.toLocaleString()} ${mov.currency}؟\n(السجل الأصلي يظل محفوظاً في دفتر الأستاذ غير القابل للحذف)`
+      )
+    ) {
       return;
     }
     const docId = (mov as any)._docId || `MOV-${mov.id}`;
     const actor = userProfile?.username || 'admin';
     const res = await actionGuard.runGuarded({
-      guardKey: `treasury_del_mov_${docId}`,
-      operationType: 'DELETE',
+      guardKey: `treasury_reverse_mov_${docId}`,
+      operationType: 'UPDATE',
       userId: actor,
       documentReference: docId,
       targetCollection: 'movements',
-      payloadSummary: `حذف حركة ${mov.reference}`,
+      payloadSummary: `قيد عكسي لحركة ${mov.reference}`,
       execute: async () => {
-        await ErpDataService.deleteDocumentWithTombstone(
-          'movements',
-          docId,
-          mov.id || docId,
-          actor,
-          [
-            mov.reference,
-            mov.id ? `MOV-${mov.id}` : '',
-            (mov as any).syncUuid
-          ]
-        );
-        await ErpDataService.logAudit(
-          actor,
-          'DELETE_TREASURY_MOVEMENT',
-          `حذف حركة ${mov.reference} (${mov.amount} ${mov.currency}) من ${mov.cashbox}`
-        );
-        return { resultReference: docId };
+        const revJournalRef = await ErpDataService.reverseTreasuryMovementAtomic({
+          movement: mov,
+          reason: `عكس حركة مالية معتمد من الخزينة (${mov.reference || docId})`,
+          actorUsername: actor,
+          actorDisplayName: userProfile?.fullName || actor
+        });
+        return { resultReference: revJournalRef };
       }
     });
     if (res.ok) {
-      notify('success', `تم حذف الحركة ${mov.reference} نهائياً ومنع عودتها`);
+      notify('success', `تم تنفيذ القيد العكسي الموثق للحركة ${mov.reference} وإعادة احتساب الرصيد بدقة`);
     } else {
       notify('error', res.message);
     }
@@ -488,25 +496,6 @@ export const TreasuryModuleView: React.FC = () => {
           createdAt: now + 2
         };
 
-        await ErpDataService.handleTransactionCommit({
-          collectionName: 'transfers',
-          docId: trfDocId,
-          payload: newTrf,
-          actorUsername: userProfile?.username
-        });
-        await ErpDataService.handleTransactionCommit({
-          collectionName: 'movements',
-          docId: outDocId,
-          payload: outMov,
-          actorUsername: userProfile?.username
-        });
-        await ErpDataService.handleTransactionCommit({
-          collectionName: 'movements',
-          docId: inDocId,
-          payload: inMov,
-          actorUsername: userProfile?.username
-        });
-
         const trfJournals = buildTreasuryTransferJournalPayloads({
           id: now,
           txDate: today,
@@ -519,13 +508,39 @@ export const TreasuryModuleView: React.FC = () => {
           destinationAmount: destAmt,
           createdBy: actor
         });
-        await ErpDataService.persistJournalPayloads(trfJournals).catch(() => {});
 
-        await ErpDataService.logAudit(
-          userProfile?.username || 'admin',
-          'TREASURY_TRANSFER',
-          `تحويل ${refPreview}: ${srcAmt} ${trfForm.sourceCurrency} (${trfForm.sourceCashbox}) -> ${destAmt} ${trfForm.destinationCurrency} (${trfForm.destinationCashbox})`
-        );
+        await ErpDataService.commitAtomicTransactionBundle({
+          actorUsername: userProfile?.username,
+          operations: [
+            {
+              kind: 'merge',
+              collectionName: 'transfers',
+              docId: trfDocId,
+              payload: newTrf,
+              checkDuplicateFinancial: true
+            },
+            {
+              kind: 'merge',
+              collectionName: 'movements',
+              docId: outDocId,
+              payload: outMov,
+              checkDuplicateFinancial: true
+            },
+            {
+              kind: 'merge',
+              collectionName: 'movements',
+              docId: inDocId,
+              payload: inMov,
+              checkDuplicateFinancial: true
+            }
+          ],
+          journals: trfJournals,
+          auditLog: {
+            username: userProfile?.username || 'admin',
+            action: 'TREASURY_TRANSFER',
+            detail: `تحويل ذري ${refPreview}: ${srcAmt} ${trfForm.sourceCurrency} (${trfForm.sourceCashbox}) -> ${destAmt} ${trfForm.destinationCurrency} (${trfForm.destinationCashbox})`
+          }
+        });
         return { resultReference: trfDocId };
       }
     });

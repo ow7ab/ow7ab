@@ -27,7 +27,6 @@ import {
   ERP_MODULES,
   SCOPED_ADMIN_MARKER,
   canAssignRole,
-  canConfigureEmployeePermissions,
   canModifyEmployeeTarget,
   isSuperAdminAccount,
   isScopedAdministrator,
@@ -70,7 +69,8 @@ export const EmployeeManagementCenter: React.FC = () => {
   const { language } = useLanguage();
   const { userProfile, isSuperAdmin } = useAuth();
 
-  const canManageUsers = isSuperAdmin || canConfigureEmployeePermissions(userProfile);
+  // Admin-only exclusivity for employee/role/permission control per governance policy
+  const canManageUsers = isSuperAdmin;
 
   const [activeSubTab, setActiveSubTab] = useState<UsersSubTab>('DIRECTORY');
   const [employees, setEmployees] = useState<UserAccount[]>([]);

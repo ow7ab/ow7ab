@@ -2145,7 +2145,7 @@ fun SettingsScreen(
         )
     }
 
-    if (showDiagnosticDashboard) {
+    if (showDiagnosticDashboard && isSuperAdmin) {
         SyncDiagnosticDashboardDialog(
             viewModel = viewModel,
             onDismiss = { showDiagnosticDashboard = false }

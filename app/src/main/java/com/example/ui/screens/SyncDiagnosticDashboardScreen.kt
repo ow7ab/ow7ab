@@ -36,6 +36,7 @@ import com.example.data.remote.CloudErrorLogEntry
 import com.example.data.remote.ServiceProbeId
 import com.example.data.remote.ServiceProbeResult
 import com.example.data.remote.SyncDiagnosticRecord
+import com.example.isSuperAdminAccount
 import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.PmpViewModel
@@ -114,11 +115,16 @@ fun SyncDiagnosticDashboardView(
     val movements by viewModel.movements.collectAsState()
     val products by viewModel.products.collectAsState()
     val userAccounts by viewModel.userAccounts.collectAsState()
+    val currentUser by viewModel.currentUser.collectAsState()
+    val unifiedSync by viewModel.unifiedSyncSnapshot.collectAsState()
+    val reconReport by viewModel.crossPlatformReconciliationReport.collectAsState()
+    val isSuperAdmin = currentUser.isSuperAdminAccount()
 
     var selectedTab by remember(initialTab) { mutableIntStateOf(initialTab.coerceIn(0, 3)) }
     var opStatusFilter by remember { mutableStateOf("ALL") }
     var opSearchQuery by remember { mutableStateOf("") }
     var showWipeConfirmDialog by remember { mutableStateOf(false) }
+    var isRunningRecon by remember { mutableStateOf(false) }
     val totalErrorsBadge = maxOf(pendingErrors.size, structuredErrors.size)
     val tabs = listOf(
         "نظرة عامة والوحدات",
@@ -130,6 +136,30 @@ fun SyncDiagnosticDashboardView(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
+
+    if (!isSuperAdmin) {
+        Box(
+            modifier = modifier.fillMaxSize().background(GlassBackgroundBrush).padding(24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            GlassCard(backgroundColor = Color.White) {
+                Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "PMP SYSTEM HEALTH CENTER — صلاحية Admin فقط",
+                        color = PmpRed,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                    )
+                    Text(
+                        text = "مركز مراقبة صحة النظام ومطابقة الأرصدة مخصص حصرياً لحساب Admin ومخفي عن باقي الحسابات.",
+                        color = TextMuted,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        }
+        return
+    }
 
     var firebaseUser by remember {
         mutableStateOf(runCatching { Firebase.auth.currentUser }.getOrNull())
@@ -216,14 +246,14 @@ fun SyncDiagnosticDashboardView(
                                 }
                                 Column {
                                     Text(
-                                        text = "لوحة تشخيص ومراقبة المزامنة",
+                                        text = "PMP SYSTEM HEALTH CENTER • لوحة تشخيص ومراقبة المزامنة",
                                         style = MaterialTheme.typography.titleLarge,
                                         color = PmpBrandNavy,
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 18.sp
+                                        fontSize = 16.sp
                                     )
                                     Text(
-                                        text = "Google Cloud Synchronization Diagnostics Hub",
+                                        text = "حالة المزامنة: ${unifiedSync.status.code} (${unifiedSync.labelAr}) • Admin Only",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = TextMuted,
                                         fontSize = 11.sp
@@ -513,6 +543,201 @@ fun SyncDiagnosticDashboardView(
             // Tab Content
             when (selectedTab) {
                 0 -> {
+                    // Cross-Platform Balance Reconciliation & PDF/Excel Export Hub
+                    item {
+                        GlassCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            backgroundColor = Color.White
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                val maskedUid = firebaseUser?.uid?.let {
+                                    if (it.length > 8) "${it.take(6)}...${it.takeLast(4)}" else it
+                                } ?: "غير مرتبط"
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "مطابقة الأرصدة بين المنصات (Web / Desktop / Android)",
+                                            color = PmpBrandNavy,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp
+                                        )
+                                        Text(
+                                            text = "Firebase Auth: $maskedUid • الحالة الموحدة: ${unifiedSync.status.code} • معلق: ${unifiedSync.pendingWritesCount}",
+                                            color = TextMuted,
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                    GlassBadge(
+                                        text = unifiedSync.status.code,
+                                        color = when (unifiedSync.status) {
+                                            com.example.domain.accounting.UnifiedSyncStatus.SYNCED -> PmpGreen
+                                            com.example.domain.accounting.UnifiedSyncStatus.SYNCING -> PmpCyan
+                                            com.example.domain.accounting.UnifiedSyncStatus.PENDING -> PmpGold
+                                            else -> PmpRed
+                                        }
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    GlassButton(
+                                        text = if (isRunningRecon) "جارٍ المطابقة..." else "تشغيل مطابقة الأرصدة",
+                                        icon = Icons.Default.Verified,
+                                        gradient = GlassAccentBlueGradient,
+                                        enabled = !isRunningRecon,
+                                        modifier = Modifier.weight(1f),
+                                        onClick = {
+                                            isRunningRecon = true
+                                            viewModel.runCrossPlatformReconciliation {
+                                                isRunningRecon = false
+                                            }
+                                        }
+                                    )
+                                    GlassButton(
+                                        text = "PDF",
+                                        icon = Icons.Default.PictureAsPdf,
+                                        gradient = Brush.horizontalGradient(listOf(PmpBrandNavy, Color(0xFF334155))),
+                                        modifier = Modifier.width(86.dp),
+                                        onClick = {
+                                            val rows = mutableListOf(
+                                                listOf("المصادقة", "Firebase Auth", maskedUid, unifiedSync.status.code, unifiedSync.labelAr)
+                                            )
+                                            reconReport?.let { rep ->
+                                                listOf("SDG", "EGP", "USD").forEach { cur ->
+                                                    rows.add(
+                                                        listOf(
+                                                            "أرصدة $cur",
+                                                            "مركزي: ${rep.centralCurrencyTotals[cur] ?: 0.0}",
+                                                            "Android: ${rep.localCurrencyTotals[cur] ?: 0.0}",
+                                                            "Ledger: ${rep.ledgerCurrencyTotals[cur] ?: 0.0}",
+                                                            rep.lastSyncedTransactionRef
+                                                        )
+                                                    )
+                                                }
+                                                rep.anomalies.forEach { a ->
+                                                    rows.add(
+                                                        listOf(
+                                                            "تباين",
+                                                            a.affectedAccount,
+                                                            "فرق: ${a.varianceAmount} ${a.currency}",
+                                                            a.rootCauseSource,
+                                                            a.safeRemediationDescriptionAr
+                                                        )
+                                                    )
+                                                }
+                                            }
+                                            structuredErrors.take(15).forEach { e ->
+                                                rows.add(listOf("خطأ مصنف", e.operation, e.collectionPath, e.categoryTitleAr, e.sanitizedMessage))
+                                            }
+                                            com.example.util.StatementPdfAndExcelExporter.exportHealthReportToPdf(
+                                                context = context,
+                                                reportTitle = "PMP SYSTEM HEALTH CENTER",
+                                                subtitle = "حالة المزامنة: ${unifiedSync.status.code} | Admin: ${currentUser?.username ?: "admin"}",
+                                                headers = listOf("القسم", "البند", "القيمة", "المصدر/الحالة", "التفاصيل"),
+                                                rows = rows,
+                                                shareAfterExport = true
+                                            )
+                                        }
+                                    )
+                                    GlassButton(
+                                        text = "Excel",
+                                        icon = Icons.Default.TableChart,
+                                        gradient = Brush.horizontalGradient(listOf(Color(0xFF065F46), Color(0xFF059669))),
+                                        modifier = Modifier.width(92.dp),
+                                        onClick = {
+                                            val rows = mutableListOf(
+                                                listOf("المصادقة", "Firebase Auth", maskedUid, unifiedSync.status.code, unifiedSync.labelAr)
+                                            )
+                                            reconReport?.let { rep ->
+                                                listOf("SDG", "EGP", "USD").forEach { cur ->
+                                                    rows.add(
+                                                        listOf(
+                                                            "أرصدة $cur",
+                                                            "مركزي: ${rep.centralCurrencyTotals[cur] ?: 0.0}",
+                                                            "Android: ${rep.localCurrencyTotals[cur] ?: 0.0}",
+                                                            "Ledger: ${rep.ledgerCurrencyTotals[cur] ?: 0.0}",
+                                                            rep.lastSyncedTransactionRef
+                                                        )
+                                                    )
+                                                }
+                                                rep.anomalies.forEach { a ->
+                                                    rows.add(
+                                                        listOf(
+                                                            "تباين",
+                                                            a.affectedAccount,
+                                                            "فرق: ${a.varianceAmount} ${a.currency}",
+                                                            a.rootCauseSource,
+                                                            com.example.util.StatementPdfAndExcelExporter.redactHealthTelemetry(a.safeRemediationDescriptionAr)
+                                                        )
+                                                    )
+                                                }
+                                            }
+                                            structuredErrors.take(20).forEach { e ->
+                                                rows.add(
+                                                    listOf(
+                                                        "خطأ مصنف",
+                                                        e.operation,
+                                                        e.collectionPath,
+                                                        e.categoryTitleAr,
+                                                        com.example.util.StatementPdfAndExcelExporter.redactHealthTelemetry(e.sanitizedMessage)
+                                                    )
+                                                )
+                                            }
+                                            com.example.util.StatementPdfAndExcelExporter.exportReportToExcel(
+                                                context = context,
+                                                reportTitle = "PMP_SYSTEM_HEALTH_CENTER",
+                                                subtitle = "حالة المزامنة: ${unifiedSync.status.code} | Admin: ${currentUser?.username ?: "admin"}",
+                                                headers = listOf("القسم", "البند", "القيمة", "المصدر/الحالة", "التفاصيل"),
+                                                rows = rows,
+                                                shareAfterExport = true
+                                            )
+                                        }
+                                    )
+                                }
+
+                                reconReport?.let { rep ->
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(if (rep.overallStatus == "MATCHED") Color(0xFFF0FDF4) else Color(0xFFFEF2F2))
+                                            .padding(10.dp)
+                                    ) {
+                                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text(
+                                                text = rep.summaryAr,
+                                                color = if (rep.overallStatus == "MATCHED") PmpGreen else PmpRed,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
+                                            )
+                                            Text(
+                                                text = "SDG مركزي: ${rep.centralCurrencyTotals["SDG"] ?: 0.0} | محلي: ${rep.localCurrencyTotals["SDG"] ?: 0.0} • EGP مركزي: ${rep.centralCurrencyTotals["EGP"] ?: 0.0} | محلي: ${rep.localCurrencyTotals["EGP"] ?: 0.0}",
+                                                color = PmpBrandNavy,
+                                                fontSize = 11.sp
+                                            )
+                                            rep.anomalies.take(5).forEach { a ->
+                                                Text(
+                                                    text = "• ${a.affectedAccount}: فرق ${a.varianceAmount} (${a.rootCauseSource}) — ${a.safeRemediationDescriptionAr}",
+                                                    color = PmpRed,
+                                                    fontSize = 10.5.sp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Tab 0: Overview & Modules Health
                     item {
                         GlassCard(

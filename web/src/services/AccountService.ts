@@ -20,8 +20,12 @@ import {
   serverTimestamp,
   Unsubscribe
 } from 'firebase/firestore';
-import { signInAnonymously } from 'firebase/auth';
-import { auth, firestore } from '../config/firebaseConfig';
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut as fbSignOut
+} from 'firebase/auth';
+import { auth, firestore, getProvisioningAuth } from '../config/firebaseConfig';
 import {
   UserAccount,
   PermissionChangeAuditEntry
@@ -51,6 +55,46 @@ export function buildEmailDirectoryKey(email: string): string {
   return safeId(`EMAIL_${normalized}`, 'EMAIL_USER').slice(0, 100);
 }
 
+export function resolveCorporateAuthEmail(username: string, phoneOrEmail?: string): string {
+  const rawEmail = (phoneOrEmail || '').trim().toLowerCase();
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail)) {
+    return rawEmail;
+  }
+  const cleanUser = (username || 'user')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '.')
+    .replace(/^\.+|\.+$/g, '');
+  return `${cleanUser || 'employee'}@pmp-paints.com`;
+}
+
+async function provisionFirebaseEmailAccount(authEmail: string, rawPassword: string): Promise<string | null> {
+  const cleanEmail = (authEmail || '').trim().toLowerCase();
+  const cleanSecret = (rawPassword || '').trim();
+  if (!cleanEmail.includes('@') || cleanSecret.length < 6) {
+    // Firebase Email/Password requires >= 6 characters; if legacy 4-digit PIN is used, keep existing Firestore hash compatibility
+    // unless caller supplies a >= 6 char secret. Wait: normalize short PIN deterministically? NEVER store weak padded password silently!
+    return null;
+  }
+  const provAuth = getProvisioningAuth();
+  try {
+    const created = await createUserWithEmailAndPassword(provAuth, cleanEmail, cleanSecret);
+    return created.user.uid;
+  } catch (err: any) {
+    if (err?.code === 'auth/email-already-in-use') {
+      try {
+        const signed = await signInWithEmailAndPassword(provAuth, cleanEmail, cleanSecret);
+        return signed.user.uid;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  } finally {
+    await fbSignOut(provAuth).catch(() => {});
+  }
+}
+
 function mapFirestoreDocToUserAccount(docId: string, raw: Record<string, any>, fallbackIndex: number): UserAccount {
   const numericId =
     typeof raw.id === 'number'
@@ -72,6 +116,8 @@ function mapFirestoreDocToUserAccount(docId: string, raw: Record<string, any>, f
     permissions: String(raw.permissions || ''),
     serverSyncToken: String(raw.serverSyncToken || ''),
     remoteServerId: raw.remoteServerId ? String(raw.remoteServerId) : undefined,
+    linkedUid: raw.linkedUid ? String(raw.linkedUid) : undefined,
+    authEmail: raw.authEmail ? String(raw.authEmail) : undefined,
     syncStatus: (raw.syncStatus as UserAccount['syncStatus']) || 'APPROVED_BY_MANAGER',
     active: raw.active !== false,
     createdAt: raw.createdAt
@@ -218,8 +264,8 @@ export const AccountService = {
    * 2) Direct document lookups (`email_directory/{emailKey}` -> `user_accounts/{userCode}`, `cluster_members/{uid}` -> `user_accounts/{userCode}`, `linked_accounts/{uid}`).
    * 3) Collection-wide `user_accounts` scan ONLY when the signed-in member holds ADMIN or MANAGER role.
    */
-  async findSignedInUserAccount(fbUser: { uid: string; email?: string | null }): Promise<UserAccount | null> {
-    if (!fbUser?.uid || !auth.currentUser) return null;
+  async findSignedInUserAccount(fbUser: { uid: string; email?: string | null; isAnonymous?: boolean }): Promise<UserAccount | null> {
+    if (!fbUser?.uid || fbUser.isAnonymous || !auth.currentUser || auth.currentUser.isAnonymous) return null;
     const cluster = ErpDataService.activeCluster || PRIMARY_CLUSTER;
     const cleanUid = safeId(fbUser.uid, fbUser.uid);
     const cleanEmail = (fbUser.email || '').trim().toLowerCase();
@@ -387,27 +433,20 @@ export const AccountService = {
   },
 
   /**
-   * Looks up a user account in Firestore by username, userCode, or phoneOrEmail for authentication.
-   * Respects zero-trust Firestore rules: never fires an unauthenticated collection list on `user_accounts`.
+   * Looks up a user account in Firestore by username, userCode, or phoneOrEmail
+   * ONLY within an already-authenticated, non-anonymous Firebase session.
+   * Never creates anonymous sessions or pre-registers cluster_members from unverified input.
    */
   async findAccountForLogin(identifier: string): Promise<UserAccount | null> {
     const clean = (identifier || '').trim().toLowerCase();
     if (!clean) return null;
 
-    let fbUser = auth.currentUser;
-    if (!fbUser) {
-      try {
-        const cred = await signInAnonymously(auth);
-        fbUser = cred.user;
-      } catch (err) {
-        console.warn('Anonymous session initialization note during login lookup:', err);
-      }
+    const fbUser = auth.currentUser;
+    if (!fbUser || fbUser.isAnonymous) {
+      return null;
     }
 
-    const cluster = PRIMARY_CLUSTER;
-    if (fbUser) {
-      await this.ensureOwnClusterMemberRegistration(null, fbUser.uid, fbUser.email || (clean.includes('@') ? clean : null)).catch(() => {});
-    }
+    const cluster = ErpDataService.activeCluster || PRIMARY_CLUSTER;
 
     // 1. Direct lookup via candidate document IDs
     const candidateDocIds = [
@@ -540,12 +579,13 @@ export const AccountService = {
    * so Firestore Security Rules resolve the user's authoritative role cleanly.
    */
   async syncRbacDirectoryForAccount(account: UserAccount, linkedUid?: string | null): Promise<void> {
+    if (!auth.currentUser || auth.currentUser.isAnonymous) return;
     const cluster = ErpDataService.activeCluster;
     const roleKey = resolveCanonicalRbacTier(account);
-    const email = (account.phoneOrEmail || '').trim().toLowerCase();
+    const email = (account.authEmail || account.phoneOrEmail || '').trim().toLowerCase();
     const emailKey = email.includes('@') ? buildEmailDirectoryKey(email) : '';
 
-    if (emailKey && auth.currentUser) {
+    if (emailKey) {
       const dirPath = `erp_clusters/${cluster}/email_directory/${emailKey}`;
       try {
         await setDoc(
@@ -568,8 +608,8 @@ export const AccountService = {
       }
     }
 
-    const uid = (linkedUid || '').trim();
-    if (uid && auth.currentUser) {
+    const uid = (linkedUid || account.linkedUid || '').trim();
+    if (uid) {
       const cleanUid = safeId(uid, uid);
       const memberPath = `erp_clusters/${cluster}/cluster_members/${cleanUid}`;
       try {
@@ -597,37 +637,44 @@ export const AccountService = {
   },
 
   /**
-   * Ensures the signed-in Firebase Auth user has a matching `cluster_members/{uid}` document
-   * (either via first-owner bootstrap or pre-provisioned `email_directory/{emailKey}`).
+   * Ensures the authenticated non-anonymous Firebase Auth user has a matching `cluster_members/{uid}` document
+   * (either via first-owner bootstrap or verified pre-provisioned `email_directory/{emailKey}`).
    */
   async ensureOwnClusterMemberRegistration(
     account: UserAccount | null,
     fbUid: string,
     fbEmail?: string | null
   ): Promise<void> {
-    if (!fbUid || !auth.currentUser) return;
+    const fbUser = auth.currentUser;
+    if (!fbUid || !fbUser || fbUser.isAnonymous) return;
     const cluster = ErpDataService.activeCluster;
     const cleanUid = safeId(fbUid, fbUid);
     const memberRef = doc(firestore, `erp_clusters/${cluster}/cluster_members`, cleanUid);
 
     try {
       const existing = await getDocFromServer(memberRef).catch(() => getDoc(memberRef));
-      if (existing.exists()) return;
+      const existingData = existing.exists() ? existing.data() || {} : null;
+      if (existingData) {
+        // Do not blindly overwrite active membership if it already belongs to this user
+        const existingCode = String(existingData.userCode || '').trim();
+        if (!account || !account.userCode || existingCode === account.userCode) {
+          return;
+        }
+      }
 
       const ownerRef = doc(firestore, `erp_clusters/${cluster}/system_metadata`, 'cluster_owner');
       const ownerSnap = await getDocFromServer(ownerRef).catch(() => null);
       const ownerExists = Boolean(ownerSnap && ownerSnap.exists());
       const existingOwnerUid = ownerExists ? String(ownerSnap?.data()?.ownerUid || '') : '';
-      const email = (fbEmail || account?.phoneOrEmail || '').trim().toLowerCase();
+      const isEmailVerified = Boolean(fbUser.emailVerified);
+      const verifiedFbEmail = isEmailVerified && fbUser.email ? fbUser.email.trim().toLowerCase() : '';
+      const email = verifiedFbEmail || (fbEmail || '').trim().toLowerCase();
       const canBootstrapAdmin =
-        (account != null && (isSuperAdminAccount(account) || isSystemManager(account))) ||
-        email === 'oaw7ab@gmail.com' ||
-        email === 'admin@pmp-paints.com' ||
-        account?.userCode === 'USR-ADMIN' ||
-        account?.userCode === 'USR-HQ-001' ||
-        account?.username?.toLowerCase() === 'admin';
+        (!ownerExists && account != null && (isSuperAdminAccount(account) || isSystemManager(account))) ||
+        (ownerExists && existingOwnerUid === cleanUid) ||
+        (isEmailVerified && (verifiedFbEmail === 'oaw7ab@gmail.com' || verifiedFbEmail === 'admin@pmp-paints.com'));
 
-      if (canBootstrapAdmin) {
+      if (canBootstrapAdmin && !existingData) {
         await setDoc(memberRef, {
           uid: cleanUid,
           userCode: account?.userCode || 'USR-ADMIN',
@@ -637,7 +684,7 @@ export const AccountService = {
           active: true,
           updatedAt: Date.now()
         }, { merge: true });
-        if (!ownerExists || email === 'oaw7ab@gmail.com' || email === 'admin@pmp-paints.com') {
+        if (!ownerExists || (isEmailVerified && (verifiedFbEmail === 'oaw7ab@gmail.com' || verifiedFbEmail === 'admin@pmp-paints.com'))) {
           await setDoc(ownerRef, {
             ownerUid: cleanUid,
             userCode: account?.userCode || 'USR-ADMIN',
@@ -647,21 +694,23 @@ export const AccountService = {
         return;
       }
 
-      if (account) {
+      if (account && !existingData && isEmailVerified && verifiedFbEmail === (account.phoneOrEmail || '').trim().toLowerCase()) {
         const tier = resolveCanonicalRbacTier(account);
-        await setDoc(memberRef, {
-          uid: cleanUid,
-          userCode: account.userCode || `USR-${cleanUid.slice(0, 6).toUpperCase()}`,
-          roleKey: tier,
-          branch: account.branch || 'الخرطوم',
-          permissions: account.permissions || 'صلاحية العرض',
-          active: account.active !== false,
-          updatedAt: Date.now()
-        }, { merge: true });
+        if (tier !== 'ADMIN') {
+          await setDoc(memberRef, {
+            uid: cleanUid,
+            userCode: account.userCode || `USR-${cleanUid.slice(0, 6).toUpperCase()}`,
+            roleKey: tier,
+            branch: account.branch || 'الخرطوم',
+            permissions: account.permissions || 'صلاحية العرض',
+            active: account.active !== false,
+            updatedAt: Date.now()
+          }, { merge: true });
+        }
         return;
       }
 
-      if (email.includes('@')) {
+      if (!existingData && email.includes('@') && isEmailVerified) {
         const emailKey = buildEmailDirectoryKey(email);
         const dirSnap = await getDoc(doc(firestore, `erp_clusters/${cluster}/email_directory`, emailKey)).catch(() => null);
         if (dirSnap && dirSnap.exists()) {
@@ -669,10 +718,10 @@ export const AccountService = {
           await setDoc(memberRef, {
             uid: cleanUid,
             emailKey,
-            userCode: d.userCode || account?.userCode || `USR-${cleanUid.slice(0, 6).toUpperCase()}`,
-            roleKey: d.roleKey || (account ? resolveCanonicalRbacTier(account) : 'EMPLOYEE'),
-            branch: d.branch || account?.branch || 'الخرطوم',
-            permissions: d.permissions ?? account?.permissions ?? 'صلاحية العرض',
+            userCode: d.userCode || `USR-${cleanUid.slice(0, 6).toUpperCase()}`,
+            roleKey: d.roleKey || 'EMPLOYEE',
+            branch: d.branch || 'الخرطوم',
+            permissions: d.permissions ?? 'صلاحية العرض',
             active: d.active !== false,
             updatedAt: Date.now()
           }, { merge: true });
@@ -758,7 +807,7 @@ export const AccountService = {
       ).catch(() => {});
     }
 
-    await this.syncRbacDirectoryForAccount(updated, (requestAccount as any).linkedUid);
+    await this.syncRbacDirectoryForAccount(updated, requestAccount.linkedUid);
 
     await this.logAuditEntry({
       entryId: `RBAC-LOG-${Date.now()}`,
@@ -840,8 +889,14 @@ export const AccountService = {
     const docId = safeId(updatedAccount.userCode, `USR-${updatedAccount.id}`);
 
     let passwordHash = updatedAccount.pinOrPassword;
+    let provisionedUid = updatedAccount.linkedUid || '';
+    const corpAuthEmail = resolveCorporateAuthEmail(updatedAccount.username, updatedAccount.phoneOrEmail);
     if (rawNewPassword && rawNewPassword.trim().length > 0) {
       passwordHash = await hashPassword(rawNewPassword.trim());
+      if (rawNewPassword.trim().length >= 6) {
+        const maybeUid = await provisionFirebaseEmailAccount(corpAuthEmail, rawNewPassword.trim());
+        if (maybeUid) provisionedUid = maybeUid;
+      }
     }
 
     const payload: Record<string, any> = {
@@ -850,6 +905,8 @@ export const AccountService = {
       fullName: updatedAccount.fullName,
       username: updatedAccount.username,
       phoneOrEmail: updatedAccount.phoneOrEmail || '',
+      authEmail: corpAuthEmail,
+      ...(provisionedUid ? { linkedUid: provisionedUid } : {}),
       role: updatedAccount.role,
       branch: updatedAccount.branch,
       permissions: updatedAccount.permissions,
@@ -875,7 +932,7 @@ export const AccountService = {
       throw err;
     }
 
-    await this.syncRbacDirectoryForAccount(updatedAccount, (updatedAccount as any).linkedUid);
+    await this.syncRbacDirectoryForAccount(updatedAccount, provisionedUid || updatedAccount.linkedUid);
 
     // Sync /linked_accounts only if Firebase Auth user is signed in and matches uid (per firestore.rules)
     const fbUser = auth.currentUser;
@@ -951,12 +1008,15 @@ export const AccountService = {
     }
 
     const hashedSecret = await hashPassword(rawPass);
+    const resolvedUsername = (newAccount.username || userCode.toLowerCase()).trim();
+    const corpAuthEmail = resolveCorporateAuthEmail(resolvedUsername, newAccount.phoneOrEmail);
+    const provisionedUid = rawPass.length >= 6 ? await provisionFirebaseEmailAccount(corpAuthEmail, rawPass) : null;
 
     const fullAccount: UserAccount = {
       id,
       userCode,
       fullName: (newAccount.fullName || '').trim(),
-      username: (newAccount.username || userCode.toLowerCase()).trim(),
+      username: resolvedUsername,
       phoneOrEmail: (newAccount.phoneOrEmail || '').trim(),
       pinOrPassword: hashedSecret,
       role: newAccount.role || 'موظف',
@@ -964,7 +1024,9 @@ export const AccountService = {
       branch: newAccount.branch || 'الخرطوم',
       permissions: newAccount.permissions || 'صلاحية العرض',
       serverSyncToken: `SYNC_${id}`,
-      remoteServerId: `CLOUD-${userCode}`,
+      remoteServerId: provisionedUid || `CLOUD-${userCode}`,
+      linkedUid: provisionedUid || undefined,
+      authEmail: corpAuthEmail,
       syncStatus: 'APPROVED_BY_MANAGER',
       active: newAccount.active !== false,
       createdAt: new Date().toLocaleDateString('ar-EG')
@@ -977,6 +1039,8 @@ export const AccountService = {
       fullName: fullAccount.fullName,
       username: fullAccount.username,
       phoneOrEmail: fullAccount.phoneOrEmail,
+      authEmail: corpAuthEmail,
+      ...(provisionedUid ? { linkedUid: provisionedUid } : {}),
       pinOrPassword: hashedSecret,
       role: fullAccount.role,
       branch: fullAccount.branch,
@@ -999,7 +1063,7 @@ export const AccountService = {
       throw err;
     }
 
-    await this.syncRbacDirectoryForAccount(fullAccount);
+    await this.syncRbacDirectoryForAccount(fullAccount, provisionedUid);
 
     // Clear any prior deleted_users tombstone if re-creating
     await deleteDoc(doc(firestore, `erp_clusters/${cluster}/deleted_users`, safeId(`DEL-${userCode}`, `DEL-${id}`))).catch(

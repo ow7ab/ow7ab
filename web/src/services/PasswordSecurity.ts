@@ -246,6 +246,34 @@ export function evaluatePasswordStrength(
 // ============================================================================
 
 const SESSION_SEAL_DOMAIN = 'PMP-PAINTS-ERP-SESSION-SEAL-V2';
+const SESSION_HMAC_KEY_STORAGE = 'pmp_sec_session_hmac_v1';
+let memorySessionHmacSecret: string | null = null;
+
+function getOrCreateDeviceSessionSecret(): string {
+  try {
+    if (typeof globalThis.localStorage !== 'undefined') {
+      const existing = globalThis.localStorage.getItem(SESSION_HMAC_KEY_STORAGE);
+      if (existing && existing.length >= 32) {
+        memorySessionHmacSecret = existing;
+        return existing;
+      }
+      const bytes = new Uint8Array(32);
+      globalThis.crypto.getRandomValues(bytes);
+      const created = bytesToHex(bytes);
+      globalThis.localStorage.setItem(SESSION_HMAC_KEY_STORAGE, created);
+      memorySessionHmacSecret = created;
+      return created;
+    }
+  } catch {
+    // Restricted storage fallback: stay process-local in memory
+  }
+  if (!memorySessionHmacSecret) {
+    const bytes = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(bytes);
+    memorySessionHmacSecret = bytesToHex(bytes);
+  }
+  return memorySessionHmacSecret;
+}
 
 function buildCanonicalSessionString(payload: {
   userCode?: string;
@@ -287,9 +315,17 @@ export async function computeSessionIntegritySeal(payload: {
   issuedAt?: number;
 }): Promise<string> {
   const canonical = buildCanonicalSessionString(payload);
+  const deviceSecret = getOrCreateDeviceSessionSecret();
   const enc = new TextEncoder();
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', enc.encode(canonical));
-  return bytesToHex(new Uint8Array(digest));
+  const key = await globalThis.crypto.subtle.importKey(
+    'raw',
+    enc.encode(deviceSecret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sig = await globalThis.crypto.subtle.sign('HMAC', key, enc.encode(canonical));
+  return bytesToHex(new Uint8Array(sig));
 }
 
 export async function verifySessionIntegritySeal(
