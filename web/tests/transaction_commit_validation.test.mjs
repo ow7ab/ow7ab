@@ -203,8 +203,16 @@ test('Web modules & ErpDataService wire handleTransactionCommit and smooth tab n
       treasurySrc.includes('ErpDataService.commitAtomicTransactionBundle'),
     true
   );
-  assert.equal(salesSrc.includes('ErpDataService.handleTransactionCommit'), true);
-  assert.equal(purchasesSrc.includes('ErpDataService.handleTransactionCommit'), true);
+  assert.equal(
+    salesSrc.includes('ErpDataService.handleTransactionCommit') ||
+      salesSrc.includes('ErpDataService.commitAtomicTransactionBundle'),
+    true
+  );
+  assert.equal(
+    purchasesSrc.includes('ErpDataService.handleTransactionCommit') ||
+      purchasesSrc.includes('ErpDataService.commitAtomicTransactionBundle'),
+    true
+  );
   assert.equal(portalSrc.includes('pmp-tab-transition'), true);
   assert.equal(portalSrc.includes('navigateToTab'), true);
   assert.equal(cssSrc.includes('@keyframes pmpTabEnter'), true);

@@ -315,6 +315,6 @@ test('4. Telemetry redaction strips secrets/JWTs/API keys and Admin-only + Immut
 
   const rulesSrc = fs.readFileSync(path.join(ROOT_DIR, 'firestore.rules'), 'utf8');
   assert.ok(rulesSrc.includes('function isNonAnonymousAuth()'));
-  assert.ok(rulesSrc.includes('function isImmutableFinancialLedgerCollection(collectionName)'));
+  assert.ok(rulesSrc.includes('function isImmutableFinancialLedgerCollection(col)'));
   assert.ok(rulesSrc.includes('function isValidFinancialLedgerReversal()'));
 });
