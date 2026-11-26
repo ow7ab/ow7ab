@@ -10,35 +10,51 @@ import org.junit.Test
 
 class OperationsAndRoleCatalogTest {
 
+    private fun fakeUser(
+        fullName: String,
+        username: String,
+        role: String,
+        branch: String,
+        permissions: String
+    ) = UserAccountEntity(
+        userCode = "USR-${username.uppercase()}",
+        fullName = fullName,
+        username = username,
+        role = role,
+        branch = branch,
+        permissions = permissions,
+        serverSyncToken = "SYNC-$username"
+    )
+
     @Test
     fun `role catalog resolves all 9 factory and Sudan roles`() {
         assertEquals(9, EmployeeRoleCatalog.ROLE_PRESET_LIST.size)
 
-        val gm = UserAccountEntity(fullName = "م. مجدي فضل", username = "admin", role = "مدير النظام", branch = "SD-001", permissions = "الكل")
+        val gm = fakeUser("م. مجدي فضل", "admin", "مدير النظام", "SD-001", "الكل")
         assertEquals(EmployeeRoleKey.GENERAL_MANAGER, EmployeeRoleCatalog.resolveEmployeeRoleKey(gm))
 
-        val fin = UserAccountEntity(fullName = "أ. أحمد الطلخاوي", username = "talkhawy", role = "المدير المالي (مصر)", branch = "EG-001", permissions = "المحاسبة")
+        val fin = fakeUser("أ. أحمد الطلخاوي", "talkhawy", "المدير المالي (مصر)", "EG-001", "المحاسبة")
         assertEquals(EmployeeRoleKey.FINANCE_MANAGER_EGYPT, EmployeeRoleCatalog.resolveEmployeeRoleKey(fin))
 
-        val qc = UserAccountEntity(fullName = "م. رانيا سمير", username = "rania", role = "مدير الجودة والمشتريات", branch = "EG-001", permissions = "المشتريات")
+        val qc = fakeUser("م. رانيا سمير", "rania", "مدير الجودة والمشتريات", "EG-001", "المشتريات")
         assertEquals(EmployeeRoleKey.QUALITY_PROCUREMENT_MANAGER, EmployeeRoleCatalog.resolveEmployeeRoleKey(qc))
 
-        val prod = UserAccountEntity(fullName = "م. مصطفى الصيفي", username = "saify", role = "مهندس الإنتاج", branch = "EG-001", permissions = "المصنع")
+        val prod = fakeUser("م. مصطفى الصيفي", "saify", "مهندس الإنتاج", "EG-001", "المصنع")
         assertEquals(EmployeeRoleKey.PRODUCTION_MANAGER, EmployeeRoleCatalog.resolveEmployeeRoleKey(prod))
 
-        val pack = UserAccountEntity(fullName = "م. محمد عبدالباسط", username = "pack1", role = "مهندس التعبئة والتغليف", branch = "EG-001", permissions = "التعبئة والتغليف")
+        val pack = fakeUser("م. محمد عبدالباسط", "pack1", "مهندس التعبئة والتغليف", "EG-001", "التعبئة والتغليف")
         assertEquals(EmployeeRoleKey.PACKING_ENGINEER, EmployeeRoleCatalog.resolveEmployeeRoleKey(pack))
 
-        val wh = UserAccountEntity(fullName = "إبراهيم مبارك", username = "ibrahim", role = "أمين مخزن مصر", branch = "EG-001", permissions = "المخازن")
+        val wh = fakeUser("إبراهيم مبارك", "ibrahim", "أمين مخزن مصر", "EG-001", "المخازن")
         assertEquals(EmployeeRoleKey.WAREHOUSE_KEEPER_EGYPT, EmployeeRoleCatalog.resolveEmployeeRoleKey(wh))
 
-        val load = UserAccountEntity(fullName = "منذر مزمل", username = "monzer", role = "مسؤول التحميل والعدد", branch = "EG-001", permissions = "المخازن")
+        val load = fakeUser("منذر مزمل", "monzer", "مسؤول التحميل والعدد", "EG-001", "المخازن")
         assertEquals(EmployeeRoleKey.LOADING_TOOLS_SUPERVISOR, EmployeeRoleCatalog.resolveEmployeeRoleKey(load))
 
-        val sudan = UserAccountEntity(fullName = "عمر عبدالوهاب", username = "omar_hf", role = "محاسب خزنة ومبيعات", branch = "مخزن حلفا (HF-001)", permissions = "الخزن,التحويلات")
+        val sudan = fakeUser("عمر عبدالوهاب", "omar_hf", "محاسب خزنة ومبيعات", "مخزن حلفا (HF-001)", "الخزن,التحويلات")
         assertEquals(EmployeeRoleKey.SUDAN_BRANCH_MANAGER, EmployeeRoleCatalog.resolveEmployeeRoleKey(sudan))
 
-        val sales = UserAccountEntity(fullName = "مندوب", username = "sales1", role = "مسؤول مبيعات وفواتير", branch = "SD-001", permissions = "المبيعات")
+        val sales = fakeUser("مندوب", "sales1", "مسؤول مبيعات وفواتير", "SD-001", "المبيعات")
         assertEquals(EmployeeRoleKey.SALES_AGENT, EmployeeRoleCatalog.resolveEmployeeRoleKey(sales))
     }
 
