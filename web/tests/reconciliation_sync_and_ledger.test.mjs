@@ -317,4 +317,37 @@ test('4. Telemetry redaction strips secrets/JWTs/API keys and Admin-only + Immut
   assert.ok(rulesSrc.includes('function isNonAnonymousAuth()'));
   assert.ok(rulesSrc.includes('function isImmutableFinancialLedgerCollection(col)'));
   assert.ok(rulesSrc.includes('function isValidFinancialLedgerReversal()'));
+
+  assert.ok(erpDataSrc.includes('hasActiveClusterMembership'));
+  assert.ok(erpDataSrc.includes('flushPendingAuditLogs'));
+  assert.ok(erpDataSrc.includes('enqueuePreAuthAudit'));
+});
+
+test('5. Account 3900 reconciliation adjustment is defined in DEFAULT_CHART_OF_ACCOUNTS and produces balanced GL statements', () => {
+  const { DEFAULT_CHART_OF_ACCOUNTS, createBalancedJournalPayload, computeTrialBalance, computeIncomeStatement, computeBalanceSheet } =
+    AccountingEngine;
+
+  const acc3900 = DEFAULT_CHART_OF_ACCOUNTS.find((a) => a.accountCode === '3900');
+  assert.ok(acc3900, 'Expected system adjustment account 3900 in DEFAULT_CHART_OF_ACCOUNTS');
+  assert.equal(acc3900.accountType, 'EQUITY');
+
+  const adj = createBalancedJournalPayload({
+    sourceType: 'RECONCILIATION_ADJUSTMENT',
+    description: 'قيد تسوية مطابقة خزنة السودان',
+    currency: 'SDG',
+    lines: [
+      { accountCode: '1110', debit: 4500 },
+      { accountCode: '3900', credit: 4500 }
+    ]
+  });
+  assert.equal(adj.entry.totalDebit, 4500);
+  assert.equal(adj.entry.totalCredit, 4500);
+
+  const tb = computeTrialBalance(DEFAULT_CHART_OF_ACCOUNTS, [adj.entry], adj.lines, 'SDG');
+  const pnl = computeIncomeStatement(tb);
+  const bs = computeBalanceSheet(tb, pnl.netIncome);
+  assert.equal(tb.isBalanced, true);
+  assert.equal(bs.isBalanced, true);
+  assert.equal(bs.totalAssets, 4500);
+  assert.equal(bs.totalLiabilitiesAndEquity, 4500);
 });

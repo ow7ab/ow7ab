@@ -64,9 +64,10 @@ class PmpDatabaseMigration14To15Test {
         assertEquals(1, invoices.size)
         assertEquals("INV-PRESERVE-15", invoices.first().invoiceNo)
 
-        // 2. Existing 18 CoA accounts remain intact
+        // 2. Existing 19 CoA accounts (including 3900 reconciliation adjustment) remain intact
         val accounts = accDao.getAllAccountsDirect()
-        assertEquals(18, accounts.size)
+        assertEquals(19, accounts.size)
+        assertTrue(accounts.any { it.accountCode == "3900" })
 
         // 3. idempotency_requests table + DAO operations work cleanly after migration
         val key = "IDEMP-SAVE-DOC15-ABCD1234"

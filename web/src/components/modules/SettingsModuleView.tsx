@@ -558,6 +558,28 @@ export const SettingsModuleView: React.FC = () => {
                   <GlassButton
                     variant="secondary"
                     onClick={() =>
+                      ReportExporter.exportToExcel(
+                        'pmp_cloud_errors_log',
+                        'سجل أخطاء السيرفر المصنفة — PMP PAINTS ERP',
+                        ['التوقيت', 'التصنيف', 'العملية', 'المسار', 'الرسالة', 'التوصية'],
+                        cloudErrors.map((err) => [
+                          new Date(err.timestamp).toLocaleString('ar-EG'),
+                          err.categoryTitleAr,
+                          err.operation,
+                          err.path,
+                          err.sanitizedMessage,
+                          err.remediationHintAr
+                        ])
+                      )
+                    }
+                    className="text-[11px] flex items-center gap-1"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>تصدير Excel</span>
+                  </GlassButton>
+                  <GlassButton
+                    variant="secondary"
+                    onClick={() =>
                       ReportExporter.exportToCsv(
                         'pmp_cloud_errors_log',
                         ['التوقيت', 'التصنيف', 'العملية', 'المسار', 'الرسالة', 'التوصية'],

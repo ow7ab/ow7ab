@@ -1222,6 +1222,10 @@ class CloudErpSyncRepository(
         metadata: Map<String, Any> = emptyMap()
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
+            val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+            if (fbUser == null || fbUser.isAnonymous) {
+                return@runCatching "LOCAL_ONLY"
+            }
             val cRef = clusterRef(clusterCode)
             val logId = "LOG-" + System.currentTimeMillis() + "-" + (100..999).random()
             val data = mutableMapOf<String, Any>(

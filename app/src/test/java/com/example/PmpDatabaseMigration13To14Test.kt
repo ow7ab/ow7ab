@@ -63,11 +63,11 @@ class PmpDatabaseMigration13To14Test {
         assertEquals(1, invoices.size)
         assertEquals("INV-PRESERVE-14", invoices.first().invoiceNo)
 
-        // 2. All 18 system Chart of Accounts seeded cleanly by MIGRATION_13_14
+        // 2. All 19 system Chart of Accounts (18 base + 3900 reconciliation adjustment) seeded cleanly
         val accounts = accDao.getAllAccountsDirect()
-        assertEquals(18, accounts.size)
+        assertEquals(19, accounts.size)
         val codes = accounts.map { it.accountCode }.toSet()
-        assertTrue(codes.containsAll(listOf("1110", "1111", "1112", "1120", "1130", "1141", "1142", "1143", "2110", "3100", "4100", "5100", "5200", "5300")))
+        assertTrue(codes.containsAll(listOf("1110", "1111", "1112", "1120", "1130", "1141", "1142", "1143", "2110", "3100", "3900", "4100", "5100", "5200", "5300")))
 
         // 3. Journal entry & lines insert cleanly with Room schema integrity
         val entryId = accDao.upsertJournalEntry(

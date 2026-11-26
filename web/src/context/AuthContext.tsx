@@ -283,6 +283,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             !isSwitchingAccountRef.current
           ) {
             await AccountService.ensureOwnClusterMemberRegistration(matched, user.uid, user.email).catch(() => {});
+            if (resolveUserRoleType(matched) === 'SUPER_ADMIN') {
+              void AccountService.syncExistingLinkedAccountsMembership();
+            }
+            void ErpDataService.flushPendingAuditLogs();
             persistSession(matched, 'EMAIL_PASSWORD');
             setIsLoading(false);
             return;
@@ -472,6 +476,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             signedInFbUser.uid,
             signedInFbUser.email || candidateEmails[0]
           ).catch(() => {});
+          if (resolveUserRoleType(matchedViaFb) === 'SUPER_ADMIN') {
+            void AccountService.syncExistingLinkedAccountsMembership();
+          }
+          void ErpDataService.flushPendingAuditLogs();
           LoginRateLimiter.recordSuccess(cleanUser);
           await ErpDataService.logAudit(
             matchedViaFb.username,
@@ -568,6 +576,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (matched) {
           validateAccountAccessState(matched);
           await AccountService.ensureOwnClusterMemberRegistration(matched, fbCredUser.uid, fbCredUser.email || cleanEmail).catch(() => {});
+          if (resolveUserRoleType(matched) === 'SUPER_ADMIN') {
+            void AccountService.syncExistingLinkedAccountsMembership();
+          }
+          void ErpDataService.flushPendingAuditLogs();
           LoginRateLimiter.recordSuccess(cleanEmail);
           await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_EMAIL', `تسجيل دخول عبر البريد ${fbCredUser.email || cleanEmail}`);
           persistSession(matched, 'EMAIL_PASSWORD');
@@ -672,6 +684,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         validateAccountAccessState(targetAccount);
         await AccountService.ensureOwnClusterMemberRegistration(targetAccount, cred.user.uid, cred.user.email).catch(() => {});
+        if (resolveUserRoleType(targetAccount) === 'SUPER_ADMIN') {
+          void AccountService.syncExistingLinkedAccountsMembership();
+        }
+        void ErpDataService.flushPendingAuditLogs();
       } finally {
         isSwitchingAccountRef.current = false;
       }
@@ -734,6 +750,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (fbUser?.uid) {
           await AccountService.ensureOwnClusterMemberRegistration(matched, fbUser.uid, email).catch(() => {});
         }
+        if (resolveUserRoleType(matched) === 'SUPER_ADMIN') {
+          void AccountService.syncExistingLinkedAccountsMembership();
+        }
+        void ErpDataService.flushPendingAuditLogs();
         LoginRateLimiter.recordSuccess(email);
         await ErpDataService.logAudit(matched.username, 'WEB_LOGIN_GOOGLE', `تسجيل دخول اختياري عبر Google (${email})`);
         persistSession(matched, 'GOOGLE_OPTIONAL');

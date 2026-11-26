@@ -1245,22 +1245,124 @@ class ErpDataServiceImpl {
     );
   }
 
+  private confirmedMemberKeys = new Set<string>();
+  private readonly preAuthAuditQueueKey = 'pmp_pending_audit_logs_v1';
+
+  private readPreAuthAuditQueue(): Array<{ docId: string; entry: AuditLog }> {
+    try {
+      const raw = localStorage.getItem(this.preAuthAuditQueueKey);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.slice(-40) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private writePreAuthAuditQueue(queue: Array<{ docId: string; entry: AuditLog }>): void {
+    try {
+      localStorage.setItem(this.preAuthAuditQueueKey, JSON.stringify(queue.slice(-40)));
+    } catch {
+      // Ignore storage quota issues
+    }
+  }
+
+  private enqueuePreAuthAudit(docId: string, entry: AuditLog): void {
+    const queue = this.readPreAuthAuditQueue();
+    queue.push({ docId, entry });
+    this.writePreAuthAuditQueue(queue);
+  }
+
+  private async hasActiveClusterMembership(uid: string, cluster: string): Promise<boolean> {
+    const cleanUid = safeId(uid, uid);
+    const cacheKey = `${cluster}:${cleanUid}`;
+    if (this.confirmedMemberKeys.has(cacheKey)) return true;
+    try {
+      const memberRef = doc(firestore, `erp_clusters/${cluster}/cluster_members`, cleanUid);
+      const snap = await getDocFromServer(memberRef).catch(() => getDoc(memberRef));
+      const data = snap.exists() ? snap.data() || {} : null;
+      const isActive = Boolean(data && data.active === true && typeof data.roleKey === 'string' && data.roleKey !== 'NONE');
+      if (isActive) {
+        this.confirmedMemberKeys.add(cacheKey);
+      }
+      return isActive;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Flushes any pre-auth audit logs buffered prior to Firebase authentication / cluster_members activation.
+   */
+  async flushPendingAuditLogs(): Promise<void> {
+    const fbUser = auth.currentUser;
+    if (!fbUser || fbUser.isAnonymous) return;
+    const cluster = this.activeCluster;
+    const activeMember = await this.hasActiveClusterMembership(fbUser.uid, cluster);
+    if (!activeMember) return;
+
+    const queue = this.readPreAuthAuditQueue();
+    if (queue.length === 0) return;
+
+    const remaining: Array<{ docId: string; entry: AuditLog }> = [];
+    for (const item of queue) {
+      if (!item?.docId || !item?.entry) continue;
+      try {
+        await setDoc(doc(firestore, this.collectionPath('audit_logs', cluster), item.docId), {
+          ...item.entry,
+          actor: item.entry.username,
+          serverUpdatedAt: serverTimestamp()
+        });
+      } catch (err: any) {
+        if (String(err?.code || '').includes('permission-denied')) {
+          this.confirmedMemberKeys.delete(`${cluster}:${safeId(fbUser.uid, fbUser.uid)}`);
+          remaining.push(item);
+        }
+      }
+    }
+    this.writePreAuthAuditQueue(remaining);
+  }
+
   /**
    * Logs an administrative or business action to `/erp_clusters/{activeCluster}/audit_logs`.
+   * Pre-login or transitional non-member events are safely buffered locally rather than
+   * triggering unauthenticated Firestore PERMISSION_DENIED errors.
    */
   async logAudit(username: string, action: string, detail: string): Promise<void> {
+    const now = Date.now();
+    const docId = `LOG-${now}-${Math.floor(Math.random() * 1000)}`;
+    const entry: AuditLog = {
+      id: now,
+      username: username || 'النظام',
+      action,
+      detail,
+      timestamp: now
+    };
+    const fbUser = auth.currentUser;
+    if (!fbUser || fbUser.isAnonymous) {
+      this.enqueuePreAuthAudit(docId, entry);
+      return;
+    }
+    const cluster = this.activeCluster;
     try {
-      const now = Date.now();
-      const docId = `LOG-${now}-${Math.floor(Math.random() * 1000)}`;
-      const entry: AuditLog = {
-        id: now,
-        username: username || 'النظام',
-        action,
-        detail,
-        timestamp: now
-      };
-      await this.upsertDocument('audit_logs', docId, entry);
-    } catch (err) {
+      const activeMember = await this.hasActiveClusterMembership(fbUser.uid, cluster);
+      if (!activeMember) {
+        this.enqueuePreAuthAudit(docId, entry);
+        return;
+      }
+      await setDoc(doc(firestore, this.collectionPath('audit_logs', cluster), docId), {
+        ...entry,
+        actor: entry.username,
+        serverUpdatedAt: serverTimestamp()
+      });
+    } catch (err: any) {
+      const errCode = String(err?.code || '').toLowerCase();
+      if (errCode.includes('permission-denied')) {
+        this.confirmedMemberKeys.delete(`${cluster}:${safeId(fbUser.uid, fbUser.uid)}`);
+        this.enqueuePreAuthAudit(docId, entry);
+      } else {
+        CloudErrorLogger.recordError('UPSERT_AUDIT_LOGS', `${this.collectionPath('audit_logs', cluster)}/${docId}`, err);
+      }
       console.warn('Failed to write audit log:', sanitizeCloudMessage(err));
     }
   }
@@ -2246,32 +2348,53 @@ class ErpDataServiceImpl {
     const today = new Date(now).toISOString().split('T')[0];
     const cashCode = resolveCashAccountCode(params.anomaly.affectedAccount, params.anomaly.currency);
     const dir = params.anomaly.proposedAdjustmentDirection || (params.anomaly.varianceAmount >= 0 ? 'وارد' : 'منصرف');
-    const adjJournal = createBalancedJournalPayload({
-      entryDate: today,
-      sourceType: 'RECONCILIATION_ADJUSTMENT',
-      sourceDocId: now,
-      sourceDocNo: `REC-ADJ-${String(now).slice(-6)}`,
-      description: `قيد تسوية مطابقة (${params.anomaly.affectedAccount}): ${params.anomaly.rootCauseDetailAr}`,
-      currency: params.anomaly.currency,
-      lines:
-        dir === 'وارد'
-          ? [
-              { accountCode: cashCode, debit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: params.anomaly.affectedAccount, memo: 'تسوية رصيد من واقع سجل الحركات' },
-              { accountCode: '3900', credit: amt, costCenter: 'ADMIN', partyType: 'SYSTEM', partyName: 'حساب فروق التسوية', memo: 'مقابل مطابقة الأرصدة' }
-            ]
-          : [
-              { accountCode: '3900', debit: amt, costCenter: 'ADMIN', partyType: 'SYSTEM', partyName: 'حساب فروق التسوية', memo: 'مقابل مطابقة الأرصدة' },
-              { accountCode: cashCode, credit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: params.anomaly.affectedAccount, memo: 'تسوية رصيد من واقع سجل الحركات' }
-            ],
-      createdBy: params.actorUsername,
-      idempotencyKey: `JRN-RECON-${params.anomaly.id}-${now}`
-    });
+    const existingAccounts = await this.fetchCollectionOnce<ChartAccount>('accounting_accounts').catch(
+      () => [] as ChartAccount[]
+    );
+    const acc3900 = DEFAULT_CHART_OF_ACCOUNTS.find((a) => a.accountCode === '3900');
+    const has3900Stored = existingAccounts.some((a) => String(a?.accountCode || '').trim() === '3900');
+    const mergedAccounts = [...DEFAULT_CHART_OF_ACCOUNTS, ...existingAccounts];
+
+    const adjJournal = createBalancedJournalPayload(
+      {
+        entryDate: today,
+        sourceType: 'RECONCILIATION_ADJUSTMENT',
+        sourceDocId: now,
+        sourceDocNo: `REC-ADJ-${String(now).slice(-6)}`,
+        description: `قيد تسوية مطابقة (${params.anomaly.affectedAccount}): ${params.anomaly.rootCauseDetailAr}`,
+        currency: params.anomaly.currency,
+        lines:
+          dir === 'وارد'
+            ? [
+                { accountCode: cashCode, debit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: params.anomaly.affectedAccount, memo: 'تسوية رصيد من واقع سجل الحركات' },
+                { accountCode: '3900', credit: amt, costCenter: 'ADMIN', partyType: 'SYSTEM', partyName: 'حساب فروق التسوية', memo: 'مقابل مطابقة الأرصدة' }
+              ]
+            : [
+                { accountCode: '3900', debit: amt, costCenter: 'ADMIN', partyType: 'SYSTEM', partyName: 'حساب فروق التسوية', memo: 'مقابل مطابقة الأرصدة' },
+                { accountCode: cashCode, credit: amt, costCenter: 'TREASURY', partyType: 'CASHBOX', partyName: params.anomaly.affectedAccount, memo: 'تسوية رصيد من واقع سجل الحركات' }
+              ],
+        createdBy: params.actorUsername,
+        idempotencyKey: `JRN-RECON-${params.anomaly.id}-${now}`
+      },
+      mergedAccounts
+    );
     if (!adjJournal) {
       throw new Error('تعذر توليد قيد تسوية متوازن.');
     }
+    const seedOps: AtomicBundleOperation[] =
+      !has3900Stored && acc3900
+        ? [
+            {
+              kind: 'upsert',
+              collectionName: 'accounting_accounts',
+              docId: acc3900.syncUuid,
+              payload: { ...acc3900, updatedAt: now }
+            }
+          ]
+        : [];
     await this.commitAtomicTransactionBundle({
       actorUsername: params.actorUsername,
-      operations: [],
+      operations: seedOps,
       journals: [adjJournal],
       auditLog: {
         username: params.actorUsername,

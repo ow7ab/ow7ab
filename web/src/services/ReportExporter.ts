@@ -88,7 +88,7 @@ export const ReportExporter = {
             })
             .join(',')
         )
-      ].join('\n');
+      ].join('\r\n');
 
     const defaultFileName = `${filename.replace(/\.csv$/i, '')}_${new Date().toISOString().slice(0, 10)}.csv`;
     const desktopBridge = getInlineDesktopBridge();
@@ -127,6 +127,72 @@ export const ReportExporter = {
     }
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', defaultFileName);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  },
+
+  exportToExcel: (
+    filename: string,
+    title: string,
+    headers: string[],
+    rows: (string | number | undefined | null)[][]
+  ) => {
+    const safeTitle = escapeHtml(title);
+    const headerCells = headers
+      .map(
+        (h) =>
+          `<th style="background:#0f172a;color:#ffffff;font-weight:bold;border:1px solid #cbd5e1;padding:8px;">${escapeHtml(
+            h
+          )}</th>`
+      )
+      .join('');
+    const bodyRows = rows
+      .map(
+        (row) =>
+          `<tr>${row
+            .map(
+              (cell) =>
+                `<td style="border:1px solid #cbd5e1;padding:6px;text-align:right;">${escapeHtml(
+                  sanitizeCsvCell(cell)
+                )}</td>`
+            )
+            .join('')}</tr>`
+      )
+      .join('');
+    const html = `\uFEFF<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40" dir="rtl" lang="ar">
+<head><meta charset="UTF-8" /><title>${safeTitle}</title></head>
+<body>
+  <h2 style="font-family:Arial,sans-serif;color:#b91c1c;">${safeTitle}</h2>
+  <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px;">
+    <thead><tr>${headerCells}</tr></thead>
+    <tbody>${bodyRows}</tbody>
+  </table>
+</body>
+</html>`;
+    const defaultFileName = `${filename.replace(/\.(xls|csv)$/i, '')}_${new Date().toISOString().slice(0, 10)}.xls`;
+    const desktopBridge = getInlineDesktopBridge();
+    if (desktopBridge) {
+      void desktopBridge
+        .saveFile({
+          title: 'حفظ ملف Excel — PMP PAINTS ERP',
+          defaultFilename: defaultFileName,
+          content: html,
+          encoding: 'utf8',
+          filters: [
+            { name: 'Excel Workbook (.xls)', extensions: ['xls'] },
+            { name: 'All Files', extensions: ['*'] }
+          ]
+        })
+        .catch(() => {});
+      return;
+    }
+    const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);

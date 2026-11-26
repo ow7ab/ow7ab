@@ -245,7 +245,12 @@ export const PmpSystemHealthCenter: React.FC = () => {
 
   const handleExportExcel = () => {
     const { headers, rows } = buildHealthExportRows();
-    ReportExporter.exportToCsv('pmp_system_health_center_report', headers, rows);
+    ReportExporter.exportToExcel(
+      'pmp_system_health_center_report',
+      'PMP SYSTEM HEALTH CENTER — تقرير صحة النظام ومطابقة الأرصدة',
+      headers,
+      rows
+    );
   };
 
   return (

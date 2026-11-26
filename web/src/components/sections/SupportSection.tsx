@@ -4,6 +4,7 @@ import { GlassCard } from '../ui/GlassCard';
 import { GlassButton } from '../ui/GlassButton';
 import { GlassBadge } from '../ui/GlassBadge';
 import { useLanguage } from '../../context/LanguageContext';
+import { auth } from '../../config/firebaseConfig';
 import { ErpDataService } from '../../services/ErpDataService';
 
 export const SupportSection: React.FC = () => {
@@ -29,6 +30,9 @@ export const SupportSection: React.FC = () => {
         'WEB_SUPPORT_TICKET',
         `[${formData.branch}] ${formData.subject || 'بلاغ فني'}: ${formData.message.trim()}`
       );
+      if (!auth.currentUser || auth.currentUser.isAnonymous) {
+        setSubmitError('تم حفظ التذكرة محلياً وسيتم رفعها تلقائياً عند تسجيل الدخول بالحساب المعتمد.');
+      }
       setSubmitted(true);
       setFormData({ name: '', branch: 'SD-001', subject: '', message: '' });
       setTimeout(() => setSubmitted(false), 4500);

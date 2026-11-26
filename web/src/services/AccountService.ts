@@ -1187,5 +1187,30 @@ export const AccountService = {
     return logs
       .sort((a, b) => (b.changedAtMillis || 0) - (a.changedAtMillis || 0))
       .slice(0, limitCount);
+  },
+
+  /**
+   * Backfills missing `email_directory` and `cluster_members/{uid}` documents for pre-existing
+   * accounts whenever a primary Admin signs in, eliminating legacy PERMISSION_DENIED writes.
+   */
+  async syncExistingLinkedAccountsMembership(): Promise<void> {
+    if (!auth.currentUser || auth.currentUser.isAnonymous) return;
+    try {
+      const accounts = await this.getAllEmployees();
+      for (const acc of accounts) {
+        if (!acc || acc.active === false || acc.syncStatus === 'PENDING_MANAGER_APPROVAL') continue;
+        const uidCandidate = String(acc.linkedUid || acc.remoteServerId || '').trim();
+        const isFirebaseUid =
+          uidCandidate.length >= 20 &&
+          !uidCandidate.startsWith('CLOUD-') &&
+          !uidCandidate.startsWith('SRV-') &&
+          !uidCandidate.startsWith('USR-');
+        if (isFirebaseUid || (acc.phoneOrEmail && acc.phoneOrEmail.includes('@'))) {
+          await this.syncRbacDirectoryForAccount(acc, isFirebaseUid ? uidCandidate : null).catch(() => {});
+        }
+      }
+    } catch {
+      // Non-fatal background RBAC directory reconciliation
+    }
   }
 };

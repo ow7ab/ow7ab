@@ -276,5 +276,11 @@ class ReconciliationAndLedgerAuditTest {
 
         assertEquals(17, PmpDatabase.MIGRATION_17_18.startVersion)
         assertEquals(18, PmpDatabase.MIGRATION_17_18.endVersion)
+
+        val acc3900 = com.example.domain.accounting.AccountingLedgerEngine.DEFAULT_ACCOUNTS.firstOrNull {
+            it.accountCode == "3900"
+        }
+        assertTrue("Reconciliation adjustment account 3900 must exist in Android DEFAULT_ACCOUNTS", acc3900 != null)
+        assertEquals("EQUITY", acc3900!!.accountType)
     }
 }

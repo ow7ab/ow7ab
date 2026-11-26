@@ -1415,6 +1415,22 @@ abstract class PmpDatabase : RoomDatabase() {
                 addColIfMissing("stock_moves", "reversalReason", "TEXT NOT NULL DEFAULT ''")
                 addColIfMissing("stock_moves", "syncStatus", "TEXT NOT NULL DEFAULT 'SYNCED'")
             }
+            runCatching {
+                val seedNow = System.currentTimeMillis()
+                db.execSQL(
+                    """
+                    INSERT OR IGNORE INTO `accounting_accounts` (
+                        `syncUuid`, `accountCode`, `nameAr`, `nameEn`, `accountType`, `normalSide`,
+                        `parentCode`, `currencyHint`, `isSystemAccount`, `active`, `recordVersion`, `createdAt`, `updatedAt`
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, ?)
+                    """.trimIndent(),
+                    arrayOf<Any>(
+                        "ACC-3900", "3900", "حساب فروق التسوية ومطابقة الأرصدة",
+                        "Reconciliation & Settlement Adjustments", "EQUITY", "CREDIT",
+                        "3000", "ALL", seedNow, seedNow
+                    )
+                )
+            }
         }
 
         val MIGRATION_17_18 = object : Migration(17, 18) {
@@ -1803,6 +1819,7 @@ abstract class PmpDatabase : RoomDatabase() {
                         ChartAccountEntity(syncUuid = "ACC-2110", accountCode = "2110", nameAr = "ذمم الموردين الدائنة (المشتريات)", nameEn = "Accounts Payable Suppliers", accountType = AccountType.LIABILITY.name, normalSide = "CREDIT", parentCode = "2100", currencyHint = "ALL", createdAt = now, updatedAt = now),
                         ChartAccountEntity(syncUuid = "ACC-2120", accountCode = "2120", nameAr = "التزامات ومصروفات مستحقة", nameEn = "Accrued Liabilities", accountType = AccountType.LIABILITY.name, normalSide = "CREDIT", parentCode = "2100", currencyHint = "ALL", createdAt = now, updatedAt = now),
                         ChartAccountEntity(syncUuid = "ACC-3100", accountCode = "3100", nameAr = "رأس المال والأرصدة الافتتاحية والأرباح المحتجزة", nameEn = "Capital & Retained Earnings", accountType = AccountType.EQUITY.name, normalSide = "CREDIT", parentCode = "3000", currencyHint = "ALL", createdAt = now, updatedAt = now),
+                        ChartAccountEntity(syncUuid = "ACC-3900", accountCode = "3900", nameAr = "حساب فروق التسوية ومطابقة الأرصدة", nameEn = "Reconciliation & Settlement Adjustments", accountType = AccountType.EQUITY.name, normalSide = "CREDIT", parentCode = "3000", currencyHint = "ALL", createdAt = now, updatedAt = now),
                         ChartAccountEntity(syncUuid = "ACC-4100", accountCode = "4100", nameAr = "إيرادات مبيعات الدهانات والبوهيات", nameEn = "Paint Sales Revenue", accountType = AccountType.REVENUE.name, normalSide = "CREDIT", parentCode = "4000", currencyHint = "ALL", createdAt = now, updatedAt = now),
                         ChartAccountEntity(syncUuid = "ACC-4200", accountCode = "4200", nameAr = "إيرادات أخرى وفروق عملة دائنة", nameEn = "Other Income & FX Gain", accountType = AccountType.REVENUE.name, normalSide = "CREDIT", parentCode = "4000", currencyHint = "ALL", createdAt = now, updatedAt = now),
                         ChartAccountEntity(syncUuid = "ACC-5100", accountCode = "5100", nameAr = "تكلفة البضاعة المباعة (COGS)", nameEn = "Cost of Goods Sold", accountType = AccountType.EXPENSE.name, normalSide = "DEBIT", parentCode = "5000", currencyHint = "ALL", createdAt = now, updatedAt = now),
