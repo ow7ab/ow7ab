@@ -2385,7 +2385,7 @@ class ErpDataServiceImpl {
       !has3900Stored && acc3900
         ? [
             {
-              kind: 'upsert',
+              kind: 'merge',
               collectionName: 'accounting_accounts',
               docId: acc3900.syncUuid,
               payload: { ...acc3900, updatedAt: now }
