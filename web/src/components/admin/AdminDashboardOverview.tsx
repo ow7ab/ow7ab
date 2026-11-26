@@ -171,9 +171,27 @@ export const AdminDashboardOverview: React.FC<AdminDashboardOverviewProps> = ({ 
             </p>
           </div>
 
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold shrink-0">
-            <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-            <span>{language === 'ar' ? 'مزامنة سحابية حية' : 'Live Cloud Sync'}</span>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <GlassButton
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => onNavigateToModule('MY_WORKSPACE')}
+            >
+              {language === 'ar' ? 'مكتبي (مساحة عملي)' : 'My Workspace'}
+            </GlassButton>
+            <GlassButton
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={() => onNavigateToModule('OPERATIONS')}
+            >
+              {language === 'ar' ? 'التشغيل والمكافآت' : 'Operations & Rewards'}
+            </GlassButton>
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+              <span>{language === 'ar' ? 'مزامنة سحابية حية' : 'Live Cloud Sync'}</span>
+            </div>
           </div>
         </div>
       </GlassCard>

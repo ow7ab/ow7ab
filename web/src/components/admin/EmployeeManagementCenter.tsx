@@ -38,22 +38,30 @@ import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { useTransactionGuard } from '../../hooks/useTransactionGuard';
 import { OPERATION_LOADING_LABELS } from '../../services/IdempotencyService';
+import { ROLE_PRESET_LIST } from '../../config/employeeRoles';
 
 type UsersSubTab = 'DIRECTORY' | 'CREATE' | 'PENDING';
 
 const JOB_ROLES = [
   'مدير النظام',
   'المدير',
+  'المدير العام',
   'مدير فرع ومصنع مصر',
+  'المدير المالي (مصر)',
   'مسؤول نظام مخصص',
   'المحاسب',
   'محاسب خزنة ومبيعات',
+  'مدير فرع حلفا وعطبرة',
   'مسؤول مبيعات وفواتير',
   'مسؤول المشتريات',
+  'مدير الجودة والمشتريات',
   'أمين مخزن الخام',
   'أمين مخزن المنتج التام',
+  'أمين مخزن مصر',
   'أمين مخزن وترحيل',
+  'مسؤول التحميل والعدد',
   'مهندس الإنتاج',
+  'مهندس التعبئة والتغليف',
   'مسؤول الجودة',
   'مراجع مالي وتقارير'
 ];
@@ -793,6 +801,50 @@ export const EmployeeManagementCenter: React.FC = () => {
               <UserPlus className="w-5 h-5 text-pmp-primary" />
               <span>{language === 'ar' ? 'إنشاء حساب موظف جديد وتشفير الرمز السري' : 'Create Enterprise Account'}</span>
             </h3>
+
+            {/* Quick Factory & Sudan Role Preset Selector */}
+            <div className="p-3.5 rounded-2xl bg-theme-surface/70 border border-theme space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-black text-theme-primary">
+                  {language === 'ar'
+                    ? 'قالب وظيفي جاهز من دولاب المصنع والفروع (تعبئة تلقائية للدور والفرع والصلاحيات):'
+                    : 'Factory Role Preset (Auto-fill role, branch & permissions):'}
+                </span>
+                <span className="text-[11px] text-theme-muted">9 أدوار تشغيلية معتمدة</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {ROLE_PRESET_LIST.filter((preset) => canAssignRole(userProfile, preset.titleAr)).map((preset) => {
+                  const isSelected = newEmpData.role === preset.titleAr;
+                  return (
+                    <button
+                      key={preset.key}
+                      type="button"
+                      onClick={() => {
+                        const mergedPerms = Array.from(
+                          new Set([...preset.defaultPermissions, ...preset.assignedModules])
+                        );
+                        setNewEmpData((prev) => ({
+                          ...prev,
+                          role: preset.titleAr,
+                          branch: BRANCH_OPTIONS.includes(preset.defaultBranch)
+                            ? preset.defaultBranch
+                            : prev.branch,
+                          permissions: mergedPerms
+                        }));
+                      }}
+                      className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold border transition-all text-right ${
+                        isSelected
+                          ? 'bg-pmp-primary text-white border-pmp-primary shadow-sm'
+                          : 'bg-theme-base text-theme-secondary border-theme hover:border-pmp-primary'
+                      }`}
+                      title={preset.summaryAr}
+                    >
+                      {preset.titleAr}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <div>

@@ -36,6 +36,17 @@ service cloud.firestore {
     // Collection: /erp_clusters/{clusterCode}/invoices/{docId}
     //   - Invoices: soft-cancellation (status 'ملغاة'/'cancelled') and payment summary updates only; non-Admin delete denied.
     //
+    // Operational Collections (Web/Desktop & Android Sync):
+    //   - shift_production_logs, press_machines, tool_custodies, in_transit_shipments:
+    //       Active cluster members (branch-scoped) can read/create/update; Manager/Admin can delete.
+    //   - daily_checklists, employee_tasks:
+    //       Active cluster members (branch-scoped) can read; employees can toggle/update completion/status
+    //       fields on own/role/unassigned items without mutating task definitions; Manager/Admin full edit/delete.
+    //   - seqaofa_entries:
+    //       Treasury-authorized roles (Admin/Manager/Accountant/Deputy/Treasury grant, branch-scoped) can create/update; Admin-only delete.
+    //   - financial_budgets, employee_rewards:
+    //       Active cluster members (branch-scoped) can read; Admin/Manager/Accountant only can create/update; Admin-only delete.
+    //
     // ===============================================================
 
     // 1. Global Default-Deny Safety Net
@@ -280,7 +291,10 @@ service cloud.firestore {
         'accounting_accounts', 'journal_entries', 'journal_lines',
         'deleted_records', 'system_metadata', 'system_config', 'app_updates',
         'permission_audit_logs', 'config',
-        'idempotency_requests'
+        'idempotency_requests',
+        'employee_tasks', 'shift_production_logs', 'press_machines', 'tool_custodies',
+        'daily_checklists', 'seqaofa_entries', 'in_transit_shipments',
+        'financial_budgets', 'employee_rewards'
       ];
     }
 
@@ -604,7 +618,235 @@ service cloud.firestore {
         (col != 'raw_material_price_history' || (
           (!('newPrice' in d) || (d.newPrice is number && d.newPrice >= 0)) &&
           (!('previousPrice' in d) || (d.previousPrice is number && d.previousPrice >= 0))
+        )) &&
+        isValidOperationalDocWrite(col, d);
+    }
+
+    function isValidOperationalDocWrite(col, d) {
+      return (col != 'shift_production_logs' || (
+          (!('syncUuid' in d) || isNonEmptyString(d.syncUuid, 128)) &&
+          (!('shiftDate' in d) || isNonEmptyString(d.shiftDate, 40)) &&
+          (!('shiftName' in d) || isNullableOptionalString(d.shiftName, 80)) &&
+          (!('shiftCode' in d) || isNullableOptionalString(d.shiftCode, 80)) &&
+          (!('lineNo' in d) || (d.lineNo is number && d.lineNo >= 1 && d.lineNo <= 20)) &&
+          (!('lineGroup' in d) || isNullableOptionalString(d.lineGroup, 120)) &&
+          (!('engineerName' in d) || isNullableOptionalString(d.engineerName, 160)) &&
+          (!('engineerUsername' in d) || isNullableOptionalString(d.engineerUsername, 120)) &&
+          (!('batchNo' in d) || isNullableOptionalString(d.batchNo, 120)) &&
+          (!('productName' in d) || isNullableOptionalString(d.productName, 200)) &&
+          (!('packageSize' in d) || isNullableOptionalString(d.packageSize, 60)) &&
+          (!('productType' in d) || isNullableOptionalString(d.productType, 60)) &&
+          (!('kettleWeightKg' in d) || (d.kettleWeightKg is number && d.kettleWeightKg >= 0)) &&
+          (!('targetCartons' in d) || (d.targetCartons is number && d.targetCartons >= 0)) &&
+          (!('producedCartons' in d) || (d.producedCartons is number && d.producedCartons >= 0)) &&
+          (!('emptyCansUsed' in d) || (d.emptyCansUsed is number && d.emptyCansUsed >= 0)) &&
+          (!('emptyCartonsUsed' in d) || (d.emptyCartonsUsed is number && d.emptyCartonsUsed >= 0)) &&
+          (!('wasteCans' in d) || (d.wasteCans is number && d.wasteCans >= 0)) &&
+          (!('maxWasteAllowed' in d) || (d.maxWasteAllowed is number && d.maxWasteAllowed >= 0)) &&
+          (!('extraCans' in d) || (d.extraCans is number && d.extraCans >= 0)) &&
+          (!('weightErrors' in d) || (d.weightErrors is number && d.weightErrors >= 0)) &&
+          (!('stickerErrors' in d) || (d.stickerErrors is number && d.stickerErrors >= 0)) &&
+          (!('technicalDowntimeMin' in d) || (d.technicalDowntimeMin is number && d.technicalDowntimeMin >= 0)) &&
+          (!('materialDowntimeMin' in d) || (d.materialDowntimeMin is number && d.materialDowntimeMin >= 0)) &&
+          (!('workersCount' in d) || (d.workersCount is number && d.workersCount >= 0)) &&
+          (!('activeLinesCount' in d) || (d.activeLinesCount is number && d.activeLinesCount >= 0)) &&
+          (!('workersPresent' in d) || (d.workersPresent is number && d.workersPresent >= 0)) &&
+          (!('workersRequired' in d) || (d.workersRequired is number && d.workersRequired >= 0)) &&
+          (!('downtimeReason' in d) || isNullableOptionalString(d.downtimeReason, 1000)) &&
+          (!('qualityStatus' in d) || isNullableOptionalString(d.qualityStatus, 80)) &&
+          (!('qualityReviewedBy' in d) || isNullableOptionalString(d.qualityReviewedBy, 160)) &&
+          (!('notes' in d) || isNullableOptionalString(d.notes, 2000)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 160)) &&
+          (!('createdBy' in d) || isNullableOptionalString(d.createdBy, 128))
+        )) &&
+        (col != 'press_machines' || (
+          (!('syncUuid' in d) || isNonEmptyString(d.syncUuid, 128)) &&
+          (!('pressCode' in d) || isNullableOptionalString(d.pressCode, 80)) &&
+          (!('machineCode' in d) || isNullableOptionalString(d.machineCode, 80)) &&
+          (!('name' in d) || isNonEmptyString(d.name, 160)) &&
+          (!('machineName' in d) || isNonEmptyString(d.machineName, 160)) &&
+          (!('location' in d) || isNullableOptionalString(d.location, 160)) &&
+          (!('lineCategory' in d) || isNullableOptionalString(d.lineCategory, 80)) &&
+          (!('status' in d) || d.status in ['جاهز', 'تحت الصيانة', 'متوقف', 'يحتاج قطع غيار', 'يعمل بكفاءة']) &&
+          (!('pressStatus' in d) || isNullableOptionalString(d.pressStatus, 80)) &&
+          (!('lastMaintenanceDate' in d) || isNullableOptionalString(d.lastMaintenanceDate, 40)) &&
+          (!('nextMaintenanceDate' in d) || isNullableOptionalString(d.nextMaintenanceDate, 40)) &&
+          (!('assignedSupervisor' in d) || isNullableOptionalString(d.assignedSupervisor, 160)) &&
+          (!('assignedOperator' in d) || isNullableOptionalString(d.assignedOperator, 160)) &&
+          (!('notes' in d) || isNullableOptionalString(d.notes, 2000)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 160)) &&
+          (!('updatedBy' in d) || isNullableOptionalString(d.updatedBy, 160))
+        )) &&
+        (col != 'tool_custodies' || (
+          (!('syncUuid' in d) || isNonEmptyString(d.syncUuid, 128)) &&
+          (!('custodyNo' in d) || isNullableOptionalString(d.custodyNo, 80)) &&
+          (!('toolCode' in d) || isNullableOptionalString(d.toolCode, 80)) &&
+          (!('toolName' in d) || isNonEmptyString(d.toolName, 200)) &&
+          (!('department' in d) || isNullableOptionalString(d.department, 120)) &&
+          (!('custodianName' in d) || isNullableOptionalString(d.custodianName, 160)) &&
+          (!('custodianUsername' in d) || isNullableOptionalString(d.custodianUsername, 120)) &&
+          (!('deliveredQty' in d) || (d.deliveredQty is number && d.deliveredQty >= 0)) &&
+          (!('countedQty' in d) || (d.countedQty is number && d.countedQty >= 0)) &&
+          (!('missingQty' in d) || (d.missingQty is number && d.missingQty >= 0)) &&
+          (!('quantityIssued' in d) || (d.quantityIssued is number && d.quantityIssued >= 0)) &&
+          (!('quantityReturned' in d) || (d.quantityReturned is number && d.quantityReturned >= 0)) &&
+          (!('damagedCount' in d) || (d.damagedCount is number && d.damagedCount >= 0)) &&
+          (!('deliveryCondition' in d) || isNullableOptionalString(d.deliveryCondition, 120)) &&
+          (!('monthlyAuditStatus' in d) || isNullableOptionalString(d.monthlyAuditStatus, 80)) &&
+          (!('status' in d) || isNullableOptionalString(d.status, 80)) &&
+          (!('deliveryDate' in d) || isNullableOptionalString(d.deliveryDate, 40)) &&
+          (!('issuedDate' in d) || isNullableOptionalString(d.issuedDate, 40)) &&
+          (!('actionTaken' in d) || isNullableOptionalString(d.actionTaken, 500)) &&
+          (!('notes' in d) || isNullableOptionalString(d.notes, 2000)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 160)) &&
+          (!('updatedBy' in d) || isNullableOptionalString(d.updatedBy, 160))
+        )) &&
+        (col != 'daily_checklists' || (
+          (!('syncUuid' in d) || isNonEmptyString(d.syncUuid, 128)) &&
+          (!('dateKey' in d) || isNonEmptyString(d.dateKey, 40)) &&
+          (!('roleKey' in d) || isNonEmptyString(d.roleKey, 80)) &&
+          (!('assigneeName' in d) || isNullableOptionalString(d.assigneeName, 160)) &&
+          (!('assigneeUsername' in d) || isNullableOptionalString(d.assigneeUsername, 120)) &&
+          (!('assigneeUid' in d) || isNullableOptionalString(d.assigneeUid, 128)) &&
+          (!('createdByUid' in d) || isNullableOptionalString(d.createdByUid, 128)) &&
+          (!('title' in d) || isNonEmptyString(d.title, 300)) &&
+          (!('metricTarget' in d) || isNullableOptionalString(d.metricTarget, 160)) &&
+          (!('completed' in d) || d.completed is bool) &&
+          (!('completedAt' in d) || d.completedAt == null || (d.completedAt is number && d.completedAt >= 0)) &&
+          (!('note' in d) || isNullableOptionalString(d.note, 2000)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 160))
+        )) &&
+        (col != 'employee_tasks' || (
+          (!('syncUuid' in d) || isNonEmptyString(d.syncUuid, 128)) &&
+          (!('taskCode' in d) || isNullableOptionalString(d.taskCode, 80)) &&
+          (!('title' in d) || isNonEmptyString(d.title, 300)) &&
+          (!('description' in d) || isNullableOptionalString(d.description, 2000)) &&
+          (!('department' in d) || isNullableOptionalString(d.department, 120)) &&
+          (!('roleKey' in d) || isNullableOptionalString(d.roleKey, 80)) &&
+          (!('assigneeName' in d) || isNullableOptionalString(d.assigneeName, 160)) &&
+          (!('assigneeUsername' in d) || isNullableOptionalString(d.assigneeUsername, 120)) &&
+          (!('assigneeUid' in d) || isNullableOptionalString(d.assigneeUid, 128)) &&
+          (!('createdByUid' in d) || isNullableOptionalString(d.createdByUid, 128)) &&
+          (!('assignedBy' in d) || isNullableOptionalString(d.assignedBy, 160)) &&
+          (!('createdBy' in d) || isNullableOptionalString(d.createdBy, 160)) &&
+          (!('priority' in d) || isNullableOptionalString(d.priority, 40)) &&
+          (!('status' in d) || d.status in ['لم يبدأ', 'قيد الانتظار', 'جاري', 'مكتمل', 'متأخر']) &&
+          (!('completionPercent' in d) || (d.completionPercent is number && d.completionPercent >= 0 && d.completionPercent <= 100)) &&
+          (!('startDate' in d) || isNullableOptionalString(d.startDate, 40)) &&
+          (!('dueDate' in d) || isNullableOptionalString(d.dueDate, 40)) &&
+          (!('indicatorTarget' in d) || isNullableOptionalString(d.indicatorTarget, 200)) &&
+          (!('targetValue' in d) || isNullableOptionalString(d.targetValue, 200)) &&
+          (!('achievedValue' in d) || isNullableOptionalString(d.achievedValue, 200)) &&
+          (!('hasDeviation' in d) || d.hasDeviation is bool) &&
+          (!('notes' in d) || isNullableOptionalString(d.notes, 2000)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 160))
+        )) &&
+        (col != 'seqaofa_entries' || (
+          (!('syncUuid' in d) || isNonEmptyString(d.syncUuid, 128)) &&
+          (!('entryDate' in d) || isNullableOptionalString(d.entryDate, 40)) &&
+          (!('hub' in d) || isNullableOptionalString(d.hub, 80)) &&
+          (!('custodianName' in d) || isNonEmptyString(d.custodianName, 160)) &&
+          (!('direction' in d) || d.direction in ['وارد', 'منصرف', 'IN', 'OUT']) &&
+          (!('amountSdg' in d) || (d.amountSdg is number && d.amountSdg >= 0)) &&
+          (!('exchangeRate' in d) || (d.exchangeRate is number && d.exchangeRate >= 0)) &&
+          (!('equivalentEgp' in d) || (d.equivalentEgp is number && d.equivalentEgp >= 0)) &&
+          (!('counterparty' in d) || isNullableOptionalString(d.counterparty, 200)) &&
+          (!('purpose' in d) || isNullableOptionalString(d.purpose, 500)) &&
+          (!('referenceNo' in d) || isNullableOptionalString(d.referenceNo, 120)) &&
+          (!('referenceCode' in d) || isNullableOptionalString(d.referenceCode, 120)) &&
+          (!('notes' in d) || isNullableOptionalString(d.notes, 2000)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 160)) &&
+          (!('createdBy' in d) || isNullableOptionalString(d.createdBy, 128)) &&
+          (!('recordedBy' in d) || isNullableOptionalString(d.recordedBy, 128))
+        )) &&
+        (col != 'in_transit_shipments' || (
+          (!('syncUuid' in d) || isNonEmptyString(d.syncUuid, 128)) &&
+          (!('shipmentCode' in d) || isNullableOptionalString(d.shipmentCode, 80)) &&
+          (!('dispatchDate' in d) || isNullableOptionalString(d.dispatchDate, 40)) &&
+          (!('invoiceRef' in d) || isNullableOptionalString(d.invoiceRef, 120)) &&
+          (!('carrierName' in d) || isNullableOptionalString(d.carrierName, 160)) &&
+          (!('driverOrCarrier' in d) || isNullableOptionalString(d.driverOrCarrier, 160)) &&
+          (!('destinationBranch' in d) || isNullableOptionalString(d.destinationBranch, 160)) &&
+          (!('destinationHub' in d) || isNullableOptionalString(d.destinationHub, 120)) &&
+          (!('cartons116' in d) || (d.cartons116 is number && d.cartons116 >= 0)) &&
+          (!('cartons1Kg' in d) || (d.cartons1Kg is number && d.cartons1Kg >= 0)) &&
+          (!('cartonsGallon' in d) || (d.cartonsGallon is number && d.cartonsGallon >= 0)) &&
+          (!('customsSdg' in d) || (d.customsSdg is number && d.customsSdg >= 0)) &&
+          (!('freightEgp' in d) || (d.freightEgp is number && d.freightEgp >= 0)) &&
+          (!('status' in d) || d.status in ['خرج من مصنع مصر', 'في الطريق', 'في الجمارك', 'تم الاستلام']) &&
+          (!('receivedDate' in d) || isNullableOptionalString(d.receivedDate, 40)) &&
+          (!('receivedBy' in d) || isNullableOptionalString(d.receivedBy, 160)) &&
+          (!('receivedAt' in d) || d.receivedAt == null || (d.receivedAt is number && d.receivedAt >= 0)) &&
+          (!('notes' in d) || isNullableOptionalString(d.notes, 2000)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 160)) &&
+          (!('createdBy' in d) || isNullableOptionalString(d.createdBy, 128))
+        )) &&
+        (col != 'financial_budgets' || (
+          (!('syncUuid' in d) || isNonEmptyString(d.syncUuid, 128)) &&
+          (!('periodKey' in d) || isNullableOptionalString(d.periodKey, 40)) &&
+          (!('periodMonth' in d) || isNullableOptionalString(d.periodMonth, 40)) &&
+          (!('category' in d) || isNonEmptyString(d.category, 120)) &&
+          (!('department' in d) || isNullableOptionalString(d.department, 120)) &&
+          (!('responsibleName' in d) || isNullableOptionalString(d.responsibleName, 160)) &&
+          (!('supervisorName' in d) || isNullableOptionalString(d.supervisorName, 160)) &&
+          (!('currency' in d) || d.currency in ['SDG', 'EGP', 'USD']) &&
+          (!('plannedAmount' in d) || (d.plannedAmount is number && d.plannedAmount >= 0)) &&
+          (!('actualAmount' in d) || (d.actualAmount is number && d.actualAmount >= 0)) &&
+          (!('deviationPercent' in d) || (d.deviationPercent is number && d.deviationPercent >= 0)) &&
+          (!('maxDeviationPercent' in d) || (d.maxDeviationPercent is number && d.maxDeviationPercent >= 0 && d.maxDeviationPercent <= 100)) &&
+          (!('maxAllowedDeviationPercent' in d) || (d.maxAllowedDeviationPercent is number && d.maxAllowedDeviationPercent >= 0 && d.maxAllowedDeviationPercent <= 100)) &&
+          (!('notes' in d) || isNullableOptionalString(d.notes, 2000)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 160)) &&
+          (!('updatedBy' in d) || isNullableOptionalString(d.updatedBy, 160))
+        )) &&
+        (col != 'employee_rewards' || (
+          (!('syncUuid' in d) || isNonEmptyString(d.syncUuid, 128)) &&
+          (!('periodKey' in d) || isNullableOptionalString(d.periodKey, 40)) &&
+          (!('periodLabel' in d) || isNullableOptionalString(d.periodLabel, 60)) &&
+          (!('employeeName' in d) || isNonEmptyString(d.employeeName, 160)) &&
+          (!('employeeUsername' in d) || isNullableOptionalString(d.employeeUsername, 120)) &&
+          (!('roleKey' in d) || isNullableOptionalString(d.roleKey, 80)) &&
+          (!('roleTitle' in d) || isNullableOptionalString(d.roleTitle, 160)) &&
+          (!('completionPercent' in d) || (d.completionPercent is number && d.completionPercent >= 0 && d.completionPercent <= 100)) &&
+          (!('deviationPercent' in d) || (d.deviationPercent is number && d.deviationPercent >= 0 && d.deviationPercent <= 100)) &&
+          (!('errorCount' in d) || (d.errorCount is number && d.errorCount >= 0)) &&
+          (!('innovationCount' in d) || (d.innovationCount is number && d.innovationCount >= 0)) &&
+          (!('bonusTier' in d) || d.bonusTier in ['المستوى الأول (3 شهور)', 'المستوى الثاني (4 شهور)', 'المستوى الثالث (5 شهور)', 'غير مستوفٍ للشرط']) &&
+          (!('bonusMonths' in d) || d.bonusMonths in [0, 3, 4, 5]) &&
+          (!('evaluatedBy' in d) || isNullableOptionalString(d.evaluatedBy, 160)) &&
+          (!('notes' in d) || isNullableOptionalString(d.notes, 2000)) &&
+          (!('branch' in d) || isNullableOptionalString(d.branch, 160))
         ));
+    }
+
+    function matchesMemberIdentity(m, val) {
+      return val is string && val.size() > 0 && (
+        val == request.auth.uid ||
+        (('userCode' in m) && m.userCode is string && m.userCode.size() > 0 && val == m.userCode) ||
+        (('username' in m) && m.username is string && m.username.size() > 0 && val.lower() == m.username.lower()) ||
+        (('fullName' in m) && m.fullName is string && m.fullName.size() > 0 && val == m.fullName) ||
+        (('email' in m) && m.email is string && m.email.size() > 0 && val.lower() == m.email.lower())
+      );
+    }
+
+    function isTaskOrChecklistActor(m, res) {
+      let hasAssigneeUid = ('assigneeUid' in res) && res.assigneeUid is string && res.assigneeUid.size() > 0;
+      let hasAssigneeUsername = ('assigneeUsername' in res) && res.assigneeUsername is string && res.assigneeUsername.size() > 0;
+      let isSpecificallyAssigned = hasAssigneeUid || hasAssigneeUsername;
+      let matchesAssignee =
+        (hasAssigneeUid && res.assigneeUid == request.auth.uid) ||
+        (hasAssigneeUsername && matchesMemberIdentity(m, res.assigneeUsername));
+      let matchesCreator =
+        (('createdByUid' in res) && res.createdByUid is string && res.createdByUid == request.auth.uid) ||
+        (('createdBy' in res) && matchesMemberIdentity(m, res.createdBy)) ||
+        (('assignedBy' in res) && matchesMemberIdentity(m, res.assignedBy));
+      return matchesAssignee || matchesCreator || !isSpecificallyAssigned;
+    }
+
+    function isSelfOrUnassignedTaskCreate(m, d) {
+      let assigneeUidOk = !('assigneeUid' in d) || d.assigneeUid == null || d.assigneeUid == '' || d.assigneeUid == request.auth.uid;
+      let assigneeUserOk = !('assigneeUsername' in d) || d.assigneeUsername == null || d.assigneeUsername == '' || matchesMemberIdentity(m, d.assigneeUsername);
+      return assigneeUidOk && assigneeUserOk;
     }
 
     // Single-lookup Collection-level Role Authorization Matrices
@@ -636,10 +878,16 @@ service cloud.firestore {
           (col == 'cashboxes' &&
             (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m)) &&
             (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
-          (col in ['movements', 'transfers', 'daily_closings'] &&
+          (col in ['movements', 'transfers', 'daily_closings', 'seqaofa_entries'] &&
             (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || hasTreasuryPermissionGrant(m)) &&
             (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
-          (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'permission_audit_logs', 'accounting_accounts', 'journal_entries', 'journal_lines', 'cashboxes', 'movements', 'transfers', 'daily_closings']) &&
+          (col in ['financial_budgets', 'employee_rewards'] &&
+            (isMemberManager(m) || isMemberAccountant(m)) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
+          (col == 'employee_tasks' &&
+            (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || isSelfOrUnassignedTaskCreate(m, d)) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch))) ||
+          (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'permission_audit_logs', 'accounting_accounts', 'journal_entries', 'journal_lines', 'cashboxes', 'movements', 'transfers', 'daily_closings', 'seqaofa_entries', 'financial_budgets', 'employee_rewards', 'employee_tasks']) &&
             (!('branch' in d) || canMemberAccessBranch(m, d.branch)))
         );
     }
@@ -663,11 +911,29 @@ service cloud.firestore {
             (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m)) &&
             (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
             (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
-          (col in ['movements', 'transfers', 'invoice_payments', 'daily_closings'] &&
+          (col in ['movements', 'transfers', 'invoice_payments', 'daily_closings', 'seqaofa_entries'] &&
             (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || hasTreasuryPermissionGrant(m)) &&
             (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
             (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
-          (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'journal_entries', 'inventory_movements', 'accounting_accounts', 'cashboxes', 'movements', 'transfers', 'invoice_payments', 'daily_closings']) &&
+          (col in ['financial_budgets', 'employee_rewards'] &&
+            (isMemberManager(m) || isMemberAccountant(m)) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
+            (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
+          (col == 'daily_checklists' &&
+            (isMemberManager(m) || (
+              isTaskOrChecklistActor(m, resource.data) &&
+              d.diff(resource.data).affectedKeys().hasOnly(['completed', 'completedAt', 'note', 'updatedAt', 'serverUpdatedAt', 'serverUpdatedBy'])
+            )) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
+            (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
+          (col == 'employee_tasks' &&
+            (isMemberManager(m) || (
+              isTaskOrChecklistActor(m, resource.data) &&
+              d.diff(resource.data).affectedKeys().hasOnly(['status', 'completionPercent', 'achievedValue', 'hasDeviation', 'notes', 'updatedAt', 'serverUpdatedAt', 'serverUpdatedBy'])
+            )) &&
+            (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
+            (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch))) ||
+          (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'journal_entries', 'inventory_movements', 'accounting_accounts', 'cashboxes', 'movements', 'transfers', 'invoice_payments', 'daily_closings', 'seqaofa_entries', 'financial_budgets', 'employee_rewards', 'daily_checklists', 'employee_tasks']) &&
             (isMemberManager(m) || isMemberAccountant(m) || isMemberDeputyAccountant(m) || !(col in ['warehouses', 'products', 'packaging_rules'])) &&
             (!('branch' in d) || canMemberAccessBranch(m, d.branch)) &&
             (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)))
@@ -679,7 +945,7 @@ service cloud.firestore {
       return isNonAnonymousAuth() && ('active' in m) && m.active == true && ('roleKey' in m) &&
         m.roleKey in ['ADMIN', 'MANAGER', 'ACCOUNTANT', 'DEPUTY_ACCOUNTANT', 'EMPLOYEE'] && (
           isMemberAdmin(m) ||
-          (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'cashboxes', 'warehouses', 'accounting_accounts', 'invoices', 'movements', 'transfers', 'invoice_payments']) &&
+          (!(col in ['system_metadata', 'system_config', 'app_updates', 'config', 'deleted_records', 'deleted_users', 'cashboxes', 'warehouses', 'accounting_accounts', 'invoices', 'movements', 'transfers', 'invoice_payments', 'seqaofa_entries', 'financial_budgets', 'employee_rewards']) &&
             isMemberManager(m) &&
             (!('branch' in resource.data) || canMemberAccessBranch(m, resource.data.branch)))
         );

@@ -3088,6 +3088,14 @@ class CloudErpSyncRepository(
                     }
                 }
 
+                // 10d. Factory Operations, Role Checklists, Seqaofa, In-Transit & Rewards
+                val resolvedOpsDao = opsDaoOrNull()
+                if (resolvedOpsDao != null) {
+                    runSyncStep("مزامنة التشغيل اليومي والورديات والسقوفة والمكافآت", "shift_production_logs", critical = false) {
+                        pushFactoryOperationsToCloud(cRef, resolvedOpsDao, actor)
+                    }
+                }
+
                 // 11. Cluster Server Info Metadata (Non-blocking)
                 runCatching {
                     cRef.collection("server_status").document("cluster_meta").set(
@@ -3750,6 +3758,12 @@ class CloudErpSyncRepository(
             }.getOrNull()
             if (resolvedAccDao != null) {
                 restoredCount += restorePhase4AccountingFromCloud(cRef, resolvedAccDao)
+            }
+
+            // 10d. Restore Factory Operations, Role Checklists, Seqaofa, In-Transit & Rewards
+            val resolvedOpsDao = opsDaoOrNull()
+            if (resolvedOpsDao != null) {
+                restoredCount += restoreFactoryOperationsFromCloud(cRef, resolvedOpsDao)
             }
 
             // Clean any residual duplicates across cashboxes, warehouses, transactions, and user accounts
@@ -5378,6 +5392,391 @@ class CloudErpSyncRepository(
         report
     }
 
+    private fun opsDaoOrNull(): OperationsDao? {
+        return runCatching {
+            PmpDatabase.getDatabase(firestore.app.applicationContext).operationsDao()
+        }.getOrNull()
+    }
+
+    private suspend fun pushFactoryOperationsToCloud(
+        cRef: com.google.firebase.firestore.CollectionReference,
+        opsDao: OperationsDao,
+        actor: String
+    ): Int {
+        var count = 0
+
+        suspend fun <T> pushItems(
+            collection: String,
+            items: List<T>,
+            keyOf: (T) -> String,
+            toMap: (T) -> Map<String, Any?>
+        ) {
+            items.chunked(250).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { item ->
+                    val docId = safeId(keyOf(item), "REC-${System.currentTimeMillis()}")
+                    val data = HashMap(toMap(item))
+                    data["serverUpdatedBy"] = actor
+                    data["serverUpdatedAt"] = FieldValue.serverTimestamp()
+                    batch.set(cRef.collection(collection).document(docId), data, SetOptions.merge())
+                }
+                batch.commit().await()
+                count += chunk.size
+            }
+        }
+
+        pushItems("shift_production_logs", opsDao.getShiftLogsDirect(), { it.syncUuid }) { s ->
+            mapOf(
+                "id" to s.id, "syncUuid" to s.syncUuid, "shiftDate" to s.shiftDate, "shiftCode" to s.shiftCode,
+                "lineGroup" to s.lineGroup, "engineerName" to s.engineerName, "engineerUsername" to s.engineerUsername,
+                "activeLinesCount" to s.activeLinesCount, "workersPresent" to s.workersPresent,
+                "workersRequired" to s.workersRequired, "targetCartons" to s.targetCartons,
+                "producedCartons" to s.producedCartons, "productType" to s.productType,
+                "wasteCans" to s.wasteCans, "maxWasteAllowed" to s.maxWasteAllowed,
+                "technicalDowntimeMin" to s.technicalDowntimeMin, "materialDowntimeMin" to s.materialDowntimeMin,
+                "downtimeReason" to s.downtimeReason, "qualityStatus" to s.qualityStatus,
+                "qualityReviewedBy" to s.qualityReviewedBy, "branch" to s.branch,
+                "createdAt" to s.createdAt, "updatedAt" to s.updatedAt
+            )
+        }
+
+        pushItems("press_machines", opsDao.getPressMachinesDirect(), { it.syncUuid }) { p ->
+            mapOf(
+                "id" to p.id, "syncUuid" to p.syncUuid, "machineCode" to p.machineCode,
+                "machineName" to p.machineName, "lineCategory" to p.lineCategory, "pressStatus" to p.pressStatus,
+                "assignedOperator" to p.assignedOperator, "lastMaintenanceDate" to p.lastMaintenanceDate,
+                "notes" to p.notes, "branch" to p.branch, "updatedAt" to p.updatedAt
+            )
+        }
+
+        pushItems("tool_custodies", opsDao.getToolCustodiesDirect(), { it.syncUuid }) { t ->
+            mapOf(
+                "id" to t.id, "syncUuid" to t.syncUuid, "toolCode" to t.toolCode, "toolName" to t.toolName,
+                "department" to t.department, "custodianName" to t.custodianName,
+                "custodianUsername" to t.custodianUsername, "quantityIssued" to t.quantityIssued,
+                "quantityReturned" to t.quantityReturned, "damagedCount" to t.damagedCount,
+                "status" to t.status, "issuedDate" to t.issuedDate, "notes" to t.notes, "updatedAt" to t.updatedAt
+            )
+        }
+
+        pushItems("daily_checklists", opsDao.getDailyChecklistsDirect(), { it.syncUuid }) { c ->
+            mapOf(
+                "id" to c.id, "syncUuid" to c.syncUuid, "dateKey" to c.dateKey, "roleKey" to c.roleKey,
+                "assigneeName" to c.assigneeName, "assigneeUsername" to c.assigneeUsername,
+                "title" to c.title, "metricTarget" to c.metricTarget, "completed" to c.completed,
+                "completedAt" to (c.completedAt ?: 0L), "note" to c.note, "branch" to c.branch,
+                "createdAt" to c.createdAt, "updatedAt" to c.updatedAt
+            )
+        }
+
+        pushItems("employee_tasks", opsDao.getEmployeeTasksDirect(), { it.syncUuid }) { t ->
+            mapOf(
+                "id" to t.id, "syncUuid" to t.syncUuid, "taskCode" to t.taskCode, "title" to t.title,
+                "description" to t.description, "roleKey" to t.roleKey, "assigneeName" to t.assigneeName,
+                "assigneeUsername" to t.assigneeUsername, "assignedBy" to t.assignedBy, "priority" to t.priority,
+                "status" to t.status, "dueDate" to t.dueDate, "targetValue" to t.targetValue,
+                "achievedValue" to t.achievedValue, "hasDeviation" to t.hasDeviation, "branch" to t.branch,
+                "createdAt" to t.createdAt, "updatedAt" to t.updatedAt
+            )
+        }
+
+        pushItems("seqaofa_entries", opsDao.getSeqaofaEntriesDirect(), { it.syncUuid }) { s ->
+            mapOf(
+                "id" to s.id, "syncUuid" to s.syncUuid, "entryDate" to s.entryDate, "hub" to s.hub,
+                "custodianName" to s.custodianName, "direction" to s.direction, "amountSdg" to s.amountSdg,
+                "exchangeRate" to s.exchangeRate, "equivalentEgp" to s.equivalentEgp,
+                "purpose" to s.purpose, "referenceCode" to s.referenceCode, "recordedBy" to s.recordedBy,
+                "createdAt" to s.createdAt, "updatedAt" to s.updatedAt
+            )
+        }
+
+        pushItems("in_transit_shipments", opsDao.getInTransitShipmentsDirect(), { it.syncUuid }) { m ->
+            mapOf(
+                "id" to m.id, "syncUuid" to m.syncUuid, "shipmentCode" to m.shipmentCode,
+                "dispatchDate" to m.dispatchDate, "destinationHub" to m.destinationHub,
+                "driverOrCarrier" to m.driverOrCarrier, "cartons116" to m.cartons116,
+                "cartons1Kg" to m.cartons1Kg, "cartonsGallon" to m.cartonsGallon,
+                "customsSdg" to m.customsSdg, "freightEgp" to m.freightEgp, "status" to m.status,
+                "receivedBy" to m.receivedBy, "receivedAt" to (m.receivedAt ?: 0L), "notes" to m.notes,
+                "createdAt" to m.createdAt, "updatedAt" to m.updatedAt
+            )
+        }
+
+        pushItems("financial_budgets", opsDao.getFinancialBudgetsDirect(), { it.syncUuid }) { b ->
+            mapOf(
+                "id" to b.id, "syncUuid" to b.syncUuid, "periodMonth" to b.periodMonth,
+                "category" to b.category, "department" to b.department, "currency" to b.currency,
+                "plannedAmount" to b.plannedAmount, "actualAmount" to b.actualAmount,
+                "deviationPercent" to b.deviationPercent, "maxAllowedDeviationPercent" to b.maxAllowedDeviationPercent,
+                "supervisorName" to b.supervisorName, "notes" to b.notes, "updatedAt" to b.updatedAt
+            )
+        }
+
+        pushItems("employee_rewards", opsDao.getEmployeeRewardsDirect(), { it.syncUuid }) { r ->
+            mapOf(
+                "id" to r.id, "syncUuid" to r.syncUuid, "periodLabel" to r.periodLabel,
+                "employeeName" to r.employeeName, "employeeUsername" to r.employeeUsername,
+                "roleKey" to r.roleKey, "roleTitle" to r.roleTitle, "completionPercent" to r.completionPercent,
+                "deviationPercent" to r.deviationPercent, "errorCount" to r.errorCount,
+                "innovationCount" to r.innovationCount, "bonusTier" to r.bonusTier,
+                "bonusMonths" to r.bonusMonths, "evaluatedBy" to r.evaluatedBy,
+                "notes" to r.notes, "updatedAt" to r.updatedAt
+            )
+        }
+
+        return count
+    }
+
+    private suspend fun restoreFactoryOperationsFromCloud(
+        cRef: com.google.firebase.firestore.CollectionReference,
+        opsDao: OperationsDao
+    ): Int {
+        var restored = 0
+        runCatching {
+            val logs = cRef.collection("shift_production_logs").get().await().documents.mapNotNull { doc ->
+                val uuid = doc.getString("syncUuid") ?: doc.id
+                ShiftProductionLogEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = uuid,
+                    shiftDate = doc.getString("shiftDate") ?: "",
+                    shiftCode = doc.getString("shiftCode") ?: "الصباحية",
+                    lineGroup = doc.getString("lineGroup") ?: "3 خطوط (دورة أولى)",
+                    engineerName = doc.getString("engineerName") ?: "",
+                    engineerUsername = doc.getString("engineerUsername") ?: "",
+                    activeLinesCount = doc.safeLong("activeLinesCount")?.toInt() ?: 3,
+                    workersPresent = doc.safeLong("workersPresent")?.toInt() ?: 10,
+                    workersRequired = doc.safeLong("workersRequired")?.toInt() ?: 10,
+                    targetCartons = doc.safeLong("targetCartons")?.toInt() ?: 500,
+                    producedCartons = doc.safeLong("producedCartons")?.toInt() ?: 0,
+                    productType = doc.getString("productType") ?: "1/16",
+                    wasteCans = doc.safeLong("wasteCans")?.toInt() ?: 0,
+                    maxWasteAllowed = doc.safeLong("maxWasteAllowed")?.toInt() ?: 25,
+                    technicalDowntimeMin = doc.safeLong("technicalDowntimeMin")?.toInt() ?: 0,
+                    materialDowntimeMin = doc.safeLong("materialDowntimeMin")?.toInt() ?: 0,
+                    downtimeReason = doc.getString("downtimeReason") ?: "",
+                    qualityStatus = doc.getString("qualityStatus") ?: "مطابق",
+                    qualityReviewedBy = doc.getString("qualityReviewedBy") ?: "",
+                    branch = doc.getString("branch") ?: "فرع مصر والمصنع (EG-001)",
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (logs.isNotEmpty()) {
+                opsDao.upsertShiftLogs(logs)
+                restored += logs.size
+            }
+        }
+
+        runCatching {
+            val presses = cRef.collection("press_machines").get().await().documents.mapNotNull { doc ->
+                PressMachineEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: doc.id,
+                    machineCode = doc.getString("machineCode") ?: doc.id,
+                    machineName = doc.getString("machineName") ?: "مكبس",
+                    lineCategory = doc.getString("lineCategory") ?: "عادي",
+                    pressStatus = doc.getString("pressStatus") ?: "يعمل بكفاءة",
+                    assignedOperator = doc.getString("assignedOperator") ?: "",
+                    lastMaintenanceDate = doc.getString("lastMaintenanceDate") ?: "",
+                    notes = doc.getString("notes") ?: "",
+                    branch = doc.getString("branch") ?: "فرع مصر والمصنع (EG-001)",
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (presses.isNotEmpty()) {
+                opsDao.upsertPressMachines(presses)
+                restored += presses.size
+            }
+        }
+
+        runCatching {
+            val tools = cRef.collection("tool_custodies").get().await().documents.mapNotNull { doc ->
+                ToolCustodyEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: doc.id,
+                    toolCode = doc.getString("toolCode") ?: doc.id,
+                    toolName = doc.getString("toolName") ?: "عدة",
+                    department = doc.getString("department") ?: "التعبئة",
+                    custodianName = doc.getString("custodianName") ?: "",
+                    custodianUsername = doc.getString("custodianUsername") ?: "",
+                    quantityIssued = doc.safeLong("quantityIssued")?.toInt() ?: 1,
+                    quantityReturned = doc.safeLong("quantityReturned")?.toInt() ?: 0,
+                    damagedCount = doc.safeLong("damagedCount")?.toInt() ?: 0,
+                    status = doc.getString("status") ?: "مسلمة",
+                    issuedDate = doc.getString("issuedDate") ?: "",
+                    notes = doc.getString("notes") ?: "",
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (tools.isNotEmpty()) {
+                opsDao.upsertToolCustodies(tools)
+                restored += tools.size
+            }
+        }
+
+        runCatching {
+            val checks = cRef.collection("daily_checklists").get().await().documents.mapNotNull { doc ->
+                val compTs = doc.safeLong("completedAt")
+                DailyChecklistEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: doc.id,
+                    dateKey = doc.getString("dateKey") ?: "",
+                    roleKey = doc.getString("roleKey") ?: "GENERAL_MANAGER",
+                    assigneeName = doc.getString("assigneeName") ?: "",
+                    assigneeUsername = doc.getString("assigneeUsername") ?: "",
+                    title = doc.getString("title") ?: "",
+                    metricTarget = doc.getString("metricTarget") ?: "",
+                    completed = doc.safeBoolean("completed") ?: false,
+                    completedAt = compTs?.takeIf { it > 0L },
+                    note = doc.getString("note") ?: "",
+                    branch = doc.getString("branch") ?: "فرع مصر والمصنع (EG-001)",
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (checks.isNotEmpty()) {
+                opsDao.upsertDailyChecklists(checks)
+                restored += checks.size
+            }
+        }
+
+        runCatching {
+            val tasks = cRef.collection("employee_tasks").get().await().documents.mapNotNull { doc ->
+                EmployeeTaskEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: doc.id,
+                    taskCode = doc.getString("taskCode") ?: doc.id,
+                    title = doc.getString("title") ?: "",
+                    description = doc.getString("description") ?: "",
+                    roleKey = doc.getString("roleKey") ?: "GENERAL_MANAGER",
+                    assigneeName = doc.getString("assigneeName") ?: "",
+                    assigneeUsername = doc.getString("assigneeUsername") ?: "",
+                    assignedBy = doc.getString("assignedBy") ?: "",
+                    priority = doc.getString("priority") ?: "عاجل",
+                    status = doc.getString("status") ?: "قيد الانتظار",
+                    dueDate = doc.getString("dueDate") ?: "",
+                    targetValue = doc.getString("targetValue") ?: "",
+                    achievedValue = doc.getString("achievedValue") ?: "",
+                    hasDeviation = doc.safeBoolean("hasDeviation") ?: false,
+                    branch = doc.getString("branch") ?: "فرع مصر والمصنع (EG-001)",
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (tasks.isNotEmpty()) {
+                opsDao.upsertEmployeeTasks(tasks)
+                restored += tasks.size
+            }
+        }
+
+        runCatching {
+            val seq = cRef.collection("seqaofa_entries").get().await().documents.mapNotNull { doc ->
+                SeqaofaEntryEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: doc.id,
+                    entryDate = doc.getString("entryDate") ?: "",
+                    hub = doc.getString("hub") ?: "حلفا",
+                    custodianName = doc.getString("custodianName") ?: "",
+                    direction = doc.getString("direction") ?: "وارد",
+                    amountSdg = doc.safeDouble("amountSdg") ?: 0.0,
+                    exchangeRate = doc.safeDouble("exchangeRate") ?: 0.0,
+                    equivalentEgp = doc.safeDouble("equivalentEgp") ?: 0.0,
+                    purpose = doc.getString("purpose") ?: "",
+                    referenceCode = doc.getString("referenceCode") ?: "",
+                    recordedBy = doc.getString("recordedBy") ?: "",
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (seq.isNotEmpty()) {
+                opsDao.upsertSeqaofaEntries(seq)
+                restored += seq.size
+            }
+        }
+
+        runCatching {
+            val ships = cRef.collection("in_transit_shipments").get().await().documents.mapNotNull { doc ->
+                val recTs = doc.safeLong("receivedAt")
+                InTransitShipmentEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: doc.id,
+                    shipmentCode = doc.getString("shipmentCode") ?: doc.id,
+                    dispatchDate = doc.getString("dispatchDate") ?: "",
+                    destinationHub = doc.getString("destinationHub") ?: "حلفا",
+                    driverOrCarrier = doc.getString("driverOrCarrier") ?: "",
+                    cartons116 = doc.safeLong("cartons116")?.toInt() ?: 0,
+                    cartons1Kg = doc.safeLong("cartons1Kg")?.toInt() ?: 0,
+                    cartonsGallon = doc.safeLong("cartonsGallon")?.toInt() ?: 0,
+                    customsSdg = doc.safeDouble("customsSdg") ?: 0.0,
+                    freightEgp = doc.safeDouble("freightEgp") ?: 0.0,
+                    status = doc.getString("status") ?: "خرج من مصنع مصر",
+                    receivedBy = doc.getString("receivedBy") ?: "",
+                    receivedAt = recTs?.takeIf { it > 0L },
+                    notes = doc.getString("notes") ?: "",
+                    createdAt = doc.safeLong("createdAt") ?: System.currentTimeMillis(),
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (ships.isNotEmpty()) {
+                opsDao.upsertInTransitShipments(ships)
+                restored += ships.size
+            }
+        }
+
+        runCatching {
+            val budgets = cRef.collection("financial_budgets").get().await().documents.mapNotNull { doc ->
+                FinancialBudgetEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: doc.id,
+                    periodMonth = doc.getString("periodMonth") ?: "",
+                    category = doc.getString("category") ?: "",
+                    department = doc.getString("department") ?: "",
+                    currency = doc.getString("currency") ?: "EGP",
+                    plannedAmount = doc.safeDouble("plannedAmount") ?: 0.0,
+                    actualAmount = doc.safeDouble("actualAmount") ?: 0.0,
+                    deviationPercent = doc.safeDouble("deviationPercent") ?: 0.0,
+                    maxAllowedDeviationPercent = doc.safeDouble("maxAllowedDeviationPercent") ?: 5.0,
+                    supervisorName = doc.getString("supervisorName") ?: "",
+                    notes = doc.getString("notes") ?: "",
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (budgets.isNotEmpty()) {
+                opsDao.upsertFinancialBudgets(budgets)
+                restored += budgets.size
+            }
+        }
+
+        runCatching {
+            val rewards = cRef.collection("employee_rewards").get().await().documents.mapNotNull { doc ->
+                EmployeeRewardEntity(
+                    id = doc.safeLong("id") ?: 0L,
+                    syncUuid = doc.getString("syncUuid") ?: doc.id,
+                    periodLabel = doc.getString("periodLabel") ?: "",
+                    employeeName = doc.getString("employeeName") ?: "",
+                    employeeUsername = doc.getString("employeeUsername") ?: "",
+                    roleKey = doc.getString("roleKey") ?: "GENERAL_MANAGER",
+                    roleTitle = doc.getString("roleTitle") ?: "",
+                    completionPercent = doc.safeDouble("completionPercent") ?: 0.0,
+                    deviationPercent = doc.safeDouble("deviationPercent") ?: 0.0,
+                    errorCount = doc.safeLong("errorCount")?.toInt() ?: 0,
+                    innovationCount = doc.safeLong("innovationCount")?.toInt() ?: 0,
+                    bonusTier = doc.getString("bonusTier") ?: "غير مستوفٍ للشرط",
+                    bonusMonths = doc.safeLong("bonusMonths")?.toInt() ?: 0,
+                    evaluatedBy = doc.getString("evaluatedBy") ?: "",
+                    notes = doc.getString("notes") ?: "",
+                    updatedAt = doc.safeLong("updatedAt") ?: System.currentTimeMillis()
+                )
+            }
+            if (rewards.isNotEmpty()) {
+                opsDao.upsertEmployeeRewards(rewards)
+                restored += rewards.size
+            }
+        }
+
+        return restored
+    }
+
     /**
      * Real-time multi-user listener for user_accounts in the cluster:
      * Automatically updates local Room when any user is added, approved, or has permissions modified.
@@ -5515,7 +5914,8 @@ class CloudErpSyncRepository(
         dao: PmpDao,
         scope: CoroutineScope,
         inventoryDao: ErpInventoryDao? = null,
-        accountingDao: ErpAccountingDao? = null
+        accountingDao: ErpAccountingDao? = null,
+        operationsDao: OperationsDao? = null
     ): Flow<Int> = callbackFlow {
         val fbUser = runCatching { Firebase.auth.currentUser }.getOrNull()
         if (fbUser == null) {
@@ -6410,6 +6810,34 @@ class CloudErpSyncRepository(
                 }
         }
 
+        val opsCollections = listOf(
+            "shift_production_logs",
+            "press_machines",
+            "tool_custodies",
+            "daily_checklists",
+            "employee_tasks",
+            "seqaofa_entries",
+            "in_transit_shipments",
+            "financial_budgets",
+            "employee_rewards"
+        )
+        val opsListeners = operationsDao?.let { oDao ->
+            opsCollections.map { colName ->
+                cRef.collection(colName)
+                    .addSnapshotListener(com.google.firebase.firestore.MetadataChanges.INCLUDE) { snapshot, error ->
+                        if (error == null && snapshot != null) {
+                            updateCollectionSyncMetadata(colName, snapshot.metadata.hasPendingWrites(), snapshot.metadata.isFromCache(), snapshot.size())
+                            scope.launch(Dispatchers.IO + syncExceptionHandler) {
+                                runCatching {
+                                    restoreFactoryOperationsFromCloud(cRef, oDao)
+                                    trySend(snapshot.size())
+                                }
+                            }
+                        }
+                    }
+            }
+        } ?: emptyList()
+
         awaitClose {
             epochListener.remove()
             tombListener.remove()
@@ -6432,6 +6860,7 @@ class CloudErpSyncRepository(
             qcListener?.remove()
             jrnListener?.remove()
             jlnListener?.remove()
+            opsListeners.forEach { it.remove() }
         }
     }
 

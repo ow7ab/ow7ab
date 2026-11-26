@@ -191,6 +191,8 @@ class MainActivity : FragmentActivity() {
 
 enum class PmpScreen(val route: String, val title: String, val icon: ImageVector) {
     DASHBOARD("dashboard", "الرئيسية", Icons.Default.Dashboard),
+    MY_WORKSPACE("my_workspace", "مكتبي", Icons.Default.Work),
+    OPERATIONS("operations", "التشغيل", Icons.Default.Assignment),
     TREASURY("treasury", "الخزن", Icons.Default.AccountBalanceWallet),
     PURCHASES("purchases", "المشتريات", Icons.Default.ShoppingCart),
     SALES("sales", "المبيعات", Icons.Default.ReceiptLong),
@@ -314,6 +316,17 @@ fun UserAccountEntity?.resolveAllowedScreens(
     return PmpScreen.entries.filter { screen ->
         when (screen) {
             PmpScreen.DASHBOARD -> true
+            PmpScreen.MY_WORKSPACE -> true
+            PmpScreen.OPERATIONS -> isSystemManager() ||
+                hasModulePermission("المصنع", nowMillis) ||
+                hasModulePermission("الإنتاج", nowMillis) ||
+                hasModulePermission("التعبئة والتغليف", nowMillis) ||
+                hasModulePermission("المخازن", nowMillis) ||
+                hasModulePermission("المختبر الكيميائي", nowMillis) ||
+                hasModulePermission("المحاسبة", nowMillis) ||
+                hasModulePermission("التحويلات", nowMillis) ||
+                hasModulePermission("المشتريات", nowMillis) ||
+                hasModulePermission("التشغيل", nowMillis)
             PmpScreen.SETTINGS -> true
             PmpScreen.TREASURY -> hasModulePermission("الخزن", nowMillis) ||
                 hasModulePermission("التحويلات", nowMillis) ||
@@ -956,6 +969,13 @@ fun PmpAppContent(
                                     viewModel = viewModel,
                                     onNavigate = handleDashboardNavigate,
                                     onSignOut = handleSignOut
+                                )
+                                PmpScreen.MY_WORKSPACE -> MyWorkspaceScreen(
+                                    viewModel = viewModel,
+                                    onNavigate = handleDashboardNavigate
+                                )
+                                PmpScreen.OPERATIONS -> FactoryOperationsScreen(
+                                    viewModel = viewModel
                                 )
                                 PmpScreen.TREASURY -> TreasuryScreen(
                                     viewModel = viewModel,
@@ -1784,6 +1804,26 @@ fun PmpNavigationMenuModal(
 
             // Categorized modules
             val categories = listOf(
+                NavCategory(
+                    title = "مكتب الموظف والتشغيل اليومي",
+                    subtitle = "مساحة العمل المخصصة للدور الوظيفي والورديات والسقوفة والمكافآت",
+                    items = listOf(
+                        NavMenuItem(
+                            screen = PmpScreen.MY_WORKSPACE,
+                            label = "مكتبي (مساحة عملي)",
+                            desc = "مهام الدور الوظيفي، قائمة التحقق اليومية، والإدخال السريع",
+                            icon = Icons.Default.Work,
+                            color = Color(0xFF0EA5E9)
+                        ),
+                        NavMenuItem(
+                            screen = PmpScreen.OPERATIONS,
+                            label = "مركز التشغيل والمكافآت",
+                            desc = "الورديات (1,000 ك)، المكابس والعدد، السقوفة والطريق، والمكافآت",
+                            icon = Icons.Default.Assignment,
+                            color = Color(0xFFDC2626)
+                        )
+                    )
+                ),
                 NavCategory(
                     title = "المبيعات والتسعير التجاري",
                     subtitle = "إصدار الفواتير، نقاط البيع، ودليل أسعار العملتين (EGP / SDG)",

@@ -178,6 +178,10 @@ fun DashboardScreen(
             // Quick Command & Navigation Strip (1-tap smooth switching across permitted modules + security audit diagnostics)
             item(key = "dashboard_quick_nav_strip") {
                 val quickLinks = buildList {
+                    add(Triple("my_workspace", "مكتبي (مساحة عملي)", Icons.Default.Work))
+                    if (PmpScreen.OPERATIONS in allowedScreens) {
+                        add(Triple("operations", "التشغيل والمكافآت", Icons.Default.Assignment))
+                    }
                     if (canAccessTreasury) add(Triple("treasury", "حركة الخزينة", Icons.Default.AccountBalanceWallet))
                     if (canAccessSales) add(Triple("sales", "المبيعات والفواتير", Icons.Default.ReceiptLong))
                     if (canAccessInventory) add(Triple("inventory", "المخازن", Icons.Default.Warehouse))

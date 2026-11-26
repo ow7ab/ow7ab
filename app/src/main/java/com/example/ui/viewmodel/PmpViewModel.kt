@@ -42,6 +42,7 @@ data class UiMessage(
 class PmpViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database: PmpDatabase = PmpDatabase.getDatabase(application)
+    private val operationsDao: OperationsDao = database.operationsDao()
     private val repository: PmpRepository = PmpRepository(database.pmpDao(), database)
     private val cloudSyncRepo: CloudAccountSyncRepository = CloudAccountSyncRepository.create(application)
     private val cloudErpSyncRepo: CloudErpSyncRepository = CloudErpSyncRepository.create(application)
@@ -227,6 +228,43 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
             emit(emptyList())
         }
         .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    // --- Role Workspace & Factory Operations Live Streams ---
+    val shiftProductionLogs: StateFlow<List<ShiftProductionLogEntity>> = operationsDao.getShiftLogs()
+        .catch { emit(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val pressMachines: StateFlow<List<PressMachineEntity>> = operationsDao.getPressMachines()
+        .catch { emit(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val toolCustodies: StateFlow<List<ToolCustodyEntity>> = operationsDao.getToolCustodies()
+        .catch { emit(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val dailyChecklists: StateFlow<List<DailyChecklistEntity>> = operationsDao.getDailyChecklists()
+        .catch { emit(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val employeeTasks: StateFlow<List<EmployeeTaskEntity>> = operationsDao.getEmployeeTasks()
+        .catch { emit(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val seqaofaEntries: StateFlow<List<SeqaofaEntryEntity>> = operationsDao.getSeqaofaEntries()
+        .catch { emit(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val inTransitShipments: StateFlow<List<InTransitShipmentEntity>> = operationsDao.getInTransitShipments()
+        .catch { emit(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val financialBudgets: StateFlow<List<FinancialBudgetEntity>> = operationsDao.getFinancialBudgets()
+        .catch { emit(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val employeeRewards: StateFlow<List<EmployeeRewardEntity>> = operationsDao.getEmployeeRewards()
+        .catch { emit(emptyList()) }
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val customers = repository.getCustomers()
@@ -3766,7 +3804,8 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     dao = repository.getDao(),
                     scope = viewModelScope,
                     inventoryDao = database.erpInventoryDao(),
-                    accountingDao = database.erpAccountingDao()
+                    accountingDao = database.erpAccountingDao(),
+                    operationsDao = operationsDao
                 )
                     .catch { Log.w("PmpViewModel", "Cluster ERP data observer warning: ${it.message}") }
                     .collect {
@@ -6613,6 +6652,227 @@ class PmpViewModel(application: Application) : AndroidViewModel(application) {
                     persistAndSyncToServer()
                     rev.entryNo to (rev to lines)
                 }
+        }
+    }
+
+    // --- Role Workspace & Factory Operations Mutations ---
+
+    fun saveShiftProductionLog(entity: ShiftProductionLogEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            operationsDao.upsertShiftLog(entity.copy(updatedAt = System.currentTimeMillis()))
+            withContext(Dispatchers.Main) {
+                postMessage("تم حفظ تقرير وردية ${entity.lineGroup} (${entity.producedCartons} كرتونة)")
+            }
+            persistAndSyncToServer()
+        }
+    }
+
+    fun savePressMachine(entity: PressMachineEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            operationsDao.upsertPressMachine(entity.copy(updatedAt = System.currentTimeMillis()))
+            withContext(Dispatchers.Main) {
+                postMessage("تم تحديث حالة المكبس ${entity.machineCode}: ${entity.pressStatus}")
+            }
+            persistAndSyncToServer()
+        }
+    }
+
+    fun saveToolCustody(entity: ToolCustodyEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            operationsDao.upsertToolCustody(entity.copy(updatedAt = System.currentTimeMillis()))
+            withContext(Dispatchers.Main) {
+                postMessage("تم تسجيل عهدة العدة ${entity.toolName} باسم ${entity.custodianName}")
+            }
+            persistAndSyncToServer()
+        }
+    }
+
+    fun toggleDailyChecklistItem(item: DailyChecklistEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            val nextCompleted = !item.completed
+            operationsDao.upsertDailyChecklist(
+                item.copy(
+                    completed = nextCompleted,
+                    completedAt = if (nextCompleted) now else null,
+                    updatedAt = now
+                )
+            )
+            persistAndSyncToServer()
+        }
+    }
+
+    fun seedDailyChecklistForRole(
+        roleKey: com.example.core.architecture.EmployeeRoleKey,
+        assigneeName: String,
+        assigneeUsername: String,
+        branch: String
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+            val profile = com.example.core.architecture.EmployeeRoleCatalog.ALL_PROFILES[roleKey] ?: return@launch
+            val existing = operationsDao.getDailyChecklistsDirect()
+                .filter { it.dateKey == today && it.roleKey == roleKey.name && it.assigneeUsername == assigneeUsername }
+            if (existing.isNotEmpty()) {
+                withContext(Dispatchers.Main) { postMessage("قائمة اليوم مولدة مسبقاً لهذا الدور") }
+                return@launch
+            }
+            val now = System.currentTimeMillis()
+            val seeds = profile.dailyChecklist.mapIndexed { idx, tpl ->
+                val safeUser = assigneeUsername.ifBlank { "emp" }.replace(Regex("[^a-zA-Z0-9_-]"), "")
+                DailyChecklistEntity(
+                    syncUuid = "CHK-$today-${roleKey.name}-${idx + 1}-$safeUser",
+                    dateKey = today,
+                    roleKey = roleKey.name,
+                    assigneeName = assigneeName,
+                    assigneeUsername = assigneeUsername,
+                    title = tpl.title,
+                    metricTarget = tpl.metricTarget,
+                    completed = false,
+                    branch = branch.ifBlank { profile.defaultBranch },
+                    createdAt = now,
+                    updatedAt = now
+                )
+            }
+            operationsDao.upsertDailyChecklists(seeds)
+            withContext(Dispatchers.Main) { postMessage("تم توليد ${seeds.size} مهام تحقق يومية") }
+            persistAndSyncToServer()
+        }
+    }
+
+    fun saveEmployeeTask(entity: EmployeeTaskEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            operationsDao.upsertEmployeeTask(entity.copy(updatedAt = System.currentTimeMillis()))
+            withContext(Dispatchers.Main) { postMessage("تم حفظ المهمة ${entity.taskCode}") }
+            persistAndSyncToServer()
+        }
+    }
+
+    fun cycleEmployeeTaskStatus(task: EmployeeTaskEntity) {
+        val next = when (task.status) {
+            "لم يبدأ", "قيد الانتظار" -> "جاري"
+            "جاري" -> "مكتمل"
+            else -> "متأخر"
+        }
+        saveEmployeeTask(task.copy(status = next, hasDeviation = next == "متأخر"))
+    }
+
+    fun saveSeqaofaEntry(entity: SeqaofaEntryEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            operationsDao.upsertSeqaofaEntry(entity.copy(updatedAt = System.currentTimeMillis()))
+            withContext(Dispatchers.Main) { postMessage("تم تسجيل حركة السقوفة ${entity.hub} (${entity.direction})") }
+            persistAndSyncToServer()
+        }
+    }
+
+    fun saveInTransitShipment(entity: InTransitShipmentEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            operationsDao.upsertInTransitShipment(entity.copy(updatedAt = System.currentTimeMillis()))
+            withContext(Dispatchers.Main) { postMessage("تم تحديث شحنة ${entity.shipmentCode}: ${entity.status}") }
+            persistAndSyncToServer()
+        }
+    }
+
+    fun markInTransitShipmentReceived(shipment: InTransitShipmentEntity) {
+        val receiver = resolveUserActor("مدير فرع السودان")
+        saveInTransitShipment(
+            shipment.copy(
+                status = "تم الاستلام",
+                receivedBy = receiver,
+                receivedAt = System.currentTimeMillis()
+            )
+        )
+    }
+
+    fun saveFinancialBudget(entity: FinancialBudgetEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val eval = com.example.core.architecture.EmployeeRoleCatalog.evaluateBudgetDeviation(
+                entity.plannedAmount,
+                entity.actualAmount,
+                entity.maxAllowedDeviationPercent
+            )
+            operationsDao.upsertFinancialBudget(
+                entity.copy(
+                    deviationPercent = eval.deviationPercent,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            withContext(Dispatchers.Main) { postMessage("تم حفظ بند الموازنة (${eval.statusLabel})") }
+            persistAndSyncToServer()
+        }
+    }
+
+    fun saveEmployeeReward(entity: EmployeeRewardEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val tier = com.example.core.architecture.EmployeeRoleCatalog.evaluateEmployeeBonusTier(
+                entity.completionPercent,
+                entity.deviationPercent,
+                entity.errorCount,
+                entity.innovationCount
+            )
+            operationsDao.upsertEmployeeReward(
+                entity.copy(
+                    bonusTier = tier.bonusTier,
+                    bonusMonths = tier.bonusMonths,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            withContext(Dispatchers.Main) { postMessage("تم احتساب التقييم: ${tier.bonusTier}") }
+            persistAndSyncToServer()
+        }
+    }
+
+    fun seedDefaultFactoryOperations() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val actor = resolveUserActor("م. مصطفى الصيفي")
+            val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+            val period = SimpleDateFormat("yyyy-MM", Locale.US).format(Date())
+            val now = System.currentTimeMillis()
+
+            if (operationsDao.getPressMachinesDirect().isEmpty()) {
+                val presses = listOf(
+                    PressMachineEntity(syncUuid = "PRS-OLD-01", machineCode = "PRESS-OLD-1", machineName = "مكبس العادي القديم (رئيسي)", lineCategory = "عادي", pressStatus = "يعمل بكفاءة", assignedOperator = "م. مصطفى الصيفي", lastMaintenanceDate = today, notes = "مجهز بالبكر وسنادة الأباجورة", updatedAt = now),
+                    PressMachineEntity(syncUuid = "PRS-OLD-02", machineCode = "PRESS-OLD-2", machineName = "مكبس الخطوط القديم (احتياطي)", lineCategory = "عادي", pressStatus = "جاهز / احتياط", assignedOperator = "م. محمد عبدالباسط", lastMaintenanceDate = today, notes = "جاهز للتبديل السريع", updatedAt = now),
+                    PressMachineEntity(syncUuid = "PRS-NEW-01", machineCode = "PRESS-NEW-1", machineName = "مكبس جديد 1 (قفل أوتوماتيك)", lineCategory = "جديد", pressStatus = "صيانة / عطل", assignedOperator = "أ. أحمد الطلخاوي / منذر", lastMaintenanceDate = today, notes = "متابعة التجهيز الميكانيكي والكهربائي", updatedAt = now),
+                    PressMachineEntity(syncUuid = "PRS-PLA-01", machineCode = "PRESS-PLASTIC-1", machineName = "مكبس خط البلاستيك", lineCategory = "بلاستيك", pressStatus = "تحت التجهيز", assignedOperator = "م. رانيا سمير", lastMaintenanceDate = today, notes = "خطة تشغيل خط البلاستيك والمكبس", updatedAt = now)
+                )
+                operationsDao.upsertPressMachines(presses)
+            }
+
+            if (operationsDao.getShiftLogsDirect().isEmpty()) {
+                val logs = listOf(
+                    ShiftProductionLogEntity(syncUuid = "SHF-$today-3L", shiftDate = today, shiftCode = "الصباحية", lineGroup = "3 خطوط (دورة أولى)", engineerName = "م. محمد عبدالباسط", engineerUsername = "abdelbaset_pack", activeLinesCount = 3, workersPresent = 10, workersRequired = 10, targetCartons = 500, producedCartons = 485, productType = "1/16", wasteCans = 18, maxWasteAllowed = 25, technicalDowntimeMin = 15, materialDowntimeMin = 10, downtimeReason = "ضبط سخان الماكينة 2", qualityStatus = "مطابق", qualityReviewedBy = "م. رانيا سمير", updatedAt = now),
+                    ShiftProductionLogEntity(syncUuid = "SHF-$today-2L", shiftDate = today, shiftCode = "الصباحية", lineGroup = "خطان (دورة ثانية)", engineerName = "م. زياد حسام", engineerUsername = "ziad_pack", activeLinesCount = 2, workersPresent = 6, workersRequired = 6, targetCartons = 500, producedCartons = 490, productType = "1 ك", wasteCans = 12, maxWasteAllowed = 25, technicalDowntimeMin = 10, materialDowntimeMin = 0, downtimeReason = "صيانة بسيطة بسير السلوفان", qualityStatus = "مطابق", qualityReviewedBy = "م. رانيا سمير", updatedAt = now)
+                )
+                operationsDao.upsertShiftLogs(logs)
+            }
+
+            if (operationsDao.getFinancialBudgetsDirect().isEmpty()) {
+                val budgets = listOf(
+                    FinancialBudgetEntity(syncUuid = "BUD-$period-EGP-RAW", periodMonth = period, category = "خامات الإنتاج والألكيد والتيوسين", department = "المشتريات والمصنع", currency = "EGP", plannedAmount = 1200000.0, actualAmount = 1235000.0, deviationPercent = 2.9, maxAllowedDeviationPercent = 5.0, supervisorName = "أ. أحمد الطلخاوي", notes = "ضمن حد الانحراف 5%", updatedAt = now),
+                    FinancialBudgetEntity(syncUuid = "BUD-$period-EGP-OPS", periodMonth = period, category = "خزينة مصروفات التشغيل والرواتب", department = "الإدارة المالية", currency = "EGP", plannedAmount = 350000.0, actualAmount = 342000.0, deviationPercent = 2.3, maxAllowedDeviationPercent = 5.0, supervisorName = "أ. أحمد الطلخاوي", notes = "تغذية تشغيلية أسبوعية", updatedAt = now)
+                )
+                operationsDao.upsertFinancialBudgets(budgets)
+            }
+
+            if (operationsDao.getInTransitShipmentsDirect().isEmpty()) {
+                val shipment = InTransitShipmentEntity(syncUuid = "TRN-$today-01", shipmentCode = "TRN-HF-2026-01", dispatchDate = today, destinationHub = "حلفا", driverOrCarrier = "براد أرقين اللوجستي", cartons116 = 450, cartons1Kg = 350, cartonsGallon = 100, customsSdg = 1850000.0, freightEgp = 95000.0, status = "في الجمارك", notes = "رسالة 900 كرتونة", createdAt = now, updatedAt = now)
+                operationsDao.upsertInTransitShipment(shipment)
+            }
+
+            if (operationsDao.getEmployeeTasksDirect().isEmpty()) {
+                val tasks = listOf(
+                    EmployeeTaskEntity(syncUuid = "TSK-SEED-01", taskCode = "TSK-101", title = "تجهيز المكبس الجديد وإغلاق أعطال خط 3", roleKey = "PRODUCTION_MANAGER", assigneeName = "م. مصطفى الصيفي", assignedBy = actor, priority = "حرج", status = "جاري", dueDate = today, targetValue = "1,000 كرتونة/يوم", achievedValue = "975 كرتونة", updatedAt = now),
+                    EmployeeTaskEntity(syncUuid = "TSK-SEED-02", taskCode = "TSK-102", title = "حصر عُهد العدد اليدوية وتوريد 99 لفة استرتش", roleKey = "LOADING_TOOLS_SUPERVISOR", assigneeName = "منذر مزمل فضل", assignedBy = actor, priority = "عاجل", status = "جاري", dueDate = today, targetValue = "100% عهد مسجلة", achievedValue = "جاري الجرد", updatedAt = now),
+                    EmployeeTaskEntity(syncUuid = "TSK-SEED-03", taskCode = "TSK-103", title = "فحص خلو البراميل الفارغة من الألكيد ومطابقة الموازنة", roleKey = "FINANCE_MANAGER_EGYPT", assigneeName = "أ. أحمد الطلخاوي", assignedBy = actor, priority = "عادي", status = "مكتمل", dueDate = today, targetValue = "انحراف ≤ 5%", achievedValue = "2.9%", updatedAt = now)
+                )
+                operationsDao.upsertEmployeeTasks(tasks)
+            }
+
+            withContext(Dispatchers.Main) {
+                postMessage("تم تحميل بيانات التشغيل الافتراضية للمصنع والفروع بنجاح")
+            }
+            persistAndSyncToServer()
         }
     }
 }

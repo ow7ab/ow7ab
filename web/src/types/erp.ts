@@ -10,7 +10,15 @@ export type UserRoleType = 'SUPER_ADMIN' | 'MANAGER' | 'EMPLOYEE';
 export type JobRole =
   | 'مدير النظام'
   | 'المدير'
+  | 'المدير العام'
   | 'مدير فرع ومصنع مصر'
+  | 'المدير المالي'
+  | 'مديرة الجودة والمشتريات'
+  | 'مدير الإنتاج'
+  | 'مهندس التعبئة والجودة'
+  | 'أمين مخازن المصنع'
+  | 'مشرف التحميل والعدد'
+  | 'محاسب ومبيعات السودان'
   | 'مسؤول نظام مخصص'
   | 'المحاسب'
   | 'محاسب خزنة ومبيعات'
@@ -1072,5 +1080,206 @@ export interface ConsolidatedFxSummary {
   totalLiabilitiesConsolidated: number;
   totalEquityConsolidated: number;
 }
+
+// =============================================================================
+// PMP FACTORY OPERATIONS, ROLE WORKSPACES, PRESSES, TOOLS, SEQAOFA & REWARDS
+// =============================================================================
+
+export type EmployeeRoleKey =
+  | 'GENERAL_MANAGER'
+  | 'FINANCE_MANAGER_EGYPT'
+  | 'QUALITY_PROCUREMENT_MANAGER'
+  | 'PRODUCTION_MANAGER'
+  | 'PACKING_ENGINEER'
+  | 'WAREHOUSE_KEEPER_EGYPT'
+  | 'LOADING_TOOLS_SUPERVISOR'
+  | 'SUDAN_BRANCH_MANAGER'
+  | 'SALES_AGENT';
+
+export interface ShiftProductionLog {
+  id: number;
+  syncUuid: string;
+  shiftDate: string;
+  shiftName: 'الوردية الصباحية' | 'الوردية المسائية' | string;
+  lineNo: 1 | 2 | 3 | 4 | 5;
+  engineerName: string;
+  batchNo: string;
+  productName: string;
+  packageSize: '1/16' | '1 كيلو' | 'جالون' | 'مهندسين' | string;
+  kettleWeightKg: number;
+  targetCartons: number;
+  producedCartons: number;
+  emptyCansUsed: number;
+  emptyCartonsUsed: number;
+  wasteCans: number;
+  maxWasteAllowed: number;
+  extraCans: number;
+  weightErrors: number;
+  stickerErrors: number;
+  technicalDowntimeMin: number;
+  materialDowntimeMin: number;
+  workersCount: number;
+  notes: string;
+  branch: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type PressStatus = 'جاهز' | 'تحت الصيانة' | 'متوقف' | 'يحتاج قطع غيار';
+
+export interface PressMachine {
+  id: number;
+  syncUuid: string;
+  pressCode: string;
+  name: string;
+  location: string;
+  status: PressStatus;
+  lastMaintenanceDate: string;
+  nextMaintenanceDate: string;
+  assignedSupervisor: string;
+  notes: string;
+  branch: string;
+  updatedBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ToolCustodyItem {
+  id: number;
+  syncUuid: string;
+  custodyNo: string;
+  toolName: string;
+  deliveredQty: number;
+  deliveryCondition: string;
+  custodianName: string;
+  deliveryDate: string;
+  monthlyAuditStatus: 'مطابق' | 'يوجد فاقد' | 'بانتظار الجرد' | string;
+  countedQty: number;
+  missingQty: number;
+  actionTaken: string;
+  notes: string;
+  branch: string;
+  updatedBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DailyChecklistItem {
+  id: number;
+  syncUuid: string;
+  dateKey: string;
+  roleKey: EmployeeRoleKey | string;
+  assigneeName: string;
+  assigneeUsername: string;
+  title: string;
+  metricTarget: string;
+  completed: boolean;
+  completedAt: number | null;
+  note: string;
+  branch: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type OperationalTaskStatus = 'لم يبدأ' | 'جاري' | 'مكتمل' | 'متأخر';
+
+export interface EmployeeTaskItem {
+  id: number;
+  syncUuid: string;
+  title: string;
+  department: string;
+  assigneeName: string;
+  assigneeUsername: string;
+  roleKey: EmployeeRoleKey | string;
+  priority: 'عالية' | 'متوسطة' | 'منخفضة' | string;
+  startDate: string;
+  dueDate: string;
+  status: OperationalTaskStatus;
+  completionPercent: number;
+  indicatorTarget: string;
+  notes: string;
+  branch: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SeqaofaEntry {
+  id: number;
+  syncUuid: string;
+  entryDate: string;
+  custodianName: 'محمد صديق' | 'عمر عبدالوهاب' | string;
+  direction: 'وارد' | 'منصرف';
+  amountSdg: number;
+  exchangeRate: number;
+  equivalentEgp: number;
+  counterparty: string;
+  referenceNo: string;
+  notes: string;
+  branch: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface InTransitShipment {
+  id: number;
+  syncUuid: string;
+  dispatchDate: string;
+  invoiceRef: string;
+  carrierName: string;
+  destinationBranch: string;
+  cartons116: number;
+  cartons1Kg: number;
+  cartonsGallon: number;
+  customsSdg: number;
+  freightEgp: number;
+  status: 'في الطريق' | 'في الجمارك' | 'تم الاستلام';
+  receivedDate: string;
+  notes: string;
+  branch: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface FinancialBudgetItem {
+  id: number;
+  syncUuid: string;
+  periodKey: string;
+  category: 'الخطة المالية' | 'خطة النولون' | 'المشتريات' | 'الرواتب' | 'مصروفات التشغيل' | string;
+  responsibleName: string;
+  plannedAmount: number;
+  actualAmount: number;
+  currency: CurrencyCode;
+  maxDeviationPercent: number;
+  notes: string;
+  branch: string;
+  updatedBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface EmployeeRewardEvaluation {
+  id: number;
+  syncUuid: string;
+  periodKey: string;
+  employeeName: string;
+  employeeUsername: string;
+  roleTitle: string;
+  completionPercent: number;
+  deviationPercent: number;
+  errorCount: number;
+  innovationCount: number;
+  bonusTier: 'المستوى الأول (3 شهور)' | 'المستوى الثاني (4 شهور)' | 'المستوى الثالث (5 شهور)' | 'غير مستوفٍ للشرط';
+  bonusMonths: 0 | 3 | 4 | 5;
+  notes: string;
+  branch: string;
+  evaluatedBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 
 

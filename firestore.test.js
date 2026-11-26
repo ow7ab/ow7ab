@@ -1441,6 +1441,410 @@ test("27. Financial Ledger Immutability: movements, transfers, invoice_payments 
   );
 });
 
+test("28. Operational Factory & Logistics Collections (shift_production_logs, press_machines, tool_custodies, in_transit_shipments): branch scoping, payload bounds, and delete RBAC", async () => {
+  await seedClusterRbac();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const intruderDb = testEnv.authenticatedContext(INTRUDER_UID).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const managerDb = testEnv.authenticatedContext(MANAGER_UID).firestore();
+  const accDb = testEnv.authenticatedContext(ACCOUNTANT_UID).firestore();
+  const empSdDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+
+  const cAdm = adminDb.collection("erp_clusters").doc(CLUSTER);
+  const cMgr = managerDb.collection("erp_clusters").doc(CLUSTER);
+  const cAcc = accDb.collection("erp_clusters").doc(CLUSTER);
+  const cEmpSd = empSdDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Unauthenticated & non-member denied
+  await assertFails(unauthDb.collection("erp_clusters").doc(CLUSTER).collection("shift_production_logs").get());
+  await assertFails(intruderDb.collection("erp_clusters").doc(CLUSTER).collection("press_machines").get());
+
+  // Manager can create & update factory ops (EG-001)
+  await assertSucceeds(
+    cMgr.collection("shift_production_logs").doc("SHF-EG-1").set({
+      syncUuid: "SHF-EG-1",
+      shiftDate: "2026-11-26",
+      lineNo: 1,
+      targetCartons: 200,
+      producedCartons: 210,
+      wasteCans: 8,
+      maxWasteAllowed: 25,
+      branch: "EG-001 (مصنع مصر والتصدير)",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cMgr.collection("press_machines").doc("PRESS-1").set({
+      syncUuid: "PRESS-1",
+      pressCode: "PRS-01",
+      name: "مكبس 1",
+      status: "جاهز",
+      branch: "EG-001 (مصنع مصر والتصدير)",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cMgr.collection("tool_custodies").doc("TOOL-1").set({
+      syncUuid: "TOOL-1",
+      toolName: "صندوق العدة",
+      deliveredQty: 5,
+      countedQty: 5,
+      missingQty: 0,
+      branch: "EG-001 (مصنع مصر والتصدير)",
+      updatedAt: Date.now(),
+    })
+  );
+
+  // SD-001 employee CAN create/update in-branch in_transit_shipments, CANNOT read/create/update EG-001 factory ops
+  await assertSucceeds(
+    cEmpSd.collection("in_transit_shipments").doc("TRN-SD-1").set({
+      syncUuid: "TRN-SD-1",
+      dispatchDate: "2026-11-26",
+      invoiceRef: "INV-TRN-1",
+      cartons116: 50,
+      cartons1Kg: 20,
+      cartonsGallon: 10,
+      customsSdg: 120000,
+      freightEgp: 15000,
+      status: "في الطريق",
+      branch: "فرع السودان (SD-001)",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cEmpSd.collection("in_transit_shipments").doc("TRN-SD-1").update({
+      status: "تم الاستلام",
+      receivedDate: "2026-11-26",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertFails(cEmpSd.collection("shift_production_logs").doc("SHF-EG-1").get());
+  await assertFails(
+    cEmpSd.collection("press_machines").doc("PRESS-EG-UNAUTH").set({
+      syncUuid: "PRESS-EG-UNAUTH",
+      name: "مكبس متسلل",
+      status: "جاهز",
+      branch: "EG-001 (مصنع مصر والتصدير)",
+    })
+  );
+  await assertFails(
+    cEmpSd.collection("press_machines").doc("PRESS-1").update({
+      status: "متوقف",
+    })
+  );
+
+  // Negative quantities & invalid status rejected even for Manager
+  await assertFails(
+    cMgr.collection("shift_production_logs").doc("SHF-BAD-NEG").set({
+      syncUuid: "SHF-BAD-NEG",
+      shiftDate: "2026-11-26",
+      wasteCans: -5,
+      branch: "EG-001 (مصنع مصر والتصدير)",
+    })
+  );
+  await assertFails(
+    cMgr.collection("press_machines").doc("PRESS-1").update({
+      status: "INVALID_STATUS",
+    })
+  );
+  await assertFails(
+    cMgr.collection("tool_custodies").doc("TOOL-BAD").set({
+      syncUuid: "TOOL-BAD",
+      toolName: "عدة",
+      deliveredQty: -1,
+    })
+  );
+
+  // Delete restricted strictly to Admin / Manager (Accountant & Employee denied)
+  await assertFails(cEmpSd.collection("in_transit_shipments").doc("TRN-SD-1").delete());
+  await assertFails(cAcc.collection("tool_custodies").doc("TOOL-1").delete());
+  await assertSucceeds(cMgr.collection("tool_custodies").doc("TOOL-1").delete());
+  await assertSucceeds(cAdm.collection("press_machines").doc("PRESS-1").delete());
+});
+
+test("29. Operational Checklists & Employee Tasks (daily_checklists, employee_tasks): actor/role completion toggles vs definition tampering", async () => {
+  await seedClusterRbac();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const managerDb = testEnv.authenticatedContext(MANAGER_UID).firestore();
+  const empSdDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+
+  const cAdm = adminDb.collection("erp_clusters").doc(CLUSTER);
+  const cMgr = managerDb.collection("erp_clusters").doc(CLUSTER);
+  const cEmpSd = empSdDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Employee initializes own daily checklist in SD-001 and toggles completion
+  await assertSucceeds(
+    cEmpSd.collection("daily_checklists").doc("CHK-SD-1").set({
+      syncUuid: "CHK-SD-1",
+      dateKey: "2026-11-26",
+      roleKey: "SALES_AGENT",
+      assigneeName: "موظف السودان",
+      assigneeUsername: "USR-SD-1001",
+      title: "مراجعة فواتير اليوم",
+      metricTarget: "يومي",
+      completed: false,
+      completedAt: null,
+      note: "",
+      branch: "فرع السودان (SD-001)",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cEmpSd.collection("daily_checklists").doc("CHK-SD-1").update({
+      completed: true,
+      completedAt: Date.now(),
+      note: "تمت المراجعة",
+      updatedAt: Date.now(),
+    })
+  );
+  // Employee CANNOT rewrite checklist definition fields (title / assigneeUsername / branch)
+  await assertFails(
+    cEmpSd.collection("daily_checklists").doc("CHK-SD-1").update({
+      title: "عنوان معدل بدون صلاحية",
+      updatedAt: Date.now(),
+    })
+  );
+
+  // Manager creates task assigned to EMPLOYEE_SD_UID (by userCode) and another task assigned to a different employee
+  await assertSucceeds(
+    cMgr.collection("employee_tasks").doc("TSK-SD-OWN").set({
+      syncUuid: "TSK-SD-OWN",
+      title: "تحصيل فواتير الخرطوم",
+      roleKey: "SALES_AGENT",
+      assigneeName: "أحمد السودان",
+      assigneeUsername: "USR-SD-1001",
+      priority: "عالية",
+      status: "لم يبدأ",
+      completionPercent: 0,
+      indicatorTarget: "100%",
+      branch: "فرع السودان (SD-001)",
+      createdBy: "mgr",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cMgr.collection("employee_tasks").doc("TSK-SD-OTHER").set({
+      syncUuid: "TSK-SD-OTHER",
+      title: "مهمة موظف آخر",
+      roleKey: "EMPLOYEE",
+      assigneeName: "موظف آخر",
+      assigneeUsername: "alice_other",
+      priority: "عالية",
+      status: "لم يبدأ",
+      completionPercent: 0,
+      branch: "فرع السودان (SD-001)",
+      createdBy: "mgr",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    })
+  );
+
+  // Plain employee CANNOT assign a new task to another user
+  await assertFails(
+    cEmpSd.collection("employee_tasks").doc("TSK-FORGED").set({
+      syncUuid: "TSK-FORGED",
+      title: "تكليف مزور",
+      assigneeUsername: "alice_other",
+      status: "لم يبدأ",
+      branch: "فرع السودان (SD-001)",
+    })
+  );
+
+  // Assignee CAN update own task status & completionPercent, CANNOT mutate title/priority/assigneeUsername
+  await assertSucceeds(
+    cEmpSd.collection("employee_tasks").doc("TSK-SD-OWN").update({
+      status: "مكتمل",
+      completionPercent: 100,
+      updatedAt: Date.now(),
+    })
+  );
+  await assertFails(
+    cEmpSd.collection("employee_tasks").doc("TSK-SD-OWN").update({
+      title: "تغيير المهمة",
+      priority: "منخفضة",
+    })
+  );
+
+  // Employee CANNOT update another employee's assigned task
+  await assertFails(
+    cEmpSd.collection("employee_tasks").doc("TSK-SD-OTHER").update({
+      status: "مكتمل",
+      completionPercent: 100,
+    })
+  );
+
+  // Manager CAN reassign/edit task definitions; Employee CANNOT delete; Manager/Admin CAN delete
+  await assertSucceeds(
+    cMgr.collection("employee_tasks").doc("TSK-SD-OTHER").update({
+      priority: "متوسطة",
+      assigneeUsername: "USR-SD-1001",
+    })
+  );
+  await assertFails(cEmpSd.collection("daily_checklists").doc("CHK-SD-1").delete());
+  await assertFails(cEmpSd.collection("employee_tasks").doc("TSK-SD-OWN").delete());
+  await assertSucceeds(cMgr.collection("daily_checklists").doc("CHK-SD-1").delete());
+  await assertSucceeds(cAdm.collection("employee_tasks").doc("TSK-SD-OWN").delete());
+});
+
+test("30. Financial Budgets, Employee Rewards, and Seqaofa Entries: strict financial/treasury/admin RBAC", async () => {
+  await seedClusterRbac();
+  const TREASURY_SD_UID = "treasury_sd_emp_910";
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx
+      .firestore()
+      .collection("erp_clusters")
+      .doc(CLUSTER)
+      .collection("cluster_members")
+      .doc(TREASURY_SD_UID)
+      .set({
+        uid: TREASURY_SD_UID,
+        userCode: "USR-SD-TREAS",
+        roleKey: "EMPLOYEE",
+        branch: "فرع السودان (SD-001)",
+        permissions: "الخزن,التحويلات,العمليات المالية",
+        active: true,
+      });
+  });
+
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const managerDb = testEnv.authenticatedContext(MANAGER_UID).firestore();
+  const accDb = testEnv.authenticatedContext(ACCOUNTANT_UID).firestore();
+  const depDb = testEnv.authenticatedContext(DEPUTY_UID).firestore();
+  const empSdDb = testEnv.authenticatedContext(EMPLOYEE_SD_UID).firestore();
+  const treasEmpDb = testEnv.authenticatedContext(TREASURY_SD_UID).firestore();
+
+  const cAdm = adminDb.collection("erp_clusters").doc(CLUSTER);
+  const cMgr = managerDb.collection("erp_clusters").doc(CLUSTER);
+  const cAcc = accDb.collection("erp_clusters").doc(CLUSTER);
+  const cDep = depDb.collection("erp_clusters").doc(CLUSTER);
+  const cEmpSd = empSdDb.collection("erp_clusters").doc(CLUSTER);
+  const cTreas = treasEmpDb.collection("erp_clusters").doc(CLUSTER);
+
+  // Accountant & Manager CAN create/update financial_budgets and employee_rewards; Deputy & Employee CANNOT
+  await assertSucceeds(
+    cAcc.collection("financial_budgets").doc("BUD-SD-2026-11").set({
+      syncUuid: "BUD-SD-2026-11",
+      periodKey: "2026-11",
+      category: "الخطة المالية",
+      plannedAmount: 1000000,
+      actualAmount: 980000,
+      currency: "EGP",
+      maxDeviationPercent: 5,
+      branch: "فرع السودان (SD-001)",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cMgr.collection("employee_rewards").doc("RWD-SD-1").set({
+      syncUuid: "RWD-SD-1",
+      periodKey: "2026-11",
+      employeeName: "أحمد السودان",
+      employeeUsername: "USR-SD-1001",
+      completionPercent: 100,
+      deviationPercent: 2,
+      errorCount: 0,
+      innovationCount: 1,
+      bonusTier: "المستوى الثالث (5 شهور)",
+      bonusMonths: 5,
+      branch: "فرع السودان (SD-001)",
+      updatedAt: Date.now(),
+    })
+  );
+
+  await assertFails(
+    cEmpSd.collection("financial_budgets").doc("BUD-FORGE").set({
+      syncUuid: "BUD-FORGE",
+      category: "الرواتب",
+      plannedAmount: 500000,
+      branch: "فرع السودان (SD-001)",
+    })
+  );
+  await assertFails(
+    cDep.collection("financial_budgets").doc("BUD-SD-2026-11").update({
+      actualAmount: 100,
+    })
+  );
+  await assertFails(
+    cEmpSd.collection("employee_rewards").doc("RWD-SELF").set({
+      syncUuid: "RWD-SELF",
+      employeeName: "مكافأة ذاتية",
+      completionPercent: 100,
+      bonusTier: "المستوى الثالث (5 شهور)",
+      bonusMonths: 5,
+      branch: "فرع السودان (SD-001)",
+    })
+  );
+  await assertFails(
+    cDep.collection("employee_rewards").doc("RWD-SD-1").update({
+      bonusMonths: 5,
+    })
+  );
+
+  // Active branch member CAN read budgets & rewards in their branch (MyWorkspaceView sync)
+  await assertSucceeds(cEmpSd.collection("financial_budgets").doc("BUD-SD-2026-11").get());
+  await assertSucceeds(cEmpSd.collection("employee_rewards").doc("RWD-SD-1").get());
+
+  // Invalid reward / budget values rejected even for Admin
+  await assertFails(
+    cAdm.collection("financial_budgets").doc("BUD-BAD").set({
+      syncUuid: "BUD-BAD",
+      category: "الرواتب",
+      plannedAmount: -100,
+      currency: "EGP",
+    })
+  );
+  await assertFails(
+    cAdm.collection("employee_rewards").doc("RWD-BAD").set({
+      syncUuid: "RWD-BAD",
+      employeeName: "موظف",
+      completionPercent: 150,
+      bonusMonths: 9,
+    })
+  );
+
+  // Seqaofa entries: plain employee denied; Deputy Accountant & Treasury employee (in-branch) allowed
+  await assertFails(
+    cEmpSd.collection("seqaofa_entries").doc("SEQ-PLAIN").set({
+      syncUuid: "SEQ-PLAIN",
+      custodianName: "محمد صديق",
+      direction: "وارد",
+      amountSdg: 50000,
+      exchangeRate: 183.5,
+      branch: "فرع السودان (SD-001)",
+    })
+  );
+  await assertSucceeds(
+    cTreas.collection("seqaofa_entries").doc("SEQ-SD-1").set({
+      syncUuid: "SEQ-SD-1",
+      entryDate: "2026-11-26",
+      custodianName: "محمد صديق",
+      direction: "وارد",
+      amountSdg: 500000,
+      exchangeRate: 183.5,
+      equivalentEgp: 2724.8,
+      branch: "فرع السودان (SD-001)",
+      updatedAt: Date.now(),
+    })
+  );
+  await assertSucceeds(
+    cDep.collection("seqaofa_entries").doc("SEQ-SD-1").update({
+      notes: "مطابق مع الخزنة",
+      updatedAt: Date.now(),
+    })
+  );
+
+  // Delete on financial_budgets, employee_rewards, seqaofa_entries restricted strictly to Admin
+  await assertFails(cMgr.collection("financial_budgets").doc("BUD-SD-2026-11").delete());
+  await assertFails(cMgr.collection("employee_rewards").doc("RWD-SD-1").delete());
+  await assertFails(cMgr.collection("seqaofa_entries").doc("SEQ-SD-1").delete());
+  await assertFails(cAcc.collection("financial_budgets").doc("BUD-SD-2026-11").delete());
+  await assertSucceeds(cAdm.collection("financial_budgets").doc("BUD-SD-2026-11").delete());
+  await assertSucceeds(cAdm.collection("employee_rewards").doc("RWD-SD-1").delete());
+  await assertSucceeds(cAdm.collection("seqaofa_entries").doc("SEQ-SD-1").delete());
+});
+
 
 
 

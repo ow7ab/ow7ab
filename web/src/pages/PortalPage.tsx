@@ -26,7 +26,9 @@ import {
   ShieldCheck,
   History,
   ArrowLeftRight,
-  MonitorSmartphone
+  MonitorSmartphone,
+  Briefcase,
+  ClipboardList
 } from 'lucide-react';
 import { GlassCard } from '../components/ui/GlassCard';
 import { GlassButton } from '../components/ui/GlassButton';
@@ -89,6 +91,14 @@ const SettingsModuleView = lazyWithRetry(
   () => import('../components/modules/SettingsModuleView').then((m) => ({ default: m.SettingsModuleView })),
   'SettingsModuleView'
 );
+const MyWorkspaceView = lazyWithRetry(
+  () => import('../components/modules/MyWorkspaceView').then((m) => ({ default: m.MyWorkspaceView })),
+  'MyWorkspaceView'
+);
+const FactoryOperationsView = lazyWithRetry(
+  () => import('../components/modules/FactoryOperationsView').then((m) => ({ default: m.FactoryOperationsView })),
+  'FactoryOperationsView'
+);
 const GlobalSearchModal = lazyWithRetry(
   () => import('../components/search/GlobalSearchModal').then((m) => ({ default: m.GlobalSearchModal })),
   'GlobalSearchModal'
@@ -109,7 +119,9 @@ const ModuleLoadingSkeleton: React.FC<{ label?: string }> = ({ label }) => (
 );
 
 export type PmpScreenRoute =
+  | 'MY_WORKSPACE'
   | 'DASHBOARD'
+  | 'OPERATIONS'
   | 'TREASURY'
   | 'PURCHASES'
   | 'SALES'
@@ -153,10 +165,18 @@ export const PortalPage: React.FC<PortalPageProps> = ({
   const canAccessAdminArea = Boolean(userProfile) && isSuperAdmin;
 
   const [activeTab, setActiveTab] = useState<PmpScreenRoute>(() =>
-    portalRoute === '/admin' && canAccessAdminArea ? 'USERS' : 'DASHBOARD'
+    portalRoute === '/admin' && canAccessAdminArea
+      ? 'USERS'
+      : portalRoute === '/employee' || !hasSystemManagerAccess
+      ? 'MY_WORKSPACE'
+      : 'DASHBOARD'
   );
   const [recentTabs, setRecentTabs] = useState<PmpScreenRoute[]>(() => [
-    portalRoute === '/admin' && canAccessAdminArea ? 'USERS' : 'DASHBOARD'
+    portalRoute === '/admin' && canAccessAdminArea
+      ? 'USERS'
+      : portalRoute === '/employee' || !hasSystemManagerAccess
+      ? 'MY_WORKSPACE'
+      : 'DASHBOARD'
   ]);
   const mainScrollRef = React.useRef<HTMLElement>(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
@@ -280,7 +300,15 @@ export const PortalPage: React.FC<PortalPageProps> = ({
    * EXACT 11 Android Navigation Tabs matching `enum class PmpScreen` and `resolveAllowedScreens()` in `MainActivity.kt`
    */
   const navMenuItems: { id: PmpScreenRoute; labelAr: string; labelEn: string; icon: React.ReactNode; visible: boolean }[] = [
+    { id: 'MY_WORKSPACE', labelAr: 'مكتبي (مساحة عملي)', labelEn: 'My Workspace', icon: <Briefcase className="w-4 h-4" />, visible: true },
     { id: 'DASHBOARD', labelAr: 'الرئيسية', labelEn: 'Dashboard', icon: <LayoutDashboard className="w-4 h-4" />, visible: true },
+    {
+      id: 'OPERATIONS',
+      labelAr: 'التشغيل والمتابعة',
+      labelEn: 'Operations & KPIs',
+      icon: <ClipboardList className="w-4 h-4" />,
+      visible: true
+    },
     {
       id: 'TREASURY',
       labelAr: 'الخزن',
@@ -425,6 +453,8 @@ export const PortalPage: React.FC<PortalPageProps> = ({
 
   const handleNavigateToModule = (modId: string) => {
     const targetMap: Record<string, PmpScreenRoute> = {
+      MY_WORKSPACE: 'MY_WORKSPACE',
+      OPERATIONS: 'OPERATIONS',
       FACTORY: 'FACTORY',
       TREASURY: 'TREASURY',
       PURCHASES: 'PURCHASES',
@@ -852,9 +882,13 @@ export const PortalPage: React.FC<PortalPageProps> = ({
               }
             >
               <div key={activeTab} className="pmp-tab-transition">
+                {activeTab === 'MY_WORKSPACE' && (
+                  <MyWorkspaceView onNavigateToModule={handleNavigateToModule} />
+                )}
                 {activeTab === 'DASHBOARD' && (
                   <AdminDashboardOverview onNavigateToModule={handleNavigateToModule} />
                 )}
+                {activeTab === 'OPERATIONS' && <FactoryOperationsView />}
                 {activeTab === 'TREASURY' && <TreasuryModuleView />}
                 {activeTab === 'PURCHASES' && <PurchasesModuleView />}
                 {activeTab === 'SALES' && <SalesModuleView />}

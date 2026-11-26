@@ -70,11 +70,18 @@ fun UsersScreen(
 
     val roleOptions = listOf(
         "المدير",
-        "مسؤول المشتريات",
-        "أمين مخزن الخام",
+        "المدير العام",
+        "المدير المالي (مصر)",
+        "مدير الجودة والمشتريات",
         "مهندس الإنتاج",
-        "مسؤول الجودة",
+        "مهندس التعبئة والتغليف",
+        "أمين مخزن الخام",
         "أمين مخزن المنتج التام",
+        "أمين مخزن مصر",
+        "مسؤول التحميل والعدد",
+        "مدير فرع حلفا وعطبرة",
+        "مسؤول المشتريات",
+        "مسؤول الجودة",
         "مسؤول المبيعات",
         "المحاسب",
         "مدير النظام",
@@ -558,6 +565,47 @@ fun UsersScreen(
                                         fontSize = 16.sp
                                     )
                                     GlassBadge(text = "اعتماد مدير النظام", color = PmpBlueLight)
+                                }
+
+                                // Quick Factory & Sudan Role Preset Selector
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        text = "قالب وظيفي جاهز من المصنع والفروع (تعبئة الدور والفرع والصلاحيات):",
+                                        color = TextMuted,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    androidx.compose.foundation.lazy.LazyRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        items(com.example.core.architecture.EmployeeRoleCatalog.ROLE_PRESET_LIST, key = { it.key.name }) { preset ->
+                                            val isSelected = selectedRole == preset.titleAr
+                                            FilterChip(
+                                                selected = isSelected,
+                                                onClick = {
+                                                    selectedRole = if (preset.titleAr in roleOptions) preset.titleAr else "مسمى وظيفي آخر (كتابة يدوية)..."
+                                                    customRoleText = if (preset.titleAr in roleOptions) "" else preset.titleAr
+                                                    if (preset.defaultBranch in branchOptions) {
+                                                        selectedBranch = preset.defaultBranch
+                                                    }
+                                                    val mapped = buildSet {
+                                                        addAll(preset.assignedModules)
+                                                        if ("عرض" in preset.defaultPermissions) add("صلاحية العرض")
+                                                        if ("إنشاء" in preset.defaultPermissions) add("صلاحية الإنشاء")
+                                                        if ("تعديل" in preset.defaultPermissions) add("صلاحية التعديل")
+                                                        if ("اعتماد" in preset.defaultPermissions) add("اعتماد المستندات")
+                                                        if ("تصدير PDF" in preset.defaultPermissions) add("تصدير PDF")
+                                                        if ("طباعة" in preset.defaultPermissions) add("طباعة المستندات")
+                                                        if ("عمليات مالية" in preset.defaultPermissions) add("العمليات المالية")
+                                                        if ("عمليات مخزنية" in preset.defaultPermissions) add("عمليات المخزون")
+                                                        if ("التقارير" in preset.defaultPermissions) add("التقارير (كاملة)")
+                                                    }
+                                                    selectedPermissions = mapped
+                                                },
+                                                label = { Text(preset.titleAr, fontSize = 11.sp) }
+                                            )
+                                        }
+                                    }
                                 }
 
                                 GlassTextField(

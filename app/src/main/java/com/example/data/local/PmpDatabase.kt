@@ -55,9 +55,18 @@ import kotlinx.coroutines.sync.withLock
         FormulationVersionEntity::class,
         LabExperimentEntity::class,
         RawMaterialPriceHistoryEntity::class,
-        LabExcelImportBatchEntity::class
+        LabExcelImportBatchEntity::class,
+        ShiftProductionLogEntity::class,
+        PressMachineEntity::class,
+        ToolCustodyEntity::class,
+        DailyChecklistEntity::class,
+        EmployeeTaskEntity::class,
+        SeqaofaEntryEntity::class,
+        InTransitShipmentEntity::class,
+        FinancialBudgetEntity::class,
+        EmployeeRewardEntity::class
     ],
-    version = 18,
+    version = 19,
     exportSchema = false
 )
 abstract class PmpDatabase : RoomDatabase() {
@@ -66,6 +75,7 @@ abstract class PmpDatabase : RoomDatabase() {
     abstract fun erpInventoryDao(): ErpInventoryDao
     abstract fun erpAccountingDao(): ErpAccountingDao
     abstract fun idempotencyDao(): IdempotencyDao
+    abstract fun operationsDao(): OperationsDao
     abstract fun labDao(): LabDao
 
     companion object {
@@ -1441,6 +1451,234 @@ abstract class PmpDatabase : RoomDatabase() {
             }
         }
 
+        fun ensureV19OperationsSchema(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `shift_production_logs` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `shiftDate` TEXT NOT NULL,
+                    `shiftCode` TEXT NOT NULL,
+                    `lineGroup` TEXT NOT NULL,
+                    `engineerName` TEXT NOT NULL,
+                    `engineerUsername` TEXT NOT NULL,
+                    `activeLinesCount` INTEGER NOT NULL,
+                    `workersPresent` INTEGER NOT NULL,
+                    `workersRequired` INTEGER NOT NULL,
+                    `targetCartons` INTEGER NOT NULL,
+                    `producedCartons` INTEGER NOT NULL,
+                    `productType` TEXT NOT NULL,
+                    `wasteCans` INTEGER NOT NULL,
+                    `maxWasteAllowed` INTEGER NOT NULL,
+                    `technicalDowntimeMin` INTEGER NOT NULL,
+                    `materialDowntimeMin` INTEGER NOT NULL,
+                    `downtimeReason` TEXT NOT NULL,
+                    `qualityStatus` TEXT NOT NULL,
+                    `qualityReviewedBy` TEXT NOT NULL,
+                    `branch` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_shift_production_logs_syncUuid` ON `shift_production_logs` (`syncUuid`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_shift_production_logs_shiftDate` ON `shift_production_logs` (`shiftDate`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `press_machines` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `machineCode` TEXT NOT NULL,
+                    `machineName` TEXT NOT NULL,
+                    `lineCategory` TEXT NOT NULL,
+                    `pressStatus` TEXT NOT NULL,
+                    `assignedOperator` TEXT NOT NULL,
+                    `lastMaintenanceDate` TEXT NOT NULL,
+                    `notes` TEXT NOT NULL,
+                    `branch` TEXT NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_press_machines_syncUuid` ON `press_machines` (`syncUuid`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `tool_custodies` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `toolCode` TEXT NOT NULL,
+                    `toolName` TEXT NOT NULL,
+                    `department` TEXT NOT NULL,
+                    `custodianName` TEXT NOT NULL,
+                    `custodianUsername` TEXT NOT NULL,
+                    `quantityIssued` INTEGER NOT NULL,
+                    `quantityReturned` INTEGER NOT NULL,
+                    `damagedCount` INTEGER NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `issuedDate` TEXT NOT NULL,
+                    `notes` TEXT NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_tool_custodies_syncUuid` ON `tool_custodies` (`syncUuid`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `daily_checklists` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `dateKey` TEXT NOT NULL,
+                    `roleKey` TEXT NOT NULL,
+                    `assigneeName` TEXT NOT NULL,
+                    `assigneeUsername` TEXT NOT NULL,
+                    `title` TEXT NOT NULL,
+                    `metricTarget` TEXT NOT NULL,
+                    `completed` INTEGER NOT NULL,
+                    `completedAt` INTEGER,
+                    `note` TEXT NOT NULL,
+                    `branch` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_daily_checklists_syncUuid` ON `daily_checklists` (`syncUuid`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_daily_checklists_dateKey` ON `daily_checklists` (`dateKey`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `employee_tasks` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `taskCode` TEXT NOT NULL,
+                    `title` TEXT NOT NULL,
+                    `description` TEXT NOT NULL,
+                    `roleKey` TEXT NOT NULL,
+                    `assigneeName` TEXT NOT NULL,
+                    `assigneeUsername` TEXT NOT NULL,
+                    `assignedBy` TEXT NOT NULL,
+                    `priority` TEXT NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `dueDate` TEXT NOT NULL,
+                    `targetValue` TEXT NOT NULL,
+                    `achievedValue` TEXT NOT NULL,
+                    `hasDeviation` INTEGER NOT NULL,
+                    `branch` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_employee_tasks_syncUuid` ON `employee_tasks` (`syncUuid`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_employee_tasks_dueDate` ON `employee_tasks` (`dueDate`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `seqaofa_entries` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `entryDate` TEXT NOT NULL,
+                    `hub` TEXT NOT NULL,
+                    `custodianName` TEXT NOT NULL,
+                    `direction` TEXT NOT NULL,
+                    `amountSdg` REAL NOT NULL,
+                    `exchangeRate` REAL NOT NULL,
+                    `equivalentEgp` REAL NOT NULL,
+                    `purpose` TEXT NOT NULL,
+                    `referenceCode` TEXT NOT NULL,
+                    `recordedBy` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_seqaofa_entries_syncUuid` ON `seqaofa_entries` (`syncUuid`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_seqaofa_entries_entryDate` ON `seqaofa_entries` (`entryDate`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `in_transit_shipments` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `shipmentCode` TEXT NOT NULL,
+                    `dispatchDate` TEXT NOT NULL,
+                    `destinationHub` TEXT NOT NULL,
+                    `driverOrCarrier` TEXT NOT NULL,
+                    `cartons116` INTEGER NOT NULL,
+                    `cartons1Kg` INTEGER NOT NULL,
+                    `cartonsGallon` INTEGER NOT NULL,
+                    `customsSdg` REAL NOT NULL,
+                    `freightEgp` REAL NOT NULL,
+                    `status` TEXT NOT NULL,
+                    `receivedBy` TEXT NOT NULL,
+                    `receivedAt` INTEGER,
+                    `notes` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_in_transit_shipments_syncUuid` ON `in_transit_shipments` (`syncUuid`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_in_transit_shipments_shipmentCode` ON `in_transit_shipments` (`shipmentCode`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `financial_budgets` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `periodMonth` TEXT NOT NULL,
+                    `category` TEXT NOT NULL,
+                    `department` TEXT NOT NULL,
+                    `currency` TEXT NOT NULL,
+                    `plannedAmount` REAL NOT NULL,
+                    `actualAmount` REAL NOT NULL,
+                    `deviationPercent` REAL NOT NULL,
+                    `maxAllowedDeviationPercent` REAL NOT NULL,
+                    `supervisorName` TEXT NOT NULL,
+                    `notes` TEXT NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_financial_budgets_syncUuid` ON `financial_budgets` (`syncUuid`)")
+
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `employee_rewards` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `syncUuid` TEXT NOT NULL,
+                    `periodLabel` TEXT NOT NULL,
+                    `employeeName` TEXT NOT NULL,
+                    `employeeUsername` TEXT NOT NULL,
+                    `roleKey` TEXT NOT NULL,
+                    `roleTitle` TEXT NOT NULL,
+                    `completionPercent` REAL NOT NULL,
+                    `deviationPercent` REAL NOT NULL,
+                    `errorCount` INTEGER NOT NULL,
+                    `innovationCount` INTEGER NOT NULL,
+                    `bonusTier` TEXT NOT NULL,
+                    `bonusMonths` INTEGER NOT NULL,
+                    `evaluatedBy` TEXT NOT NULL,
+                    `notes` TEXT NOT NULL,
+                    `updatedAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_employee_rewards_syncUuid` ON `employee_rewards` (`syncUuid`)")
+        }
+
+        val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                repairSchemaForRoomValidation(db)
+                upgradeSchemaToV17ChemicalLab(db)
+                ensureV18ImmutableLedgerColumns(db)
+                ensureV19OperationsSchema(db)
+            }
+        }
+
         private val dbCallbackMutex = Mutex()
         private val dbCallbackScope = CoroutineScope(
             SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
@@ -1615,7 +1853,8 @@ abstract class PmpDatabase : RoomDatabase() {
                         MIGRATION_14_15,
                         MIGRATION_15_16,
                         MIGRATION_16_17,
-                        MIGRATION_17_18
+                        MIGRATION_17_18,
+                        MIGRATION_18_19
                     )
                     .addCallback(DatabaseCallback(appContext))
                     .build()
