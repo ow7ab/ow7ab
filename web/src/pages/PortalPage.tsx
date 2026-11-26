@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 import { GlassCard } from '../components/ui/GlassCard';
 import { GlassButton } from '../components/ui/GlassButton';
-import { Modal } from '../components/ui/Modal';
+import { Modal, renderInBodyPortal } from '../components/ui/Modal';
 import { ErrorBoundary } from '../components/ui/ErrorBoundary';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -657,14 +657,15 @@ export const PortalPage: React.FC<PortalPageProps> = ({
         </aside>
 
         {/* Mobile Slide-Over Drawer */}
-        {mobileDrawerOpen && (
-          <div className="fixed inset-0 z-50 md:hidden flex">
-            <div
-              className="fixed inset-0 bg-black/75 backdrop-blur-sm transition-opacity"
-              onClick={() => setMobileDrawerOpen(false)}
-            />
+        {mobileDrawerOpen &&
+          renderInBodyPortal(
+            <div className="fixed inset-0 z-[9990] md:hidden flex">
+                <div
+                  className="fixed inset-0 bg-black/75 backdrop-blur-sm transition-opacity"
+                  onClick={() => setMobileDrawerOpen(false)}
+                />
 
-            <div className="relative w-72 max-w-[85vw] bg-theme-surface border-l border-theme flex flex-col justify-between h-full p-4 z-10 shadow-2xl overflow-y-auto">
+                <div className="relative w-72 max-w-[85vw] bg-theme-surface border-l border-theme flex flex-col justify-between h-full p-4 z-10 shadow-2xl overflow-y-auto overscroll-contain">
               <div className="space-y-4">
                 <div className="flex items-center justify-between pb-3 border-b border-theme">
                   <div className="flex items-center gap-2 min-w-0">
@@ -767,7 +768,7 @@ export const PortalPage: React.FC<PortalPageProps> = ({
               </div>
             </div>
           </div>
-        )}
+          )}
 
         {/* Main Content Workspace — EXACT 11 MODULE VIEWS */}
         <main ref={mainScrollRef} className="flex-1 overflow-y-auto p-3 sm:p-6 lg:p-8 pb-24 md:pb-8 space-y-4 sm:space-y-6">

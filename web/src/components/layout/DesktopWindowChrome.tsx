@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { renderInBodyPortal } from '../ui/Modal';
 import {
   Minus,
   Square,
@@ -405,13 +406,16 @@ export const DesktopWindowChrome: React.FC<{ children: React.ReactNode }> = ({ c
       )}
 
       {/* Desktop Print & Official PDF Export Modal */}
-      {printPreview && (
-        <div
-          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setPrintPreview(null)}
-        >
+      {printPreview &&
+        renderInBodyPortal(
           <div
-            className="w-full max-w-5xl h-[86vh] bg-theme-surface border border-theme rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+            className="fixed inset-0 z-[9999] bg-black/75 backdrop-blur-sm flex items-start justify-center overflow-y-auto overscroll-contain pt-10 pb-6 px-4"
+            onClick={() => setPrintPreview(null)}
+          >
+              <div
+                role="dialog"
+                aria-modal="true"
+                className="w-full max-w-5xl my-auto h-[86vh] max-h-[calc(100vh-4rem)] bg-theme-surface border border-theme rounded-2xl shadow-2xl flex flex-col overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-5 py-3.5 border-b border-theme flex items-center justify-between gap-3">
@@ -468,16 +472,19 @@ export const DesktopWindowChrome: React.FC<{ children: React.ReactNode }> = ({ c
             </div>
           </div>
         </div>
-      )}
+        )}
 
       {/* Keyboard Shortcuts Reference Modal */}
-      {showShortcutsModal && (
-        <div
-          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setShowShortcutsModal(false)}
-        >
+      {showShortcutsModal &&
+        renderInBodyPortal(
           <div
-            className="max-w-md w-full bg-theme-surface border border-theme rounded-2xl shadow-2xl p-5 space-y-4"
+            className="fixed inset-0 z-[9999] bg-black/70 backdrop-blur-sm flex items-start justify-center overflow-y-auto overscroll-contain pt-10 pb-6 px-4"
+            onClick={() => setShowShortcutsModal(false)}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="max-w-md w-full my-auto max-h-[calc(100vh-4rem)] overflow-y-auto bg-theme-surface border border-theme rounded-2xl shadow-2xl p-5 space-y-4"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">

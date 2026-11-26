@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { renderInBodyPortal } from '../ui/Modal';
 import {
   Search,
   Package,
@@ -291,13 +292,15 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({ isOpen, on
     { id: 'USERS', labelAr: 'الموظفين', labelEn: 'Staff', allowed: canUsers }
   ];
 
-  return (
+  return renderInBodyPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-12 sm:pt-16 px-4 bg-black/70 backdrop-blur-sm"
+      className="fixed inset-0 z-[9998] flex items-start justify-center overflow-y-auto overscroll-contain pt-10 pb-6 px-4 bg-black/70 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="max-w-2xl w-full bg-theme-surface border border-theme rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+        role="dialog"
+        aria-modal="true"
+        className="max-w-2xl w-full my-auto bg-theme-surface border border-theme rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[calc(100vh-4rem)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-4 border-b border-theme space-y-3">
@@ -357,7 +360,7 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({ isOpen, on
           </div>
         </div>
 
-        <div className="p-4 overflow-y-auto space-y-4 flex-1 text-xs">
+        <div className="p-4 min-h-0 overflow-y-auto overscroll-contain space-y-4 flex-1 text-xs">
           {loading && (
             <div className="text-center py-4 text-theme-muted">
               {language === 'ar' ? 'جاري تحميل السجلات المصرحة من Firestore...' : 'Loading live records...'}

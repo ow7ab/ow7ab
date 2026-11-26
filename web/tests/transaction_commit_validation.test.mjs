@@ -217,3 +217,41 @@ test('Web modules & ErpDataService wire handleTransactionCommit and smooth tab n
   assert.equal(portalSrc.includes('navigateToTab'), true);
   assert.equal(cssSrc.includes('@keyframes pmpTabEnter'), true);
 });
+
+test('Modal renders through document.body portal with working max-width mapping, unconstrained scroll, and non-trapping pmpTabEnter keyframes', async () => {
+  const modalSrc = fs.readFileSync(path.join(SRC_DIR, 'components/ui/Modal.tsx'), 'utf8');
+  const searchSrc = fs.readFileSync(path.join(SRC_DIR, 'components/search/GlobalSearchModal.tsx'), 'utf8');
+  const chromeSrc = fs.readFileSync(path.join(SRC_DIR, 'components/layout/DesktopWindowChrome.tsx'), 'utf8');
+  const portalSrc = fs.readFileSync(path.join(SRC_DIR, 'pages/PortalPage.tsx'), 'utf8');
+  const cssSrc = fs.readFileSync(path.join(SRC_DIR, 'styles/designSystem.css'), 'utf8');
+
+  assert.equal(modalSrc.includes('createPortal('), true);
+  assert.equal(modalSrc.includes('renderInBodyPortal('), true);
+  assert.equal(modalSrc.includes("overflowY: 'auto'"), true);
+  assert.equal(modalSrc.includes("overscrollBehavior: 'contain'"), true);
+  assert.equal(modalSrc.includes('pmpModalEnter'), true);
+  assert.equal(searchSrc.includes('renderInBodyPortal('), true);
+  assert.equal(chromeSrc.includes('renderInBodyPortal('), true);
+  assert.equal(portalSrc.includes('renderInBodyPortal('), true);
+
+  const tabKeyframeMatch = cssSrc.match(/@keyframes pmpTabEnter\s*\{[\s\S]*?\n\}/);
+  assert.ok(tabKeyframeMatch, 'Expected @keyframes pmpTabEnter block');
+  assert.equal(tabKeyframeMatch[0].includes('transform: none'), true);
+  assert.equal(cssSrc.includes('@keyframes pmpModalEnter'), true);
+
+  const helperSliceMatch = modalSrc.match(
+    /export const MODAL_MAX_WIDTH_MAP[\s\S]*?export function resolveModalMaxWidth[\s\S]*?\n\}/
+  );
+  assert.ok(helperSliceMatch, 'Expected resolveModalMaxWidth helper in Modal.tsx');
+  const transpiledHelper = ts.transpileModule(helperSliceMatch[0], {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
+  });
+  const helperPath = path.join(tmpOutDir, 'modal-width-helper.mjs');
+  fs.writeFileSync(helperPath, transpiledHelper.outputText, 'utf8');
+  const helperMod = await import(pathToFileURL(helperPath).href);
+
+  assert.equal(helperMod.resolveModalMaxWidth('max-w-md'), '28rem');
+  assert.equal(helperMod.resolveModalMaxWidth('max-w-4xl'), '56rem');
+  assert.equal(helperMod.resolveModalMaxWidth('640px'), '640px');
+  assert.equal(helperMod.resolveModalMaxWidth(undefined), '540px');
+});
