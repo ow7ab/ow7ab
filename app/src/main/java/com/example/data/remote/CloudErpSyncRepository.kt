@@ -5399,7 +5399,7 @@ class CloudErpSyncRepository(
     }
 
     private suspend fun pushFactoryOperationsToCloud(
-        cRef: com.google.firebase.firestore.CollectionReference,
+        cRef: com.google.firebase.firestore.DocumentReference,
         opsDao: OperationsDao,
         actor: String
     ): Int {
@@ -5528,7 +5528,7 @@ class CloudErpSyncRepository(
     }
 
     private suspend fun restoreFactoryOperationsFromCloud(
-        cRef: com.google.firebase.firestore.CollectionReference,
+        cRef: com.google.firebase.firestore.DocumentReference,
         opsDao: OperationsDao
     ): Int {
         var restored = 0

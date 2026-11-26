@@ -482,28 +482,28 @@ export const MyWorkspaceView: React.FC<MyWorkspaceViewProps> = ({ onNavigateToMo
           value={`${todayCartonsTotal.toLocaleString()} / ${DAILY_SHIFT_CARTON_TARGET}`}
           subtitle={`نسبة الإنجاز: ${targetProgressPct}% عبر الـ 5 خطوط`}
           icon={<Factory className="w-5 h-5" />}
-          accent={targetProgressPct >= 80 ? 'green' : 'gold'}
+          badgeVariant={targetProgressPct >= 80 ? 'green' : 'gold'}
         />
         <StatCard
           title="التوالف وأخطاء اليوم"
           value={`${todayWasteTotal} عبوة`}
           subtitle={`أخطاء الوزن والاستيكر: ${todayErrorsTotal} (الحد 25/خط)`}
           icon={<AlertTriangle className="w-5 h-5" />}
-          accent={todayWasteTotal > DEFAULT_MAX_WASTE_CANS_PER_LINE * 5 ? 'red' : 'cyan'}
+          badgeVariant={todayWasteTotal > DEFAULT_MAX_WASTE_CANS_PER_LINE * 5 ? 'red' : 'cyan'}
         />
         <StatCard
           title="الخامات والمكابس والعدة"
           value={`${pressesReadyCount}/${presses.length || 0} مكبس جاهز`}
           subtitle={`خامات عند حد الطلب: ${criticalRawCount} • عجز عدة: ${missingToolsCount}`}
           icon={<Wrench className="w-5 h-5" />}
-          accent={criticalRawCount > 0 || missingToolsCount > 0 ? 'gold' : 'green'}
+          badgeVariant={criticalRawCount > 0 || missingToolsCount > 0 ? 'gold' : 'green'}
         />
         <StatCard
           title="مؤشر المكافأة الموسمية"
           value={myLatestReward.bonusTier}
           subtitle={`إنجاز المهام: ${myLatestReward.completionPercent}%`}
           icon={<Award className="w-5 h-5" />}
-          accent={myLatestReward.bonusMonths >= 4 ? 'green' : myLatestReward.bonusMonths === 3 ? 'gold' : 'red'}
+          badgeVariant={myLatestReward.bonusMonths >= 4 ? 'green' : myLatestReward.bonusMonths === 3 ? 'gold' : 'red'}
         />
       </div>
 

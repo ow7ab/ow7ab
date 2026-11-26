@@ -476,10 +476,10 @@ export const FactoryOperationsView: React.FC = () => {
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <StatCard title="إنتاج اليوم (5 خطوط)" value={`${todayCartons} / ${DAILY_SHIFT_CARTON_TARGET}`} subtitle="كرتونة في الوردية" icon={<Factory className="w-5 h-5" />} accent="cyan" />
-        <StatCard title="المكابس الجاهزة" value={`${presses.filter((p) => p.status === 'جاهز').length} / ${presses.length}`} subtitle="حالة الصيانة والتشغيل" icon={<Wrench className="w-5 h-5" />} accent="green" />
-        <StatCard title="شحنات في الطريق" value={`${transitSummary.pendingCount} إرسالية`} subtitle={`${transitSummary.totalCartons116 + transitSummary.totalCartons1Kg} كرتونة منتظرة`} icon={<Truck className="w-5 h-5" />} accent="gold" />
-        <StatCard title="أرصدة السقوفة" value={`${seqaofaBalances.reduce((s, c) => s + c.balanceSdg, 0).toLocaleString()} SDG`} subtitle={`${seqaofaBalances.length} عهدة نشطة`} icon={<Coins className="w-5 h-5" />} accent="cyan" />
+        <StatCard title="إنتاج اليوم (5 خطوط)" value={`${todayCartons} / ${DAILY_SHIFT_CARTON_TARGET}`} subtitle="كرتونة في الوردية" icon={<Factory className="w-5 h-5" />} badgeVariant="cyan" />
+        <StatCard title="المكابس الجاهزة" value={`${presses.filter((p) => p.status === 'جاهز').length} / ${presses.length}`} subtitle="حالة الصيانة والتشغيل" icon={<Wrench className="w-5 h-5" />} badgeVariant="green" />
+        <StatCard title="شحنات في الطريق" value={`${transitSummary.pendingCount} إرسالية`} subtitle={`${transitSummary.totalCartons116 + transitSummary.totalCartons1Kg} كرتونة منتظرة`} icon={<Truck className="w-5 h-5" />} badgeVariant="gold" />
+        <StatCard title="أرصدة السقوفة" value={`${seqaofaBalances.reduce((s, c) => s + c.balanceSdg, 0).toLocaleString()} SDG`} subtitle={`${seqaofaBalances.length} عهدة نشطة`} icon={<Coins className="w-5 h-5" />} badgeVariant="cyan" />
       </div>
 
       {/* Sub Tabs */}

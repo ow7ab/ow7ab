@@ -179,7 +179,7 @@ fun DashboardScreen(
             item(key = "dashboard_quick_nav_strip") {
                 val quickLinks = buildList {
                     add(Triple("my_workspace", "مكتبي (مساحة عملي)", Icons.Default.Work))
-                    if (PmpScreen.OPERATIONS in allowedScreens) {
+                    if (isManager || canAccessFactory || canAccessInventory || canAccessTreasury || canAccessTransfers || canAccessLab) {
                         add(Triple("operations", "التشغيل والمكافآت", Icons.Default.Assignment))
                     }
                     if (canAccessTreasury) add(Triple("treasury", "حركة الخزينة", Icons.Default.AccountBalanceWallet))

@@ -159,7 +159,7 @@ export async function seedDefaultFactoryOperations(actorName: string, branch = '
   const period = currentPeriodKey();
   let createdCount = 0;
 
-  const existingPresses = await ErpDataService.fetchAll<PressMachine>('press_machines');
+  const existingPresses = await ErpDataService.fetchCollectionOnce<PressMachine>('press_machines');
   if (existingPresses.length === 0) {
     const presses: PressMachine[] = [1, 2, 3, 4].map((num) => ({
       id: now + num,
@@ -181,7 +181,7 @@ export async function seedDefaultFactoryOperations(actorName: string, branch = '
     createdCount += presses.length;
   }
 
-  const existingTools = await ErpDataService.fetchAll<ToolCustodyItem>('tool_custodies');
+  const existingTools = await ErpDataService.fetchCollectionOnce<ToolCustodyItem>('tool_custodies');
   if (existingTools.length === 0) {
     const tools: ToolCustodyItem[] = [
       { toolName: 'صندوق العدة الميكانيكية الكامل', qty: 1, code: 'TOOL-01' },
@@ -210,7 +210,7 @@ export async function seedDefaultFactoryOperations(actorName: string, branch = '
     createdCount += tools.length;
   }
 
-  const existingBudgets = await ErpDataService.fetchAll<FinancialBudgetItem>('financial_budgets');
+  const existingBudgets = await ErpDataService.fetchCollectionOnce<FinancialBudgetItem>('financial_budgets');
   if (existingBudgets.length === 0) {
     const budgets: FinancialBudgetItem[] = [
       { category: 'الخطة المالية', responsibleName: 'أ. أحمد الطلخاوي', planned: 5000000, actual: 4850000, currency: 'EGP', code: `BUD-FIN-${period}` },
@@ -236,7 +236,7 @@ export async function seedDefaultFactoryOperations(actorName: string, branch = '
     createdCount += budgets.length;
   }
 
-  const existingTasks = await ErpDataService.fetchAll<EmployeeTaskItem>('employee_tasks');
+  const existingTasks = await ErpDataService.fetchCollectionOnce<EmployeeTaskItem>('employee_tasks');
   if (existingTasks.length === 0) {
     const defaultTasks: Array<{ title: string; dept: string; assignee: string; roleKey: EmployeeRoleKey; indicator: string; code: string }> = [
       { title: 'استلام الصاج وعجز الغطاء والكرتون وتوثيق التوالف', dept: 'المخازن', assignee: 'إبراهيم مبارك', roleKey: 'WAREHOUSE_KEEPER_EGYPT', indicator: 'مطابقة يومية', code: 'TSK-IBRAHIM-01' },

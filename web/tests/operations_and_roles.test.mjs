@@ -34,7 +34,7 @@ const opsMod = loadTsModule('src/services/OperationsService.ts', (id) => {
   if (id.includes('ErpDataService')) {
     return {
       ErpDataService: {
-        fetchAll: async () => [],
+        fetchCollectionOnce: async () => [],
         saveRecord: async (_col, rec) => rec
       }
     };
